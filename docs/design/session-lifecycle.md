@@ -19,21 +19,22 @@ session held.
 
 A structural failure, an unknown failure, or an exhausted retry budget on a live
 owned session moves the session to parked with the matching park cause
-(structural failure, unknown failure, or retry budget exhausted) and the
-standing failure cause attached; it never terminalizes the session directly. A
-retryable failure moves the session through recovering or blocked while budgeted
-retries run, and the retryable outcome is recorded only when the session closes
-with the retryable cause standing. A structural failure is never resumed
-automatically: the session parks with the structural cause, and the expected
-closure is a fresh session that supersedes it. When
-[goal mode](../spec/goal-mode.md) reaches either its attempt budget or its
-lifetime attempt ceiling, the goal's session moves from blocked to parked with
-cause retry budget exhausted, where the owner sees it; exhaustion is never a
-silent stop. The domain already defines the park causes, the rule that a park's
-cause must admit its standing failure cause, and the closures that carry the
-standing cause forward. The missing part is the driver: the turn liveness pass,
-the goal disposition pass, and model-call failure classification call the park
-path with the classified cause inside the transaction that records the failure.
+(structural failure, unknown failure, or retry budget exhausted) and, on the
+structural and retry-budget parks, the standing failure cause attached; it never
+terminalizes the session directly. A retryable failure moves the session through
+recovering or blocked while budgeted retries run, and the retryable outcome is
+recorded only when the session closes with the retryable cause standing. A
+structural failure is never resumed automatically: the session parks with the
+structural cause, and the expected closure is a fresh session that supersedes
+it. When [goal mode](../spec/goal-mode.md) reaches either its attempt budget or
+its lifetime attempt ceiling, the goal's session moves from blocked to parked
+with cause retry budget exhausted, where the owner sees it; exhaustion is never
+a silent stop. The domain already defines the park causes, the rule that a
+park's cause must admit its standing failure cause, and the closures that carry
+the standing cause forward. The missing part is the driver: the turn liveness
+pass, the goal disposition pass, and model-call failure classification call the
+park path with the classified cause inside the transaction that records the
+failure.
 
 When a module's redispatch owns the retry of parked work, the redispatch issues
 supersede against the parked predecessor, naming the successor, in the same
@@ -101,8 +102,9 @@ No new dispatch path splits the payload from the creation command.
 ## Acceptance criteria
 
 A structural failure, an unknown failure, or an exhausted retry budget on a live
-owned session leaves the session parked with the matching cause and standing
-failure, and the session is terminal only after a closure command.
+owned session leaves the session parked with the matching cause, and with the
+standing failure on the structural and retry-budget parks; the session is
+terminal only after a closure command.
 
 The goal disposition pass at either limit leaves the goal's session parked with
 cause retry budget exhausted, and the operator queue lists it.

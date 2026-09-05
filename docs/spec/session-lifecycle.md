@@ -28,8 +28,8 @@ covers waiting. Each of those states carries exactly one deadline; blocked and
 parked carry none. The admission and waiting bounds come from configuration. A
 parked session carries a machine-readable cause and the responder who must act,
 the operator queue or one module. An expired waiting deadline and a module park
-are the two paths into parked. The operator queue is exactly the parked sessions
-whose recorded responder is the operator.
+are the two paths into parked. The operator queue is every parked session; the
+recorded responder does not filter it.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a finish check passed and declared when no check did. A failure is
@@ -50,17 +50,18 @@ or the watchdog) classified from the domain actor that
 [identity and commands](identity-and-commands.md) defines.
 
 The command surface creates a session, releases its start gate, submits input,
-attaches, resumes, or stops a goal, adopts, and releases. Five further commands
-close a session or lift a park: a session-level stop closes any non-terminal
-session, supersede closes it in favour of a named successor, abandon and close
-as failed close a parked session, and resume returns a parked session to its
-mapped state. A parked session with a blocked goal resumes through the goal's
-resume-with-guidance command; one with a pursuing goal may use the session-level
-resume. The goal command that [goal mode](goal-mode.md) calls supersede starts a
-new goal generation in the same session and is unrelated to the session outcome
-superseded.
+attaches, resumes, or stops a goal, adopts, and releases; a release also settles
+a held start gate, so the session becomes dispatched with its queued work
+admitted. Five further commands close a session or lift a park: a session-level
+stop closes any non-terminal session, supersede closes it in favour of a named
+successor, abandon and close as failed close a parked session, and resume
+returns a parked session to its mapped state. A parked session with a blocked
+goal resumes through the goal's resume-with-guidance command; one with a
+pursuing goal may use the session-level resume. The goal command that
+[goal mode](goal-mode.md) calls supersede starts a new goal generation in the
+same session and is unrelated to the session outcome superseded.
 
-Modules observe the lifecycle through eight event kinds with typed payloads on
+Modules observe the lifecycle through seven event kinds with typed payloads on
 the transactional outbox that [persistence protocol](persistence-protocol.md)
 owns; the other outbox kinds are core-internal. The compaction funnel and the
 five lifecycle metrics are read-only views over durable columns.
@@ -98,8 +99,8 @@ substrate work are owner decisions made outside the daemon.
 Order comes from commit-ordered sequences, never from comparing wall-clock
 times. A liveness check that cannot query some kind of evidence skips the turn
 instead of ending it, and any event it does not recognize counts as progress.
-When a lifecycle guard trips, the daemon waits, asks, or parks the session; it
-never ends work on staleness evidence alone.
+When a lifecycle guard trips on an admitted session, the daemon waits, asks, or
+parks the session; it never ends work on staleness evidence alone.
 
 An owned session that waits for an operator is parked, or blocked on a goal that
 no automatic resumption will lift; a pending tool-approval decision is the
@@ -149,7 +150,9 @@ Core mints every lifecycle identity; no module pre-allocates a turn, input, or
 frontier identity inside its own transaction.
 
 Ownership is advisory: an owner module observes events and issues commands like
-any other client, and it never sits between core and the session.
+any other client, and it never sits between core and the session; a
+core-integrated module parks its own session directly, inside the transaction
+that records the cause.
 
 The lifecycle actor of a command derives from its principal and its domain
 actor: a module principal classifies as that module; otherwise the domain actor
@@ -182,6 +185,9 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
   successor; see [session lifecycle design](../design/session-lifecycle.md).
 - Deadline events for modules: modules and the program substrate subscribe to
   deadline expiries instead of running their own watchdogs; see
+  [session lifecycle design](../design/session-lifecycle.md).
+- Session state-change events: the eighth module-facing event kind, so modules
+  observe park, resume, and other non-terminal transitions; see
   [session lifecycle design](../design/session-lifecycle.md).
 - Program-run lifecycle actor: a run-scoped actor for commands issued by a
   program run; see [session lifecycle design](../design/session-lifecycle.md).
