@@ -30,14 +30,16 @@ on that startup re-evaluation. An exhausted wait becomes eligible on its
 deadline, when it has one, on a durable member-availability update, or on an
 operator clearing a credential exclusion. A wake re-runs admission from current
 state, and the turn resumes only when that admission selects a member. A woken
-contended wait whose admission selects no member stays parked, rewritten with
-the surviving bounded members and their live reservations. Release atomically
-consumes the wait, creates a fresh prepared successor attempt, and returns the
-same turn to running, resuming the availability chain the wait was part of
-rather than starting a new one. A stop-turn request against a parked wait
-consumes the wait, creates a fresh immediate-successor attempt carrying the
-applied-interrupt proof, ends that attempt cancelled, appends the cancellation
-entry after the wait's latest frontier, and terminalizes the turn cancelled.
+contended wait that still finds an admissible member at its bound stays parked,
+rewritten with the surviving bounded members and their live reservations. One
+that finds no admissible bounded member left takes the exhaustion outcome
+instead. Release atomically consumes the wait, creates a fresh prepared
+successor attempt, and returns the same turn to running, resuming the
+availability chain the wait was part of rather than starting a new one. A
+stop-turn request against a parked wait consumes the wait, creates a fresh
+immediate-successor attempt carrying the applied-interrupt proof, ends that
+attempt cancelled, appends the cancellation entry after the wait's latest
+frontier, and terminalizes the turn cancelled.
 
 Runner-loss recovery has two user commands, replace and abandon, whose request
 shapes and placement transitions are owned by
@@ -71,7 +73,9 @@ replacement commands, completes the generic startup scan, binds the process
 socket, and only then enables ordinary runner enrollment and scheduling. The
 generic scan skips runner-owned attempts until that phase has resolved them,
 then classifies only the remaining daemon-owned tenure. With no retained runner
-work the phase completes immediately.
+work the phase completes immediately. Recovery-only admission precedes the blob
+namespace checks that [blob-storage](../spec/blob-storage.md) runs after the
+generic scan, and no recovery frame touches blob state.
 [Configuration and credentials](../spec/configuration-and-credentials.md)
 commits retained OAuth-marker resolution, scratch-home scavenging, prior-process
 capacity-reservation recovery, and the legacy family-to-policy backfill. Those
