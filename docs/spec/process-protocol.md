@@ -8,7 +8,7 @@ The process protocol is the wire boundary between a local client process and
 `crates/process-protocol` defines protocol version 1 and a closed set of
 request, message, event, and field shapes; that set is the whole wire surface
 the daemon implements. The daemon side of the boundary is
-`apps/signalboxd/src/process_runtime.rs`; the client side is the `signalbox`
+`apps/signalboxd/src/process_runtime/`; the client side is the `signalbox`
 terminal binary in `apps/client` and the native macOS client's
 `SignalboxProcessClient` in `clients/native`, which opens the same socket.
 

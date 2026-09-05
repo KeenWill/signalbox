@@ -54,19 +54,21 @@ until it ends or yields to a durable wait. See
 
 One durable daemon authorization to attempt a physical interaction with a model
 provider against one exact resolved target and context frontier. See
-[call records and lifecycle](spec/model-call-execution.md#call-records-and-lifecycle).
+[call records and lifecycle](spec/model-call-execution.md).
 
 ## Outcome-authoritative provider call
 
 The sole model call eligible to determine one provider interaction's completion,
-refusal, failure, or cancellation; authority transfer is deferred design. See
+refusal, failure, or cancellation. Transfer of that authority from an ambiguous
+call to its replacement is committed design, not built; see
 [model-call execution design](design/model-call-execution.md).
 
 ## Provider-target mismatch invalidation
 
 A typed value recorded when trusted mismatch evidence is first learned after the
 outcome-authoritative call completed but before its turn terminalized, stopping
-further semantic effects without rewriting the call. Deferred design; see
+further semantic effects without rewriting the call. Pending the undecided
+per-call provenance schema; see
 [model-call execution design](design/model-call-execution.md).
 
 ## Tool request
@@ -151,13 +153,12 @@ runner-local executor on an identified runner. Planned design; see
 
 A terminal physical outcome backed by adequate evidence that the intended effect
 did not complete, or completed with a specific reported failure. See
-[observation classification](spec/model-call-execution.md#provider-observation-classification).
+[observation classification](spec/model-call-execution.md).
 
 ## Ambiguous outcome
 
 A physical outcome where available evidence cannot establish whether an external
-effect occurred. See
-[observation classification](spec/model-call-execution.md#provider-observation-classification).
+effect occurred. See [observation classification](spec/model-call-execution.md).
 
 ## Reconciliation marker
 
@@ -210,22 +211,22 @@ the request and session defaults when its origin input is accepted. See
 
 A per-attempt monotonic ordinal identifying which scheduler dispatch may report
 for a physical attempt, realized today as the dispatch gate. See
-[staged execution](spec/model-call-execution.md#staged-execution).
+[staged execution](spec/model-call-execution.md).
 
 ## Transactional outbox
 
 The append-only event rows written inside the transactions that commit
 client-observable state, the sole path from a commit to an update event. See
-[transactional outbox](spec/persistence-protocol.md#transactional-outbox).
+[transactional outbox](spec/persistence-protocol.md).
 
 ## Update event
 
 One durable-transition fact delivered to subscribers, produced only from the
 outbox rows its committing transaction appended. See
-[transactional outbox](spec/persistence-protocol.md#transactional-outbox).
+[transactional outbox](spec/persistence-protocol.md).
 
 ## Subscription cursor
 
 The opaque resumption token each durable update event advances, derived from the
 outbox's monotonic commit-ordered sequence. See
-[transactional outbox](spec/persistence-protocol.md#transactional-outbox).
+[transactional outbox](spec/persistence-protocol.md).
