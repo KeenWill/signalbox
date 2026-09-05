@@ -174,8 +174,9 @@ An alias concretion leaving a durable provenance row, a substitution ending the
 call `KnownFailed` live, and a marker naming the configured target classifying
 as substitution become criteria when the open provenance schema decision lands.
 
-A user can accept the duplicate risk on a parked ambiguity, a replacement call
-runs on a new attempt, and the original call stays terminal `Ambiguous`.
+A user can accept the duplicate risk on a parked ambiguity, and the original
+call stays terminal `Ambiguous`. A replacement call running on a new attempt
+becomes a criterion when the open credential-authority decision lands.
 
 A session with admitted workspace instructions sends them as one region between
 system policy and history, and the system prompt is unchanged.
