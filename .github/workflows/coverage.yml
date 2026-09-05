@@ -98,7 +98,7 @@ jobs:
       # Exact version pin, as cargo-deny is pinned in deny.yml: an instrumented
       # build and its report must come from one known tool build.
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
           tool: cargo-llvm-cov@0.8.7
       # Each measured suite runs under `--no-report`, which accumulates
