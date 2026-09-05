@@ -116,10 +116,9 @@ the frozen value — a digest or request hash never defines identity.
 Implemented lifecycles are owned by the living spec and linked at the end of
 this section, not restated. The sketches below are targets: they show the
 destination the future tool decisions should reach, and they are constrained by
-the accepted invariants cited inline. Conflating session identity with retry
-identity, or a logical request with its physical attempts, weakens recovery —
-the identity boundaries exist to prevent exactly that, and every sketch below
-preserves them.
+the accepted invariants. Conflating session identity with retry identity, or a
+logical request with its physical attempts, weakens recovery — the identity
+boundaries exist to prevent exactly that, and every sketch below preserves them.
 
 ### Logical tool requests (target)
 
