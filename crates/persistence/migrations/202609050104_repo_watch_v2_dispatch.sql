@@ -10,7 +10,7 @@ SET search_path = mod_repo_watch, pg_catalog;
 CREATE TABLE dispatch_ledger (
     dispatch_ref uuid NOT NULL,
     action_ordinal numeric(20,0) NOT NULL,
-    command_id uuid NOT NULL UNIQUE,
+    command_id uuid NOT NULL PRIMARY KEY,
     repository text NOT NULL,
     rule_id text NOT NULL,
     rule_revision numeric(20,0) NOT NULL,
@@ -21,7 +21,6 @@ CREATE TABLE dispatch_ledger (
     rejection_kind text,
     issued_at timestamptz NOT NULL,
     settled_at timestamptz,
-    PRIMARY KEY (dispatch_ref, action_ordinal),
     UNIQUE NULLS NOT DISTINCT
         (repository, rule_id, rule_revision, event_id, trigger_sequence, action_ordinal),
     FOREIGN KEY (repository, rule_id, rule_revision)
