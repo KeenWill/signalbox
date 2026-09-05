@@ -758,11 +758,6 @@ the implemented session and external-link evidence.
   mutable aliases over changing digests, producer provenance, ownership, and
   workflow attachment — needs its own foundation decision before a workflow can
   attach one.
-- **Content-type read tools and their isolation mechanism.** Which
-  content-type-aware readers exist, which formats they support, and the concrete
-  sandbox mechanism remain undecided. The required strong process-isolation
-  posture and visibility contract are fixed by
-  [blob storage](spec/blob-storage.md).
 - **Non-socket ingest paths.** Daemon-local file adoption and runner-produced
   artifact ingest — moving multi-gigabyte content into the catalog without
   base64 chunking over the local socket — remain undecided.
@@ -774,19 +769,10 @@ the implemented session and external-link evidence.
 
 ### File and media interpretation
 
-The proposed common architecture is described for owner review in
-[file and media layer](proposals/file-and-media-layer.md). The following choices
-remain unresolved and bind no implementation:
+The architecture is specified in
+[file and media interpretation](spec/file-and-media.md). These choices remain
+open and bind no implementation:
 
-- **Isolation substrate.** Choose a dedicated local worker, the existing runner
-  sandbox, or another mechanism that proves the proposed containment contract.
-  Leaning: a daemon-supervised local worker using accepted platform sandbox
-  primitives, because reads must work without a session runner. Blocks the
-  isolation and inspection slice.
-- **First file formats.** Select the initial adapter inventory. Leaning: UTF-8
-  text, JSON, CSV, PDF, PNG, JPEG, WebP, GIF, WAV, MP3, FLAC, and Ogg/Opus;
-  defer office containers, SVG, video, and archives. Blocks adapter slices, not
-  registry work.
 - **Parser dependency budget.** Decide whether isolated native decoders are
   admissible. Leaning: pure Rust first, with native libraries approved per
   adapter only when coverage requires them and executable isolation exists.
@@ -796,9 +782,6 @@ remain unresolved and bind no implementation:
 - **Provider-native general files.** Decide which model adapters may receive
   them. Leaning: require an exact per-adapter type inventory and never treat a
   generic provider file surface as accepting unknown bytes.
-- **Encrypted-file credentials.** Decide whether a future credential reference
-  may supply a password. Leaning: keep `EncryptedOrLocked` terminal in version
-  one; secrets must not enter tool arguments or results.
 - **File-media turn budgets.** Set cumulative typed-read request and source-work
   ceilings after first-adapter benchmarks while preserving every per-request and
   per-call hard ceiling. Blocks production enablement, not interface work.
