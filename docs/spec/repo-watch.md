@@ -16,7 +16,8 @@ the example TOML own the shape of what an operator writes.
 Two transports feed one fact store. Polling sends conditional requests from one
 independent task per configured repository at that repository's interval; the
 conditional-request cache starts empty on every daemon start, so the first poll
-after a restart is one complete unconditional fetch. A webhook listener accepts
+after a restart is one complete unconditional fetch except for resources a
+preceding startup drain's targeted refresh warmed. A webhook listener accepts
 only `POST` on its configured path as plain HTTP, and a repository that enables
 it runs in shadow or primary mode. Shadow projects a delivery against an
 in-memory baseline and records parity rows only; primary applies it to the
@@ -461,22 +462,23 @@ deliveries pending, invalidates partial freshness, emits a closed timeout cause,
 and enters projection backoff. A deadline reached by the pre-poll drain stops
 that poll before its provider sweep can advance the cursor past the
 still-pending delivery, and a poll that observes the same transition as an
-admitted delivery cannot advance the cursor past it. Expiry during the dispatch
-work after a delivery's terminal record leaves no projection pending; that
-attempt is rescheduled at five seconds without backoff and does not stop a
-pre-poll drain's poll. A targeted completion started by a cancelled drain
-retains its exact terminal request and cursor write, recording disposition and
-projections as the durable recovery handoff before the cursor write. If every
-settling read is unavailable, the shadow is discarded rather than trusted,
-because a disposition may have landed without being reflected in that baseline.
-A delivery whose target-specific processing fails is deferred for the rest of
-that drain rather than failing it, and the attempt still reports the first such
-failure; credential, transport, provider-throttle, and provider-outage failures
-stop the current page, because they prove later targeted requests cannot make
-independent progress. The repository task schedules a new drain attempt after
-five seconds, doubling to a five-minute ceiling on consecutive failures and
-returning to five seconds on success. A failing pre-poll drain is reported and
-not propagated, so acceleration never cancels the reconciliation sweep.
+admitted delivery cannot advance the cursor past it. When no earlier delivery on
+the page failed projection, expiry during the dispatch work after a delivery's
+terminal record leaves no projection pending; that attempt is rescheduled at
+five seconds without backoff and does not stop a pre-poll drain's poll. A
+targeted completion started by a cancelled drain retains its exact terminal
+request and cursor write, recording disposition and projections as the durable
+recovery handoff before the cursor write. If every settling read is unavailable,
+the shadow is discarded rather than trusted, because a disposition may have
+landed without being reflected in that baseline. A delivery whose
+target-specific processing fails is deferred for the rest of that drain rather
+than failing it, and the attempt still reports the first such failure;
+credential, transport, provider-throttle, and provider-outage failures stop the
+current page, because they prove later targeted requests cannot make independent
+progress. The repository task schedules a new drain attempt after five seconds,
+doubling to a five-minute ceiling on consecutive failures and returning to five
+seconds on success. A failing pre-poll drain is reported and not propagated, so
+acceleration never cancels the reconciliation sweep.
 
 A signature-valid delivery outside the mapped set, including ordinary issue
 comments, other actions in mapped families, tag pushes, create and delete
@@ -491,14 +493,15 @@ commit cannot authorize reuse of state that never reached that cursor. A mapped
 delivery needing a missing baseline, current mergeability, or a check rollup
 records a targeted-query projection and reuses the poller's credential, client,
 cache, normalization, and bounds. Within one drain page, a whole-pull-request
-hydration an earlier delivery already landed is not repeated, so the later
-delivery records no query for it; mergeability and check-rollup refreshes always
-issue. Guards classify stale head, lifecycle, branch, workflow-attempt, and
-immutable-provider facts as superseded or duplicate rather than allowing a
-regression. Event projections carry no uniqueness constraint, because separate
-deliveries may represent one content occurrence. Terminal payload bytes remain
-seven days; after a successful full poll, at most once per day starting with the
-first poll after boot, expired bytes are deleted.
+hydration an earlier delivery landed with no head-guarded refresh alongside it
+is not repeated, so the later delivery records no query for it; mergeability and
+check-rollup refreshes always issue. Guards classify stale head, lifecycle,
+branch, workflow-attempt, and immutable-provider facts as superseded or
+duplicate rather than allowing a regression. Event projections carry no
+uniqueness constraint, because separate deliveries may represent one content
+occurrence. Terminal payload bytes remain seven days; after a successful full
+poll, at most once per day starting with the first poll after boot, expired
+bytes are deleted.
 
 The repository's single serialized worker applies the closed guarded patch to
 the latest cursor in memory and runs the same differ and content-identity
