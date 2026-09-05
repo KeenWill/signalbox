@@ -13,6 +13,83 @@ import domain_spine_digest as digest
 
 
 class DomainSpineDigestTests(unittest.TestCase):
+    def test_negative_auto_trait_implementation_is_not_a_delta_item(self) -> None:
+        baseline = "pub mod sample\npub struct sample::Packet\n"
+        current = baseline + "impl !core::marker::Freeze for sample::Packet\n"
+        expected = """\
+sample
+  (root): types=1 traits=0 functions=0
+    added: none
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
+    def test_generic_local_type_parameters_do_not_retain_blanket_impls(self) -> None:
+        baseline = "pub mod sample\npub enum sample::Setting<T>\n"
+        current = baseline + """\
+impl<T, U> core::convert::Into<U> for sample::Setting<T> where U: core::convert::From<T>
+impl<T> core::any::Any for sample::Setting<T> where T: 'static
+impl<T> core::borrow::Borrow<T> for sample::Setting<T> where T: ?core::marker::Sized
+"""
+        expected = """\
+sample
+  (root): types=1 traits=0 functions=0
+    added: none
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
+    def test_callable_bounds_keep_trait_and_subject_identity(self) -> None:
+        baseline = """\
+pub mod sample
+pub struct sample::Handler<F>
+pub struct sample::Output
+"""
+        current = baseline + """\
+impl<F: core::ops::Fn() -> sample::Output, Output> external::Callable<fn() -> Output> for sample::Handler<F>
+pub type sample::Handler<F>::Result = Output
+"""
+        expected = """\
+sample
+  (root): types=2 traits=0 functions=0
+    added: associated type Handler::Result, implementation Handler<F> as external::Callable<fn() -> Output>
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
     def test_local_trait_for_foreign_type_uses_trait_ownership(self) -> None:
         baseline = "pub mod sample\npub trait sample::Visible\n"
         current = baseline + """\

@@ -50,10 +50,10 @@ def previous_text(path: Path, current: str) -> str:
 def without_generics(text: str) -> str:
     result: list[str] = []
     depth = 0
-    for char in text:
+    for index, char in enumerate(text):
         if char == "<":
             depth += 1
-        elif char == ">":
+        elif char == ">" and text[index - 1:index] != "-":
             depth -= 1
         elif depth == 0:
             result.append(char)
@@ -71,7 +71,7 @@ def implementation_parts(line: str) -> tuple[str, str]:
         depth = 0
         for index, char in enumerate(body):
             depth += char == "<"
-            depth -= char == ">"
+            depth -= char == ">" and body[index - 1:index] != "-"
             if depth == 0:
                 parameters = body[1:index]
                 body = body[index + 1:].lstrip()
@@ -84,8 +84,23 @@ def owning_modules(text: str, modules: set[str]) -> list[str]:
         rf"(?<![\w:]){re.escape(module)}(?=::|\b)", text)]
 
 
+def parameter_names(text: str) -> set[str]:
+    return set(re.findall(r"(?:^|,\s*)(?:const\s+)?('?\w+)", text))
+
+
 def parse(text: str) -> tuple[str, list[Item]]:
     lines = text.splitlines()
+    declared_parameters: dict[str, set[str]] = {}
+    for line in lines:
+        match = DECLARATION.match(line)
+        if match is None or match.group("kind") not in {"struct", "enum", "union"}:
+            continue
+        body = line[match.end():]
+        generic_start = body.find("<")
+        name_end = re.search(r"[\s<(={]", body)
+        if generic_start >= 0 and name_end and generic_start == name_end.start():
+            parameters, _ = implementation_parts(f"impl{body[generic_start:]}")
+            declared_parameters[body[:generic_start]] = parameter_names(parameters)
     module_lines = [(match.group("name"), line) for line in lines
                     if (match := MODULE.match(line))]
     modules = {name for name, _ in module_lines}
@@ -113,17 +128,19 @@ def parse(text: str) -> tuple[str, list[Item]]:
                 subject_owners = owning_modules(raw_subject, modules)
                 trait_owners = owning_modules(raw_trait, modules)
                 owners = subject_owners or trait_owners
-                parameters = re.findall(r"(?:^|,\s*)(?:const\s+)?('?\w+)",
-                                        parameter_text)
+                parameters = parameter_names(parameter_text)
+                own_parameters = declared_parameters.get(
+                    without_generics(raw_subject), set())
                 uses_subject_parameter = any(
-                    re.search(rf"(?<!\w){re.escape(name)}(?!\w)", raw_subject)
+                    name not in own_parameters
+                    and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", raw_subject)
                     for name in parameters
                 )
                 blanket = (
                     impl_line.startswith("impl<") and not uses_subject_parameter
                     and BLANKET_TRAIT.match(without_generics(trait))
                 )
-                if owners and not AUTO_TRAIT.match(trait) and (
+                if owners and not AUTO_TRAIT.match(trait.removeprefix("!")) and (
                     not blanket or trait_owners
                 ):
                     module = max(owners, key=len)
