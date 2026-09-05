@@ -86,7 +86,9 @@ pub(crate) fn build_request_with_fast_mode<C>(
     })
 }
 
-pub(crate) fn server_compaction_supported(provider_model: &str) -> bool {
+/// Whether an exact Anthropic provider-model identifier supports the server
+/// compaction request and replay contract.
+pub fn server_compaction_supported(provider_model: &str) -> bool {
     const SUPPORTED_FAMILIES: [&str; 9] = [
         "claude-fable-5",
         "claude-mythos-5",

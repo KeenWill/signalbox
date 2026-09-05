@@ -3,8 +3,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use signalbox_model_runtime::{
-    CancellationSignal, InputTokenCountOutcome, ModelInputTokenCounter, ModelOperation,
-    ModelRuntime, ObservationSink, PreparationDefect, PreparationOutcome, TerminalReport,
+    CancellationSignal, InputTokenCountOutcome, MessagePart, ModelInputTokenCounter,
+    ModelOperation, ModelRuntime, ObservationSink, PreparationDefect, PreparationOutcome,
+    TerminalReport,
 };
 use signalbox_model_runtime_claude_cli::{
     ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
@@ -45,14 +46,16 @@ where
 {
     async fn count_input_tokens(
         &self,
-        operation: ModelOperation<C>,
+        mut operation: ModelOperation<C>,
         cancellation: CancellationSignal,
     ) -> InputTokenCountOutcome<C> {
-        if self.routes.get(operation.resolved_target.as_str()) != Some(&ModelAdapter::Anthropic) {
+        let provider_model = operation.resolved_target.as_str();
+        if self.routes.get(provider_model) != Some(&ModelAdapter::Anthropic) {
             return InputTokenCountOutcome::Unavailable {
                 correlation: operation.correlation,
             };
         }
+        omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::Anthropic);
         let Some(runtime) = self.anthropic.as_ref() else {
             return InputTokenCountOutcome::Failed {
                 correlation: operation.correlation,
@@ -195,6 +198,31 @@ fn map_preparation<C, P, R>(
     }
 }
 
+fn omit_unreplayable_provider_compaction<C>(
+    operation: &mut ModelOperation<C>,
+    adapter: ModelAdapter,
+) {
+    let can_replay = adapter == ModelAdapter::Anthropic
+        && signalbox_model_runtime_anthropic::server_compaction_supported(
+            operation.resolved_target.as_str(),
+        );
+    if can_replay {
+        return;
+    }
+    operation.messages.retain_mut(|message| {
+        let carried_compaction = message
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::ProviderCompaction { .. }));
+        if carried_compaction {
+            message
+                .parts
+                .retain(|part| !matches!(part, MessagePart::ProviderCompaction { .. }));
+        }
+        !carried_compaction || !message.parts.is_empty()
+    });
+}
+
 impl<C, A, O> ModelRuntime<C> for ConfiguredModelRuntime<A, O>
 where
     C: Clone + Send + Sync,
@@ -207,10 +235,14 @@ where
 
     async fn prepare(
         &self,
-        operation: ModelOperation<C>,
+        mut operation: ModelOperation<C>,
         cancellation: CancellationSignal,
     ) -> PreparationOutcome<C, Self::Prepared> {
-        match self.routes.get(operation.resolved_target.as_str()) {
+        let adapter = self.routes.get(operation.resolved_target.as_str()).copied();
+        if let Some(adapter) = adapter {
+            omit_unreplayable_provider_compaction(&mut operation, adapter);
+        }
+        match adapter {
             Some(ModelAdapter::Anthropic) => {
                 let runtime = match self.anthropic.as_ref() {
                     Some(runtime) => Arc::clone(runtime),
@@ -325,17 +357,17 @@ mod tests {
     use signalbox_model_runtime::{
         AnthropicServiceTier, AssistantPart, CancellationSignal, CodexCliServiceTier,
         CompletionEvidence, CompletionFinish, ConversationMessage, CredentialReference,
-        ExchangeFacts, FastMode, InputTokenCountOutcome, ModelInputTokenCounter, ModelOperation,
-        ModelRuntime, ModelSettings, Observation, ObservationSink, OpenAiServiceTier,
-        PreparationDefect, PreparationOutcome, ProviderReportedModel, ReasoningLevel,
-        RequestedTarget, ResolvedTarget, Script, ScriptedModel, ServiceTier, TerminalEvidence,
-        TokenUsage,
+        ExchangeFacts, FastMode, InputTokenCountOutcome, MessagePart, ModelInputTokenCounter,
+        ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationSink,
+        OpenAiServiceTier, PreparationDefect, PreparationOutcome, ProviderReportedModel,
+        ReasoningLevel, RequestedTarget, ResolvedTarget, Script, ScriptedModel, ServiceTier,
+        TerminalEvidence, TokenUsage,
     };
     use signalbox_model_runtime_claude_cli::SUPPORTED_CLAUDE_CLI_VERSION;
 
     use crate::configuration::{HubModelConfiguration, ModelAdapter};
 
-    use super::ConfiguredModelRuntime;
+    use super::{ConfiguredModelRuntime, omit_unreplayable_provider_compaction};
 
     #[derive(Default)]
     struct Observations(Vec<Observation<String>>);
@@ -383,6 +415,71 @@ mod tests {
             content: vec![AssistantPart::Text(text.to_owned())],
             usage: TokenUsage::unreported(),
         })
+    }
+
+    fn operation_with_provider_compaction(provider_model: &str) -> ModelOperation<String> {
+        ModelOperation::new(
+            String::from("cross-provider"),
+            CredentialReference::new("credential"),
+            RequestedTarget::new("selection"),
+            ResolvedTarget::new(provider_model),
+            vec![
+                ConversationMessage {
+                    role: signalbox_model_runtime::ConversationRole::Assistant,
+                    parts: vec![
+                        MessagePart::Text(String::from("preserved output")),
+                        MessagePart::ProviderCompaction {
+                            block_json: String::from(
+                                r#"{"type":"compaction","content":"summary"}"#,
+                            ),
+                        },
+                    ],
+                },
+                ConversationMessage {
+                    role: signalbox_model_runtime::ConversationRole::Assistant,
+                    parts: vec![MessagePart::ProviderCompaction {
+                        block_json: String::from(r#"{"type":"compaction","content":"summary"}"#),
+                    }],
+                },
+            ],
+            ModelSettings::new(256),
+        )
+    }
+
+    #[test]
+    fn cross_provider_projection_omits_only_opaque_compaction_parts() {
+        let mut operation = operation_with_provider_compaction("gpt-exact");
+
+        omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::OpenAi);
+
+        assert_eq!(operation.messages.len(), 1);
+        assert_eq!(
+            operation.messages[0].parts,
+            vec![MessagePart::Text(String::from("preserved output"))]
+        );
+    }
+
+    #[test]
+    fn unsupported_anthropic_projection_omits_opaque_compaction_parts() {
+        let mut operation = operation_with_provider_compaction("claude-haiku-4-5");
+
+        omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::Anthropic);
+
+        assert_eq!(operation.messages.len(), 1);
+        assert_eq!(
+            operation.messages[0].parts,
+            vec![MessagePart::Text(String::from("preserved output"))]
+        );
+    }
+
+    #[test]
+    fn supported_anthropic_projection_retains_opaque_compaction_parts() {
+        let mut operation = operation_with_provider_compaction("claude-fable-5-1");
+        let expected = operation.messages.clone();
+
+        omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::Anthropic);
+
+        assert_eq!(operation.messages, expected);
     }
 
     #[test]

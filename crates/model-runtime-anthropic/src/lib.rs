@@ -40,4 +40,4 @@ mod wire;
 
 pub use config::AnthropicConfig;
 pub use runtime::{AnthropicConstructionError, AnthropicPreparedRequest, AnthropicRuntime};
-pub use translate::validate_model_settings;
+pub use translate::{server_compaction_supported, validate_model_settings};
