@@ -326,9 +326,8 @@ nonempty array of at most 256 closed part objects. A text part is exactly
 where `D` is a canonical blob digest, `K` is `image`, `document`, or `file`, and
 `F` is a string or JSON null. Adjacent text parts are malformed. The aggregate
 text bytes and attachment member bounds are owned by
-[blob storage](blob-storage.md#multipart-user-content); the wire applies them
-before application construction. A one-part text array is the sole spelling of
-text-only content.
+[blob storage](blob-storage.md); the wire applies them before application
+construction. A one-part text array is the sole spelling of text-only content.
 
 The `content` member on transcript `queued` states and `input_accepted` session
 events is that same closed ordered parts array. Together with
@@ -2976,11 +2975,11 @@ subsequent typed durable updates until interrupted. Each delta is flushed as one
 line:
 `provider_text_delta session=<session> turn=<turn> call=<call> part=<index> content=<text>`.
 Accepted `transcript_user_entry` members use the terminal line shape owned by
-[blob storage](blob-storage.md#multipart-user-content), preserving their ordered
-part JSON without rendering attachment bytes. That JSON's default terminal
-serialization additionally renders DEL and C1 characters inside string values as
-lowercase four-hex-digit JSON escapes; `--raw-output` is the explicit opt-in to
-ordinary compact JSON that may carry those characters literally. By default the
+[blob storage](blob-storage.md), preserving their ordered part JSON without
+rendering attachment bytes. That JSON's default terminal serialization
+additionally renders DEL and C1 characters inside string values as lowercase
+four-hex-digit JSON escapes; `--raw-output` is the explicit opt-in to ordinary
+compact JSON that may carry those characters literally. By default the
 provider-delta trailing text field escapes line feed and every other C0 code
 point, DEL, and C1 code point, so provider output cannot forge another event
 line or execute terminal controls; `--raw-output` remains the explicit opt-in to
@@ -3003,11 +3002,11 @@ The `signalbox-debug` binary is a development harness, not a protocol client.
 ### Credential-pool preparation failure
 
 **Committed unimplemented functionality.** No present event or transcript state
-admits this shape. This section is the wire-projection column of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine)
-for its `pre-call fail` and `wait-transition fail (no call)` endings, which
-share one wire projection; that table states which endings project to a terminal
-state and which to an active one. The wire projection must add
+admits this shape. This section owns the wire projection of the `pre-call fail`
+and `wait-transition fail (no call)` endings of
+[the credential-availability machine](credential-availability.md), which share
+one wire projection; that page states which endings project to a terminal state
+and which to an active one. The wire projection must add
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a distinct `transcript_turn.state` variant and
 `turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, policy_members, members }`
@@ -3042,11 +3041,11 @@ is of a kind that *expires* at the reset it reports, and is then the latest of
 them; any exclusion with no reset, and any whose kind clears by something other
 than time passing, makes it null. Reporting a reset is not sufficient, by the
 same rule and for the same reason the wait deadline uses
-([credential availability](credential-availability.md#the-credential-availability-machine))
-— publishing a time no wake honors would name a recovery moment that never
-arrives. A wake can consequently never be scheduled while an indefinite
-condition still bars the member. The narrower correlations the selected item
-omits are not lost: each remains an active durable record that
+([credential availability](credential-availability.md)) — publishing a time no
+wake honors would name a recovery moment that never arrives. A wake can
+consequently never be scheduled while an indefinite condition still bars the
+member. The narrower correlations the selected item omits are not lost: each
+remains an active durable record that
 [credential-exclusion administration](#credential-exclusion-administration)
 lists and clears by its own exact target.
 
@@ -3071,16 +3070,16 @@ producer may terminalize a turn for this pre-call cause.
 No present request, event, transcript message, or closed turn-state object
 exposes an availability-successor chain or credential-availability wait — the
 `successor`, `contended-wait`, and `exhausted-wait` endings of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-whose wire-projection column this section owns. The predecessor, authorizing
-cause, selected profile, and wait evidence are themselves committed future
-storage — no present migration, repository operation, or reconstitution path
-supplies them — so the wire cannot project them until that storage exists, and
-must then add a version-one shape together with its daemon and client consumers.
-The wait must be projected as an active state retaining the same turn and
-session slot. Nothing is committed about a client-visible successor relation:
-whether the predecessor, cause, and successor chain are exposed, and how, is the
-open question at
+[the credential-availability machine](credential-availability.md), whose wire
+projection this section owns. The predecessor, authorizing cause, selected
+profile, and wait evidence are themselves committed future storage — no present
+migration, repository operation, or reconstitution path supplies them — so the
+wire cannot project them until that storage exists, and must then add a
+version-one shape together with its daemon and client consumers. The wait must
+be projected as an active state retaining the same turn and session slot.
+Nothing is committed about a client-visible successor relation: whether the
+predecessor, cause, and successor chain are exposed, and how, is the open
+question at
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance);
 this section states the wait compatibility constraint only. Whatever first makes
 either wait reachable must include this coordinated wire projection; admitting
