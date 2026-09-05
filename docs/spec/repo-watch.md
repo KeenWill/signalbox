@@ -1,37 +1,35 @@
 # Repository watch and event dispatch
 
 Repository watch turns GitHub activity on configured repositories into durable
-events, matches those events against configured rules, and dispatches sessions
-to act on them.
+events, matches them against configured rules, and dispatches sessions to act on
+them.
 
 ## Map
 
 Repository watch is a credentialed external-ingress boundary from its first
 operation. Each configured repository has its own credential-file reference,
 read only for that repository's request and never given to a dispatched session.
-A repository absent from the configured list is not watched, and an absent
-repository-watch section means the subsystem does not start. The configuration
-section (`RepositoryWatchConfiguration`) and the example TOML own the shape of
-what an operator writes.
+Only configured repositories are watched, and without a repository-watch section
+the subsystem does not start. The configuration section
+(`RepositoryWatchConfiguration`) and the example TOML own the shape of what an
+operator writes.
 
 Two transports feed one fact store. Polling sends conditional requests from one
 independent task per configured repository at that repository's interval; the
 conditional-request cache starts empty on every daemon start, so the first poll
 after a restart is one complete unconditional fetch. A webhook listener accepts
 only `POST` on its configured path as plain HTTP, and a repository that enables
-it selects `webhook_mode` from the two closed values `shadow` and `primary`.
-Shadow projects a delivery against an in-memory baseline and records parity rows
-only; primary applies it to the durable cursor and writes webhook-produced
-events.
+it runs in one of two modes, shadow or primary. Shadow projects a delivery
+against an in-memory baseline and records parity rows only; primary applies it
+to the durable cursor and writes webhook-produced events.
 
 Each repository has one versioned durable cursor (`RepoWatchCursor`). It retains
 the normalized repository state the next comparison needs, the exact
 signal-reviewer set, and the last positive occurrence sequence of every
 recurring event stream. A merged pull request leaves the ordinary observation
 and keeps only a compact baseline of the members the differ needs to recognize
-later post-merge changes. A per-repository atomic commit takes an expected
-generation, one complete cursor candidate, and its ordered batch of event
-occurrences.
+post-merge changes. A per-repository atomic commit takes an expected generation,
+one complete cursor candidate, and its ordered batch of event occurrences.
 
 A pure differ (`derive_repo_watch_events`) compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities,
@@ -64,11 +62,9 @@ the boundary event identities, and the target's current state. One event and
 rule match admits the rule's complete ordered action list as one singleton
 batch. Each dispatch record links the triggering event, rule identity and
 version, singleton key, action ordinal, session-template provenance, and the new
-session, and a durable delivery intent records the reserved submit-command,
-accepted-input, turn, and cancellation candidates beside the applied link so
-equal recovery reuses the committed batch. A batch delivers its originating
-event when admission dispatched that event, and the target's collapsed current
-state when admission settled an obligation. An obligation records exactly one
+session. A durable delivery intent records the reserved submit-command,
+accepted-input, turn, and cancellation candidates beside the applied link, so
+equal recovery reuses the committed batch. An obligation records exactly one
 blocker: the occupying repository-watch dispatch or an external commissioned
 session. Every park and release of an obligation appends a journal row naming
 the count at the transition and, for a release, its operator or the causing
@@ -103,21 +99,17 @@ dispositions, and a primary delivery records `committed` in place of
 between a repository's first shadow receipt and its promotion and reports
 `matched`, `webhook_only`, `poll_only`, or `not_directly_mapped`. Projection
 coverage is closed by delivery family and action, mapping each admitted GitHub
-delivery to the guarded state it applies and the events it may derive; payloads
-do not authoritatively supply GitHub's computed mergeability or complete check
-rollups.
+delivery to the guarded state it applies and the events it may derive.
 
 Repository-watch operations are readable through a typed read-only application
 port (`repo_watch_operations`) backed by the durable cursor, event, evaluation,
 dispatch, obligation, webhook, and commissioned records.
 
-### Convergence sweep
-
 The convergence sweep is a periodic pass composed beside repository watch.
-Repository watch owns event-driven dispatch; the sweep supplies the missing
-liveness source for watched pull requests whose provider events stopped
-arriving. It owns its convergence predicate, its fenced commission, its durable
-retry and park records, and its configuration throttle. It is opt-in twice:
+Repository watch owns event-driven dispatch; the sweep supplies liveness for
+watched pull requests whose provider events stopped arriving. It owns its
+convergence predicate, its fenced commission, its durable retry and park
+records, and its configuration throttle. It is opt-in twice:
 `[repository_watch.convergence_sweep]` supplies one review-response session
 template and the timing policy, and each repository lists its
 `convergence_pull_requests`. A census snapshot is converged exactly when no
@@ -193,27 +185,26 @@ their dispatches. The frontier records the pull request owning each recurring
 stream although nothing reads it yet, because a stream identity is a one-way
 hash no later migration can invert.
 
-The content identity `RepoWatchEventContentIdentityV1` is a domain-separated
-SHA-256 digest over the repository, event version, canonical target, identifying
-payload members, a separately domain-separated stream identity, and the stream's
-positive occurrence sequence. Exactly two payload members are excluded from the
-digest: the random event identity, because a re-derivation mints a fresh
-candidate, and the workflow display name, because a provider can rename a
-workflow under every identifying member; both stay in the payload rules read. A
-later equal fact on a recurring stream advances its sequence and so has a
-different content identity, while equal facts derived from an equal frontier
-have the same identity even when their candidate UUIDs differ. A fact is
-immutable only when the differ suppresses re-emission on members its stream key
-already names; completed check runs are recurring, naming run identity and
-completion generation, so only an advancing sequence keeps a restored earlier
-conclusion distinct from the first. A completed check suite's completion
-generation is the provider's `updated_at` and a completed run's is
-`completed_at`, because the provider defines only those fields. A rerequested
-suite emits its later completion even with unchanged identity and conclusion,
-and a rerequested run emits on a new identity, completion time, or conclusion.
-Workflows sharing a display name stay distinct, renaming cannot re-emit an
-observed run attempt, and a new attempt under an unchanged run identity does
-emit.
+The content identity is a domain-separated SHA-256 digest over the repository,
+event version, canonical target, identifying payload members, a separately
+domain-separated stream identity, and the stream's positive occurrence sequence.
+Exactly two payload members are excluded from the digest: the random event
+identity, because a re-derivation mints a fresh candidate, and the workflow
+display name, because a provider can rename a workflow under every identifying
+member; both stay in the payload rules read. A later equal fact on a recurring
+stream advances its sequence and so has a different content identity, while
+equal facts derived from an equal frontier have the same identity even when
+their candidate UUIDs differ. A fact is immutable only when the differ
+suppresses re-emission on members its stream key already names; completed check
+runs are recurring, naming run identity and completion generation, so only an
+advancing sequence keeps a restored earlier conclusion distinct from the first.
+A completed check suite's completion generation is the provider's `updated_at`
+and a completed run's is `completed_at`, because the provider defines only those
+fields. A rerequested suite emits its later completion even with unchanged
+identity and conclusion, and a rerequested run emits on a new identity,
+completion time, or conclusion. Workflows sharing a display name stay distinct,
+renaming cannot re-emit an observed run attempt, and a new attempt under an
+unchanged run identity does emit.
 
 An unchanged candidate with no events does not advance the cursor, and an
 unchanged candidate carrying events is rejected. Replay detection compares
@@ -312,27 +303,28 @@ capacity loss and is redispatched rather than leaving the pull request assigned
 to a session that never started.
 
 Each obligation lineage carries a durable count of consecutive dispatches that
-ended without meeting it; any requeue increments the count on the successor,
-whatever ended the dispatch, the count records which batch it already includes
-so siblings add nothing, and a dispatch that converges leaves no count.
+ended without meeting it. Any requeue increments the count on the successor,
+whatever ended the dispatch; the count records which batch it already includes,
+so siblings add nothing; and a dispatch that converges leaves no count.
 Redispatching a counted lineage waits a delay that starts at ten minutes and
-doubles per further failure to a one-hour ceiling, and six consecutive failures
-park the obligation in the transaction counting the exhausting attempt, excluded
-from dispatch, stamped, and readable with its count, pull request, and stalled
-head. The attempt budget is a schema constant so parking, the readiness
-projection, and the dispatch loader cannot disagree, and the two delay bounds
-are compiled in and may only be lowered. An operator release through
-`repo_watch_release_parked_dispatch_obligation` restores the whole budget.
-Whether the rule that parked an obligation also matches the progressing fact is
-irrelevant, and every event is tested against every park as it is evaluated, so
-a rule watching one narrow signal cannot stay parked on an obsolete head.
-Progress must follow the state the lineage stalled on and every fact about that
-pull request the lineage already spent across its successor obligations, so a
-lagging rule replaying an older event cannot restore the budget for a fact
-already spent. Rule, repository, and stack singletons collapse many pull
-requests onto one obligation, so a releasing fact must name the same pull
-request the lineage stalled on. A branch target carries no head and no review
-activity, so an obligation stalled on one is released only by an operator.
+doubles per further failure to a one-hour ceiling. Six consecutive failures park
+the obligation in the transaction counting the exhausting attempt; a parked
+obligation is excluded from dispatch, stamped, and readable with its count, pull
+request, and stalled head. The attempt budget is a schema constant so parking,
+the readiness projection, and the dispatch loader cannot disagree, and the two
+delay bounds are compiled in and may only be lowered. An operator release
+through `repo_watch_release_parked_dispatch_obligation` restores the whole
+budget. Whether the rule that parked an obligation also matches the progressing
+fact is irrelevant, and every event is tested against every park as it is
+evaluated, so a rule watching one narrow signal cannot stay parked on an
+obsolete head. Progress must follow the state the lineage stalled on and every
+fact about that pull request the lineage already spent across its successor
+obligations, so a lagging rule replaying an older event cannot restore the
+budget for a fact already spent. Rule, repository, and stack singletons collapse
+many pull requests onto one obligation, so a releasing fact must name the same
+pull request the lineage stalled on. A branch target carries no head and no
+review activity, so an obligation stalled on one is released only by an
+operator.
 
 The escalation fails the active turn and blocks the commissioned goal only while
 that goal's authority still stands, then enters the latest-state obligation and
@@ -436,16 +428,15 @@ the durable active set, which commits nothing and so cannot itself become
 ambiguous. Reconciliation and evaluation serialize per repository, so an
 already-loaded event cannot create a dispatch after deactivation commits, though
 a committed evaluation may replay. Changing a rule's semantics while keeping the
-same rule identity and revision fails in the Configuration phase before either
-local socket binds. A higher revision under the same rule identity is a
-replacement: reconciliation appends deactivation of the old revision and
-activation of the new one after the current event tail. A deactivated
-identity-and-revision pair cannot be configured again, a revision below the
-highest ever recorded for that identity in that repository is refused, and rule
-identity is per repository, so the same identity first configured in a newly
-watched repository starts its own lineage. A fresh rule identity remains an
-admitted replacement path, but a revision bump is the ordinary way to preserve
-stable identity and history.
+same rule identity and revision fails in the Configuration phase. A higher
+revision under the same rule identity is a replacement: reconciliation appends
+deactivation of the old revision and activation of the new one after the current
+event tail. A deactivated identity-and-revision pair cannot be configured again,
+a revision below the highest ever recorded for that identity in that repository
+is refused, and rule identity is per repository, so the same identity first
+configured in a newly watched repository starts its own lineage. A fresh rule
+identity remains an admitted replacement path, but a revision bump is the
+ordinary way to preserve stable identity and history.
 
 Everything the listener does before a delivery is durably admitted is identical
 in both webhook modes. The body's canonical repository must equal the repository
@@ -502,10 +493,10 @@ The repository's single serialized worker applies the closed guarded patch to
 the latest cursor in memory and runs the same differ and content-identity
 frontier polling uses; computed mergeability and aggregate check rollups are
 never projected from a delivery. The shadow baseline is cumulative and belongs
-to the repository task, a delivery advances it only once its own terminal
-disposition is durable, and only a full poll replaces it, once nothing is
-pending, because only a full poll is the complete reconciliation sweep. Primary
-mode applies a mapped delivery to the durable cursor, reloading that cursor per
+to the repository task; a delivery advances it only once its own terminal
+disposition is durable, and only a full poll, once nothing is pending, replaces
+it, because only a full poll is the complete reconciliation sweep. Primary mode
+applies a mapped delivery to the durable cursor, reloading that cursor per
 delivery so the loaded generation is the expected generation the optimistic
 commit needs; a patch that duplicates state, is superseded, or names a fact
 outside the observable set records the same disposition as in shadow mode and
@@ -610,7 +601,8 @@ invoked by the generation that dispatch commissioned. Its values are read from
 the append-only dispatch event and action, never inferred from the synthesized
 goal or refreshed provider state. A judged turn recorded in another generation
 of that session, or in no generation, resolves no dispatch authority at all. The
-quoted rendering and the judge's decision use follow [tool loop](tool-loop.md).
+quoted rendering and the use of the judge's decision follow
+[tool loop](tool-loop.md).
 
 An occupied singleton, or an independently commissioned live session owning the
 same pull request, refuses another match and atomically opens one durable
@@ -624,8 +616,8 @@ cannot create a second session for the same admitted action or obligation.
 Any durable model-call row for the session is first-call evidence and ends the
 start obligation without rewriting the lease.
 
-A parked obligation returns to dispatch only by operator release or by a fact
-new about the pull request it stalled on: an event carrying a head other than
+A parked obligation returns to dispatch only by operator release or by a new
+fact about the pull request it stalled on: an event carrying a head other than
 the stalled one, or review activity against it.
 
 A completed approval-judge escalation judged under dispatch authority is an
@@ -646,11 +638,10 @@ is never dismissed automatically.
 The webhook receiver collects at most 25 MiB of body, compares the HMAC in
 constant time, and parses nothing before verification succeeds.
 
-Full polling continues unchanged as the slow complete reconciliation sweep and
-remains authoritative for missed deliveries, reactions, and every fact outside
-the mapped set.
+Full polling is the slow complete reconciliation sweep and is authoritative for
+missed deliveries, reactions, and every fact outside the mapped set.
 
-Readiness is conjoined from the durable outstanding-obligation view rather than
+Readiness is read from the durable outstanding-obligation view rather than
 recomputed, so the operator read cannot report an obligation ready that
 admission would refuse.
 

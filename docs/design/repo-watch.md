@@ -35,10 +35,10 @@ event or rule surface.
 ## Constraints on present code
 
 The dispatch transaction keeps recording dispatch, session, context, and input
-identities as it does now; provenance must reference those identities, never
-recreate or reinterpret them. Until provenance exists, dispatch uses the
-user-initiated creation and input interfaces, and a reader of session ancestry
-must not take that attribution as user action.
+identities; provenance must reference those identities, never recreate or
+reinterpret them. Until provenance exists, dispatch uses the user-initiated
+creation and input interfaces, and a reader of session ancestry must not take
+that attribution as user action.
 
 Shadowing is validation only and never owns delivery; a shadowed subscription
 must not become a second producer of dispatches, singleton batches, or audit
