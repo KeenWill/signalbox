@@ -1082,9 +1082,9 @@ commit boundaries by this page, and update-event delivery by
 **Committed unimplemented functionality — pre-call pool exhaustion.** A third
 `TurnFailed` producer serves the `pre-call fail` and
 `wait-transition fail (no call)` endings of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine):
-an active turn exhausts its frozen pool before any model call is prepared and
-that exhaustion selects no wait. Its single transaction ends the current attempt
+[the credential-availability machine](credential-availability.md): an active
+turn exhausts its frozen pool before any model call is prepared and that
+exhaustion selects no wait. Its single transaction ends the current attempt
 `KnownFailure`, appends the marker after the attempt's starting frontier,
 terminalizes the turn `Failed`, and emits both the ordinary `turn_failed` update
 and the typed `turn_credential_pool_exhausted` event. The sealed failure and
@@ -1093,14 +1093,14 @@ complete member evidence are owned by
 can produce this shape.
 
 That third producer serves two endings, which share its commit shape exactly.
-This page owns the transcript-producer column of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-and that column is total over all nine endings: `pre-call fail` and
-`wait-transition fail (no call)` use this producer; `post-failure fail` and
-`terminal` use the existing model-call known-failure closure, because their turn
-did issue a call and that closure is already the writer which commits one; and
-`selected`, `contended-wait`, `exhausted-wait`, and `successor` have no producer
-and append no entry, because none of them terminalizes a turn.
+This page owns which transcript producer serves each ending of
+[the credential-availability machine](credential-availability.md), and answers
+that for all nine endings: `pre-call fail` and `wait-transition fail (no call)`
+use this producer; `post-failure fail` and `terminal` use the existing
+model-call known-failure closure, because their turn did issue a call and that
+closure is already the writer which commits one; and `selected`,
+`contended-wait`, `exhausted-wait`, and `successor` have no producer and append
+no entry, because none of them terminalizes a turn.
 
 The remaining ending, `wait-transition fail (after call)`, needs a fourth
 producer, because it is a transition rather than an initial admission and the
@@ -1114,14 +1114,14 @@ cause it carries. This inventory is closed at four.
 
 Accepted-input content is `UserContent`, one ordered nonempty sequence of closed
 text or attachment parts under the cross-crate contract owned by
-[blob storage](blob-storage.md#multipart-user-content). A text part carries
-`NonEmptyUnicodeText`; construction rejects empty text and any text containing
-U+0000 (which PostgreSQL text cannot store), while whitespace-only text remains
-content. The domain applies no trimming, Unicode normalization, case folding, or
-other rewriting. Equality is exact part order plus each part's complete value
-and metadata, so normalization-distinct text spellings are unequal and any
-attachment difference changes replay equality. That exact value participates in
-`SubmitInput` replay equality (INV-012).
+[blob storage](blob-storage.md). A text part carries `NonEmptyUnicodeText`;
+construction rejects empty text and any text containing U+0000 (which PostgreSQL
+text cannot store), while whitespace-only text remains content. The domain
+applies no trimming, Unicode normalization, case folding, or other rewriting.
+Equality is exact part order plus each part's complete value and metadata, so
+normalization-distinct text spellings are unequal and any attachment difference
+changes replay equality. That exact value participates in `SubmitInput` replay
+equality (INV-012).
 
 Why (exact, unnormalized): replay equality must not depend on a normalization
 policy; search or display projections may normalize without changing accepted
@@ -1147,17 +1147,17 @@ content, and semantic history references that content rather than copying it
 ### Bounds
 
 The multipart value applies the exact structural, text-byte, and
-attachment-metadata bounds owned by
-[blob storage](blob-storage.md#multipart-user-content) before typed command
-construction, so no command identifier is claimed for a structurally invalid
-value. Typed construction and the registry claim precede the current-state
-catalog-existence, aggregate-attachment, and prospective-complete-frontier
-checks. Failure of one of those post-claim checks records its closed terminal
-rejection and no accepted-input effect. Resource failures retain counts and
-configured maxima, never rejected text or attachment metadata. The final schema
-stores one complete ordinally guarded part sequence in each mirrored command and
-accepted-input satellite, with no `content_text` authority; its one-time
-migration and exact storage version are owned by that same cross-crate contract.
+attachment-metadata bounds owned by [blob storage](blob-storage.md) before typed
+command construction, so no command identifier is claimed for a structurally
+invalid value. Typed construction and the registry claim precede the
+current-state catalog-existence, aggregate-attachment, and
+prospective-complete-frontier checks. Failure of one of those post-claim checks
+records its closed terminal rejection and no accepted-input effect. Resource
+failures retain counts and configured maxima, never rejected text or attachment
+metadata. The final schema stores one complete ordinally guarded part sequence
+in each mirrored command and accepted-input satellite, with no `content_text`
+authority; its one-time migration and exact storage version are owned by that
+same cross-crate contract.
 
 Why (bytes and parts, at admission): measurement matches wire, storage, and
 verification cost and keeps the domain value exactly as accepted. Stable shape

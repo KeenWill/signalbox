@@ -1171,7 +1171,7 @@ impl ModelCallExecution {
     /// provider failure.
     ///
     /// The selection and evidence rules are owned by
-    /// `docs/spec/credential-availability.md#the-credential-availability-machine`.
+    /// `docs/spec/credential-availability.md`.
     pub fn fail_credential_pool_exhausted(
         self,
         pool_name: String,
