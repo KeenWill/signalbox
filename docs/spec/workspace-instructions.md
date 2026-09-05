@@ -6,13 +6,13 @@ of them a model call could use.
 
 ## Map
 
-A workspace instruction is a file a repository or an operator supplies to guide
-a model. It is either an agent document, a file named `AGENTS.md`, or an agent
-skill, a directory holding a `SKILL.md`. The daemon, not a model-runtime
-adapter, finds them, records them, decides which a session may use, places their
-text in model input, and proves per turn what a model could see. Model-runtime
-adapters run with their native document, rules, and skill loaders disabled
-([runtime-substrate.md](runtime-substrate.md)).
+A workspace instruction is an agent document or an agent skill that a repository
+or an operator supplies to guide a model. An agent document is a file named
+`AGENTS.md`; an agent skill is a directory holding a `SKILL.md`. The daemon, not
+a model-runtime adapter, finds them, records them, decides which a session may
+use, places their text in model input, and proves per turn what a model could
+see. Model-runtime adapters run with their native document, rules, and skill
+loaders disabled ([runtime-substrate.md](runtime-substrate.md)).
 
 There are four stages. Discovery finds candidates. Registration validates a
 candidate and gives it a typed identity and a source hash. Eligibility decides
@@ -44,8 +44,8 @@ turn-start manifest, which names the turn's discovery and carries the hashes of
 the turn's eligibility set and admitted set. The activation transaction
 ([turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md)) inserts
 and authenticates that manifest with empty eligibility and admitted sets. It is
-the only manifest the daemon stores, and no admission exists. Discovery
-snapshots, registered bundles, and manifests live in the tables that
+the only manifest the daemon stores. Discovery snapshots, registered bundles,
+and manifests live in the tables that
 `crates/persistence/migrations/202609010007_workspaces.sql` creates;
 `apps/signalboxd/src/workspace_instruction_runtime.rs` runs discovery and
 records the manifest during activation.
@@ -63,15 +63,14 @@ durable root inventory proves the omission instead of hiding it.
 Registration verifies repository content by digest because a checkout is input,
 not daemon authority.
 
-Skill frontmatter is what a YAML parser deserializes into a closed struct:
-unknown keys are rejected, a metadata mapping is accepted and discarded, mixed
-line endings are accepted, bounds are counted in characters, and every failure
-is one invalid-skill finding.
+Skill frontmatter is YAML deserialized into a closed struct: unknown keys are
+rejected, a metadata mapping is accepted and discarded, mixed line endings are
+accepted, bounds are counted in characters, and every failure is one
+invalid-skill finding.
 
 Discovery does not follow symbolic links.
 
-The discovery safety limits are fixed by the daemon and are not
-user-configurable.
+The discovery safety limits are fixed by the daemon and not user-configurable.
 
 ## Contracts
 
@@ -99,7 +98,7 @@ is never presented as a complete inventory, and no turn-start manifest names
 one.
 
 Workspace roots sort before configured roots, and within each kind roots sort by
-canonical path. The first root whose kind-specific rules yielded a candidate is
+canonical path. The first root whose kind-specific rules yield a candidate is
 its primary authorizing root; path containment alone grants no authority.
 
 A registered identity stays stable even when another bundle has the same skill
@@ -145,9 +144,8 @@ path, or hash that disagrees with registration, as typed storage corruption
   ([design](../design/workspace-instructions.md)).
 - Eligibility control: an allow-list bound to a session template, copied into
   the session at creation, and replaceable later by its own durable command; the
-  present implementation records the empty snapshot and exposes no replacement
-  command, template field, or visibility variant
-  ([design](../design/workspace-instructions.md)).
+  present implementation exposes no replacement command, template field, or
+  visibility variant ([design](../design/workspace-instructions.md)).
 - Allow-list default: an absent allow-list means no bundle is eligible, never
   every discovered bundle ([design](../design/workspace-instructions.md)).
 - Frozen eligibility snapshot: activation copies the exact ordered eligibility
@@ -203,7 +201,7 @@ path, or hash that disagrees with registration, as typed storage corruption
   manifest ([design](../design/workspace-instructions.md)).
 - Render budgets: a fixed 32,768-byte per-bundle source budget with no
   caller-supplied field, and a fixed 65,536-byte aggregate budget measured over
-  the region's exact serialized bytes; nothing renders a bundle today
+  the region's exact serialized bytes; no present path renders a bundle
   ([design](../design/workspace-instructions.md)).
 - Target capability: the model catalog declares typed-region transport and byte
   capacity for every selectable and serving target, a target with a smaller
@@ -219,10 +217,9 @@ path, or hash that disagrees with registration, as typed storage corruption
   admission evidence, and the next preparation atomically produces a successor
   manifest while earlier call-boundary manifests stay addressable
   ([design](../design/workspace-instructions.md)).
-- Rendered hash: the rendered hash is preparation evidence, never delivery
-  evidence; a call that fails before provider spawn or send leaves it behind
-  although the model saw nothing
-  ([design](../design/workspace-instructions.md)).
+- Rendered hash: preparation evidence, never delivery evidence; a call that
+  fails before provider spawn or send leaves it behind although the model saw
+  nothing ([design](../design/workspace-instructions.md)).
 - Instruction authority: workspace instructions are repository-supplied
   untrusted input whose text cannot widen tools, reveal credentials, change
   sandbox placement, modify eligibility, or bypass system or user instructions
