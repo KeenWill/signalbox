@@ -3681,6 +3681,7 @@ async fn checkpoint_tool_batch_with_approval_and_attachment(
         initial_approval,
         ProviderReportedTokenUsage::unreported(),
         attachment,
+        None,
     )
     .await
 }
@@ -3707,6 +3708,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage(
         initial_approval,
         usage,
         None,
+        None,
     )
     .await
 }
@@ -3718,6 +3720,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
     initial_approval: InitialToolApproval,
     usage: ProviderReportedTokenUsage,
     attachment: Option<BlobDigest>,
+    provider_compaction: Option<ProviderCompactionBlock>,
 ) -> Result<
     (
         RestartModelCallFixture,
@@ -3739,15 +3742,17 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
         })
         .collect::<Vec<_>>();
     let response = ToolUsingAssistantResponse::try_from_parts(
-        proposals
+        provider_compaction
             .iter()
-            .map(|(tool_name, arguments)| {
+            .cloned()
+            .map(AssistantResponsePart::ProviderCompaction)
+            .chain(proposals.iter().map(|(tool_name, arguments)| {
                 AssistantResponsePart::ToolCall(ToolCallProposal::new(
                     ToolName::try_new(String::from(*tool_name)).expect("valid fixture tool name"),
                     NormalizedToolArguments::try_from_provider_text(String::from(*arguments))
                         .expect("bounded fixture arguments"),
                 ))
-            })
+            }))
             .collect(),
     )
     .expect("the proposals form a tool-using response");
@@ -3757,10 +3762,14 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
             ModelCallTerminalObservation::CompletedWithTools { response },
             usage,
         );
-    let identities = requests
+    let identities = provider_compaction
         .iter()
-        .enumerate()
-        .map(|(index, request)| {
+        .map(|_| {
+            ToolResponsePartIdentity::provider_compaction(SemanticTranscriptEntryId::from_uuid(
+                Uuid::from_u128(seed + 0x7f),
+            ))
+        })
+        .chain(requests.iter().enumerate().map(|(index, request)| {
             ToolResponsePartIdentity::tool_call(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
                     seed + 0x80 + u128::try_from(index).expect("the bounded batch index fits u128"),
@@ -3768,7 +3777,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
                 *request,
                 initial_approval,
             )
-        })
+        }))
         .collect();
     let outcome = model_repository
         .apply_terminal_observation(

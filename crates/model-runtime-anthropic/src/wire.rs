@@ -7,7 +7,7 @@
 //! unknown content-block and event *types* are handled explicitly where they
 //! are interpreted.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub(crate) fn raw_json_is_object(raw: &serde_json::value::RawValue) -> bool {
     raw.get().bytes().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{')
@@ -410,13 +410,64 @@ pub(crate) enum WireDelta {
     Signature { signature: String },
     #[serde(rename = "compaction_delta")]
     Compaction {
-        content: Option<String>,
+        #[serde(default)]
+        content: WireCompactionContent,
         encrypted_content: Option<String>,
     },
     /// A delta type this adapter does not recognize (the provider documents
     /// that new delta types may be added); tolerated and ignored.
     #[serde(other)]
     Unrecognized,
+}
+
+/// The required compaction-delta content field, preserving the distinction
+/// between an explicit JSON null and a missing field.
+#[derive(Debug, Default)]
+pub(crate) enum WireCompactionContent {
+    #[default]
+    Missing,
+    Null,
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for WireCompactionContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = WireCompactionContent;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string or null compaction content value")
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(WireCompactionContent::Null)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(WireCompactionContent::Null)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                String::deserialize(deserializer).map(WireCompactionContent::Text)
+            }
+        }
+
+        deserializer.deserialize_option(Visitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]

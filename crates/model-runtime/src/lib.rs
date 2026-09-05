@@ -94,7 +94,9 @@ pub use message::{
     AssistantPart, ConversationMessage, ConversationRole, MessagePart, ToolResultRecord,
 };
 pub use observation::{Observation, ObservationFact, ObservationSink};
-pub use operation::{DeliveryMode, ModelOperation, ModelOperationValidationError, ToolChoice};
+pub use operation::{
+    DeliveryMode, ModelOperation, ModelOperationValidationError, ProviderCompactionMode, ToolChoice,
+};
 pub use output::{
     DomainValidator, NoDomainConstraints, StructuredDecodeFailure, StructuredOutputContract,
     decode_structured, decode_structured_json,

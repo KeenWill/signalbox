@@ -24,7 +24,7 @@ use signalbox_model_runtime::{
     ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
-use crate::response::{convert_usage, map_finish};
+use crate::response::{convert_usage, iteration_usage_is_complete, map_finish};
 use crate::status::classify_error_token;
 use crate::wire::{
     ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent, ErrorEnvelope,
@@ -63,7 +63,7 @@ enum BlockBuilder {
         data: String,
     },
     Compaction {
-        delta: Option<(Option<String>, Option<String>)>,
+        delta: Option<(crate::wire::WireCompactionContent, Option<String>)>,
     },
     ToolUse {
         id: String,
@@ -692,12 +692,22 @@ impl StreamDecoder {
                         event.index
                     ));
                 };
-                if content.as_deref() == Some("") {
-                    return self.violation(format!(
-                        "compaction block {} closed with empty content",
-                        event.index
-                    ));
-                }
+                let content = match content {
+                    crate::wire::WireCompactionContent::Missing => {
+                        return self.violation(format!(
+                            "compaction block {} closed without delta content",
+                            event.index
+                        ));
+                    }
+                    crate::wire::WireCompactionContent::Null => None,
+                    crate::wire::WireCompactionContent::Text(content) if content.is_empty() => {
+                        return self.violation(format!(
+                            "compaction block {} closed with empty content",
+                            event.index
+                        ));
+                    }
+                    crate::wire::WireCompactionContent::Text(content) => Some(content),
+                };
                 let Ok(content_json) = serde_json::to_string(&content) else {
                     return self.violation(format!(
                         "compaction block {} content cannot be encoded",
@@ -798,8 +808,22 @@ impl StreamDecoder {
                         .violation("message_delta carries a stop_sequence without a stop_reason");
                 }
                 if let Some(usage) = event.usage.as_ref() {
+                    if !iteration_usage_is_complete(usage) {
+                        return self.violation(
+                            "message_delta carries incomplete required iteration usage",
+                        );
+                    }
                     let usage = convert_usage(usage);
-                    self.usage.absorb(usage);
+                    if event
+                        .usage
+                        .as_ref()
+                        .and_then(|wire| wire.iterations.as_ref())
+                        .is_some_and(|iterations| !iterations.is_empty())
+                    {
+                        self.usage = usage;
+                    } else {
+                        self.usage.absorb(usage);
+                    }
                     Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
                 }
                 return StreamStep::Continue;
@@ -840,6 +864,9 @@ impl StreamDecoder {
             Self::emit(correlation, sink, ObservationFact::FinishReported(finish));
         }
         if let Some(usage) = event.usage.as_ref() {
+            if !iteration_usage_is_complete(usage) {
+                return self.violation("message_delta carries incomplete required iteration usage");
+            }
             let usage = convert_usage(usage);
             if event
                 .usage
@@ -1204,6 +1231,23 @@ mod tests {
             loss.cause,
             LossCause::StreamProtocolViolation { .. }
         ));
+    }
+
+    #[test]
+    fn streamed_compaction_requires_the_delta_content_field() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"compaction_delta\",\"encrypted_content\":null}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
     }
 
     #[test]
@@ -1605,6 +1649,27 @@ mod tests {
                 cache_read_input_tokens: None,
             }),
         }));
+    }
+
+    #[test]
+    fn usage_only_iteration_totals_replace_all_earlier_axes() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":3,\"output_tokens\":4,\
+              \"iterations\":[{\"input_tokens\":3,\"output_tokens\":4}]}}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":4}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("complete iteration usage must remain completion evidence");
+        };
+        assert_eq!(completion.usage.input_tokens, Some(3));
+        assert_eq!(completion.usage.output_tokens, Some(4));
+        assert_eq!(completion.usage.cache_creation_input_tokens, None);
+        assert_eq!(completion.usage.cache_read_input_tokens, None);
     }
 
     #[test]

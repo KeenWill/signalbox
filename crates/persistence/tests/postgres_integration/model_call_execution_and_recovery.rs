@@ -852,6 +852,12 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
             .await?,
         RetainedModelCallObservationStatus::Pending
     );
+    let projected_text_bytes_before: Decimal = sqlx::query_scalar(
+        "SELECT projected_text_bytes FROM session_timeline_fact WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
     let outcome = repository
         .apply_terminal_observation(
             session,
@@ -963,6 +969,17 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_provider_compaction, 1);
+    let projected_text_bytes_after: Decimal = sqlx::query_scalar(
+        "SELECT projected_text_bytes FROM session_timeline_fact WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        projected_text_bytes_after - projected_text_bytes_before,
+        Decimal::from(u64::try_from(assistant_text.as_str().len())?),
+        "opaque provider compaction bytes are excluded from transcript text accounting"
+    );
 
     let completion_sequence: Decimal = sqlx::query_scalar(
         "SELECT event_sequence

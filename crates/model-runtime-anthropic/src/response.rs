@@ -75,6 +75,18 @@ pub(crate) fn convert_usage(wire: &WireUsage) -> TokenUsage {
     }
 }
 
+/// Whether every provider iteration carries both required token axes.
+pub(crate) fn iteration_usage_is_complete(wire: &WireUsage) -> bool {
+    wire.iterations
+        .as_deref()
+        .filter(|iterations| !iterations.is_empty())
+        .is_none_or(|iterations| {
+            iterations.iter().all(|iteration| {
+                iteration.input_tokens.is_some() && iteration.output_tokens.is_some()
+            })
+        })
+}
+
 /// A recognized response block converted to a neutral part, or the fact
 /// that the block type is unrecognized.
 pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
@@ -262,10 +274,11 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     if reported_model.is_none()
         || message_id.is_none()
         || response.usage.is_none()
-        || response
-            .usage
-            .as_ref()
-            .is_some_and(|usage| usage.input_tokens.is_none() || usage.output_tokens.is_none())
+        || response.usage.as_ref().is_some_and(|usage| {
+            usage.input_tokens.is_none()
+                || usage.output_tokens.is_none()
+                || !iteration_usage_is_complete(usage)
+        })
     {
         // The documented completion envelope always carries id, model, and
         // usage; their absence means this is not valid completion material.
@@ -672,6 +685,20 @@ mod tests {
 
         assert_eq!(completion.usage.cache_creation_input_tokens, None);
         assert_eq!(completion.usage.cache_read_input_tokens, Some(3));
+    }
+
+    #[test]
+    fn incomplete_required_iteration_usage_is_boundary_loss() {
+        let body = r#"{
+            "id":"msg_usage","type":"message","role":"assistant","model":"model-exact-1",
+            "content":[{"type":"text","text":"done"}],
+            "stop_reason":"end_turn","usage":{
+                "input_tokens":15,"output_tokens":6,
+                "iterations":[{"input_tokens":10,"output_tokens":2},{"input_tokens":5}]
+            }
+        }"#;
+
+        assert!(matches!(decode(body).0, TerminalEvidence::BoundaryLoss(_)));
     }
 
     #[test]

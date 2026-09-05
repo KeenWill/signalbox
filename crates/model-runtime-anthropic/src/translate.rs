@@ -5,12 +5,12 @@ use std::collections::BTreeSet;
 use signalbox_model_runtime::{
     AnthropicServiceTier, CodexCliServiceTier, ConversationMessage, ConversationRole, DeliveryMode,
     FastMode, MessagePart, ModelOperation, ModelSettings, OpenAiServiceTier, PreparationFailure,
-    ReasoningLevel, ServiceTier, ToolChoice,
+    ProviderCompactionMode, ReasoningLevel, ServiceTier, ToolChoice,
 };
 
 use crate::wire::{
     ContextManagement, MessagesRequest, OutputConfig, WireKnownRequestBlock, WireMessage,
-    WireRequestBlock, WireTool, WireToolChoice,
+    WireRequestBlock, WireResponseBlock, WireTool, WireToolChoice, parse_response_block,
 };
 
 /// Builds the wire request for one operation.
@@ -64,7 +64,8 @@ pub(crate) fn build_request_with_fast_mode<C>(
         .map(anthropic_effort)
         .transpose()?;
     let service_tier = anthropic_service_tier(&operation.settings, request_fast_mode)?;
-    let server_compaction = server_compaction_supported(operation.resolved_target.as_str());
+    let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
+        && server_compaction_supported(operation.resolved_target.as_str());
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
         max_tokens: operation.settings.max_output_tokens,
@@ -551,19 +552,11 @@ fn wire_message(
                         ),
                     },
                 )?;
-                #[derive(serde::Deserialize)]
-                struct Tag {
-                    #[serde(rename = "type")]
-                    kind: String,
-                }
-                let tag: Tag = serde_json::from_str(block.get()).map_err(|error| {
-                    PreparationFailure::UnsupportedOperation {
-                        detail: format!("replayed provider compaction block is invalid: {error}"),
-                    }
-                })?;
-                if tag.kind != "compaction" {
+                if !matches!(parse_response_block(&block), Ok(WireResponseBlock::Compaction { .. }))
+                {
                     return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "replayed provider compaction block has the wrong type".to_string(),
+                        detail: "replayed provider compaction block has invalid fields"
+                            .to_string(),
                     });
                 }
                 Ok(WireRequestBlock::ProviderCompaction(block))
@@ -579,9 +572,9 @@ mod tests {
     use signalbox_model_runtime::CredentialReference;
     use signalbox_model_runtime::{
         AnthropicServiceTier, ConversationMessage, ConversationRole, DeliveryMode, FastMode,
-        MessagePart, ModelOperation, ModelSettings, PreparationFailure, ReasoningLevel,
-        RequestedTarget, ResolvedTarget, ServiceTier, StructuredOutputContract, ToolCallId,
-        ToolCallProposal, ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
+        MessagePart, ModelOperation, ModelSettings, PreparationFailure, ProviderCompactionMode,
+        ReasoningLevel, RequestedTarget, ResolvedTarget, ServiceTier, StructuredOutputContract,
+        ToolCallId, ToolCallProposal, ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
     use super::{
@@ -1245,6 +1238,23 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_operation_can_suppress_server_compaction() {
+        let mut operation = operation("call-dedicated-compaction");
+        operation.resolved_target = ResolvedTarget::new("claude-opus-5");
+        operation.provider_compaction = ProviderCompactionMode::Suppressed;
+
+        let request = build_request(&operation).expect("the summary operation translates");
+        let serialized = serde_json::to_string(&request).expect("request serializes");
+
+        assert!(
+            serialized.contains(
+                r#""context_management":{"edits":[{"type":"clear_tool_uses_20250919"}]}"#
+            )
+        );
+        assert!(!serialized.contains("compact_20260112"));
+    }
+
+    #[test]
     fn compaction_replay_is_rejected_for_an_unsupported_target() {
         let mut operation = operation("call-unsupported-provider-compaction");
         operation.resolved_target = ResolvedTarget::new("claude-haiku-4-5");
@@ -1259,6 +1269,29 @@ mod tests {
             build_request(&operation),
             Err(PreparationFailure::UnsupportedOperation { .. })
         ));
+    }
+
+    #[test]
+    fn malformed_compaction_replay_is_rejected_before_send() {
+        for block_json in [
+            r#"{"type":"compaction"}"#,
+            r#"{"type":"compaction","content":""}"#,
+            r#"{"type":"compaction","content":null,"encrypted_content":1}"#,
+        ] {
+            let mut operation = operation("call-malformed-provider-compaction");
+            operation.resolved_target = ResolvedTarget::new("claude-opus-5");
+            operation.messages = vec![ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::ProviderCompaction {
+                    block_json: block_json.to_string(),
+                }],
+            }];
+
+            assert!(matches!(
+                build_request(&operation),
+                Err(PreparationFailure::UnsupportedOperation { .. })
+            ));
+        }
     }
 
     #[test]

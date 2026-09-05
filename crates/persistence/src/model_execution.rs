@@ -3272,6 +3272,14 @@ async fn load_tool_continuation_headroom_evidence(
                 usage_input_tokens, usage_output_tokens,
                 usage_cache_creation_input_tokens,
                 usage_cache_read_input_tokens,
+                NOT EXISTS (
+                    SELECT 1
+                      FROM semantic_transcript_entry AS compacted
+                     WHERE compacted.source_session_id = model_call.session_id
+                       AND compacted.producing_model_call_id = model_call.model_call_id
+                       AND compacted.payload_kind = 'provider_compaction'
+                       AND compacted.assistant_text_value::jsonb ->> 'content' IS NOT NULL
+                ) AS input_is_retained,
                 (
                     SELECT COALESCE(SUM(projected.content_bytes), 0)::numeric
                       FROM (
@@ -3370,7 +3378,10 @@ async fn load_tool_continuation_headroom_evidence(
     let Some(input_tokens) = usage.input_tokens() else {
         return Ok(None);
     };
-    let input_tokens = if input_includes_cache_tokens {
+    let input_is_retained: bool = row.try_get("input_is_retained")?;
+    let input_tokens = if !input_is_retained {
+        0
+    } else if input_includes_cache_tokens {
         input_tokens
     } else {
         input_tokens

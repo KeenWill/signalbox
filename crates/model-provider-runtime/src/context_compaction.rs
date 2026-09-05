@@ -6,8 +6,8 @@ use signalbox_domain::{DirectModelSelection, ModelCallId, ResolvedProviderTarget
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference,
     DeliveryMode, ModelOperation, ModelRuntime, ModelSettings, Observation, PreparationOutcome,
-    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
-    UnsentCause,
+    ProviderCompactionMode, ProviderReportedModel, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, TokenUsage, UnsentCause,
 };
 
 use crate::{ProviderTargetRelation, RuntimeModelCatalog, relate_provider_target};
@@ -118,6 +118,7 @@ where
             );
             operation.system = Some(request.system_prompt);
             operation.delivery = DeliveryMode::Buffered;
+            operation.provider_compaction = ProviderCompactionMode::Suppressed;
             let prepared = match self
                 .runtime
                 .prepare(operation, CancellationSignal::never())

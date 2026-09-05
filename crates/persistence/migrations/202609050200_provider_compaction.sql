@@ -106,3 +106,21 @@ BEGIN
     EXECUTE revised_definition;
 END
 $$;
+
+-- Opaque replay bytes are not projected human-readable transcript text.
+CREATE OR REPLACE FUNCTION append_session_timeline_transcript_bytes() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.payload_kind NOT IN ('assistant_text', 'context_summary') THEN
+        RETURN NULL;
+    END IF;
+    PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
+    UPDATE session_timeline_fact
+       SET projected_text_bytes = projected_text_bytes
+           + coalesce(octet_length(convert_to(NEW.assistant_text_value, 'UTF8')), 0)
+           + coalesce(octet_length(convert_to(NEW.context_summary_value, 'UTF8')), 0)
+     WHERE session_id = NEW.source_session_id;
+    RETURN NULL;
+END
+$$;
