@@ -125,9 +125,9 @@ family, or different version rather than interpreting it as the local process
 protocol. No process-protocol frame is a browser DTO. The descriptor,
 historical-window, and lexical-search route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md) and its
-[lexical-search section](sessions-and-transcript.md). The open-workspace live
+[sessions and transcript](sessions-and-transcript.md). The open-workspace live
 snapshot, follow route, and resynchronization semantics are owned by
-[its live-session section](sessions-and-transcript.md). The descriptor, content,
+[sessions and transcript](sessions-and-transcript.md). The descriptor, content,
 and download routes beneath `/api/blobs/{digest}` are the same-origin surface
 owned by [blob storage](blob-storage.md#browser-delivery-views-and-derivations).
 
