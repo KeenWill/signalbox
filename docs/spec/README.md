@@ -9,12 +9,16 @@ the conventions the pages follow.
 
 ## Homes
 
-A claim about the system lives in exactly one of three places. `docs/spec/`
-states built behavior only. `docs/design/` holds one document per subsystem with
-committed but unbuilt design, written for the agent that will build it; the
-document is deleted when its feature lands.
+A prose claim about the system lives in exactly one of three places.
+`docs/spec/` states built behavior only. `docs/design/` holds one document per
+subsystem with committed but unbuilt design, written for the agent that will
+build it; the document is deleted when its feature lands.
 [open-questions.md](../open-questions.md) holds undecided items. Nothing on a
 spec page describes behavior the code lacks except the lines under Not built.
+Two normative surfaces sit outside those homes:
+[domain-spine.md](../domain-spine.md) mirrors the public API shapes of the
+domain and application crates, and [invariants.md](../invariants.md) indexes the
+INV-tagged tests.
 
 A design document is titled `<Subsystem> design`, opens with one sentence saying
 it is not built and which spec page it extends, and has the sections Goal,
