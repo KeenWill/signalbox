@@ -70,6 +70,4 @@ hosted for now, although this may change over time.
 | `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`             |
 | `devenv-lock.yml` `relock`                        | Nix                                                   |
 | `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix) |
-| `coverage.yml` `publish-comment`                  | `gh` CLI                                              |
-| `swift.yml` `publish-native-coverage-comment`     | `gh` CLI                                              |
 | `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                 |
