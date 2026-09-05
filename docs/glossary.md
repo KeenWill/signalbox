@@ -77,7 +77,9 @@ state, and eventual logical outcome. See [tool loop](spec/tool-loop.md).
 ## Tool attempt
 
 One physical effort by a daemon-local or runner-local executor to perform a tool
-request. See [tool loop](spec/tool-loop.md).
+request. See [tool loop](spec/tool-loop.md) for daemon-local attempts;
+runner-local execution is planned design in
+[runner protocol design](design/runner-protocol.md).
 
 ## Creation cause
 
