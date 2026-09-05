@@ -4,7 +4,7 @@ The Git authority lets a session read and write one pinned repository through
 typed operations that cannot choose which repository they touch or where a push
 goes.
 
-## Map
+## Overview
 
 The Git tool family is a suite of typed operations constructed over one
 workspace root; `LocalGitTools` is that suite. The deployment injects the root
@@ -27,7 +27,7 @@ destination is a remote the deployment configured, never one the caller chose. A
 minted destination is scoped to a durable workspace record, and its grant is
 keyed by the record's identity, not its path.
 
-## Decisions
+## Design decisions
 
 `git2` is trusted for typed Git semantics only after authority capture: parsing
 the configuration snapshot, reading and writing private index snapshots, reading
@@ -96,7 +96,7 @@ violation of one, or a gap in a mechanism enforcing one, is a defect. A finding
 that violates no contract and contradicts no implemented contract is an accepted
 residual.
 
-## Contracts
+## Boundary contracts
 
 The Git family operates only on a direct main worktree whose `.git` directory is
 immediately inside the root its suite was constructed with. The root is
@@ -139,7 +139,7 @@ Grants are scoped by workspace identity, so a grant does not survive an
 unrecorded move of the directory and must be minted again under the new
 workspace.
 
-## Not built
+## Planned
 
 - Push by remote name, with the endpoint resolved against the durable minted
   record ahead of the call ([design](../design/git-authority-threat-model.md)).

@@ -11,7 +11,7 @@ daemon records the roots it derives. A push names a remote, and the daemon
 resolves that name against the durable record. A moved workspace keeps its
 identity and its grants.
 
-## Shape
+## Design
 
 Storage. The `workspace`, `configured_git_remote_mint`,
 `configured_git_remote_withdrawal`, and `configured_git_remote_live` tables
@@ -46,7 +46,7 @@ identity to a new canonical root; the identity and its grants stand. Registering
 a durably relocated directory resolves to that identity instead of minting a new
 one.
 
-## Constraints on present code
+## Compatibility constraints
 
 Until the resolver lands, the push executor is constructed with one validated
 `ConfiguredGitRemote`, `GitPushArguments` carries a branch and nothing else, and
@@ -67,7 +67,7 @@ The identity generators for `WorkspaceId`, `GitRemoteMintId`, and
 `GitRemoteWithdrawalId` land with the store and the operator verbs
 ([identity-and-commands.md](../spec/identity-and-commands.md)).
 
-## Acceptance
+## Acceptance criteria
 
 Registering a workspace through the client stores the canonical root once,
 records the registering command, and refuses a second spelling of the same
