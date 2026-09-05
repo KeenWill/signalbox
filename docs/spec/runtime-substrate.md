@@ -121,8 +121,10 @@ Both HTTP decoders construct refusal evidence, but execute converts it to an
 unrecognized provider error before returning, because a buffered HTTP request
 gives no proof that the response followed the complete upload.
 
-The Claude Code CLI never supplies the non-acceptance proof: it classifies
-failures from rendered prose by substring and exposes no structured native code.
+Neither CLI adapter supplies non-acceptance proof. Both retain rendered failure
+prose as opaque native evidence. Claude Code classifies machine-readable HTTP
+status values; Codex failures remain `Unrecognized` with no parsed retry
+duration.
 
 SSE id and retry fields are parsed and dropped, because they exist for stream
 resumption and resuming would be a second request.
@@ -278,12 +280,10 @@ otherwise a recognized native code outranks a recognized type, which outranks
 the status. An error record that follows the provider's finish marker and names
 no classifiable failure is stream-protocol loss, while a classified one stays
 definitive and outranks the finish. A provider-directed retry delay, decoded
-from the HTTP `Retry-After` header or the Codex CLI's rendered retry phrase,
-rides the provider-error evidence, and the bridge carries it into the durable
-failure observation that feeds the availability-successor backoff. The header
-admits the delay-seconds and HTTP-date forms, a past date is no delay, and a
-malformed value is no evidence; the Codex phrase admits only its bounded second
-and minute units.
+from the HTTP `Retry-After` header, rides the provider-error evidence, and the
+bridge carries it into the durable failure observation that feeds the
+availability-successor backoff. The header admits the delay-seconds and
+HTTP-date forms, a past date is no delay, and a malformed value is no evidence.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
 never inferred from the error kind, status retryability or provider prose. An
@@ -294,10 +294,8 @@ response decoded before any stream began. A status-derived fallback, an absent
 or undecodable body, or an unmapped token carries no proof and keeps its
 status-classified kind; a newly mapped availability token carries none until
 that set names it, and an SSE error record never carries it, so an availability
-failure that arrives mid-stream carries none. The Codex CLI adapter, which has
-no error envelope, admits the proof only when its event stream closes with a
-`turn.failed` event; a stream-level error that no matching `turn.failed` event
-closes carries none.
+failure that arrives mid-stream carries none. A Codex `turn.failed` closure
+supplies no structured availability cause and carries no proof.
 
 The Anthropic proof set is `rate_limit_error`, `overloaded_error`, and
 `api_error` at HTTP 500. The OpenAI proof set is `rate_limit_exceeded`,
@@ -313,17 +311,18 @@ never silent success: a Codex CLI exit of zero without the turn-completed event
 is boundary loss, and under the Claude Code CLI only a terminal result event
 establishes success or refusal, never prose; in a subprocess adapter that loss
 follows a zero exit, while a nonzero exit is definitive provider-error evidence
-classified from bounded stderr. A Codex turn that completes without a streamed
-agent message takes its response from the CLI's separately written final-message
-file under the same size and redaction checks, and a streamed message outranks
-it. A finish reason observed before a stream loss is retained as a reported
-finish but is not completion or refusal evidence; an unrecognized finish
-reported before the envelope is validated is an envelope violation instead, and
-no finish is retained. Within one adapter the buffered and streamed decoders
-never disagree about an output-ceiling finish inside accumulated tool content,
-which is an observed fact in both and not an envelope defect; an unrequested
-Anthropic fallback block is the exception, unintelligible-response loss in the
-buffered decoder and a stream protocol violation in the streamed one.
+with bounded stderr retained only as opaque native evidence. A Codex turn that
+completes without a streamed agent message takes its response from the CLI's
+separately written final-message file under the same size and redaction checks,
+and a streamed message outranks it. A finish reason observed before a stream
+loss is retained as a reported finish but is not completion or refusal evidence;
+an unrecognized finish reported before the envelope is validated is an envelope
+violation instead, and no finish is retained. Within one adapter the buffered
+and streamed decoders never disagree about an output-ceiling finish inside
+accumulated tool content, which is an observed fact in both and not an envelope
+defect; an unrequested Anthropic fallback block is the exception,
+unintelligible-response loss in the buffered decoder and a stream protocol
+violation in the streamed one.
 
 The tool-calls-at-loss fact reports the decoded prefix and nothing beyond it:
 none-opened says no tool call opened in what the adapter decoded, never that the

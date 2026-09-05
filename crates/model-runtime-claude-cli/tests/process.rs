@@ -596,12 +596,10 @@ async fn inv_035_tool_proposal_id_credential_prefix_is_held_into_following_text(
     assert_eq!(result.spawns, 1);
 }
 
-/// A generic structured error determines no kind, so the definitive stderr the
-/// nonzero exit carries decides instead of the evidence reporting
-/// `Unrecognized` beside a stderr that names the cause. The usage the result
-/// stated still reaches the observation stream on this path.
+/// A generic structured error and definitive stderr remain opaque. The usage
+/// the result stated still reaches the observation stream on this path.
 #[tokio::test]
-async fn definitive_exit_stderr_classifies_a_generic_structured_error() {
+async fn definitive_exit_stderr_keeps_a_generic_structured_error_opaque() {
     let result = execute_scenario(
         "generic_error_then_definitive_stderr_exit",
         OperationShape::Text,
@@ -609,7 +607,7 @@ async fn definitive_exit_stderr_classifies_a_generic_structured_error() {
     .await;
     let failure = provider_error(&result.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(reported_usage(&result.observations), vec![failure.usage]);
     assert_eq!(result.spawns, 1);
 }
@@ -730,11 +728,11 @@ async fn success_rejects_every_contradictory_error_field_shape() {
 }
 
 #[tokio::test]
-async fn nonzero_exit_is_a_typed_provider_failure() {
+async fn nonzero_exit_is_an_opaque_provider_failure() {
     let result = execute_scenario("process_nonzero", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
     assert_eq!(result.spawns, 1);
 }
 

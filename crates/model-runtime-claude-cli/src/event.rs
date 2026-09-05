@@ -16,7 +16,7 @@ use signalbox_model_runtime::{
 
 use crate::SUPPORTED_CLAUDE_CLI_VERSION;
 use crate::bridge::{SERVER_NAME, TOOL_ACKNOWLEDGEMENT, TOOL_PREFIX};
-use crate::status::classify_error;
+use crate::status::classify_status;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
     AssistantContent, AssistantEvent, AssistantRawEvent, RawToolUse, ResultEvent, SystemInit,
@@ -658,7 +658,7 @@ impl<C: Clone> EventDecoder<C> {
                 status,
                 message,
             } => {
-                let kind = classify_error(status, &subtype, &message);
+                let kind = classify_status(status);
                 let subtype = sink.redact_retained_metadata(&subtype);
                 let message = sink.redact_retained_metadata(&message);
                 self.report_usage(sink);
@@ -739,7 +739,6 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn provider_error_after_exit(
         mut self,
         fallback: &str,
-        fallback_kind: ProviderErrorKind,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         // Every other terminal path reports usage before returning its evidence;
@@ -753,17 +752,9 @@ impl<C: Clone> EventDecoder<C> {
             message,
         }) = self.terminal
         {
-            // A generic structured error (`error_during_execution`) determines no
-            // kind on its own, while the process exit carries definitive stderr
-            // (`authentication failed`). Fall back to the exit classification in
-            // exactly that case so the shared provider-error vocabulary reflects
-            // all the evidence available, rather than reporting `Unrecognized`
-            // beside a stderr that names the cause. A structured error that does
-            // determine a kind still wins: it is the provider's own statement.
-            let kind = match classify_error(status, &subtype, &message) {
-                ProviderErrorKind::Unrecognized => fallback_kind,
-                determined => determined,
-            };
+            // Machine-readable HTTP status determines the kind; stderr remains
+            // opaque and supplies no exit classification for a generic error.
+            let kind = classify_status(status);
             let subtype = sink.redact_retained_metadata(&subtype);
             let message = sink.redact_retained_metadata(&message);
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
@@ -782,7 +773,7 @@ impl<C: Clone> EventDecoder<C> {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: self.exchange,
                 reported_model: self.reported_model,
-                kind: fallback_kind,
+                kind: ProviderErrorKind::Unrecognized,
                 non_acceptance_proven: false,
                 native: NativeErrorFacts {
                     error_token: Some("claude_cli_exit".to_string()),
@@ -804,8 +795,7 @@ impl<C: Clone> EventDecoder<C> {
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         if matches!(self.terminal, Some(CliTerminal::Error { .. })) {
-            let kind = classify_error(None, "process_exit", "Claude reported an error");
-            self.provider_error_after_exit("Claude reported an error", kind, sink)
+            self.provider_error_after_exit("Claude reported an error", sink)
         } else {
             self.loss(cause)
         }
@@ -1131,16 +1121,11 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
     }
 
-    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind {
-        classify_error(None, "process_exit", classification)
-    }
-
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
-        EventDecoder::provider_error_after_exit(self, message, kind, sink)
+        EventDecoder::provider_error_after_exit(self, message, sink)
     }
 }

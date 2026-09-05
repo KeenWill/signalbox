@@ -52,7 +52,6 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
-use crate::status::{classify_error, retry_after};
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
     EnvelopeOutcome, ItemDetails, ItemEvent, ItemIdentity, ItemLifecycleEvent, ModelEnvelope,
@@ -362,10 +361,10 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, true)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Unrecoverable(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, false)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) => self.completed(sink),
             None => boundary_loss_before_envelope(
@@ -385,18 +384,17 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn provider_error_after_exit(
         self,
         fallback: &str,
-        kind: ProviderErrorKind,
         sink: &RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, true)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Unrecoverable(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, false)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) | None => {
-                provider_failure_classified(self.exchange, self.usage, fallback, kind, sink)
+                provider_failure(self.exchange, self.usage, fallback, sink)
             }
         }
     }
@@ -412,10 +410,10 @@ impl<C: Clone> EventDecoder<C> {
     ) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, true)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Unrecoverable(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, false)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) | None => {
                 boundary_loss_before_envelope(self.exchange, self.usage, cause)
@@ -1113,16 +1111,11 @@ fn optional_usage(value: Option<i64>, name: &str) -> Result<Option<u64>, DecodeF
         .transpose()
 }
 
-fn provider_error(
-    mut exchange: ExchangeFacts,
-    usage: TokenUsage,
-    message: &str,
-) -> TerminalEvidence {
-    exchange.retry_after = retry_after(message);
+fn provider_error(exchange: ExchangeFacts, usage: TokenUsage, message: &str) -> TerminalEvidence {
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
         reported_model: None,
-        kind: classify_error(message),
+        kind: ProviderErrorKind::Unrecognized,
         non_acceptance_proven: false,
         native: NativeErrorFacts {
             error_token: Some("codex_cli_error".to_string()),
@@ -1139,42 +1132,15 @@ fn provider_error(
 /// fragments it continues would have been, instead of receiving an
 /// independent stateless re-redaction that cannot see the held marker.
 fn provider_failure<C: Clone>(
-    mut exchange: ExchangeFacts,
+    exchange: ExchangeFacts,
     usage: TokenUsage,
     message: &str,
     sink: &RedactingSink<'_, C>,
-    non_acceptance_proven: bool,
 ) -> TerminalEvidence {
-    exchange.retry_after = retry_after(message);
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
         reported_model: None,
-        kind: classify_error(message),
-        non_acceptance_proven,
-        native: NativeErrorFacts {
-            error_token: Some("codex_cli_error".to_string()),
-            error_code: None,
-            message: Some(sink.redact_terminal_failure_text(message)),
-        },
-        usage,
-    })
-}
-
-/// Builds provider-failure evidence whose typed kind is classified from
-/// provider-controlled material before the emitted native message receives
-/// the stateful redaction of `message`.
-fn provider_failure_classified<C: Clone>(
-    mut exchange: ExchangeFacts,
-    usage: TokenUsage,
-    message: &str,
-    kind: ProviderErrorKind,
-    sink: &RedactingSink<'_, C>,
-) -> TerminalEvidence {
-    exchange.retry_after = retry_after(message);
-    TerminalEvidence::ProviderError(ProviderErrorEvidence {
-        exchange,
-        reported_model: None,
-        kind,
+        kind: ProviderErrorKind::Unrecognized,
         non_acceptance_proven: false,
         native: NativeErrorFacts {
             error_token: Some("codex_cli_error".to_string()),
@@ -1331,16 +1297,11 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
     }
 
-    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind {
-        classify_error(classification)
-    }
-
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
-        EventDecoder::provider_error_after_exit(self, message, kind, sink)
+        EventDecoder::provider_error_after_exit(self, message, sink)
     }
 }

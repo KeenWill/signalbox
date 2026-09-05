@@ -10,8 +10,7 @@ use tokio::process::{Child, Command};
 
 use crate::{
     CancellationSignal, LossCause, Observation, ObservationFact, ObservationSink,
-    ProvenUnsentEvidence, ProviderErrorKind, REDACTED, RedactingSink, TerminalEvidence,
-    TransportFacts, UnsentCause,
+    ProvenUnsentEvidence, REDACTED, RedactingSink, TerminalEvidence, TransportFacts, UnsentCause,
 };
 
 const TRUNCATION_SUFFIX: &str = "… [truncated]";
@@ -256,13 +255,10 @@ pub trait CliSession<C>: Sized {
         cause: LossCause,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
-    /// Collapses raw non-successful-exit material to a closed kind.
-    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind;
-    /// Produces a provider failure from sanitized material and its closed kind.
+    /// Produces a provider failure from sanitized exit evidence.
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
 }
@@ -939,36 +935,22 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             // continuation would otherwise keep the pair from rejoining, and
             // the continuation would survive the stateless stderr redaction.
             let stderr_detail = sanitized_stderr(&redacting_sink, &stderr, stderr_limit);
-            // The emitted message carries only sanitized stderr; the failure
-            // is classified from the bounded raw stderr so an explicit error
-            // phrase sharing a line with a consumed credential marker still
-            // reaches the classifier.
-            let (message, classification) = if !stderr_detail.trim().is_empty() {
-                (
-                    format!(
-                        "{} exited with status {status}: {stderr_detail}",
-                        labels.process
-                    ),
-                    format!(
-                        "{} exited with status {status}: {}",
-                        labels.process,
-                        stderr.classification().trim()
-                    ),
+            let message = if !stderr_detail.trim().is_empty() {
+                format!(
+                    "{} exited with status {status}: {stderr_detail}",
+                    labels.process
                 )
             } else if let Some(error) = input_error {
-                let message = format!(
+                format!(
                     "{} exited with status {status} after stdin failed: {error}",
                     labels.process
-                );
-                (message.clone(), message)
+                )
             } else {
-                let message = format!("{} exited with status {status}", labels.process);
-                (message.clone(), message)
+                format!("{} exited with status {status}", labels.process)
             };
             // Evidence is built before the sink flushes so the failure
             // message still sees the held cross-fragment redaction state.
-            let kind = D::classify_provider_error_after_exit(&classification);
-            let evidence = decoder.provider_error_after_exit(&message, kind, &mut redacting_sink);
+            let evidence = decoder.provider_error_after_exit(&message, &mut redacting_sink);
             redacting_sink.finish();
             evidence
         }
@@ -1460,7 +1442,6 @@ fn oversize_event(limit: usize, labels: CliProcessLabels) -> std::io::Error {
 
 struct BoundedOutput {
     raw: Vec<u8>,
-    classification_end: usize,
     evidence_truncated: bool,
 }
 
@@ -1468,19 +1449,9 @@ impl BoundedOutput {
     fn diagnostic(text: String) -> Self {
         let raw = text.into_bytes();
         Self {
-            classification_end: raw.len(),
             raw,
             evidence_truncated: false,
         }
-    }
-
-    fn classification(&self) -> String {
-        let mut classification =
-            String::from_utf8_lossy(&self.raw[..self.classification_end]).into_owned();
-        if self.evidence_truncated {
-            classification.push_str(TRUNCATION_SUFFIX);
-        }
-        classification
     }
 }
 
@@ -1501,10 +1472,8 @@ async fn read_bounded_output<R: AsyncRead + Unpin>(
         retained.extend_from_slice(&buffer[..admitted]);
         evidence_truncated |= retained.len() > evidence_limit || admitted < read;
     }
-    let classification_end = retained.len().min(evidence_limit);
     Ok(BoundedOutput {
         raw: retained,
-        classification_end,
         evidence_truncated,
     })
 }
@@ -1791,8 +1760,8 @@ mod tests {
         sanitized_stderr, validated_environment_overrides,
     };
     use crate::{
-        BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, ProviderErrorKind,
-        REDACTED, RedactingSink, TerminalEvidence, TokenUsage, ToolCallsAtLoss, UnsentCause,
+        BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, REDACTED,
+        RedactingSink, TerminalEvidence, TokenUsage, ToolCallsAtLoss, UnsentCause,
     };
 
     const TEST_ENVIRONMENT: &[CliEnvironmentVariable] = &[
@@ -1865,14 +1834,9 @@ mod tests {
             unused_terminal_evidence()
         }
 
-        fn classify_provider_error_after_exit(_classification: &str) -> ProviderErrorKind {
-            ProviderErrorKind::Unrecognized
-        }
-
         fn provider_error_after_exit(
             self,
             _message: &str,
-            _kind: ProviderErrorKind,
             _sink: &mut RedactingSink<'_, u8>,
         ) -> TerminalEvidence {
             unused_terminal_evidence()
@@ -1964,14 +1928,9 @@ mod tests {
             unused_terminal_evidence()
         }
 
-        fn classify_provider_error_after_exit(_classification: &str) -> ProviderErrorKind {
-            ProviderErrorKind::Unrecognized
-        }
-
         fn provider_error_after_exit(
             self,
             _message: &str,
-            _kind: ProviderErrorKind,
             _sink: &mut RedactingSink<'_, u8>,
         ) -> TerminalEvidence {
             unused_terminal_evidence()
@@ -2248,7 +2207,6 @@ mod tests {
             .expect("the fixture carries one JSON escape")
             + 2;
         let stderr = BoundedOutput {
-            classification_end: body.len(),
             raw: body.into_bytes(),
             evidence_truncated: false,
         };
@@ -2268,7 +2226,6 @@ mod tests {
         const SYNTHETIC_CREDENTIAL: &str = "SYNTHETIC-SECRET-STDERR-Z";
         let stderr = BoundedOutput {
             raw: format!("api_key={SYNTHETIC_CREDENTIAL}").into_bytes(),
-            classification_end: 0,
             evidence_truncated: true,
         };
         let mut observed: Vec<crate::Observation<u8>> = Vec::new();
@@ -2285,7 +2242,6 @@ mod tests {
         const EVIDENCE_LIMIT: usize = 12;
         let stderr = BoundedOutput {
             raw: b"api_key=x".to_vec(),
-            classification_end: 0,
             evidence_truncated: false,
         };
         let mut observed: Vec<crate::Observation<u8>> = Vec::new();
@@ -2306,19 +2262,6 @@ mod tests {
             .expect("the in-memory reader succeeds");
 
         assert_eq!(output.raw, &INPUT[..2 * EVIDENCE_LIMIT]);
-    }
-
-    #[tokio::test]
-    async fn stderr_classification_preserves_the_original_bounded_prefix() {
-        const EVIDENCE_LIMIT: usize = 8;
-        const INPUT: &[u8] = b"abcdefghijklmnopq";
-
-        let output = read_bounded_output(INPUT, EVIDENCE_LIMIT)
-            .await
-            .expect("the in-memory reader succeeds");
-
-        let expected = [&INPUT[..EVIDENCE_LIMIT], TRUNCATION_SUFFIX.as_bytes()].concat();
-        assert_eq!(output.classification().as_bytes(), expected);
     }
 
     #[tokio::test]

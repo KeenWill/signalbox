@@ -976,7 +976,7 @@ fn parse_pool_headroom_reserve_percent(
 }
 
 /// Rejects `switch_now` for any trigger whose cause this pool's adapter cannot
-/// prove the provider refused before accepting.
+/// prove the provider refused before accepting, and actions on unreachable CLI triggers.
 ///
 /// Only a decoded native error envelope supplies that proof, and each adapter
 /// names native tokens for only some causes, so the check is per adapter *and*
@@ -984,6 +984,30 @@ fn parse_pool_headroom_reserve_percent(
 /// per pool. Left admitted, the action would read as failover the deployment
 /// does not have while every matching response terminalized exactly as `stay`.
 fn reject_unprovable_substitution(pool: &CredentialPool) -> Result<(), HubModelConfigurationError> {
+    if pool.adapter == ModelAdapter::CodexCli {
+        for (trigger, action) in [
+            ("on_quota_exhausted", pool.quota_exhausted),
+            ("on_rate_limited", pool.rate_limited),
+            ("on_overloaded", pool.overloaded),
+            ("on_credential_rejected", pool.credential_rejected),
+        ] {
+            if action != CredentialPoolAction::Stay {
+                return Err(
+                    HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                        trigger: Arc::from(trigger),
+                    },
+                );
+            }
+        }
+    }
+    if pool.adapter == ModelAdapter::ClaudeCli && pool.quota_exhausted != CredentialPoolAction::Stay
+    {
+        return Err(
+            HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                trigger: Arc::from("on_quota_exhausted"),
+            },
+        );
+    }
     let unprovable = [
         (pool.quota_exhausted, AvailabilityCause::QuotaExhausted),
         (pool.rate_limited, AvailabilityCause::RateLimited),

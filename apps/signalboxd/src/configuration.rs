@@ -198,11 +198,8 @@ impl ModelAdapter {
     /// (`docs/spec/runtime-substrate.md`); a status-derived fallback carries
     /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
     /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
-    /// `insufficient_quota` but reaches overload only by status. Codex
-    /// classifies the narrower cause from rendered failure prose only after its
-    /// machine-readable JSONL lifecycle closes the request as `turn.failed`;
-    /// that envelope proves non-acceptance. Claude Code exposes no equivalent
-    /// proof. Listing every pair
+    /// `insufficient_quota` but reaches overload only by status. Neither CLI
+    /// adapter supplies a machine-readable availability cause. Listing every pair
     /// rather than matching on a group makes a later adapter state its own
     /// answer.
     pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
@@ -215,8 +212,7 @@ impl ModelAdapter {
                 true
             }
             (Self::OpenAi, AvailabilityCause::Overloaded) => false,
-            (Self::CodexCli, _) => true,
-            (Self::ClaudeCli, _) => false,
+            (Self::ClaudeCli | Self::CodexCli, _) => false,
         }
     }
 
@@ -7756,15 +7752,72 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
         );
     }
 
-    #[test]
-    fn configuration_admits_switch_now_for_a_codex_terminal_failure() {
-        let substituting = CONFIGURATION.replace(
-            CODEX_POOL,
-            &format!("{CODEX_POOL}\non_rate_limited = \"switch_now\""),
+    #[track_caller]
+    fn assert_codex_action_rejected(trigger: &str, action: &str) {
+        let configured =
+            CONFIGURATION.replace(CODEX_POOL, &format!("{CODEX_POOL}\n{trigger} = {action:?}"));
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(
+                HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                    trigger: Arc::from(trigger),
+                }
+            ),
+            "{trigger} = {action}",
         );
+    }
 
-        HubModelConfiguration::parse(&substituting)
-            .expect("Codex turn.failed proves that a successor cannot duplicate acceptance");
+    #[track_caller]
+    fn assert_codex_trigger_rejects_actions(trigger: &str) {
+        assert_codex_action_rejected(trigger, "switch_now");
+        assert_codex_action_rejected(trigger, "switch_next_turn");
+        assert_codex_action_rejected(trigger, "avoid_new_sessions");
+        assert_codex_action_rejected(trigger, "quarantine");
+        let configured =
+            CONFIGURATION.replace(CODEX_POOL, &format!("{CODEX_POOL}\n{trigger} = \"stay\""));
+        HubModelConfiguration::parse(&configured).expect("stay needs no classified failure");
+    }
+
+    #[test]
+    fn configuration_rejects_actions_for_opaque_codex_failures() {
+        assert_codex_trigger_rejects_actions("on_rate_limited");
+        assert_codex_trigger_rejects_actions("on_quota_exhausted");
+        assert_codex_trigger_rejects_actions("on_overloaded");
+        assert_codex_trigger_rejects_actions("on_credential_rejected");
+    }
+
+    #[track_caller]
+    fn assert_claude_quota_action_rejected(action: &str) {
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let (configuration, _workspace) = configuration_varying_the_claude_bridge(&executable);
+        let configured = configuration.replace(
+            "name = \"claude-code-main\"",
+            &format!("name = \"claude-code-main\"\non_quota_exhausted = {action:?}"),
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(
+                HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                    trigger: Arc::from("on_quota_exhausted"),
+                }
+            ),
+            "{action}",
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_unreachable_claude_quota_actions() {
+        assert_claude_quota_action_rejected("switch_now");
+        assert_claude_quota_action_rejected("switch_next_turn");
+        assert_claude_quota_action_rejected("avoid_new_sessions");
+        assert_claude_quota_action_rejected("quarantine");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let (configuration, _workspace) = configuration_varying_the_claude_bridge(&executable);
+        let configured = configuration.replace(
+            "name = \"claude-code-main\"",
+            "name = \"claude-code-main\"\non_quota_exhausted = \"stay\"",
+        );
+        HubModelConfiguration::parse(&configured).expect("stay needs no quota classification");
     }
 
     #[test]
