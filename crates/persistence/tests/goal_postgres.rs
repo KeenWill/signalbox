@@ -2738,7 +2738,7 @@ async fn inv048_model_goal_declaration_is_the_final_response_part() -> Result<()
     Ok(())
 }
 
-/// §2: a committed closure makes a later model achievement non-current, so
+/// A committed closure makes a later model achievement non-current, so
 /// settlement cannot be stranded behind a contradictory terminal goal event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -5066,7 +5066,7 @@ async fn attach_and_declare(
     Ok((turn, GoalModelProvenance::new(turn, declaration_request)))
 }
 
-/// Session-lifecycle §2: a failing finish check appends no achievement, keeps
+/// A failing finish check appends no achievement, keeps
 /// the goal pursuing, and leaves its detail for the failure that follows.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -5112,7 +5112,7 @@ async fn a_failing_finish_check_blocks_the_goal_with_its_result() -> Result<(), 
     Ok(())
 }
 
-/// Session-lifecycle §2: a passing finish check appends the achievement and
+/// A passing finish check appends the achievement and
 /// commits `achieved_verified` to the handoff; the settlement that retires the
 /// generation's queued turn records the session terminal.
 #[tokio::test(flavor = "multi_thread")]
