@@ -33,12 +33,13 @@ them. `RUST_LOG` admits one log level and nothing else; any other value warns
 and falls back to the INFO default.
 
 `SIGNALBOX_OTLP_ENDPOINT` enables span export; its absence disables OTLP and
-makes every other OTLP setting inert. With the endpoint set, any standard
-`OTEL_EXPORTER_OTLP_*` variable in the environment fails startup.
-`SIGNALBOX_OTLP_PROTOCOL` selects `grpc` or `http/protobuf`,
-`SIGNALBOX_OTLP_HEADERS_FILE` names a collector-header file read once at
-startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets the parent-based trace-id sampling
-ratio from 0 through 1, and `SIGNALBOX_OTLP_SERVICE_NAME` sets the service name.
+makes every other OTLP setting inert. With the endpoint set, a general or
+trace-specific `OTEL_EXPORTER_OTLP_*` endpoint, headers, timeout, protocol, or
+compression variable in the environment fails startup. `SIGNALBOX_OTLP_PROTOCOL`
+selects `grpc` or `http/protobuf`, `SIGNALBOX_OTLP_HEADERS_FILE` names a
+collector-header file read once at startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets
+the parent-based trace-id sampling ratio from 0 through 1, and
+`SIGNALBOX_OTLP_SERVICE_NAME` sets the service name.
 `SIGNALBOX_PROMETHEUS_BIND`, an exact IP socket address, enables a separate
 Prometheus listener.
 
