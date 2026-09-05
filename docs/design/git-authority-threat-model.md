@@ -16,18 +16,20 @@ identity and its grants.
 Storage. The `workspace`, `configured_git_remote_mint`,
 `configured_git_remote_withdrawal`, and `configured_git_remote_live` tables
 exist. `workspace_id` is the primary key, `root_path` is unique, and a live
-destination is keyed by workspace and remote name. An operator-registered row
-carries the `register_workspace` command that created it; a daemon-derived row
-carries no command.
+destination is keyed by workspace and remote name. Operator-registered minting
+is the only tier that widens what Signalbox may push from, so an
+operator-registered row carries the `register_workspace` command that created
+it; a daemon-derived row carries no command.
 
 Minting. Registration through the client resolves the root path once, following
 symbolic links and removing `.` and `..` components, and stores the canonical
 bytes. The store judges canonical form as bytes and cannot see the filesystem,
 so a canonical spelling whose components are symbolic links is admitted. The
-minting boundary is the only place that resolves them. Two spellings of one
-directory are one key, so at most one live destination exists per workspace and
-name. The daemon inserts a daemon-derived row for each per-session root its
-derivation materializes
+minting boundary is the only place that resolves them. Spellings that
+canonicalization collapses are one key; two bind-mount paths to one directory
+canonicalize to different bytes and stay distinct keys. At most one live
+destination exists per workspace and name. The daemon inserts a daemon-derived
+row for each per-session root its derivation materializes
 ([configuration-and-credentials.md](../spec/configuration-and-credentials.md)).
 Those rows are bookkeeping, and no path reads them to decide a binding.
 
@@ -70,8 +72,8 @@ The identity generators for `WorkspaceId`, `GitRemoteMintId`, and
 ## Acceptance criteria
 
 Registering a workspace through the client stores the canonical root once,
-records the registering command, and refuses a second spelling of the same
-directory as the same key.
+records the registering command, and refuses a second spelling that
+canonicalization collapses onto an existing key.
 
 A push carrying a remote name resolves to the one live mint for that name in the
 session's workspace, or fails with a typed error; a URL from any caller is
