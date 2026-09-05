@@ -77,12 +77,12 @@ failed informational contexts do not re-enter through GitHub's aggregate state.
 A mismatched commit OID blocks convergence even when every returned check is
 successful.
 
-Check names ending with the case-insensitive suffix `(report only)` and check
-names containing `smoke` are non-gating. The case-insensitive names
-`codecov/project`, `codecov/patch`, and `Comment the coverage report` are also
-non-gating, matching
-the repository's declared informational coverage posture. These results are
-still included in the computed state passed to operator commands.
+Check names ending with the case-insensitive suffix `(report only)` are
+non-gating. The case-insensitive names `codecov/project`, `codecov/patch`, and
+`Comment the coverage report` are also non-gating, matching the repository's
+declared informational coverage posture. Provider compatibility smoke
+aggregates remain gating. Non-gating results are still included in the computed
+state passed to operator commands.
 
 `CONFLICTING` and `UNKNOWN` mergeability both block convergence. Draft pull
 requests also remain unconverged.
@@ -100,8 +100,10 @@ at the head and, unless newly added, at the base. Additional
 thread or check pages use dynamically aliased GraphQL fields, up to 20
 continuations in one request. The fetched review-thread count must equal the
 connection's `totalCount`, otherwise the tick fails closed. Review-thread
-comments, top-level comments, and
-reviews are also paginated. REST compare requests conservatively classify
+identity and resolution state and the complete check census are traversed a
+second time and must remain identical before the final OID check. Review-thread
+comments, top-level comments, and reviews are also paginated. REST compare
+requests conservatively classify
 post-review rename-only, source-comment-only, and proven clean base-forward
 changes; a base forward must be a single merge of the reviewed head and exact
 current base whose complete patch matches the base delta. REST pull-request-file

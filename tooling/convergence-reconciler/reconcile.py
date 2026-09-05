@@ -342,6 +342,7 @@ class GitHubGraphQL:
         self._load_planning_only_status(pull_requests)
         self._load_base_ancestry(pull_requests)
         self._revalidate_checks(pull_requests)
+        self._revalidate_review_threads(pull_requests)
         self._verify_snapshot_oids(pull_requests)
         return pull_requests, tracked
 
@@ -947,43 +948,131 @@ query($id: ID!) {
 }
 """
         for pull_request in pull_requests:
-            data = self.execute(query, {"id": pull_request["node_id"]})
-            node = data.get("node")
-            if node is None:
-                raise RuntimeError("pull request became unavailable during check revalidation")
+            first = self._read_check_census(pull_request, query)
+            second = self._read_check_census(pull_request, query)
+            if first != second:
+                pull_request["checked_head_oid"] = None
+                pull_request["base_commits_not_in_head"] = None
+                continue
+            base_oid, head_oid, checked_head_oid, rollup_state, checks = first
             if (
-                node["baseRefOid"] != pull_request["base_oid"]
-                or node["headRefOid"] != pull_request["head_oid"]
+                base_oid != pull_request["base_oid"]
+                or head_oid != pull_request["head_oid"]
             ):
                 pull_request["checked_head_oid"] = None
                 pull_request["base_commits_not_in_head"] = None
                 continue
-            commit_nodes = node["commits"]["nodes"]
-            commit = commit_nodes[0]["commit"] if commit_nodes else None
-            rollup = commit.get("statusCheckRollup") if commit else None
-            contexts = (
-                rollup["contexts"]
-                if rollup
-                else {"nodes": [], "pageInfo": empty_page_info()}
-            )
-            pull_request["checked_head_oid"] = commit.get("oid") if commit else None
-            pull_request["check_rollup_state"] = (
-                rollup.get("state") if rollup else None
-            )
-            pull_request["checks"] = list(contexts["nodes"])
-            page = contexts["pageInfo"]
-            while page["hasNextPage"]:
-                task = PaginationTask("checks", pull_request, page["endCursor"])
-                page_query, variables = pagination_query([task])
-                page_data = self.execute(page_query, variables)
-                page_node = page_data.get("item0")
-                if page_node is None:
+            pull_request["checked_head_oid"] = checked_head_oid
+            pull_request["check_rollup_state"] = rollup_state
+            pull_request["checks"] = checks
+
+    def _read_check_census(
+        self, pull_request: dict[str, Any], query: str
+    ) -> tuple[str, str, str | None, str | None, list[dict[str, Any]]]:
+        data = self.execute(query, {"id": pull_request["node_id"]})
+        node = data.get("node")
+        if node is None:
+            raise RuntimeError("pull request became unavailable during check revalidation")
+        commit_nodes = node["commits"]["nodes"]
+        commit = commit_nodes[0]["commit"] if commit_nodes else None
+        rollup = commit.get("statusCheckRollup") if commit else None
+        contexts = (
+            rollup["contexts"]
+            if rollup
+            else {"nodes": [], "pageInfo": empty_page_info()}
+        )
+        checks = list(contexts["nodes"])
+        page = contexts["pageInfo"]
+        while page["hasNextPage"]:
+            page_target = {
+                "node_id": pull_request["node_id"],
+                "checks": checks,
+            }
+            task = PaginationTask("checks", page_target, page["endCursor"])
+            page_query, variables = pagination_query([task])
+            page_data = self.execute(page_query, variables)
+            page_node = page_data.get("item0")
+            if page_node is None:
+                raise RuntimeError(
+                    "pull request became unavailable during check revalidation"
+                )
+            next_page = pagination_page(page_node, "checks")
+            checks.extend(next_page["nodes"])
+            page = next_page["pageInfo"]
+        return (
+            node["baseRefOid"],
+            node["headRefOid"],
+            commit.get("oid") if commit else None,
+            rollup.get("state") if rollup else None,
+            checks,
+        )
+
+    def _revalidate_review_threads(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        query = """
+query($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on PullRequest {
+      baseRefOid
+      headRefOid
+      reviewThreads(first: 100, after: $after) {
+        totalCount
+        nodes { id isResolved }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+        for pull_request in pull_requests:
+            expected = [
+                (thread.get("id"), thread["isResolved"])
+                for thread in pull_request["review_threads"]
+            ]
+            observed: list[tuple[str, bool]] = []
+            after: str | None = None
+            total_count: int | None = None
+            while True:
+                data = self.execute(
+                    query, {"id": pull_request["node_id"], "after": after}
+                )
+                node = data.get("node")
+                if node is None:
                     raise RuntimeError(
-                        "pull request became unavailable during check revalidation"
+                        "pull request became unavailable during thread revalidation"
                     )
-                next_page = pagination_page(page_node, "checks")
-                pull_request["checks"].extend(next_page["nodes"])
-                page = next_page["pageInfo"]
+                if (
+                    node["baseRefOid"] != pull_request["base_oid"]
+                    or node["headRefOid"] != pull_request["head_oid"]
+                ):
+                    pull_request["checked_head_oid"] = None
+                    pull_request["base_commits_not_in_head"] = None
+                    break
+                page = node["reviewThreads"]
+                page_total = page["totalCount"]
+                if not isinstance(page_total, int) or isinstance(page_total, bool):
+                    raise RuntimeError("review thread totalCount is not an integer")
+                if total_count is None:
+                    total_count = page_total
+                elif page_total != total_count:
+                    raise RuntimeError(
+                        "review thread totalCount changed during revalidation"
+                    )
+                observed.extend(
+                    (thread["id"], thread["isResolved"])
+                    for thread in page["nodes"]
+                )
+                if not page["pageInfo"]["hasNextPage"]:
+                    if len(observed) != total_count:
+                        raise RuntimeError(
+                            "review thread revalidation returned an incomplete census"
+                        )
+                    if observed != expected:
+                        pull_request["checked_head_oid"] = None
+                        pull_request["base_commits_not_in_head"] = None
+                    break
+                after = page["pageInfo"]["endCursor"]
 
     def _verify_snapshot_oids(
         self,
@@ -1066,6 +1155,11 @@ query($owner: String!, $name: String!, $head: String!, $base: String!) {
     def _finish_paginated_connections(self, pull_requests: list[dict[str, Any]]) -> None:
         pending: list[PaginationTask] = []
         for pull_request in pull_requests:
+            thread_total = pull_request["_thread_total_count"]
+            if not isinstance(thread_total, int) or isinstance(thread_total, bool):
+                raise RuntimeError("review thread totalCount is not an integer")
+            if thread_total < 0:
+                raise RuntimeError("review thread totalCount is negative")
             thread_page = pull_request.pop("_thread_page")
             check_page = pull_request.pop("_check_page")
             file_page = pull_request.pop("_file_page")
@@ -1088,6 +1182,10 @@ query($owner: String!, $name: String!, $head: String!, $base: String!) {
                     )
                 page = pagination_page(node, task.kind)
                 if task.kind == "threads":
+                    if page["totalCount"] != task.pull_request["_thread_total_count"]:
+                        raise RuntimeError(
+                            "review thread totalCount changed during pagination"
+                        )
                     task.pull_request["_review_thread_nodes"].extend(page["nodes"])
                 elif task.kind == "checks":
                     task.pull_request["checks"].extend(page["nodes"])
@@ -1542,7 +1640,6 @@ def is_non_gating_check(check: dict[str, Any]) -> bool:
     folded_name = name.casefold()
     return (
         folded_name.endswith("(report only)")
-        or "smoke" in folded_name
         or folded_name in NON_GATING_CHECK_NAMES
     )
 

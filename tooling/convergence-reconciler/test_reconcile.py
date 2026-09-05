@@ -19,6 +19,7 @@ from reconcile import (
     choose_decision,
     comment_only_patch,
     configured_path,
+    empty_page_info,
     evaluate_convergence,
     is_codex_review_request,
     load_state,
@@ -104,7 +105,7 @@ class ConvergencePredicateTests(unittest.TestCase):
                 },
                 {
                     "__typename": "CheckRun",
-                    "name": "OpenAI smoke compatibility",
+                    "name": "Tool live smokes (report only)",
                     "status": "COMPLETED",
                     "conclusion": "FAILURE",
                 },
@@ -124,8 +125,35 @@ class ConvergencePredicateTests(unittest.TestCase):
             [
                 {"name": "Comment the coverage report", "state": "FAILURE"},
                 {"name": "codecov/patch", "state": "PENDING"},
-                {"name": "OpenAI smoke compatibility", "state": "FAILURE"},
+                {"name": "Tool live smokes (report only)", "state": "FAILURE"},
             ],
+        )
+
+    def test_required_provider_smoke_failure_blocks_convergence(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-smoke",
+            "check_rollup_state": "FAILURE",
+            "head_oid": "head-smoke",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-smoke"],
+            "review_threads": [],
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "OpenAI smoke compatibility",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                }
+            ],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(
+            computed["reasons"],
+            ["check-not-green:OpenAI smoke compatibility:FAILURE"],
         )
 
     def test_incomplete_review_thread_census_fails_closed(self) -> None:
@@ -140,6 +168,111 @@ class ConvergencePredicateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "incomplete census"):
             client._finish_paginated_connections([pull_request])
+
+    def test_review_thread_revalidation_detects_reopened_early_page(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        first_page = [
+            {"id": f"thread-{index}", "isResolved": index != 0}
+            for index in range(100)
+        ]
+        client.execute = mock.Mock(
+            side_effect=[
+                {
+                    "node": {
+                        "baseRefOid": "base",
+                        "headRefOid": "head",
+                        "reviewThreads": {
+                            "totalCount": 101,
+                            "nodes": first_page,
+                            "pageInfo": {
+                                "hasNextPage": True,
+                                "endCursor": "cursor",
+                            },
+                        },
+                    }
+                },
+                {
+                    "node": {
+                        "baseRefOid": "base",
+                        "headRefOid": "head",
+                        "reviewThreads": {
+                            "totalCount": 101,
+                            "nodes": [
+                                {"id": "thread-100", "isResolved": True}
+                            ],
+                            "pageInfo": empty_page_info(),
+                        },
+                    }
+                },
+            ]
+        )
+        pull_request = {
+            "node_id": "pull-request",
+            "base_oid": "base",
+            "head_oid": "head",
+            "checked_head_oid": "head",
+            "base_commits_not_in_head": 0,
+            "review_threads": [
+                {"id": f"thread-{index}", "isResolved": True}
+                for index in range(101)
+            ],
+        }
+
+        client._revalidate_review_threads([pull_request])
+
+        self.assertIsNone(pull_request["checked_head_oid"])
+        self.assertIsNone(pull_request["base_commits_not_in_head"])
+
+    def test_check_revalidation_detects_an_early_context_change(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+
+        def census(conclusion: str) -> dict[str, object]:
+            return {
+                "node": {
+                    "baseRefOid": "base",
+                    "headRefOid": "head",
+                    "commits": {
+                        "nodes": [
+                            {
+                                "commit": {
+                                    "oid": "head",
+                                    "statusCheckRollup": {
+                                        "state": conclusion,
+                                        "contexts": {
+                                            "nodes": [
+                                                {
+                                                    "__typename": "CheckRun",
+                                                    "name": "required",
+                                                    "status": "COMPLETED",
+                                                    "conclusion": conclusion,
+                                                    "completedAt": "2026-09-05T00:00:00Z",
+                                                }
+                                            ],
+                                            "pageInfo": empty_page_info(),
+                                        },
+                                    },
+                                }
+                            }
+                        ]
+                    },
+                }
+            }
+
+        client.execute = mock.Mock(
+            side_effect=[census("SUCCESS"), census("FAILURE")]
+        )
+        pull_request = {
+            "node_id": "pull-request",
+            "base_oid": "base",
+            "head_oid": "head",
+            "checked_head_oid": "head",
+            "base_commits_not_in_head": 0,
+        }
+
+        client._revalidate_checks([pull_request])
+
+        self.assertIsNone(pull_request["checked_head_oid"])
+        self.assertIsNone(pull_request["base_commits_not_in_head"])
 
     def test_unresolved_review_thread_blocks_convergence(self) -> None:
         pull_request = {
