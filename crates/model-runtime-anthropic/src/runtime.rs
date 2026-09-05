@@ -94,6 +94,7 @@ struct ExecutionSettings {
     delivery: DeliveryMode,
     sse_record_limit: usize,
     stop_sequences: Vec<String>,
+    provider_compaction_enabled: bool,
 }
 
 impl<A> std::fmt::Debug for AnthropicRuntime<A> {
@@ -415,6 +416,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                     delivery,
                     sse_record_limit: self.sse_record_limit,
                     stop_sequences,
+                    provider_compaction_enabled: server_compaction,
                 },
             },
             correlation,
@@ -513,7 +515,14 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             Some(Err(cause)) => return exchange_loss(cause, exchange),
             Some(Ok(bytes)) => bytes,
         };
-        decode_buffered_response(&body, exchange, &settings.stop_sequences, correlation, sink)
+        decode_buffered_response(
+            &body,
+            exchange,
+            &settings.stop_sequences,
+            settings.provider_compaction_enabled,
+            correlation,
+            sink,
+        )
     }
 
     async fn finish_streamed<C: Clone + Send + Sync>(
@@ -526,8 +535,11 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
         let mut framing = SseFraming::new(settings.sse_record_limit);
-        let mut decoder =
-            StreamDecoder::with_stop_sequences(exchange, settings.stop_sequences.clone());
+        let mut decoder = StreamDecoder::with_stop_sequences(
+            exchange,
+            settings.stop_sequences.clone(),
+            settings.provider_compaction_enabled,
+        );
         let mut body = response.bytes_stream();
         let mut streamed_bytes = 0usize;
         loop {
@@ -1059,7 +1071,8 @@ mod tests {
     fn streamed_response_overflow_is_typed_protocol_loss() {
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new(), false);
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -1097,7 +1110,8 @@ mod tests {
         bytes.extend_from_slice(b"coalesced trailing bytes");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - terminal_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new(), false);
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -1134,7 +1148,8 @@ mod tests {
         bytes.extend_from_slice(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - in_budget_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new(), false);
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -1189,7 +1204,8 @@ mod tests {
         });
         let mut streamed_bytes = 0;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new(), false);
         let mut sink = CancelOnModel {
             observations: Vec::new(),
             sender: Some(sender),

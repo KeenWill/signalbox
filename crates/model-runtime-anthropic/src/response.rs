@@ -75,16 +75,52 @@ pub(crate) fn convert_usage(wire: &WireUsage) -> TokenUsage {
     }
 }
 
-/// Whether every provider iteration carries both required token axes.
+/// Whether every provider iteration carries both required token axes and all
+/// four aggregate axes fit the durable unsigned representation.
 pub(crate) fn iteration_usage_is_complete(wire: &WireUsage) -> bool {
-    wire.iterations
+    let Some(iterations) = wire
+        .iterations
         .as_deref()
         .filter(|iterations| !iterations.is_empty())
-        .is_none_or(|iterations| {
-            iterations.iter().all(|iteration| {
-                iteration.input_tokens.is_some() && iteration.output_tokens.is_some()
+    else {
+        return true;
+    };
+    let mut input = 0_u64;
+    let mut output = 0_u64;
+    let mut cache_creation = 0_u64;
+    let mut cache_read = 0_u64;
+    iterations.iter().all(|iteration| {
+        let (Some(next_input), Some(next_output)) =
+            (iteration.input_tokens, iteration.output_tokens)
+        else {
+            return false;
+        };
+        let Some(next_input) = input.checked_add(next_input) else {
+            return false;
+        };
+        let Some(next_output) = output.checked_add(next_output) else {
+            return false;
+        };
+        let Some(next_cache_creation) = iteration
+            .cache_creation_input_tokens
+            .map_or(Some(cache_creation), |value| {
+                cache_creation.checked_add(value)
             })
-        })
+        else {
+            return false;
+        };
+        let Some(next_cache_read) = iteration
+            .cache_read_input_tokens
+            .map_or(Some(cache_read), |value| cache_read.checked_add(value))
+        else {
+            return false;
+        };
+        input = next_input;
+        output = next_output;
+        cache_creation = next_cache_creation;
+        cache_read = next_cache_read;
+        true
+    })
 }
 
 /// A recognized response block converted to a neutral part, or the fact
@@ -212,6 +248,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     body: &[u8],
     exchange: ExchangeFacts,
     declared_stop_sequences: &[String],
+    provider_compaction_enabled: bool,
     correlation: &C,
     sink: &mut (dyn ObservationSink<C> + Send),
 ) -> TerminalEvidence {
@@ -330,6 +367,20 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 });
             }
         };
+        if matches!(block, WireResponseBlock::Compaction { .. }) && !provider_compaction_enabled {
+            return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause: LossCause::ResponseUnintelligible {
+                    detail: "success response carries a compaction block, but this operation did \
+                             not enable provider compaction"
+                        .to_string(),
+                },
+                exchange,
+                reported_model,
+                finish_reported: None,
+                tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
+                usage,
+            });
+        }
         if let WireResponseBlock::Fallback { to_model } = block {
             // This adapter never enables server-side fallback, so the marker
             // proves the response was served by a model other than the
@@ -556,11 +607,19 @@ mod tests {
     /// Decodes the body against canonical exchange facts, collecting
     /// observations correlated to `"call-1"`.
     fn decode(body: &str) -> (TerminalEvidence, Vec<Observation<String>>) {
+        decode_with_provider_compaction(body, true)
+    }
+
+    fn decode_with_provider_compaction(
+        body: &str,
+        provider_compaction_enabled: bool,
+    ) -> (TerminalEvidence, Vec<Observation<String>>) {
         let mut observations: Vec<Observation<String>> = Vec::new();
         let evidence = decode_buffered_response(
             body.as_bytes(),
             exchange(),
             &["END".to_string()],
+            provider_compaction_enabled,
             &"call-1".to_string(),
             &mut observations,
         );
@@ -667,6 +726,20 @@ mod tests {
     }
 
     #[test]
+    fn compaction_block_is_rejected_when_the_request_disabled_it() {
+        let body = r#"{
+            "id":"msg_compact","type":"message","role":"assistant","model":"model-exact-1",
+            "content":[{"type":"compaction","content":"summary"}],
+            "stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":4}
+        }"#;
+
+        assert!(matches!(
+            decode_with_provider_compaction(body, false).0,
+            TerminalEvidence::BoundaryLoss(_)
+        ));
+    }
+
+    #[test]
     fn iteration_usage_preserves_unreported_cache_axes() {
         let body = r#"{
             "id":"msg_usage","type":"message","role":"assistant","model":"model-exact-1",
@@ -699,6 +772,26 @@ mod tests {
         }"#;
 
         assert!(matches!(decode(body).0, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn overflowing_iteration_usage_is_boundary_loss() {
+        let body = format!(
+            r#"{{
+                "id":"msg_usage","type":"message","role":"assistant","model":"model-exact-1",
+                "content":[{{"type":"text","text":"done"}}],
+                "stop_reason":"end_turn","usage":{{
+                    "input_tokens":1,"output_tokens":1,
+                    "iterations":[
+                        {{"input_tokens":{},"output_tokens":1}},
+                        {{"input_tokens":1,"output_tokens":1}}
+                    ]
+                }}
+            }}"#,
+            u64::MAX
+        );
+
+        assert!(matches!(decode(&body).0, TerminalEvidence::BoundaryLoss(_)));
     }
 
     #[test]

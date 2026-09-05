@@ -94,6 +94,7 @@ pub(crate) struct StreamDecoder {
     tool_call_ids: BTreeSet<String>,
     discarded_unexamined_bytes: bool,
     later_records: LaterRecords,
+    provider_compaction_enabled: bool,
     open_blocks: BTreeMap<u32, BlockBuilder>,
     closed: BTreeMap<u32, AssistantPart>,
 }
@@ -102,6 +103,7 @@ impl StreamDecoder {
     pub(crate) fn with_stop_sequences(
         exchange: ExchangeFacts,
         declared_stop_sequences: Vec<String>,
+        provider_compaction_enabled: bool,
     ) -> Self {
         Self {
             exchange,
@@ -116,6 +118,7 @@ impl StreamDecoder {
             tool_call_ids: BTreeSet::new(),
             discarded_unexamined_bytes: false,
             later_records: LaterRecords::AllApplied,
+            provider_compaction_enabled,
             open_blocks: BTreeMap::new(),
             closed: BTreeMap::new(),
         }
@@ -513,7 +516,32 @@ impl StreamDecoder {
                 signature: signature.filter(|value| !value.is_empty()),
             },
             WireResponseBlock::RedactedThinking { data } => BlockBuilder::RedactedThinking { data },
-            WireResponseBlock::Compaction { .. } => BlockBuilder::Compaction { delta: None },
+            WireResponseBlock::Compaction { raw } => {
+                if !self.provider_compaction_enabled {
+                    return self.violation(format!(
+                        "compaction block opened at index {}, but this operation did not enable \
+                         provider compaction",
+                        event.index
+                    ));
+                }
+                let Ok(start) = serde_json::from_str::<serde_json::Value>(raw.get()) else {
+                    return self.violation(format!(
+                        "compaction block {} could not be reinspected",
+                        event.index
+                    ));
+                };
+                if start.get("content") != Some(&serde_json::Value::Null)
+                    || start
+                        .get("encrypted_content")
+                        .is_some_and(|value| !value.is_null())
+                {
+                    return self.violation(format!(
+                        "compaction block {} opened with non-placeholder content",
+                        event.index
+                    ));
+                }
+                BlockBuilder::Compaction { delta: None }
+            }
             WireResponseBlock::Fallback { to_model } => {
                 // This adapter never enables server-side fallback, so a
                 // fallback marker mid-stream means the stream is no longer
@@ -971,8 +999,19 @@ mod tests {
     /// rejected by the panic below, keeping fixtures honest) and the
     /// observation log.
     fn drive(chunks: &[&[u8]]) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
+        drive_with_provider_compaction(chunks, true)
+    }
+
+    fn drive_with_provider_compaction(
+        chunks: &[&[u8]],
+        provider_compaction_enabled: bool,
+    ) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(exchange(), vec!["END".to_string()]);
+        let mut decoder = StreamDecoder::with_stop_sequences(
+            exchange(),
+            vec!["END".to_string()],
+            provider_compaction_enabled,
+        );
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         let mut terminal = None;
@@ -996,7 +1035,8 @@ mod tests {
     /// loss evidence for the resulting decoder state.
     fn drive_to_eof(chunks: &[&[u8]]) -> (TerminalEvidence, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(exchange(), vec!["END".to_string()]);
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(exchange(), vec!["END".to_string()], true);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         for chunk in chunks {
@@ -1027,6 +1067,21 @@ mod tests {
           \"role\":\"assistant\",\"id\":\"msg_1\",\
           \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":25,\
           \"iterations\":[{\"input_tokens\":25}]}}}\n\n"]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn message_start_rejects_overflowing_iteration_usage() {
+        let event = format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\
+             \"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_1\",\
+             \"model\":\"model-exact-1\",\"content\":[],\"usage\":{{\"input_tokens\":1,\
+             \"iterations\":[{{\"input_tokens\":{},\"output_tokens\":1}},\
+             {{\"input_tokens\":1,\"output_tokens\":1}}]}}}}}}\n\n",
+            u64::MAX
+        );
+        let (terminal, _) = drive(&[event.as_bytes()]);
 
         assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
     }
@@ -1222,6 +1277,38 @@ mod tests {
                         .to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn streamed_compaction_is_rejected_when_the_request_disabled_it() {
+        let (terminal, _) = drive_with_provider_compaction(
+            &[
+                message_start(),
+                b"event: content_block_start\n\
+                  data: {\"type\":\"content_block_start\",\"index\":0,\
+                  \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
+            ],
+            false,
+        );
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn streamed_compaction_start_rejects_non_placeholder_material() {
+        for start in [
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":\"summary\",\"encrypted_content\":null}}\n\n"
+                .as_slice(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":\"opaque==\"}}\n\n"
+                .as_slice(),
+        ] {
+            let (terminal, _) = drive(&[message_start(), start]);
+            assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+        }
     }
 
     #[test]
