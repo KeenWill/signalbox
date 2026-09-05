@@ -14,6 +14,5 @@ workspace = true
 base64 = "0.23.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.140", features = ["raw_value"] }
-signalbox-blob-store = { path = "../blob-store" }
 signalbox-domain = { path = "../domain" }
 uuid = { version = "1.24.0", default-features = false, features = ["std"] }
