@@ -147,10 +147,10 @@ a universal serializer would become a second semantic authority.
 Duplicate concurrent submission of a command is a database conflict on the
 registry, not an application race, and the loser rereads the winner.
 
-Compaction is the one command whose claim and settlement are two transactions:
-it commits its registry row, pending typed command, and prepared call before
-provider work, and a later session-locked transaction settles the command
-exactly once.
+Compaction is the one built command whose claim and settlement are two
+transactions: it commits its registry row, pending typed command, and prepared
+call before provider work, and a later session-locked transaction settles the
+command exactly once.
 
 Every explicit row lock lives in one reviewed inventory so lock order is
 auditable instead of scattered through query strings; trigger-resident locks are
@@ -228,12 +228,12 @@ does the I/O, then opens a new transaction to record the result.
 Any writer of turn-lifecycle rows first takes the session's scheduler row with
 FOR UPDATE. No production path takes FOR UPDATE on the session row itself,
 because that deadlocks against foreign-key checks. Within a session the order is
-the session row, then the lifecycle row, then the scheduler row. Any path that
-records a delegated child's result locks the parent and child session rows in
-ascending session id order before it locks the child's scheduler row. A
-transaction that takes more than one runner lock takes them in one fixed order:
-scheduler, enrollment or request heads, connection and loss heads, registration,
-placement, grant, lease, failure evidence.
+the session row, then the session-lifecycle satellite row, then the scheduler
+row. Any path that records a delegated child's result locks the parent and child
+session rows in ascending session id order before it locks the child's scheduler
+row. A transaction that takes more than one runner lock takes them in one fixed
+order: scheduler, enrollment or request heads, connection and loss heads,
+registration, placement, grant, lease, failure evidence.
 
 Unsigned 64-bit ordinals are stored as numeric(20,0). What kind of thing an id
 names is known from its table and column, never from the UUID's bytes. No code

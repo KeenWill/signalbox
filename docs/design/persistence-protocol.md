@@ -17,8 +17,12 @@ material.
 Runner replacement and abandonment are each one orchestration transaction that
 holds authority outside the placement aggregate, moves the placement, and
 appends one runner-state-transition event per affected session in the same
-transaction. The record kind already carries the replacement and abandonment
-states; the transactions that produce them do not exist.
+transaction. Replacement also appends the placement transcript entry: one
+positive placement revision with a foreign key to the same session's placement
+record at that revision, which reconstitution resolves, rejecting a missing,
+cross-session, non-successor, or duplicated reference. The record kind already
+carries the replacement and abandonment states; the transactions that produce
+them do not exist.
 
 A daemon transaction retires a workspace release the runner never acknowledged,
 so a lost runner leaves no release outstanding.
@@ -36,14 +40,18 @@ and a transaction takes the admitted-set head after the session's scheduler row
 and before the current-defaults pointer row and any credential-pool row.
 
 Credential-pool state, capacity reservations, and availability waits are durable
-rows with locks recorded in the same inventory. The machine they serve is owned
-by [credential-availability](../spec/credential-availability.md), and its design
-fixes their transitions; this document fixes only that they are stored and
-locked under the persistence rules.
+rows with locks recorded in the same inventory. A transaction takes the
+action-head row of every member of the policy it may select immediately after
+the session's scheduler row, in profile-reference byte order, FOR SHARE for a
+member it only reads and FOR UPDATE for a member whose exclusion state it
+writes, and takes a capacity or cursor row only after every action head. The
+machine they serve is owned by
+[credential-availability](../spec/credential-availability.md), and its design
+fixes their transitions.
 
 A session-state-changed event is appended, through the outbox append, in the
-transaction that commits the session state change. Its typed record and decoder
-exist.
+transaction that commits a nonterminal session state change; the transition to
+terminal has its own event. Its typed record and decoder exist.
 
 OAuth material storage supplies three shapes: a per-generation
 refresh-in-progress marker that exactly one transaction can win; an atomic
@@ -51,8 +59,11 @@ replace-and-clear that installs the new material and clears the marker in one
 commit; and a reread that reports whether a replacement committed and whether
 the marker is set. The replace shape expresses an exchange that returns a new
 identity token and one that returns none, without a second commit and without
-mixing tokens from different exchanges. Delivery of OAuth material to a model
-call is owned by
+mixing tokens from different exchanges. Provisioning locks its own profile row
+and every co-member profile row in one reference-ordered acquisition, rereads
+membership under those locks and repeats when the set has grown, and interning a
+pool-policy revision locks every member's profile row in the same order.
+Delivery of OAuth material to a model call is owned by
 [configuration-and-credentials](../spec/configuration-and-credentials.md).
 
 ## Compatibility constraints
@@ -95,8 +106,8 @@ locks.
 
 Pool state, reservations, and waits are durable and reconstitute after restart.
 
-Every committed session state change appears as a session-state-changed event in
-the outbox.
+Every committed nonterminal session state change appears as a
+session-state-changed event in the outbox.
 
 Exactly one refresh transaction wins per generation, replace-and-clear is one
 commit, and a reread distinguishes a committed replacement from none.
