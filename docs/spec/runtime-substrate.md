@@ -26,7 +26,9 @@ request would carry.
 
 Every Anthropic Messages generation and input-count request enables
 `clear_tool_uses_20250919` context editing with the
-`context-management-2025-06-27` beta; the provider's edit defaults apply.
+`context-management-2025-06-27` beta; the provider's edit defaults apply. An
+operation may suppress provider compaction while retaining other context edits;
+dedicated context-summary calls do so.
 
 Caller identity crosses the boundary as an opaque correlation parameter carried
 by `ModelOperation`, every `Observation` and the final `TerminalReport`; the
