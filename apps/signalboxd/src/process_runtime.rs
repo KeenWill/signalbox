@@ -446,7 +446,7 @@ impl ProcessRuntime {
         }
     }
 
-    /// Wires the goal-mode disposition that arms §9 resumption when an adopt
+    /// Wires the goal-mode disposition that arms automatic resumption when an adopt
     /// takes a blocked goal.
     #[must_use]
     pub fn with_goal_resumption(mut self, disposition: PostgresGoalPassDisposition) -> Self {
@@ -9053,7 +9053,7 @@ struct WireCreateSessionRequest {
     lifecycle: SessionLifecycleMembers,
 }
 
-/// The §7 lifecycle members of one creation, admitted into domain values.
+/// The lifecycle members of one creation, admitted into domain values.
 struct LifecycleMembers {
     start_gate: DomainStartGate,
     ownership: DomainSessionOwnership,
@@ -15795,7 +15795,7 @@ fn lifecycle_command_needs_eligibility_nudge(
 }
 
 /// Hands a committed closure's live turn to the committed interrupt
-/// machinery (§2) under a fresh core-owned identity.
+/// machinery under a fresh core-owned identity.
 async fn interrupt_for_closure(
     services: &ConnectionServices,
     command: &SessionLifecycleCommand,
