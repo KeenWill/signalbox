@@ -5,8 +5,8 @@ import os
 import re
 import subprocess
 from collections import Counter, defaultdict
-from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 SNAPSHOTS = {
     "signalbox-domain": Path("docs/api/signalbox-domain.txt"),
@@ -17,10 +17,14 @@ DECLARATION = re.compile(
     r"(?P<kind>struct|enum|union|type|trait|fn|const)\s+"
 )
 MODULE = re.compile(r"^pub mod (?P<name>[A-Za-z_][A-Za-z0-9_#:]*)(?:\b|$)")
+AUTO_TRAIT = re.compile(
+    r"^core::(?:marker::(?:Freeze|Send|StructuralPartialEq|"
+    r"Sync|Unpin|UnsafeUnpin)|"
+    r"panic::unwind_safe::(?:RefUnwindSafe|UnwindSafe))$"
+)
 
 
-@dataclass(frozen=True)
-class Item:
+class Item(NamedTuple):
     module: str
     category: str
     name: str
@@ -30,9 +34,7 @@ class Item:
 def git_text(revision: str, path: Path) -> str:
     result = subprocess.run(
         ["git", "show", f"{revision}:{path.as_posix()}"],
-        check=False,
-        capture_output=True,
-        text=True,
+        check=False, capture_output=True, text=True,
     )
     return result.stdout if result.returncode == 0 else ""
 
@@ -47,19 +49,21 @@ def previous_text(path: Path, current: str) -> str:
     return git_text(revision, path) or current
 
 
-def item_name(line: str, start: int) -> str:
-    name: list[str] = []
-    generic_depth = 0
-    for char in line[start:]:
+def without_generics(text: str) -> str:
+    result: list[str] = []
+    depth = 0
+    for char in text:
         if char == "<":
-            generic_depth += 1
+            depth += 1
         elif char == ">":
-            generic_depth -= 1
-        elif generic_depth == 0 and (char.isspace() or char in "(={"):
-            break
-        elif generic_depth == 0:
-            name.append(char)
-    return "".join(name).rstrip(":")
+            depth -= 1
+        elif depth == 0:
+            result.append(char)
+    return "".join(result)
+
+
+def item_name(line: str, start: int) -> str:
+    return re.split(r"[\s(={]", without_generics(line[start:]), 1)[0].rstrip(":")
 
 
 def parse(text: str) -> tuple[str, list[Item]]:
@@ -74,8 +78,25 @@ def parse(text: str) -> tuple[str, list[Item]]:
             include_nested_functions = " for " not in target and any(
                 f"{module}::" in target for module in modules
             )
+            normalized = without_generics(line[4:]).split(" where ", 1)[0].strip()
+            if " for " in normalized:
+                trait, subject = normalized.split(" for ", 1)
+                raw_subject = line.split(" for ", 1)[1].split(" where ", 1)[0]
+                owners = [module for module in modules if subject.startswith(module)]
+                source_owned = not line.startswith("impl<") or "<" in raw_subject
+                if owners and not AUTO_TRAIT.match(trait) and (
+                    source_owned or any(trait.startswith(module) for module in modules)
+                ):
+                    module = max(owners, key=len)
+                    name = f"{subject} as {trait}"
+                    items.append(Item(module, "implementation", name, line))
         match = DECLARATION.match(line)
         if match is None:
+            if line.startswith(f"pub {root}::"):
+                name = item_name(line, 4)
+                owners = [module for module in modules if name.startswith(f"{module}::")]
+                module = max(owners, key=len, default=root)
+                items.append(Item(module, "member", name, line))
             continue
         name = item_name(line, match.end())
         owners = [module for module in modules if name.startswith(f"{module}::")]
@@ -88,21 +109,11 @@ def parse(text: str) -> tuple[str, list[Item]]:
             continue
         if kind == "fn" and not (direct_child or include_nested_functions):
             continue
-        category = (
-            "type"
-            if kind in {"struct", "enum", "union", "type"}
-            else "function"
-            if kind == "fn"
-            else "constant"
-            if kind == "const"
-            else kind
-        )
+        category = "type" if kind in {"struct", "enum", "union"} else {
+            "fn": "function", "const": "constant"
+        }.get(kind, kind)
         items.append(Item(module, category, name, line))
     return root, items
-
-
-def display_name(item: Item) -> str:
-    return item.name.removeprefix(f"{item.module}::")
 
 
 def render(crate: str, path: Path) -> None:
@@ -130,18 +141,12 @@ def render(crate: str, path: Path) -> None:
         for heading, changes in (("added", added), ("removed", removed)):
             names = sorted(
                 {
-                    f"{item.category} {display_name(item)}"
+                    f"{item.category} {item.name.removeprefix(f'{item.module}::')}"
                     for item, count in changes.items()
                     if item.module == module and count
                 }
             )
             print(f"    {heading}: {', '.join(names) if names else 'none'}")
-
-
-def main() -> None:
+if __name__ == "__main__":
     for crate, path in SNAPSHOTS.items():
         render(crate, path)
-
-
-if __name__ == "__main__":
-    main()
