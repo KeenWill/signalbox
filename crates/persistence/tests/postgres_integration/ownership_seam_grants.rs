@@ -1,11 +1,14 @@
 use std::error::Error;
 
+use signalbox_persistence::local_test_connection_options;
+use sqlx::postgres::PgPoolOptions;
+
 use super::migrated_postgres;
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (container, pool, database_url) = migrated_postgres().await?;
 
     let role: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT rolcanlogin, rolinherit, rolsuper, rolcreatedb, rolcreaterole, rolreplication
@@ -14,18 +17,31 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(role, (false, false, false, false, false, false));
+    assert_eq!(role, (true, false, false, false, false, false));
 
-    let privileges: (bool, bool, bool, bool, bool) = sqlx::query_as(
-        "SELECT pg_has_role(current_user, 'mod_repo_watch', 'MEMBER'),
-                has_schema_privilege('mod_repo_watch', 'mod_repo_watch', 'USAGE'),
+    let privileges: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT has_schema_privilege('mod_repo_watch', 'mod_repo_watch', 'USAGE'),
                 has_schema_privilege('mod_repo_watch', 'mod_repo_watch', 'CREATE'),
                 has_table_privilege('mod_repo_watch', 'public.session', 'SELECT'),
                 has_table_privilege('mod_repo_watch', 'public.session', 'REFERENCES')",
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(privileges, (true, true, true, false, false));
+    assert_eq!(privileges, (true, true, false, false));
+
+    let core_membership: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM pg_auth_members membership
+               JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+               JOIN pg_roles member_role ON member_role.oid = membership.member
+              WHERE granted_role.rolname = 'mod_repo_watch'
+                AND member_role.rolname = current_user
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!core_membership);
 
     let public_table_grants: i64 = sqlx::query_scalar(
         "SELECT count(*)
@@ -37,6 +53,42 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
     .await?;
     assert_eq!(public_table_grants, 0);
 
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&pool)
+        .await?;
+    let module_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(local_test_connection_options(&database_url)?.username("mod_repo_watch"))
+        .await?;
+    let mut connection = module_pool.acquire().await?;
+    let identities: (String, String) =
+        sqlx::query_as("SELECT session_user::text, current_user::text")
+            .fetch_one(&mut *connection)
+            .await?;
+    assert_eq!(
+        identities,
+        ("mod_repo_watch".into(), "mod_repo_watch".into())
+    );
+
+    sqlx::query("RESET ROLE").execute(&mut *connection).await?;
+    let reset_identity: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&mut *connection)
+        .await?;
+    assert_eq!(reset_identity, "mod_repo_watch");
+
+    let core_read = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM public.session")
+        .fetch_one(&mut *connection)
+        .await;
+    assert_eq!(
+        core_read
+            .expect_err("the module login cannot read a core table")
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("42501")),
+    );
+
+    drop(connection);
+    drop(module_pool);
     drop(pool);
     drop(container);
     Ok(())
