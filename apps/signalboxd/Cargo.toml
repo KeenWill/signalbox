@@ -16,6 +16,7 @@ test-support = [
 ]
 
 [dependencies]
+hex = "0.4.3"
 axum = { version = "0.8.9", default-features = false, features = [
     "http1",
     "json",
