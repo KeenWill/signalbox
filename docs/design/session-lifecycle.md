@@ -112,8 +112,9 @@ cause retry budget exhausted, and the operator queue lists it.
 A redispatch of parked repo-watch work leaves the predecessor terminal as
 superseded, naming the successor, in the commit that creates the successor.
 
-No module owns a session timer beyond the repo-watch start lease; every other
-module transition that follows a deadline follows a published expiry event.
+No module owns a session timer beyond the repo-watch start lease and the
+core-integrated convergence sweep's cool-off; every other module transition that
+follows a deadline follows a published expiry event.
 
 A lifecycle command issued by a program run records the program-run actor with
 its run reference, and replaying the command classifies it identically.
