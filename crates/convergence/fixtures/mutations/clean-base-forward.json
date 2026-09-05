@@ -1,0 +1,146 @@
+{
+  "source": "settled.json",
+  "edge": "clean merge forward has exactly the base file delta",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/headRefOid",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/headRefOid",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/baseRefOid",
+      "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/baseRefOid",
+      "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "path": "/observations/0/1/response/data/repository/object/oid",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/oid",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    },
+    {
+      "path": "/observations/0/1/response/data/repository/object/statusCheckRollup/contexts/nodes/0/completedAt",
+      "value": "2026-09-05T15:00:00Z"
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup/contexts/nodes/0/completedAt",
+      "value": "2026-09-05T15:00:00Z"
+    },
+    {
+      "path": "/previous",
+      "value": {
+        "head_oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+        "check_inventory": [
+          "CheckRun:required build"
+        ],
+        "authenticated_review_head": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+        "authenticated_review_id": "PRR_kwDOTWhy-88AAAABMUiacg",
+        "authenticated_review_request": {
+          "id": "IC_kwDOTWhy-88AAAABSvedMg",
+          "author": "KeenWill",
+          "author_association": "OWNER",
+          "body": "@codex review 417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+          "created_at": "2026-09-05T11:00:00Z",
+          "last_edited_at": null
+        },
+        "authenticated_review_body": "",
+        "authenticated_review_check_inventory": [
+          "CheckRun:required build"
+        ],
+        "known_codex_review_ids": [
+          "PRR_kwDOTWhy-88AAAABMUiacg"
+        ],
+        "review_wave_ids": [
+          "PRR_kwDOTWhy-88AAAABMUiacg"
+        ],
+        "review_wave_base_oid": "113746d23d6c7b398ef34464a071dca532791898"
+      }
+    },
+    {
+      "path": "/comparisons",
+      "value": {
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 0
+        },
+        "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...113746d23d6c7b398ef34464a071dca532791898": {
+          "commits": [
+            {
+              "sha": "113746d23d6c7b398ef34464a071dca532791898",
+              "parents": [
+                {
+                  "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+                },
+                {
+                  "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
+              ]
+            }
+          ],
+          "total_commits": 1,
+          "files": [
+            {
+              "filename": "source.py",
+              "status": "modified",
+              "changes": 2,
+              "additions": 1,
+              "deletions": 1,
+              "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "patch": "@@ -1 +1 @@\n-# old explanation\n+# new explanation"
+            }
+          ],
+          "merge_base_commit": {
+            "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+          },
+          "base_commit": {
+            "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+          },
+          "status": "ahead",
+          "behind_by": 0
+        },
+        "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+          "commits": [
+            {
+              "sha": "113746d23d6c7b398ef34464a071dca532791898",
+              "parents": [
+                {
+                  "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+                },
+                {
+                  "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
+              ]
+            }
+          ],
+          "total_commits": 1,
+          "files": [
+            {
+              "filename": "source.py",
+              "status": "modified",
+              "changes": 2,
+              "additions": 1,
+              "deletions": 1,
+              "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "patch": "@@ -1 +1 @@\n-# old explanation\n+# new explanation"
+            }
+          ],
+          "merge_base_commit": {
+            "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+          },
+          "base_commit": {
+            "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+          },
+          "status": "ahead",
+          "behind_by": 0
+        }
+      }
+    }
+  ]
+}

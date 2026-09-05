@@ -1,0 +1,10 @@
+{
+  "source": "settled.json",
+  "edge": "exact head advances before the decision",
+  "mutations": [
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/headRefOid",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    }
+  ]
+}

@@ -5,6 +5,7 @@ members = [
     "apps/signalbox-runner",
     "apps/signalboxd",
     "crates/application",
+    "crates/convergence",
     "crates/approval-judge-eval",
     "crates/blob-store",
     "crates/blob-store-filesystem",

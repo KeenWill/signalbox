@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "effective blocking review",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewDecision",
+      "value": "CHANGES_REQUESTED"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewDecision",
+      "value": "CHANGES_REQUESTED"
+    }
+  ]
+}

@@ -1,0 +1,523 @@
+{
+  "mutations/base-conflict.json": {
+    "converged": false,
+    "reasons": [
+      "base-conflict"
+    ]
+  },
+  "mutations/body-only-finding.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/body-too-long.json": {
+    "converged": false,
+    "reasons": [
+      "description-exceeds-350-words"
+    ]
+  },
+  "mutations/changes-requested.json": {
+    "converged": false,
+    "reasons": [
+      "review-changes-requested"
+    ]
+  },
+  "mutations/check-red.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:required build:FAILURE"
+    ]
+  },
+  "mutations/check-rerun.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/checks-stale.json": {
+    "converged": false,
+    "reasons": [
+      "checks-not-for-current-head"
+    ]
+  },
+  "mutations/clean-base-forward.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled"
+    ]
+  },
+  "mutations/comment-only-head.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled"
+    ]
+  },
+  "mutations/completed-summary.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/declined-finding.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/draft.json": {
+    "converged": false,
+    "reasons": [
+      "pull-request-is-draft"
+    ]
+  },
+  "mutations/escalation-followed-by-reply.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/escalation-wave-4.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/escalation-wave-5.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/escalation-wave-6.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/escalation-wave-8.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/finding-edited-after-disposition.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/head-change-during-census.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "mutations/informational-answer.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/inline-comment-code-change.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/inventory-unsettled.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled"
+    ]
+  },
+  "mutations/material-base-forward.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/mergeability-unknown.json": {
+    "converged": false,
+    "reasons": [
+      "mergeability-unknown"
+    ]
+  },
+  "mutations/missing-check.json": {
+    "converged": false,
+    "reasons": [
+      "checks-not-for-current-head",
+      "base-ancestry-unknown"
+    ]
+  },
+  "mutations/persisted-body-finding.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/persisted-request-deleted.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/persisted-request-edited.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/rename-only-head.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled"
+    ]
+  },
+  "mutations/request-deleted.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/request-edited.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/request-pre-green.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/request-untrusted.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/review-before-body-edit.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/review-dismissed.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/review-edit-during-census.json": {
+    "converged": false,
+    "reasons": [
+      "checks-not-for-current-head",
+      "base-ancestry-unknown"
+    ]
+  },
+  "mutations/review-other-actor.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/rollup-missing.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head",
+      "check-rollup-missing"
+    ]
+  },
+  "mutations/settled.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/summary-without-reaction.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/thread-page-missing.json": {
+    "error": "incomplete connection census"
+  },
+  "mutations/threads-over-100.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/undispositioned-finding.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/unresolved-finding.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/wave-census-after-rerun.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "pr-1566.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:25",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:postgres-integration (persistence 1/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 2/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 3/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 4/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 5/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 6/6):QUEUED",
+      "check-not-green:postgres-integration (runner 1/1):QUEUED",
+      "check-not-green:postgres-integration (program-runtime 1/1):QUEUED",
+      "check-not-green:postgres-integration (signalboxd 1/1):QUEUED",
+      "check-not-green:postgres-integration (terminal-client 1/1):QUEUED",
+      "check-not-green:postgres-integration (approval-judge-eval 1/1):QUEUED"
+    ]
+  },
+  "pr-1567.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1568.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1569.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1570.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:12",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):IN_PROGRESS",
+      "check-not-green:postgres-integration (persistence 1/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 2/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 6/6):QUEUED",
+      "check-not-green:postgres-integration (runner 1/1):QUEUED",
+      "check-not-green:postgres-integration (program-runtime 1/1):QUEUED",
+      "check-not-green:postgres-integration (signalboxd 1/1):QUEUED",
+      "check-not-green:postgres-integration (terminal-client 1/1):QUEUED",
+      "check-not-green:postgres-integration (approval-judge-eval 1/1):QUEUED"
+    ]
+  },
+  "pr-1571.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:3",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:postgres-integration (persistence 3/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 4/6):FAILURE",
+      "check-not-green:postgres-integration (runner 1/1):QUEUED",
+      "check-not-green:postgres-integration (signalboxd 1/1):FAILURE"
+    ]
+  },
+  "pr-1572.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1573.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:14",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:postgres-integration (build):QUEUED"
+    ]
+  },
+  "pr-1574.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1575.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1576.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:20",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:postgres-integration (build):QUEUED"
+    ]
+  },
+  "pr-1577.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1578.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "unresolved-review-threads:3",
+      "undispositioned-review-threads:19",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:postgres-integration (build):QUEUED"
+    ]
+  },
+  "pr-1580.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:3",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:checker-and-format-tests:FAILURE",
+      "check-not-green:postgres-integration (build):QUEUED",
+      "check-not-green:validate-checks:FAILURE",
+      "check-not-green:validate:FAILURE"
+    ]
+  },
+  "pr-1581.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:postgres-integration (build):QUEUED"
+    ]
+  },
+  "pr-1582.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1583.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1584.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:12",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:contract-checks:FAILURE",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:checker-and-format-tests:FAILURE",
+      "check-not-green:postgres-integration (build):QUEUED",
+      "check-not-green:validate-checks:FAILURE",
+      "check-not-green:validate:FAILURE"
+    ]
+  },
+  "pr-1585.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1586.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:8",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:exec tool eval (report only):FAILURE",
+      "check-not-green:postgres-integration (build):QUEUED"
+    ]
+  },
+  "pr-1587.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "unresolved-review-threads:3",
+      "undispositioned-review-threads:10",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):IN_PROGRESS",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):IN_PROGRESS",
+      "check-not-green:checker-and-format-tests:FAILURE",
+      "check-not-green:postgres-integration (build):QUEUED",
+      "check-not-green:validate-checks:FAILURE",
+      "check-not-green:validate:FAILURE"
+    ]
+  },
+  "pr-1588.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1589.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):CANCELLED",
+      "check-not-green:postgres-integration (runner 1/1):CANCELLED",
+      "check-not-green:postgres-integration (signalboxd 1/1):FAILURE",
+      "check-not-green:postgres-integration:FAILURE"
+    ]
+  },
+  "pr-1590.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1591.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1592.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1593.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "unresolved-review-threads:2",
+      "undispositioned-review-threads:13",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:workspace tool eval (report only):QUEUED",
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:postgres-integration (build):QUEUED"
+    ]
+  },
+  "pr-1594.json.gz": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "undispositioned-review-threads:3",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:workspace-tests:FAILURE",
+      "check-not-green:postgres-integration (persistence 1/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 2/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 3/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 4/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 5/6):QUEUED",
+      "check-not-green:postgres-integration (persistence 6/6):QUEUED",
+      "check-not-green:postgres-integration (runner 1/1):QUEUED",
+      "check-not-green:postgres-integration (program-runtime 1/1):QUEUED",
+      "check-not-green:postgres-integration (signalboxd 1/1):QUEUED",
+      "check-not-green:postgres-integration (terminal-client 1/1):QUEUED",
+      "check-not-green:postgres-integration (approval-judge-eval 1/1):QUEUED",
+      "check-not-green:validate:FAILURE",
+      "base-commits-not-in-head:80"
+    ]
+  },
+  "pr-1595.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "pr-1596.json.gz": {
+    "error": "pull request changed after its convergence snapshot"
+  }
+}
