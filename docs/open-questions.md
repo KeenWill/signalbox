@@ -199,17 +199,17 @@ per-turn provenance. The following extensions remain undecided:
 
 - **Creation-attributed default visibility.** The implemented visibility and
   attribution limits are owned by
-  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
-  Decide derivation, override shape and authority, and monitor inclusion
-  together with the attributed-creation implementation.
+  [sessions-and-transcript](spec/sessions-and-transcript.md). Decide derivation,
+  override shape and authority, and monitor inclusion together with the
+  attributed-creation implementation.
 - **Expressive metadata filters.** The implemented filter grammar is owned by
-  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
-  Whether to add OR, negation, attribute predicates, case folding, or a general
-  query language remains open.
+  [sessions-and-transcript](spec/sessions-and-transcript.md). Whether to add OR,
+  negation, attribute predicates, case folding, or a general query language
+  remains open.
 - **Imported-conversation archive semantics.** Ordinary session archive and
   immutable imported-source behavior are owned by
-  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection)
-  and [conversation-import](spec/conversation-import.md). Whether imported
+  [sessions-and-transcript](spec/sessions-and-transcript.md) and
+  [conversation-import](spec/conversation-import.md). Whether imported
   conversation records have a distinct non-destructive archive state, and how
   that state affects discovery, remains undecided.
 - **Destructive retention or purge beyond ordinary archive.** Kept separate from
@@ -378,8 +378,8 @@ transcript entry in the
 execution object, creation-request placement, and template creation carrying
 placement in [process-protocol](spec/process-protocol.md); the relocation
 transcript boundary in
-[sessions-and-transcript](spec/sessions-and-transcript.md#semantic-transcript-entries);
-capability-derived tool advertisement in
+[sessions-and-transcript](spec/sessions-and-transcript.md); capability-derived
+tool advertisement in
 [model-call-execution](spec/model-call-execution.md#frontier-rendering). Why: a
 decided question is a contract, and a contract binds only where the implementer
 of that contract reads it; a decision restated on this page would be a second
