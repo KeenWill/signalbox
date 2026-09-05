@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeSet, HashMap},
     error::Error,
     fmt,
-    str::FromStr,
 };
 
 use rust_decimal::Decimal;
@@ -1749,30 +1748,12 @@ fn validate_limitations(
 }
 
 fn validate_date(value: &str, field: &str) -> Result<(), CatalogError> {
-    let bytes = value.as_bytes();
-    let shape = bytes.len() == 10
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit());
-    if !shape {
-        return Err(CatalogError::new(format!("{field} is not YYYY-MM-DD")));
-    }
-    let year = u32::from_str(&value[0..4]).map_err(|_| CatalogError::new("invalid year"))?;
-    let month = u32::from_str(&value[5..7]).map_err(|_| CatalogError::new("invalid month"))?;
-    let day = u32::from_str(&value[8..10]).map_err(|_| CatalogError::new("invalid day"))?;
-    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
-    let maximum_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => 0,
-    };
-    if day == 0 || day > maximum_day {
-        return Err(CatalogError::new(format!("{field} is not a calendar date")));
+    let date = jiff::civil::Date::strptime("%Y-%m-%d", value)
+        .map_err(|_| CatalogError::new(format!("{field} is not a YYYY-MM-DD calendar date")))?;
+    if date.strftime("%Y-%m-%d").to_string() != value {
+        return Err(CatalogError::new(format!(
+            "{field} is not a YYYY-MM-DD calendar date"
+        )));
     }
     Ok(())
 }
