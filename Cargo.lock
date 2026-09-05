@@ -4471,6 +4471,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-ownership-seam"
+version = "0.0.0"
+dependencies = [
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-persistence",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-persistence"
 version = "0.0.0"
 dependencies = [

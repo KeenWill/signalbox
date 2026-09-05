@@ -89,6 +89,7 @@ a heading on the linking page.
 - [Credential availability](credential-availability.md)
 - [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Process protocol](process-protocol.md)
+- [Ownership seam](ownership-seam.md)
 - [Persistence protocol](persistence-protocol.md)
 - [Blob storage](blob-storage.md)
 - [File and media interpretation](file-and-media.md)

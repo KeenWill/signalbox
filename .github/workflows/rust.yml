@@ -145,6 +145,8 @@ jobs:
       # change that merely reduces a count.
       - name: Check style rules
         run: python3 scripts/check_style_rules.py
+      - name: Check ownership-seam boundaries
+        run: python3 scripts/check_ownership_seam.py
   checker-and-format-tests:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
@@ -163,6 +165,8 @@ jobs:
         run: python3 scripts/test_check_panic_gate.py
       - name: Test style-rule checker
         run: python3 scripts/test_check_style_rules.py
+      - name: Test ownership-seam checker
+        run: python3 scripts/test_check_ownership_seam.py
       - name: Test documentation consistency checker
         run: python3 scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader

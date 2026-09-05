@@ -155,6 +155,8 @@ python3 scripts/check_panic_gate.py
 python3 scripts/test_check_panic_gate.py
 python3 scripts/check_style_rules.py
 python3 scripts/test_check_style_rules.py
+python3 scripts/check_ownership_seam.py
+python3 scripts/test_check_ownership_seam.py
 python3 scripts/test_postgres_integration_suites.py
 mdformat --check *.md docs/
 git diff --check
