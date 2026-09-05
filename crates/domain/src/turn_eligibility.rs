@@ -13165,13 +13165,13 @@ mod tests {
         );
 
         expect![[r#"
-            ┌──────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-            │ perturbed_stored_fact    │ failure                                                                                                                                                                                                             │
-            ├──────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-            │ active tail omitted      │ MissingActiveAcceptanceTail { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }                                                                                                                                  │
-            │ tail session cross-wired │ AcceptanceTailSessionMismatch { expected: SessionId(00000000-0000-0000-0000-000000000001), actual: SessionId(00000000-0000-0000-0000-000000000002) }                                                                │
-            │ tail anchor cross-wired  │ AcceptanceTailAnchorMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe), expected: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe), actual: AcceptedInputId(00000000-0000-0000-0000-000000000063) } │
-            └──────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+            ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                                                                                                                                                                                                         │
+            ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "active tail omitted", failure: "MissingActiveAcceptanceTail { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }" }                                                                                                                                      │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "tail session cross-wired", failure: "AcceptanceTailSessionMismatch { expected: SessionId(00000000-0000-0000-0000-000000000001), actual: SessionId(00000000-0000-0000-0000-000000000002) }" }                                                               │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "tail anchor cross-wired", failure: "AcceptanceTailAnchorMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe), expected: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe), actual: AcceptedInputId(00000000-0000-0000-0000-000000000063) }" } │
+            └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             ReconstitutionFailureRow {
@@ -13316,13 +13316,13 @@ mod tests {
         );
 
         expect![[r#"
-            ┌────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-            │ perturbed_stored_fact              │ failure                                                                                                                                                                      │
-            ├────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-            │ interior position omitted          │ AcceptanceTailPositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd), expected: SessionInputPosition(2), actual: SessionInputPosition(3) } │
-            │ pending steering owner cross-wired │ AcceptanceTailDispositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd) }                                                                  │
-            │ origin position cross-wired        │ AcceptanceTailDispositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd) }                                                                  │
-            └────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+            ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                                                                                                                                                                    │
+            ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "interior position omitted", failure: "AcceptanceTailPositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd), expected: SessionInputPosition(2), actual: SessionInputPosition(3) }" } │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "pending steering owner cross-wired", failure: "AcceptanceTailDispositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd) }" }                                                         │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "origin position cross-wired", failure: "AcceptanceTailDispositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd) }" }                                                                │
+            └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             ReconstitutionFailureRow {
@@ -16198,14 +16198,14 @@ mod tests {
         );
 
         expect![[r#"
-            ┌───────────────────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────┐
-            │ perturbed_stored_fact                     │ failure                                                                             │
-            ├───────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────┤
-            │ turn record session cross-wired           │ TurnSessionMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }          │
-            │ accepted-input record session cross-wired │ AcceptedInputSessionMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) } │
-            │ queue record session cross-wired          │ QueueSessionMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }         │
-            │ queue record turn cross-wired             │ QueueTurnMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }            │
-            └───────────────────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────┘
+            ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                                                                                           │
+            ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "turn record session cross-wired", failure: "TurnSessionMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }" }                    │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "accepted-input record session cross-wired", failure: "AcceptedInputSessionMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }" } │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "queue record session cross-wired", failure: "QueueSessionMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }" }                  │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "queue record turn cross-wired", failure: "QueueTurnMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }" }                        │
+            └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             ReconstitutionFailureRow {
@@ -16648,12 +16648,12 @@ mod tests {
         );
 
         expect![[r#"
-            ┌────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-            │ perturbed_stored_fact          │ failure                                                                                                      │
-            ├────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-            │ tail entry session cross-wired │ AcceptanceTailEntrySessionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe) } │
-            │ tail entry identity repeated   │ DuplicateAcceptanceTailEntry { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe) }       │
-            └────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+            ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                                                                                                         │
+            ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "tail entry session cross-wired", failure: "AcceptanceTailEntrySessionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe) }" } │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "tail entry identity repeated", failure: "DuplicateAcceptanceTailEntry { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe) }" }         │
+            └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             ReconstitutionFailureRow {
@@ -16728,14 +16728,14 @@ mod tests {
         );
 
         expect![[r#"
-            ┌────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-            │ perturbed_stored_fact              │ failure                                                                                                                                                                                                                                                                   │
-            ├────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-            │ snapshot owner cross-wired         │ SnapshotOwningSessionMismatch { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028) }                                                                                                                                                                       │
-            │ snapshot identity repeated         │ DuplicateSnapshot { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028) }                                                                                                                                                                                   │
-            │ snapshot membership entry repeated │ InvalidSnapshotMembership { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028) }                                                                                                                                                                           │
-            │ snapshot entry unsupplied          │ SnapshotEntryMissing { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028), entry: SemanticTranscriptEntryRef { source_session: SessionId(00000000-0000-0000-0000-000000000001), entry: SemanticTranscriptEntryId(00000000-0000-0000-0000-000000000063) } } │
-            └────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+            ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                                                                                                                                                                                                                                                                 │
+            ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "snapshot owner cross-wired", failure: "SnapshotOwningSessionMismatch { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028) }" }                                                                                                                                                                      │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "snapshot identity repeated", failure: "DuplicateSnapshot { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028) }" }                                                                                                                                                                                  │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "snapshot membership entry repeated", failure: "InvalidSnapshotMembership { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028) }" }                                                                                                                                                                  │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "snapshot entry unsupplied", failure: "SnapshotEntryMissing { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028), entry: SemanticTranscriptEntryRef { source_session: SessionId(00000000-0000-0000-0000-000000000001), entry: SemanticTranscriptEntryId(00000000-0000-0000-0000-000000000063) } }" } │
+            └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             ReconstitutionFailureRow {
@@ -16790,12 +16790,12 @@ mod tests {
         );
 
         expect![[r#"
-            ┌─────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────┐
-            │ perturbed_stored_fact           │ failure                                                                        │
-            ├─────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
-            │ stored starting snapshot absent │ StartingSnapshotMissing { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) } │
-            │ stored terminal snapshot absent │ TerminalSnapshotMissing { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) } │
-            └─────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────┘
+            ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                                                                            │
+            ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "stored starting snapshot absent", failure: "StartingSnapshotMissing { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }" } │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "stored terminal snapshot absent", failure: "TerminalSnapshotMissing { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }" } │
+            └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             ReconstitutionFailureRow {
@@ -16920,14 +16920,14 @@ mod tests {
         );
 
         expect![[r#"
-            ┌───────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────┐
-            │ perturbed_stored_fact                 │ failure                                                                      │
-            ├───────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
-            │ active slot after queued work         │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
-            │ failed terminal after queued work     │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
-            │ second active slot                    │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
-            │ failed terminal after the active slot │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
-            └───────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+            ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                                                                                │
+            ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "active slot after queued work", failure: "InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) }" }         │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "failed terminal after queued work", failure: "InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) }" }     │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "second active slot", failure: "InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) }" }                    │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "failed terminal after the active slot", failure: "InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) }" } │
+            └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             ReconstitutionFailureRow {

@@ -1001,15 +1001,15 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌────────────────┬────────────────────────────────────────────────────┐
-            │ token          │ finish                                             │
-            ├────────────────┼────────────────────────────────────────────────────┤
-            │ stop           │ EndTurn                                            │
-            │ length         │ Unrecognized { provider_token: \"length\" }        │
-            │ tool_calls     │ ToolUse                                            │
-            │ content_filter │ Refusal                                            │
-            │ function_call  │ Unrecognized { provider_token: \"function_call\" } │
-            └────────────────┴────────────────────────────────────────────────────┘
+            ┌────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                              │
+            ├────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ FinishRow { token: "stop", finish: "EndTurn" }                                                     │
+            │ FinishRow { token: "length", finish: "Unrecognized { provider_token: \"length\" }" }               │
+            │ FinishRow { token: "tool_calls", finish: "ToolUse" }                                               │
+            │ FinishRow { token: "content_filter", finish: "Refusal" }                                           │
+            │ FinishRow { token: "function_call", finish: "Unrecognized { provider_token: \"function_call\" }" } │
+            └────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(rows));
     }

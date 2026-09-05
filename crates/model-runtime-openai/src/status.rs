@@ -204,29 +204,29 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌────────┬─────────────────────────┬────────────────────┐
-            │ status │ code                    │ kind               │
-            ├────────┼─────────────────────────┼────────────────────┤
-            │    401 │ invalid_api_key         │ CredentialRejected │
-            │      0 │ invalid_request_error   │ InvalidRequest     │
-            │    404 │ model_not_found         │ TargetNotFound     │
-            │    429 │ insufficient_quota      │ QuotaExhausted     │
-            │    400 │ context_length_exceeded │ RequestTooLarge    │
-            │      0 │ rate_limit_exceeded     │ RateLimited        │
-            │      0 │ rate_limit_error        │ RateLimited        │
-            │      0 │ server_error            │ ProviderInternal   │
-            │      0 │ internal_server_error   │ ProviderInternal   │
-            │    400 │ -                       │ InvalidRequest     │
-            │    401 │ -                       │ CredentialRejected │
-            │    403 │ -                       │ PermissionDenied   │
-            │    404 │ -                       │ TargetNotFound     │
-            │    413 │ -                       │ RequestTooLarge    │
-            │    429 │ -                       │ RateLimited        │
-            │    500 │ -                       │ ProviderInternal   │
-            │    503 │ -                       │ Overloaded         │
-            │    418 │ -                       │ Unrecognized       │
-            │    429 │ brand_new_code          │ RateLimited        │
-            └────────┴─────────────────────────┴────────────────────┘
+            ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                       │
+            ├─────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ClassificationRow { status: 401, code: "invalid_api_key", kind: "CredentialRejected" }      │
+            │ ClassificationRow { status: 0, code: "invalid_request_error", kind: "InvalidRequest" }      │
+            │ ClassificationRow { status: 404, code: "model_not_found", kind: "TargetNotFound" }          │
+            │ ClassificationRow { status: 429, code: "insufficient_quota", kind: "QuotaExhausted" }       │
+            │ ClassificationRow { status: 400, code: "context_length_exceeded", kind: "RequestTooLarge" } │
+            │ ClassificationRow { status: 0, code: "rate_limit_exceeded", kind: "RateLimited" }           │
+            │ ClassificationRow { status: 0, code: "rate_limit_error", kind: "RateLimited" }              │
+            │ ClassificationRow { status: 0, code: "server_error", kind: "ProviderInternal" }             │
+            │ ClassificationRow { status: 0, code: "internal_server_error", kind: "ProviderInternal" }    │
+            │ ClassificationRow { status: 400, code: "-", kind: "InvalidRequest" }                        │
+            │ ClassificationRow { status: 401, code: "-", kind: "CredentialRejected" }                    │
+            │ ClassificationRow { status: 403, code: "-", kind: "PermissionDenied" }                      │
+            │ ClassificationRow { status: 404, code: "-", kind: "TargetNotFound" }                        │
+            │ ClassificationRow { status: 413, code: "-", kind: "RequestTooLarge" }                       │
+            │ ClassificationRow { status: 429, code: "-", kind: "RateLimited" }                           │
+            │ ClassificationRow { status: 500, code: "-", kind: "ProviderInternal" }                      │
+            │ ClassificationRow { status: 503, code: "-", kind: "Overloaded" }                            │
+            │ ClassificationRow { status: 418, code: "-", kind: "Unrecognized" }                          │
+            │ ClassificationRow { status: 429, code: "brand_new_code", kind: "RateLimited" }              │
+            └─────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(rows));
     }

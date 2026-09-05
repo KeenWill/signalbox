@@ -1326,17 +1326,17 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌───────────────────────────────┬─────────────────────────────────────────────────┐
-            │ token                         │ finish                                          │
-            ├───────────────────────────────┼─────────────────────────────────────────────────┤
-            │ end_turn                      │ EndTurn                                         │
-            │ max_tokens                    │ MaxOutputTokens                                 │
-            │ model_context_window_exceeded │ ContextWindowExceeded                           │
-            │ stop_sequence                 │ StopSequence { sequence: Some(\"END\") }        │
-            │ tool_use                      │ ToolUse                                         │
-            │ refusal                       │ Refusal                                         │
-            │ pause_turn                    │ Unrecognized { provider_token: \"pause_turn\" } │
-            └───────────────────────────────┴─────────────────────────────────────────────────┘
+            ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                        │
+            ├──────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ FinishRow { token: "end_turn", finish: "EndTurn" }                                           │
+            │ FinishRow { token: "max_tokens", finish: "MaxOutputTokens" }                                 │
+            │ FinishRow { token: "model_context_window_exceeded", finish: "ContextWindowExceeded" }        │
+            │ FinishRow { token: "stop_sequence", finish: "StopSequence { sequence: Some(\"END\") }" }     │
+            │ FinishRow { token: "tool_use", finish: "ToolUse" }                                           │
+            │ FinishRow { token: "refusal", finish: "Refusal" }                                            │
+            │ FinishRow { token: "pause_turn", finish: "Unrecognized { provider_token: \"pause_turn\" }" } │
+            └──────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(rows));
     }

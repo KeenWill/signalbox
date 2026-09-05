@@ -3288,21 +3288,21 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌──────────────────────────┬─────────────────────────────┬──────────────────┐
-            │ configured               │ reported                    │ relation         │
-            ├──────────────────────────┼─────────────────────────────┼──────────────────┤
-            │ claude-haiku-4-5         │ claude-haiku-4-5            │ Exact            │
-            │ claude-haiku-4-5         │ claude-haiku-4-5-20251001   │ AliasConcretion  │
-            │ claude-haiku-4-5         │ claude-haiku-4-5-2025-10-01 │ AliasConcretion  │
-            │ claude-haiku-4-5         │ claude-opus-4-8             │ DifferentLineage │
-            │ claude-haiku-4-5         │ claude-haiku-4-5-fast       │ DifferentLineage │
-            │ claude-haiku-4-5         │ claude-haiku-4-5-2025100    │ DifferentLineage │
-            │ claude-haiku-4-5         │ claude-haiku-4-5-202510012  │ DifferentLineage │
-            │ claude-opus-4            │ claude-opus-4-5             │ DifferentLineage │
-            │ claude-opus-4-5          │ claude-opus-4-5-20251101    │ AliasConcretion  │
-            │ claude-opus-4-5-20251101 │ claude-opus-4-5             │ DifferentLineage │
-            │ ""                       │ claude-haiku-4-5-20251001   │ DifferentLineage │
-            └──────────────────────────┴─────────────────────────────┴──────────────────┘
+            ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                │
+            ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ RelationRow { configured: "claude-haiku-4-5", reported: "claude-haiku-4-5", relation: "Exact" }                      │
+            │ RelationRow { configured: "claude-haiku-4-5", reported: "claude-haiku-4-5-20251001", relation: "AliasConcretion" }   │
+            │ RelationRow { configured: "claude-haiku-4-5", reported: "claude-haiku-4-5-2025-10-01", relation: "AliasConcretion" } │
+            │ RelationRow { configured: "claude-haiku-4-5", reported: "claude-opus-4-8", relation: "DifferentLineage" }            │
+            │ RelationRow { configured: "claude-haiku-4-5", reported: "claude-haiku-4-5-fast", relation: "DifferentLineage" }      │
+            │ RelationRow { configured: "claude-haiku-4-5", reported: "claude-haiku-4-5-2025100", relation: "DifferentLineage" }   │
+            │ RelationRow { configured: "claude-haiku-4-5", reported: "claude-haiku-4-5-202510012", relation: "DifferentLineage" } │
+            │ RelationRow { configured: "claude-opus-4", reported: "claude-opus-4-5", relation: "DifferentLineage" }               │
+            │ RelationRow { configured: "claude-opus-4-5", reported: "claude-opus-4-5-20251101", relation: "AliasConcretion" }     │
+            │ RelationRow { configured: "claude-opus-4-5-20251101", reported: "claude-opus-4-5", relation: "DifferentLineage" }    │
+            │ RelationRow { configured: "", reported: "claude-haiku-4-5-20251001", relation: "DifferentLineage" }                  │
+            └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(rows));
     }
@@ -3395,16 +3395,16 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌──────────────────────────────────────┬────────────────────────────────┐
-            │ outcome                              │ cause_code                     │
-            ├──────────────────────────────────────┼────────────────────────────────┤
-            │ completed                            │ completed                      │
-            │ refused                              │ provider_refused               │
-            │ provider_error(credential_rejected)  │ provider_credential_rejected   │
-            │ proven_unsent(connect_failed)        │ connect_failed                 │
-            │ proven_unsent(cancelled_before_send) │ cancelled_before_send          │
-            │ boundary_loss(transport_failed)      │ boundary_loss_transport_failed │
-            └──────────────────────────────────────┴────────────────────────────────┘
+            ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                   │
+            ├─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ CauseRow { outcome: "completed", cause_code: "completed" }                                              │
+            │ CauseRow { outcome: "refused", cause_code: "provider_refused" }                                         │
+            │ CauseRow { outcome: "provider_error(credential_rejected)", cause_code: "provider_credential_rejected" } │
+            │ CauseRow { outcome: "proven_unsent(connect_failed)", cause_code: "connect_failed" }                     │
+            │ CauseRow { outcome: "proven_unsent(cancelled_before_send)", cause_code: "cancelled_before_send" }       │
+            │ CauseRow { outcome: "boundary_loss(transport_failed)", cause_code: "boundary_loss_transport_failed" }   │
+            └─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(rows));
     }
@@ -3498,15 +3498,15 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌─────────────────────────────────────┬────────────────────────┐
-            │ failure                             │ cause_code             │
-            ├─────────────────────────────────────┼────────────────────────┤
-            │ unsupported_operation               │ unsupported_operation  │
-            │ credential_unavailable(unmapped)    │ credential_unmapped    │
-            │ credential_unavailable(unavailable) │ credential_unavailable │
-            │ credential_unavailable(unreadable)  │ credential_unreadable  │
-            │ credential_unusable                 │ credential_unusable    │
-            └─────────────────────────────────────┴────────────────────────┘
+            ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                   │
+            ├─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ PreparationRow { failure: "unsupported_operation", cause_code: "unsupported_operation" }                │
+            │ PreparationRow { failure: "credential_unavailable(unmapped)", cause_code: "credential_unmapped" }       │
+            │ PreparationRow { failure: "credential_unavailable(unavailable)", cause_code: "credential_unavailable" } │
+            │ PreparationRow { failure: "credential_unavailable(unreadable)", cause_code: "credential_unreadable" }   │
+            │ PreparationRow { failure: "credential_unusable", cause_code: "credential_unusable" }                    │
+            └─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(rows));
     }

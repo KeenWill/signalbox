@@ -155,11 +155,12 @@ Snapshot assertions use
     asserts nothing; it is a
     [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html).
     Table-shaped output uses the workspace's `signalbox-expect-table`
-    dev-dependency (`crates/expect-table`), which renders any `Debug` rows as
-    one box-drawn table with deterministic, right-trimmed lines that stay
-    byte-stable under re-blessing; test crates import it rather than writing
-    their own. Prior art for tables in expect tests:
-    [expectable](https://github.com/janestreet/expectable).
+    dev-dependency (`crates/expect-table`), which renders each `Debug` row as
+    one opaque `value` cell with right-trimmed lines. Callers must project
+    unordered collections, including nested `HashMap` and `HashSet` values, into
+    ordered collections or sorted rows before rendering. Test crates import the
+    renderer rather than writing their own. Prior art for tables in expect
+    tests: [expectable](https://github.com/janestreet/expectable).
 
 Rules 2, 9, and 10 — a matrix whose expectation mirrors the code becomes
 per-edge targeted asserts in a row helper plus an expect table as their
@@ -177,21 +178,20 @@ for d in all_cancellation_dispositions() {
 // "rejected":
 //     Err(error) => { assert_eq!(error.current().id(), source_id); "rejected" }
 // so the table supplements the per-edge asserts (rule 10); it does not
-// replace them. The helper emits one `#[derive(Debug)]` row struct per
-// edge; the struct's field names are the rendered column headers.
+// replace them. Render each helper row as one opaque Debug value.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
-let rows = after_cancellation_rows(&prepared, proof(1));
+let rows = after_cancellation_rows(&prepared, "after cancellation", proof(1));
 expect![[r#"
-    ┌───────────────┬──────────┐
-    │ attempted_end │ outcome  │
-    ├───────────────┼──────────┤
-    │ TurnCompleted │ rejected │
-    │ TurnRefused   │ rejected │
-    │ KnownFailure  │ rejected │
-    │ Lost          │ rejected │
-    │ Cancelled     │ ends     │
-    │ Ambiguous     │ rejected │
-    └───────────────┴──────────┘
+    ┌───────────────────────────────────────────────────────────────────────────────────────────┐
+    │ value                                                                                     │
+    ├───────────────────────────────────────────────────────────────────────────────────────────┤
+    │ AttemptEndRow { attempted_end: "after cancellation: TurnCompleted", outcome: "rejected" } │
+    │ AttemptEndRow { attempted_end: "after cancellation: TurnRefused", outcome: "rejected" }   │
+    │ AttemptEndRow { attempted_end: "after cancellation: KnownFailure", outcome: "rejected" }  │
+    │ AttemptEndRow { attempted_end: "after cancellation: Lost", outcome: "rejected" }          │
+    │ AttemptEndRow { attempted_end: "after cancellation: Cancelled", outcome: "ends" }         │
+    │ AttemptEndRow { attempted_end: "after cancellation: Ambiguous", outcome: "rejected" }     │
+    └───────────────────────────────────────────────────────────────────────────────────────────┘
 "#]]
 .assert_eq(&table(rows));
 ```
@@ -310,17 +310,17 @@ assert!(matches!(end, AttemptEnd::WithoutStop { disposition: actual }
 
 // Good: the retained cause is read back from the observed value and
 // displayed where a reviewer can see it (rule 12). The helper emits one
-// #[derive(Debug)] row struct per end — field names are the column
-// headers — rendered through the shared crate (rule 12).
+// #[derive(Debug)] row struct per end, rendered as one opaque value
+// through the shared crate (rule 12).
 expect![[r#"
-    ┌────────────────────┬─────────────┬─────────────────────┐
-    │ family             │ disposition │ retained_cause      │
-    ├────────────────────┼─────────────┼─────────────────────┤
-    │ without stop       │ Lost        │ -                   │
-    │ after cancellation │ Cancelled   │ interrupt command 1 │
-    └────────────────────┴─────────────┴─────────────────────┘
+    ┌───────────────────────────────────────────────────────────────────────────────────────────────────────┐
+    │ value                                                                                                 │
+    ├───────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ Row { family: "without stop", disposition: "Lost", retained_cause: "-" }                              │
+    │ Row { family: "after cancellation", disposition: "Cancelled", retained_cause: "interrupt command 1" } │
+    └───────────────────────────────────────────────────────────────────────────────────────────────────────┘
 "#]]
-.assert_eq(&table(attempt_end_family_rows(&ends)));
+.assert_eq(&attempt_end_family_table(&ends));
 ```
 
 ## Failure messages
@@ -402,17 +402,17 @@ a glance (rules 9 and 12):
 
 ```rust
 expect![[r#"
-    ┌─────────┬──────────┬─────────────────────────────────────┐
-    │ derived │ accepted │ priority                            │
-    ├─────────┼──────────┼─────────────────────────────────────┤
-    │       1 │        1 │ ordinary                            │
-    │       2 │        3 │ interrupt immediately after input 1 │
-    │       3 │        2 │ ordinary                            │
-    └─────────┴──────────┴─────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+    │ value                                                                                       │
+    ├─────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ DerivedSlotRow { derived: 1, accepted: 1, priority: "ordinary" }                            │
+    │ DerivedSlotRow { derived: 2, accepted: 3, priority: "interrupt immediately after input 1" } │
+    │ DerivedSlotRow { derived: 3, accepted: 2, priority: "ordinary" }                            │
+    └─────────────────────────────────────────────────────────────────────────────────────────────┘
 "#]]
 .assert_eq(&derived_order_table(&[first, second, interrupt]));
 ```
 
-The rendering helper draws only the fields the derivation depends on, in derived
-order, through the shared `signalbox-expect-table` renderer; read the snapshot
-diff when it changes (rule 11).
+The rendering helper passes one `DerivedSlotRow` per derived slot through the
+shared `signalbox-expect-table` renderer; read the snapshot diff when it changes
+(rule 11).

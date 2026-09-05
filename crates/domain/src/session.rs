@@ -2180,14 +2180,14 @@ mod tests {
         );
 
         expect![[r#"
-            ┌──────────────────────────────────┬────────────────────────────────┐
-            │ perturbed_stored_fact            │ failure                        │
-            ├──────────────────────────────────┼────────────────────────────────┤
-            │ requested session differs        │ RequestedSessionMismatch       │
-            │ defaults pointer owned elsewhere │ CurrentDefaultsSessionMismatch │
-            │ defaults record owned elsewhere  │ DefaultsSessionMismatch        │
-            │ pointer and record versions torn │ CurrentDefaultsVersionMismatch │
-            └──────────────────────────────────┴────────────────────────────────┘
+            ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                             │
+            ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "requested session differs", failure: "RequestedSessionMismatch" }              │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "defaults pointer owned elsewhere", failure: "CurrentDefaultsSessionMismatch" } │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "defaults record owned elsewhere", failure: "DefaultsSessionMismatch" }         │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "pointer and record versions torn", failure: "CurrentDefaultsVersionMismatch" } │
+            └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             ReconstitutionFailureRow {
@@ -2737,16 +2737,16 @@ mod tests {
         );
 
         expect![[r#"
-            ┌────────────────────────────────────┬───────────────────────────────┐
-            │ perturbed_stored_fact              │ failure                       │
-            ├────────────────────────────────────┼───────────────────────────────┤
-            │ result session cross-wired         │ SessionResultMismatch         │
-            │ stored provenance replaced         │ ProvenanceMismatch            │
-            │ single-source ancestry unvalidated │ TranscriptAncestryUnavailable │
-            │ defaults owner cross-wired         │ DefaultsSessionMismatch       │
-            │ defaults version is not first      │ DefaultsVersionIsNotFirst     │
-            │ stored defaults differ             │ DefaultsMismatch              │
-            └────────────────────────────────────┴───────────────────────────────┘
+            ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                              │
+            ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "result session cross-wired", failure: "SessionResultMismatch" }                 │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "stored provenance replaced", failure: "ProvenanceMismatch" }                    │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "single-source ancestry unvalidated", failure: "TranscriptAncestryUnavailable" } │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "defaults owner cross-wired", failure: "DefaultsSessionMismatch" }               │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "defaults version is not first", failure: "DefaultsVersionIsNotFirst" }          │
+            │ ReconstitutionFailureRow { perturbed_stored_fact: "stored defaults differ", failure: "DefaultsMismatch" }                          │
+            └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             ReconstitutionFailureRow {

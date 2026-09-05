@@ -202,19 +202,19 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌───────────────────────────────┬────────────────────┐
-            │ token                         │ kind               │
-            ├───────────────────────────────┼────────────────────┤
-            │ authentication_error          │ CredentialRejected │
-            │ permission_error              │ PermissionDenied   │
-            │ invalid_request_error         │ InvalidRequest     │
-            │ not_found_error               │ TargetNotFound     │
-            │ request_too_large             │ RequestTooLarge    │
-            │ rate_limit_error              │ RateLimited        │
-            │ overloaded_error              │ Overloaded         │
-            │ api_error                     │ ProviderInternal   │
-            │ billing_error_from_the_future │ Unrecognized       │
-            └───────────────────────────────┴────────────────────┘
+            ┌───────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                     │
+            ├───────────────────────────────────────────────────────────────────────────┤
+            │ TokenRow { token: "authentication_error", kind: "CredentialRejected" }    │
+            │ TokenRow { token: "permission_error", kind: "PermissionDenied" }          │
+            │ TokenRow { token: "invalid_request_error", kind: "InvalidRequest" }       │
+            │ TokenRow { token: "not_found_error", kind: "TargetNotFound" }             │
+            │ TokenRow { token: "request_too_large", kind: "RequestTooLarge" }          │
+            │ TokenRow { token: "rate_limit_error", kind: "RateLimited" }               │
+            │ TokenRow { token: "overloaded_error", kind: "Overloaded" }                │
+            │ TokenRow { token: "api_error", kind: "ProviderInternal" }                 │
+            │ TokenRow { token: "billing_error_from_the_future", kind: "Unrecognized" } │
+            └───────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(rows));
     }
@@ -224,19 +224,19 @@ mod tests {
         let rows = status_rows(&[400, 401, 403, 404, 413, 429, 500, 529, 503]);
 
         expect![[r#"
-            ┌────────┬────────────────────┐
-            │ status │ kind               │
-            ├────────┼────────────────────┤
-            │    400 │ InvalidRequest     │
-            │    401 │ CredentialRejected │
-            │    403 │ PermissionDenied   │
-            │    404 │ TargetNotFound     │
-            │    413 │ RequestTooLarge    │
-            │    429 │ RateLimited        │
-            │    500 │ ProviderInternal   │
-            │    529 │ Overloaded         │
-            │    503 │ Unrecognized       │
-            └────────┴────────────────────┘
+            ┌───────────────────────────────────────────────────────┐
+            │ value                                                 │
+            ├───────────────────────────────────────────────────────┤
+            │ StatusRow { status: 400, kind: "InvalidRequest" }     │
+            │ StatusRow { status: 401, kind: "CredentialRejected" } │
+            │ StatusRow { status: 403, kind: "PermissionDenied" }   │
+            │ StatusRow { status: 404, kind: "TargetNotFound" }     │
+            │ StatusRow { status: 413, kind: "RequestTooLarge" }    │
+            │ StatusRow { status: 429, kind: "RateLimited" }        │
+            │ StatusRow { status: 500, kind: "ProviderInternal" }   │
+            │ StatusRow { status: 529, kind: "Overloaded" }         │
+            │ StatusRow { status: 503, kind: "Unrecognized" }       │
+            └───────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(rows));
     }

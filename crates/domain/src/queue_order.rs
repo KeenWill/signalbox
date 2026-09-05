@@ -539,8 +539,8 @@ mod tests {
     }
 
     /// One derived slot's snapshot row: only the acceptance ordinal and
-    /// priority fact the derivation depends on (TS-12). The field names are
-    /// the rendered column headers.
+    /// priority fact the derivation depends on (TS-12), rendered as one opaque
+    /// Debug value.
     #[derive(Debug)]
     #[allow(
         dead_code,
@@ -596,12 +596,12 @@ mod tests {
         let second = accepted_ordinary(2);
 
         expect![[r#"
-            ┌─────────┬──────────┬──────────┐
-            │ derived │ accepted │ priority │
-            ├─────────┼──────────┼──────────┤
-            │       1 │        1 │ ordinary │
-            │       2 │        2 │ ordinary │
-            └─────────┴──────────┴──────────┘
+            ┌──────────────────────────────────────────────────────────────────┐
+            │ value                                                            │
+            ├──────────────────────────────────────────────────────────────────┤
+            │ DerivedSlotRow { derived: 1, accepted: 1, priority: "ordinary" } │
+            │ DerivedSlotRow { derived: 2, accepted: 2, priority: "ordinary" } │
+            └──────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&derived_order_table(&[second, first]));
     }
@@ -615,12 +615,12 @@ mod tests {
         let interrupt = accepted_interrupt(2, first);
 
         expect![[r#"
-            ┌─────────┬──────────┬─────────────────────────────────────┐
-            │ derived │ accepted │ priority                            │
-            ├─────────┼──────────┼─────────────────────────────────────┤
-            │       1 │        1 │ ordinary                            │
-            │       2 │        2 │ interrupt immediately after input 1 │
-            └─────────┴──────────┴─────────────────────────────────────┘
+            ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                       │
+            ├─────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ DerivedSlotRow { derived: 1, accepted: 1, priority: "ordinary" }                            │
+            │ DerivedSlotRow { derived: 2, accepted: 2, priority: "interrupt immediately after input 1" } │
+            └─────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&derived_order_table(&[first, interrupt]));
     }
@@ -730,14 +730,14 @@ mod tests {
             ])
         );
         expect![[r#"
-            ┌─────────┬──────────┬─────────────────────────────────────┐
-            │ derived │ accepted │ priority                            │
-            ├─────────┼──────────┼─────────────────────────────────────┤
-            │       1 │        1 │ ordinary                            │
-            │       2 │        3 │ interrupt immediately after input 1 │
-            │       3 │        4 │ interrupt immediately after input 3 │
-            │       4 │        2 │ ordinary                            │
-            └─────────┴──────────┴─────────────────────────────────────┘
+            ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                       │
+            ├─────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ DerivedSlotRow { derived: 1, accepted: 1, priority: "ordinary" }                            │
+            │ DerivedSlotRow { derived: 2, accepted: 3, priority: "interrupt immediately after input 1" } │
+            │ DerivedSlotRow { derived: 3, accepted: 4, priority: "interrupt immediately after input 3" } │
+            │ DerivedSlotRow { derived: 4, accepted: 2, priority: "ordinary" }                            │
+            └─────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&derived_order_table(&facts));
     }
@@ -762,14 +762,14 @@ mod tests {
             ])
         );
         expect![[r#"
-            ┌─────────┬──────────┬─────────────────────────────────────┐
-            │ derived │ accepted │ priority                            │
-            ├─────────┼──────────┼─────────────────────────────────────┤
-            │       1 │        1 │ ordinary                            │
-            │       2 │        3 │ interrupt immediately after input 1 │
-            │       3 │        2 │ ordinary                            │
-            │       4 │        4 │ ordinary                            │
-            └─────────┴──────────┴─────────────────────────────────────┘
+            ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                       │
+            ├─────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ DerivedSlotRow { derived: 1, accepted: 1, priority: "ordinary" }                            │
+            │ DerivedSlotRow { derived: 2, accepted: 3, priority: "interrupt immediately after input 1" } │
+            │ DerivedSlotRow { derived: 3, accepted: 2, priority: "ordinary" }                            │
+            │ DerivedSlotRow { derived: 4, accepted: 4, priority: "ordinary" }                            │
+            └─────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&derived_order_table(&facts));
     }
