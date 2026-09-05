@@ -7,8 +7,8 @@ approval.
 ## Map
 
 The daemon composes two web tools, `web_search` and `web_fetch`, in
-`crates/tools-web`. Each sends one request out and returns the response as
-evidence for the model.
+`crates/tools-web`. Each sends one request and returns the response as evidence
+for the model.
 
 The output boundary is structural: a provider response is parsed into typed
 components and the evidence is built from those components. Every bound on a
@@ -29,9 +29,9 @@ back.
 
 Structural construction is the primary control on web-tool output, and the
 credential scrubber is defense in depth after it. Why: parsing makes provider
-bytes data for a bounded parser rather than a second rendering channel, while
-exact-value redaction does not guarantee it catches a credential that provider
-content transforms, encodes, or splits; those forms are accepted residual risk.
+bytes data for a bounded parser rather than a second rendering channel, and
+exact-value redaction may miss a credential that provider content transforms,
+encodes, or splits; those forms are accepted residual risk.
 
 The trustworthiness, relevance, and safety of provider content are outside this
 model, which constrains how content is represented, not what it means.
@@ -46,8 +46,8 @@ delegation.
 Both tools' declarations are conservative, so deliberate operator policy and the
 ordinary approval flow are the only ways to widen egress authority.
 
-A finding that demonstrates a violation of the structural output boundary or of
-a named bound is an implementation defect. A finding only about a residual named
+A finding that demonstrates a violation of the structural output boundary or a
+named bound is an implementation defect. A finding only about a residual named
 above, or about provider-content semantics, is accepted and needs no code
 change.
 
