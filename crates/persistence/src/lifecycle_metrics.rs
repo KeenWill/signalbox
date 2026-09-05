@@ -1,4 +1,5 @@
-//! PostgreSQL adapter for the §12 lifecycle metrics.
+//! PostgreSQL adapter for the lifecycle metrics
+//! (docs/spec/session-lifecycle.md).
 //!
 //! Nothing here computes a metric: the definitions are the views the
 //! `202609020003_lifecycle_metrics.sql` migration installs. The operator
@@ -119,7 +120,7 @@ impl LifecycleRate {
     }
 }
 
-/// One calendar week's §12 report.
+/// One calendar week's metrics report.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LifecycleWeeklyMetrics {
     week_start: PrimitiveDateTime,
@@ -150,7 +151,7 @@ impl LifecycleWeeklyMetrics {
         )
     }
 
-    /// Returns the headline: the §12 completion-failure rate for this week.
+    /// Returns the headline: the completion-failure rate for this week.
     pub const fn completion_failure(&self) -> LifecycleRate {
         self.completion_failure
     }
@@ -205,7 +206,7 @@ pub enum LifecycleNonTerminalState {
     Parked,
 }
 
-/// One owned non-terminal session violating §1's armed-deadline invariant.
+/// One owned non-terminal session violating the armed-deadline invariant.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LifecycleDeadlineViolation {
     session: SessionId,
@@ -236,7 +237,7 @@ impl LifecycleDeadlineViolation {
     }
 }
 
-/// One coherent §12 report.
+/// One coherent metrics report.
 ///
 /// Carries the deadline violations as a count, not as rows: a widespread
 /// incident is exactly when a periodic reader must not build one object per
@@ -279,7 +280,7 @@ impl LifecycleMetricsReport {
     }
 }
 
-/// PostgreSQL-backed §12 metric read boundary.
+/// PostgreSQL-backed lifecycle-metric read boundary.
 #[derive(Clone, Debug)]
 pub struct LifecycleMetricsRepository {
     pool: PgPool,
@@ -354,7 +355,7 @@ impl LifecycleMetricsRepository {
         Self { pool }
     }
 
-    /// Reads one coherent report over every §12 definition.
+    /// Reads one coherent report over every metric definition.
     ///
     /// One repeatable-read snapshot, so a cohort and the count beside it
     /// describe the same instant.
