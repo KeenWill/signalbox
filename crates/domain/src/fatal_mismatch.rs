@@ -670,40 +670,40 @@ mod tests {
         );
 
         expect![[r#"
-            ┌───────────────────────────────────┬──────────┬─────────────────────────────────────┬────────────────────────────────────────────────────┐
-            │ effect                            │ attempt  │ current                             │ outcome                                            │
-            ├───────────────────────────────────┼──────────┼─────────────────────────────────────┼────────────────────────────────────────────────────┤
-            │ classify nonterminal known-failed │ running  │ unclassified                        │ applies -> classified non-ambiguous                │
-            │ classify nonterminal known-failed │ running  │ classified non-ambiguous            │ rejected: affected-call state mismatch             │
-            │ classify nonterminal known-failed │ running  │ ambiguous (blocking)                │ rejected: affected-call state mismatch             │
-            │ classify nonterminal known-failed │ running  │ ambiguous (resolved by evidence)    │ rejected: affected-call state mismatch             │
-            │ classify nonterminal known-failed │ running  │ ambiguous (duplicate risk accepted) │ rejected: affected-call state mismatch             │
-            │ classify nonterminal known-failed │ prepared │ unclassified                        │ rejected: prepared requires completed invalidation │
-            │ classify nonterminal known-failed │ prepared │ classified non-ambiguous            │ rejected: prepared requires completed invalidation │
-            │ classify nonterminal known-failed │ prepared │ ambiguous (blocking)                │ rejected: prepared requires completed invalidation │
-            │ classify nonterminal known-failed │ prepared │ ambiguous (resolved by evidence)    │ rejected: prepared requires completed invalidation │
-            │ classify nonterminal known-failed │ prepared │ ambiguous (duplicate risk accepted) │ rejected: prepared requires completed invalidation │
-            │ resolve terminal ambiguity        │ running  │ unclassified                        │ rejected: affected-call state mismatch             │
-            │ resolve terminal ambiguity        │ running  │ classified non-ambiguous            │ rejected: affected-call state mismatch             │
-            │ resolve terminal ambiguity        │ running  │ ambiguous (blocking)                │ applies -> ambiguous (resolved by evidence)        │
-            │ resolve terminal ambiguity        │ running  │ ambiguous (resolved by evidence)    │ applies -> ambiguous (resolved by evidence)        │
-            │ resolve terminal ambiguity        │ running  │ ambiguous (duplicate risk accepted) │ rejected: affected-call state mismatch             │
-            │ resolve terminal ambiguity        │ prepared │ unclassified                        │ rejected: prepared requires completed invalidation │
-            │ resolve terminal ambiguity        │ prepared │ classified non-ambiguous            │ rejected: prepared requires completed invalidation │
-            │ resolve terminal ambiguity        │ prepared │ ambiguous (blocking)                │ rejected: prepared requires completed invalidation │
-            │ resolve terminal ambiguity        │ prepared │ ambiguous (resolved by evidence)    │ rejected: prepared requires completed invalidation │
-            │ resolve terminal ambiguity        │ prepared │ ambiguous (duplicate risk accepted) │ rejected: prepared requires completed invalidation │
-            │ preserve completed invalidation   │ running  │ unclassified                        │ rejected: affected-call state mismatch             │
-            │ preserve completed invalidation   │ running  │ classified non-ambiguous            │ applies -> classified non-ambiguous                │
-            │ preserve completed invalidation   │ running  │ ambiguous (blocking)                │ rejected: affected-call state mismatch             │
-            │ preserve completed invalidation   │ running  │ ambiguous (resolved by evidence)    │ rejected: affected-call state mismatch             │
-            │ preserve completed invalidation   │ running  │ ambiguous (duplicate risk accepted) │ rejected: affected-call state mismatch             │
-            │ preserve completed invalidation   │ prepared │ unclassified                        │ rejected: affected-call state mismatch             │
-            │ preserve completed invalidation   │ prepared │ classified non-ambiguous            │ applies -> classified non-ambiguous                │
-            │ preserve completed invalidation   │ prepared │ ambiguous (blocking)                │ rejected: affected-call state mismatch             │
-            │ preserve completed invalidation   │ prepared │ ambiguous (resolved by evidence)    │ rejected: affected-call state mismatch             │
-            │ preserve completed invalidation   │ prepared │ ambiguous (duplicate risk accepted) │ rejected: affected-call state mismatch             │
-            └───────────────────────────────────┴──────────┴─────────────────────────────────────┴────────────────────────────────────────────────────┘
+            ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                                                                                   │
+            ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ Row { effect: "classify nonterminal known-failed", attempt: "running", current: "unclassified", outcome: "applies -> classified non-ambiguous" }                                        │
+            │ Row { effect: "classify nonterminal known-failed", attempt: "running", current: "classified non-ambiguous", outcome: "rejected: affected-call state mismatch" }                         │
+            │ Row { effect: "classify nonterminal known-failed", attempt: "running", current: "ambiguous (blocking)", outcome: "rejected: affected-call state mismatch" }                             │
+            │ Row { effect: "classify nonterminal known-failed", attempt: "running", current: "ambiguous (resolved by evidence)", outcome: "rejected: affected-call state mismatch" }                 │
+            │ Row { effect: "classify nonterminal known-failed", attempt: "running", current: "ambiguous (duplicate risk accepted)", outcome: "rejected: affected-call state mismatch" }              │
+            │ Row { effect: "classify nonterminal known-failed", attempt: "prepared", current: "unclassified", outcome: "rejected: prepared requires completed invalidation" }                        │
+            │ Row { effect: "classify nonterminal known-failed", attempt: "prepared", current: "classified non-ambiguous", outcome: "rejected: prepared requires completed invalidation" }            │
+            │ Row { effect: "classify nonterminal known-failed", attempt: "prepared", current: "ambiguous (blocking)", outcome: "rejected: prepared requires completed invalidation" }                │
+            │ Row { effect: "classify nonterminal known-failed", attempt: "prepared", current: "ambiguous (resolved by evidence)", outcome: "rejected: prepared requires completed invalidation" }    │
+            │ Row { effect: "classify nonterminal known-failed", attempt: "prepared", current: "ambiguous (duplicate risk accepted)", outcome: "rejected: prepared requires completed invalidation" } │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "running", current: "unclassified", outcome: "rejected: affected-call state mismatch" }                                            │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "running", current: "classified non-ambiguous", outcome: "rejected: affected-call state mismatch" }                                │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "running", current: "ambiguous (blocking)", outcome: "applies -> ambiguous (resolved by evidence)" }                               │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "running", current: "ambiguous (resolved by evidence)", outcome: "applies -> ambiguous (resolved by evidence)" }                   │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "running", current: "ambiguous (duplicate risk accepted)", outcome: "rejected: affected-call state mismatch" }                     │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "prepared", current: "unclassified", outcome: "rejected: prepared requires completed invalidation" }                               │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "prepared", current: "classified non-ambiguous", outcome: "rejected: prepared requires completed invalidation" }                   │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "prepared", current: "ambiguous (blocking)", outcome: "rejected: prepared requires completed invalidation" }                       │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "prepared", current: "ambiguous (resolved by evidence)", outcome: "rejected: prepared requires completed invalidation" }           │
+            │ Row { effect: "resolve terminal ambiguity", attempt: "prepared", current: "ambiguous (duplicate risk accepted)", outcome: "rejected: prepared requires completed invalidation" }        │
+            │ Row { effect: "preserve completed invalidation", attempt: "running", current: "unclassified", outcome: "rejected: affected-call state mismatch" }                                       │
+            │ Row { effect: "preserve completed invalidation", attempt: "running", current: "classified non-ambiguous", outcome: "applies -> classified non-ambiguous" }                              │
+            │ Row { effect: "preserve completed invalidation", attempt: "running", current: "ambiguous (blocking)", outcome: "rejected: affected-call state mismatch" }                               │
+            │ Row { effect: "preserve completed invalidation", attempt: "running", current: "ambiguous (resolved by evidence)", outcome: "rejected: affected-call state mismatch" }                   │
+            │ Row { effect: "preserve completed invalidation", attempt: "running", current: "ambiguous (duplicate risk accepted)", outcome: "rejected: affected-call state mismatch" }                │
+            │ Row { effect: "preserve completed invalidation", attempt: "prepared", current: "unclassified", outcome: "rejected: affected-call state mismatch" }                                      │
+            │ Row { effect: "preserve completed invalidation", attempt: "prepared", current: "classified non-ambiguous", outcome: "applies -> classified non-ambiguous" }                             │
+            │ Row { effect: "preserve completed invalidation", attempt: "prepared", current: "ambiguous (blocking)", outcome: "rejected: affected-call state mismatch" }                              │
+            │ Row { effect: "preserve completed invalidation", attempt: "prepared", current: "ambiguous (resolved by evidence)", outcome: "rejected: affected-call state mismatch" }                  │
+            │ Row { effect: "preserve completed invalidation", attempt: "prepared", current: "ambiguous (duplicate risk accepted)", outcome: "rejected: affected-call state mismatch" }               │
+            └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&effect_state_matrix_table(&[
             ("classify nonterminal known-failed", known_failed),

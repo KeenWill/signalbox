@@ -8319,19 +8319,19 @@ mod tests {
     #[test]
     fn inv040_finding_transition_matrix_is_closed() {
         expect![[r#"
-            ┌───────────────────┬────────────────────────────────────────────────────────────────┐
-            │ current           │ permitted_events                                               │
-            ├───────────────────┼────────────────────────────────────────────────────────────────┤
-            │ Open              │ Accepted, Rejected, Duplicate, Superseded, Stale               │
-            │ Accepted          │ Duplicate, Superseded, Stale, Posted, Fixed, BlockedWithReason │
-            │ Rejected          │ -                                                              │
-            │ Duplicate         │ -                                                              │
-            │ Superseded        │ -                                                              │
-            │ Stale             │ -                                                              │
-            │ Posted            │ Superseded, Stale, Fixed, BlockedWithReason                    │
-            │ Fixed             │ -                                                              │
-            │ BlockedWithReason │ Superseded, Stale, Posted, Fixed                               │
-            └───────────────────┴────────────────────────────────────────────────────────────────┘
+            ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                            │
+            ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ FindingTransitionRow { current: "Open", permitted_events: "Accepted, Rejected, Duplicate, Superseded, Stale" }                   │
+            │ FindingTransitionRow { current: "Accepted", permitted_events: "Duplicate, Superseded, Stale, Posted, Fixed, BlockedWithReason" } │
+            │ FindingTransitionRow { current: "Rejected", permitted_events: "-" }                                                              │
+            │ FindingTransitionRow { current: "Duplicate", permitted_events: "-" }                                                             │
+            │ FindingTransitionRow { current: "Superseded", permitted_events: "-" }                                                            │
+            │ FindingTransitionRow { current: "Stale", permitted_events: "-" }                                                                 │
+            │ FindingTransitionRow { current: "Posted", permitted_events: "Superseded, Stale, Fixed, BlockedWithReason" }                      │
+            │ FindingTransitionRow { current: "Fixed", permitted_events: "-" }                                                                 │
+            │ FindingTransitionRow { current: "BlockedWithReason", permitted_events: "Superseded, Stale, Posted, Fixed" }                      │
+            └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(finding_transition_rows()));
     }

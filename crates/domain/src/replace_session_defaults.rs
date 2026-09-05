@@ -1208,15 +1208,15 @@ mod tests {
         }
 
         expect![[r#"
-            ┌────────────────────────────────────┬────────────────────────────────┐
-            │ perturbed_stored_fact              │ failure                        │
-            ├────────────────────────────────────┼────────────────────────────────┤
-            │ result session cross-wired         │ ResultSessionMismatch          │
-            │ defaults owner cross-wired         │ DefaultsSessionMismatch        │
-            │ result and installed versions torn │ ResultVersionMismatch          │
-            │ installed version skips successor  │ InstalledVersionIsNotSuccessor │
-            │ stored replacement differs         │ StoredDefaultsMismatch         │
-            └────────────────────────────────────┴────────────────────────────────┘
+            ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ value                                                                                                                    │
+            ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ PerturbedFactRow { perturbed_stored_fact: "result session cross-wired", failure: ResultSessionMismatch }                 │
+            │ PerturbedFactRow { perturbed_stored_fact: "defaults owner cross-wired", failure: DefaultsSessionMismatch }               │
+            │ PerturbedFactRow { perturbed_stored_fact: "result and installed versions torn", failure: ResultVersionMismatch }         │
+            │ PerturbedFactRow { perturbed_stored_fact: "installed version skips successor", failure: InstalledVersionIsNotSuccessor } │
+            │ PerturbedFactRow { perturbed_stored_fact: "stored replacement differs", failure: StoredDefaultsMismatch }                │
+            └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table([
             PerturbedFactRow {
