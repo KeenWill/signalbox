@@ -252,6 +252,43 @@ class ConvergencePredicateTests(unittest.TestCase):
         self.assertIsNone(pull_request["checked_head_oid"])
         self.assertIsNone(pull_request["base_commits_not_in_head"])
 
+    def test_review_thread_revalidation_enforces_configured_limit(self) -> None:
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 1
+        )
+        client.execute = mock.Mock(
+            return_value={
+                "node": {
+                    "baseRefOid": "base",
+                    "headRefOid": "head",
+                    "reviewThreads": {
+                        "totalCount": 2,
+                        "nodes": [{"id": "thread-1", "isResolved": True}],
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "cursor",
+                        },
+                    },
+                }
+            }
+        )
+        pull_request = {
+            "node_id": "pull-request",
+            "base_oid": "base",
+            "head_oid": "head",
+            "checked_head_oid": "head",
+            "base_commits_not_in_head": 0,
+            "review_threads": [
+                {"id": "thread-1", "isResolved": True},
+                {"id": "thread-2", "isResolved": True},
+            ],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "configured limit"):
+            client._revalidate_review_threads([pull_request])
+
+        client.execute.assert_called_once()
+
     def test_check_revalidation_detects_an_early_context_change(self) -> None:
         client = GitHubGraphQL(
             "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000

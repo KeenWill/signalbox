@@ -1077,6 +1077,10 @@ query($id: ID!, $after: String) {
                 page_total = page["totalCount"]
                 if not isinstance(page_total, int) or isinstance(page_total, bool):
                     raise RuntimeError("review thread totalCount is not an integer")
+                if page_total < 0 or page_total > self.review_thread_limit:
+                    raise RuntimeError(
+                        "review thread census exceeds configured limit"
+                    )
                 if total_count is None:
                     total_count = page_total
                 elif page_total != total_count:
