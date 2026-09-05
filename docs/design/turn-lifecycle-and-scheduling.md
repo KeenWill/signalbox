@@ -22,11 +22,15 @@ owns the turn phase with its attempt disposition and the wake conditions, and
 states no rule about which ending is reached. Entering either wait form
 atomically ends the call-free current attempt with a yielded-to-durable-wait
 disposition and stores the wait, leaving no live attempt. Startup reconstitutes
-the stored wait only from its complete evidence and does not reclassify it. The
-scheduler makes the wait eligible on a reached deadline, an exact reservation
-release, or a durable member-availability update. Release atomically consumes
-the wait, creates a fresh prepared successor attempt, and returns the same turn
-to running, resuming the availability chain the wait was part of rather than
+a stored wait only from its complete evidence and does not reclassify it; it
+re-evaluates every retained contended wait against the current registrations,
+and a restart alone wakes nothing. A contended wait becomes eligible on a
+reservation release by one of the bounded members it names, on its deadline, or
+on that startup re-evaluation. An exhausted wait becomes eligible on its
+deadline, when it has one, on a durable member-availability update, or on an
+operator clearing a credential exclusion. Release atomically consumes the wait,
+creates a fresh prepared successor attempt, and returns the same turn to
+running, resuming the availability chain the wait was part of rather than
 starting a new one.
 
 Runner-loss recovery has two user commands, replace and abandon, whose request
@@ -39,13 +43,15 @@ successor placement and extends the next context frontier commits only after any
 authorized in-flight daemon-local call for the session reaches its observation
 boundary, so the call's entries append before the placement boundary. A call
 that ends known-failed, refused, cancelled, or ambiguous reaches an observation
-boundary too, so staging never waits indefinitely. Abandonment requires no
-active turn; with a turn active it records that the turn needs existing control,
-and the user empties the slot through the stop, approval, or reconciliation flow
-first. A queued turn remains queued and cannot activate while its placement is
-lost. Both commands are administrative recovery: they neither widen the
-interrupt delivery nor create a standalone cancellation path, and no case turns
-ambiguous effect evidence into known failure.
+boundary too, so staging never waits indefinitely. A response that would
+introduce unfinished tool work stays outside replacement recovery until its
+recovery transition is defined. Abandonment requires no active turn; with a turn
+active it records that the turn needs existing control, and the user empties the
+slot through the stop, approval, or reconciliation flow first. A queued turn
+remains queued and cannot activate while its placement is lost. Both commands
+are administrative recovery: they neither widen the interrupt delivery nor
+create a standalone cancellation path, and no case turns ambiguous effect
+evidence into known failure.
 
 Recovery-only startup binds the runner socket in recovery-only mode after
 migrations, reconciles retained runner inventory, evidence, and nonterminal
@@ -90,9 +96,13 @@ rows, never that boundary.
 ## Acceptance
 
 A turn whose model call finds no available credential parks in the new phase
-with its attempt ended by a yield, survives restart unchanged, becomes eligible
-on exactly the three wake conditions, and resumes with a fresh prepared attempt
-on the same availability chain.
+only when the credential machine selects a wait; an exhaustion that selects no
+wait, such as one under the `fail` policy, terminalizes the turn through the
+failure rows [credential-availability](../spec/credential-availability.md) owns
+and never enters the phase. A parked turn has its attempt ended by a yield,
+survives restart unchanged, becomes eligible on exactly the wake conditions of
+its wait form, and resumes with a fresh prepared attempt on the same
+availability chain.
 
 A replacement command issued while a call is in flight is accepted, and its
 placement boundary commits after that call's observation boundary; a commit in

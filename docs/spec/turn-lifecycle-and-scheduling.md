@@ -63,10 +63,10 @@ according to the delivery mode the client chose. Wire shapes are owned by
 
 A context frontier snapshot is the ordered set of transcript entries a turn
 starts from or a call was prepared against (`ContextFrontierId`). Every turn
-start, model call, and terminal outcome names one, and the scheduling projection
-validates the chain of snapshots, including compaction results, before it trusts
-any stored start. Transcript entries and compaction visibility are owned by
-[sessions-and-transcript](sessions-and-transcript.md).
+start, model call, and terminal outcome of an activated turn names one, and the
+scheduling projection validates the chain of snapshots, including compaction
+results, before it trusts any stored start. Transcript entries and compaction
+visibility are owned by [sessions-and-transcript](sessions-and-transcript.md).
 
 A parent turn that awaits a spawned child in the foreground parks in an active
 phase with no current attempt; a background await and inter-session messages
@@ -212,7 +212,9 @@ attachment-preparation permit ends and leaves only the durable prepared row for
 a later sweep. When a pass exceeds its occupancy bound, the handoff invokes the
 startup-recovery transaction only for a turn whose attempt and turn-progress
 frontier did not change between two observations, and a resumability read that
-does not settle counts as a resumption.
+does not settle counts as a resumption; a pass that expires inside
+pre-activation compaction instead hands off only the exact compaction call that
+window made durable.
 
 A quiescent candidate is an active turn with an accepted-input origin in the
 running phase, with no tool round, approval, or recovery attempt, and no live
@@ -352,30 +354,32 @@ terminal frontier extends the call frontier by the failure marker alone; a
 round-completed continuation window never contains a turn-end closure. A
 cancelled turn reconstructs only when its ended attempt carries the cancelled
 end and the same complete applied-interrupt result as the disposition; it names
-either no call or its one correlated terminal cancelled call, and its terminal
-frontier extends the starting or call frontier by exactly the cancellation
-marker, preceded, when cancellation terminalized a tool round, by one result
-entry per request in proposal order. A refused turn names its ended attempt and
-correlated terminal refused call, and its terminal frontier is an equal-content
-boundary over that call's frontier. A reconciliation-required turn names its
-ended attempt and exactly one terminal ambiguous model call or tool attempt; the
-attempt end is lost or ambiguous without a stop, with a later applied interrupt
-or a durable automatic recovery attempt, or it is a cancellation end carrying
-the interrupt proof. Automatic reconciliation authority binds the exact session,
-turn, and model call and is not admitted for a tool reconciliation. A model-call
-reconciliation terminal frontier is an equal-content boundary over the ambiguous
-call's source frontier; a tool reconciliation adds one result per request with
-the ambiguous request closed. A consumed steering input reconstitutes only
-against its exact consuming call, whose frontier is the start or round-result
-projection extended by the consumed entries in acceptance order; a consumer that
-completed by proposing a tool round stays correlated through its validated
-assistant history for the rest of the turn. Every active turn's projection
-carries a session-scoped acceptance tail anchored at the turn's origin and
-extending gap-free through the last observed acceptance position; a position
-consumed by the predecessor remains in that tail after a queued origin
-activates, and only steering consumed by the new active turn enters its
-execution aggregate. A tail entry recording an accepted interrupt is admitted
-only when the current stop or recovery state carries its exact proof.
+no call, its one correlated terminal cancelled call, or, when cancellation
+terminalized a tool round, that round's completed producing call, and its
+terminal frontier extends the starting or call frontier by exactly the
+cancellation marker, preceded, when cancellation terminalized a tool round, by
+one result entry per request in proposal order. A refused turn names its ended
+attempt and correlated terminal refused call, and its terminal frontier is an
+equal-content boundary over that call's frontier. A reconciliation-required turn
+names its ended attempt and exactly one terminal ambiguous model call or tool
+attempt; the attempt end is lost or ambiguous without a stop, with a later
+applied interrupt or a durable automatic recovery attempt, or it is a
+cancellation end carrying the interrupt proof. Automatic reconciliation
+authority binds the exact session, turn, and model call and is not admitted for
+a tool reconciliation. A model-call reconciliation terminal frontier is an
+equal-content boundary over the ambiguous call's source frontier; a tool
+reconciliation adds one result per request with the ambiguous request closed. A
+consumed steering input reconstitutes only against its exact consuming call,
+whose frontier is the start or round-result projection extended by the consumed
+entries in acceptance order; a consumer that completed by proposing a tool round
+stays correlated through its validated assistant history for the rest of the
+turn. Every active turn's projection carries a session-scoped acceptance tail
+anchored at the turn's origin and extending gap-free through the last observed
+acceptance position; a position consumed by the predecessor remains in that tail
+after a queued origin activates, and only steering consumed by the new active
+turn enters its execution aggregate. A tail entry recording an accepted
+interrupt is admitted only when the current stop or recovery state carries its
+exact proof.
 
 A spawned child's first turn has a closed delegated-task origin naming the exact
 spawning request, with a starting frontier containing the delegated-task entry
