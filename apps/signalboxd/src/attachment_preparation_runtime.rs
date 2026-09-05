@@ -4,8 +4,8 @@ use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use sha2::{Digest as _, Sha256};
 use signalbox_application::{
-    AttachmentPreparationFailure, ModelCallCapabilityPreparation, ModelCallProvider,
-    PreparedModelOperation,
+    AttachmentPreparationFailure, ModelCallCapabilityPreparation, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, ModelCallProvider, PreparedModelOperation,
 };
 use signalbox_blob_store::{BlobStoreFailureKind, ExpectedBlob};
 use signalbox_domain::{BlobDigest, PreparedModelCallRequest};
@@ -97,6 +97,51 @@ where
         self.inner
             .invoke(authorized, capability, acceptance_possible, cancellation)
             .await
+    }
+}
+
+impl<Provider> ModelCallInputTokenCounter for AttachmentPreparingModelCallProvider<Provider>
+where
+    Provider: ModelCallInputTokenCounter + Sync,
+{
+    type Error = Provider::Error;
+
+    async fn count_input_tokens<Cancellation>(
+        &self,
+        operation: PreparedModelOperation,
+        cancellation: Cancellation,
+    ) -> Result<ModelCallInputTokenCount, Self::Error>
+    where
+        Cancellation: Future<Output = ()> + Send + 'static,
+    {
+        let digests = operation.attachment_digests().collect::<BTreeSet<_>>();
+        if digests.is_empty() {
+            return self.inner.count_input_tokens(operation, cancellation).await;
+        }
+
+        let mut cancellation = Box::pin(cancellation);
+        let prepared = {
+            let preparation = prepare_attachments(
+                &self.catalog,
+                self.registry.as_deref(),
+                operation.request(),
+                digests,
+            );
+            tokio::pin!(preparation);
+            tokio::select! {
+                biased;
+                () = &mut cancellation => {
+                    return Ok(ModelCallInputTokenCount::Cancelled);
+                }
+                prepared = &mut preparation => prepared,
+            }
+        };
+        if prepared.is_err() {
+            // Capability preparation reports the typed attachment failure. The
+            // counter must only prevent provider interaction before that path.
+            return Ok(ModelCallInputTokenCount::Unavailable);
+        }
+        self.inner.count_input_tokens(operation, cancellation).await
     }
 }
 

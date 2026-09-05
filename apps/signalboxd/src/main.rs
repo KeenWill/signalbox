@@ -2413,7 +2413,11 @@ async fn run_hub(
     let web_http_runtime = web_http_listener.into_runtime(process_runtime.monitor());
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
-    let counter = provider.clone();
+    let counter = AttachmentPreparingModelCallProvider::new(
+        provider.clone(),
+        scheduler_pool.clone(),
+        blob_store_registry.clone(),
+    );
     let model_repository = PostgresModelCallRepository::new(
         scheduler_pool.clone(),
         model_targets,
