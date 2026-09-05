@@ -92,7 +92,7 @@ files, fetches external resources, or recurses into embedded containers.
 Recognized encrypted or locked content is a terminal outcome, and no password
 channel exists.
 
-A reader revision is immutable, so an earlier durable tool result keeps what the
+A reader revision is immutable. An earlier durable tool result keeps what the
 model saw while a later request may use a newer revision. Why: a durable result
 is never reclassified.
 
