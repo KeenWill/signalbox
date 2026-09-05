@@ -9,11 +9,13 @@ The daemon composes two web tools, `web_search` and `web_fetch`, in
 `crates/tools-web`. Each invocation sends at most one request and returns the
 outcome as evidence for the model.
 
-The output boundary is structural: a provider response is parsed into typed
-components and the evidence is built from those components. Every bound on a
-search-result component is a named constant beside the type that enforces it.
-After construction, a `CredentialScrubber` redacts the search credential's exact
-value and encoded variants from `web_search` output.
+The `web_search` output boundary is structural: the provider response is parsed
+into typed components and the evidence is built from those components, each
+admitted within a named constant beside the type that enforces it. After
+construction, a `CredentialScrubber` redacts the search credential's exact value
+and encoded variants from that output. A `web_fetch` response is not parsed into
+components: its evidence carries the response body as decoded text under a named
+byte bound, with the status, the content type, and a truncation flag.
 
 The transport floor in `crates/egress-transport` fixes how a `web_fetch`
 connection is made. Origin admission, stated in
@@ -26,7 +28,7 @@ comes back.
 
 ## Decisions
 
-Structural construction is the primary control on web-tool output, and the
+Structural construction is the primary control on `web_search` output, and the
 credential scrubber is defense in depth after it. Why: parsing treats provider
 bytes as input to a bounded parser rather than as a second rendering channel,
 and exact-value redaction may miss a credential that provider content
