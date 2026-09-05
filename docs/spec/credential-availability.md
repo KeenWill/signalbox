@@ -4,7 +4,7 @@ Credential availability decides how a model call that draws its credential from
 a configured pool ends when the pool admits a member, admits none, or a member's
 call fails with a cause the pool can route around.
 
-## Map
+## Overview
 
 A credential pool is a ranked set of credential profiles a session's model calls
 may use. Its grammar, ranking, trigger vocabulary and admission rules are owned
@@ -41,7 +41,7 @@ was found, and whether a failed call's cause, pinned action and proof authorize
 a successor. Every exhaustion fails, whatever exhaustion value the pool
 configures.
 
-## Decisions
+## Design decisions
 
 A credential failure in the delivery layer, such as a rejected daemon-owned
 OAuth refresh or a credential-home identity that failed its walk, never enters
@@ -51,7 +51,7 @@ quarantines the profile under
 deployment misconfiguration is not a provider condition the pool's trigger
 policy routes around.
 
-## Contracts
+## Boundary contracts
 
 Every credential-pool selection attempt ends in exactly one ending of this
 machine, and that ending fixes every projection any specification page states of
@@ -128,7 +128,7 @@ qualifying causes; the pinned action for that cause is not `switch_now`; the
 adapter supplied no pre-stream proof. Why ordered: ordinary inputs fail several
 gates at once, and the first names the actionable reason.
 
-## Not built
+## Planned
 
 - Contended-wait: an exhaustion in which at least one member was skipped only
   for its concurrency bound parks the turn with closed cause contended

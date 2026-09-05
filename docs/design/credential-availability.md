@@ -14,7 +14,7 @@ concurrent invocations per member and makes contention a wait distinct from
 exhaustion. The pre-call exhaustion ending gains a typed live event and
 per-member evidence rows.
 
-## Shape
+## Design
 
 The machine's endings partition on questions asked in order: did selection admit
 a member; if not, was any otherwise-admissible member skipped only for its
@@ -135,7 +135,7 @@ consults the exhaustion value of the pool-policy revision it resolved. `park`
 selects a wait under the wait-selection rule above; `fail` terminalizes as the
 spec page states.
 
-## Constraints on present code
+## Compatibility constraints
 
 - A chain exclusion stays insert-only and turn-local. The release rule re-reads
   every other exclusion from current state and depends on chain exclusions never
@@ -157,7 +157,7 @@ spec page states.
 - Every attempt a release opens names the wait-release origin; the continuation
   chain stays total over attempts.
 
-## Acceptance
+## Acceptance criteria
 
 - A `park` pool whose exhaustion snapshot holds a member whose every active
   exclusion expires enters exhausted-wait, keeps its slot, appends no
