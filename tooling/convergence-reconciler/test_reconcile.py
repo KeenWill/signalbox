@@ -1265,6 +1265,47 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
         self.assertEqual(pull_request["live_codex_review_oids"], {})
 
+    def test_review_body_finding_is_not_hidden_by_declined_threads(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        head = "a" * 40
+        pull_request = {
+            "head_oid": head,
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "review_threads": [
+                {
+                    "isResolved": True,
+                    "isDispositioned": True,
+                    "isInformational": False,
+                    "dispositionKind": "declined",
+                    "reviewIds": ["review-node"],
+                }
+            ],
+            "_review_comments": [
+                {
+                    "authorAssociation": "OWNER",
+                    "body": f"@codex review\nExact head {head}",
+                    "createdAt": "2026-08-16T10:00:00Z",
+                }
+            ],
+            "_reviews": [
+                {
+                    "id": "review-node",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "state": "COMMENTED",
+                    "body": "P1: an additional body finding",
+                    "submittedAt": "2026-08-16T10:01:00Z",
+                    "commit": {"oid": head},
+                    "comments": {"totalCount": 1},
+                }
+            ],
+        }
+
+        client._finalize_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+        self.assertEqual(pull_request["live_codex_review_oids"], {})
+
     def test_completed_summary_and_reaction_authenticate_quiet_review(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         head = "a" * 40
@@ -2203,6 +2244,39 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "reviewIds": [],
                 }
             ],
+        )
+
+    def test_trusted_reply_review_record_remains_a_disposition(self) -> None:
+        threads = [
+            {
+                "isResolved": True,
+                "comments": {
+                    "nodes": [
+                        {
+                            "author": {"login": "reviewer"},
+                            "authorAssociation": "NONE",
+                            "body": "Finding",
+                            "createdAt": "2026-09-05T10:00:00Z",
+                            "pullRequestReview": {"id": "review-finding"},
+                        },
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "Fixed in commit abcdef123.",
+                            "createdAt": "2026-09-05T10:05:00Z",
+                            "pullRequestReview": {"id": "review-reply"},
+                        },
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")[0]
+
+        self.assertTrue(normalized["isDispositioned"])
+        self.assertEqual(normalized["dispositionKind"], "fixed")
+        self.assertEqual(
+            normalized["latestReviewerAt"], "2026-09-05T10:00:00Z"
         )
 
     def test_exact_codex_review_command_is_a_review_request(self) -> None:

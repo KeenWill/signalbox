@@ -570,13 +570,14 @@ query($id: ID!, $after: String!) {
                     and thread.get("isInformational", False)
                     for thread in review_threads
                 )
-                review_is_quiet = review.get("state") != "CHANGES_REQUESTED" and (
-                    (
+                review_is_quiet = (
+                    review.get("state") != "CHANGES_REQUESTED"
+                    and not (review.get("body") or "").strip()
+                    and (
                         review["comments"]["totalCount"] == 0
-                        and not (review.get("body") or "").strip()
+                        or all_findings_declined
+                        or informational_wave
                     )
-                    or all_findings_declined
-                    or informational_wave
                 )
                 if is_live_codex_review and review_is_quiet:
                     # Same-head evidence may survive a check rerun only while
@@ -1762,7 +1763,6 @@ def normalize_review_threads(
                 index
                 for index, comment in enumerate(comments)
                 if index == 0
-                or isinstance(comment.get("pullRequestReview"), dict)
                 or comment.get("authorAssociation")
                 not in TRUSTED_REVIEW_REQUEST_ASSOCIATIONS
             ),

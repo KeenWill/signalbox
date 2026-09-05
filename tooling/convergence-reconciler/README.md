@@ -54,9 +54,10 @@ one current GitHub snapshot:
    No body-only review has the aggregate decision `CHANGES_REQUESTED`.
 2. Unless every changed file is planning-only under the repository banner rule,
    a trusted repository member explicitly requested Codex review naming the
-   current head OID, and `chatgpt-codex-connector` subsequently completed either
-   a comment-free review or a review whose findings were all validly declined
-   and resolved. Authenticated evidence is retained for an unchanged head across
+   current head OID, and `chatgpt-codex-connector` subsequently produced either
+   its completed-summary approval reaction or an empty-body review with no
+   comments or with every finding validly declined and resolved. Authenticated
+   evidence is retained for an unchanged head across
    later check reruns only while its settled check-context identity inventory
    remains unchanged.
 3. A check rollup exists on the commit whose OID equals the current head OID,
