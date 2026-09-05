@@ -149,8 +149,8 @@ and prevent partial command-fence or commissioned-dispatch identities.
 Observation projections are decoded as complete pairs by the persistence
 adapter. The function pins the restore-safe schema search path. The
 cross-component behavior using these records is owned by
-[pull-request convergence reconciliation](convergence-reconciliation.md).
-Migration `202608210402_repo_watch_pull_request_target_indexes.sql` indexes the
+[pull-request convergence reconciliation](repo-watch.md). Migration
+`202608210402_repo_watch_pull_request_target_indexes.sql` indexes the
 repository-watch event-to-action path used to census sessions by pull-request
 target. Migration `202608210403_convergence_sweep_parked_session.sql` projects
 the exact inactive census dispatch and session through the parked-target
