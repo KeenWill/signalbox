@@ -4,9 +4,8 @@
 import os
 import re
 import subprocess
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, namedtuple
 from pathlib import Path
-from typing import NamedTuple
 
 SNAPSHOTS = {
     "signalbox-domain": Path("docs/api/signalbox-domain.txt"),
@@ -22,18 +21,19 @@ AUTO_TRAIT = re.compile(
     r"Sync|Unpin|UnsafeUnpin)|"
     r"panic::unwind_safe::(?:RefUnwindSafe|UnwindSafe))$"
 )
-
-
-Item = NamedTuple(
-    "Item", [("module", str), ("category", str), ("name", str), ("declaration", str)]
+BLANKET_TRAIT = re.compile(
+    r"^(?:alloc::borrow::ToOwned|core::(?:any::Any|borrow::Borrow(?:Mut)?|"
+    r"clone::CloneToUninit|convert::(?:From|Into|TryFrom|TryInto))|"
+    r"equivalent::(?:Comparable|Equivalent)|hashbrown::Equivalent|"
+    r"tracing::instrument::(?:Instrument|WithSubscriber)|typenum::type_operators::Same)$"
 )
+Item = namedtuple("Item", "module category name declaration")
 
 
 def git_text(revision: str, path: Path) -> str:
     result = subprocess.run(
-        ["git", "show", f"{revision}:{path.as_posix()}"],
-        check=False, capture_output=True, text=True,
-    )
+        ["git", "show", f"{revision}:{path.as_posix()}"], check=False,
+        capture_output=True, text=True)
     return result.stdout if result.returncode == 0 else ""
 
 
@@ -65,24 +65,21 @@ def item_name(line: str, start: int) -> str:
 
 def parse(text: str) -> tuple[str, list[Item]]:
     lines = text.splitlines()
-    module_lines = [
-        (match.group("name"), line)
-        for line in lines if (match := MODULE.match(line))
-    ]
+    module_lines = [(match.group("name"), line) for line in lines
+                    if (match := MODULE.match(line))]
     modules = {name for name, _ in module_lines}
     root = min(modules, key=lambda name: name.count("::"))
-    items = [
-        Item(name.rpartition("::")[0] or root, "module", name, line)
-        for name, line in module_lines
-    ]
+    items = [Item(name.rpartition("::")[0] or root, "module", name, line)
+             for name, line in module_lines]
     include_nested_functions = include_associated_types = False
     for line in lines:
-        if line.startswith(("impl ", "impl<")):
+        impl_line = line.removeprefix("unsafe ")
+        if impl_line.startswith(("impl ", "impl<")):
             include_associated_types = False
-            target = line.split(" where ", 1)[0]
+            target = impl_line.split(" where ", 1)[0]
             include_nested_functions = " for " not in target and any(
                 f"{module}::" in target for module in modules)
-            normalized = without_generics(line[4:]).split(" where ", 1)[0].strip()
+            normalized = without_generics(impl_line[4:]).split(" where ", 1)[0].strip()
             if " for " not in normalized:
                 owners = [module for module in modules if normalized.startswith(module)]
                 if owners:
@@ -90,15 +87,20 @@ def parse(text: str) -> tuple[str, list[Item]]:
                     items.append(Item(module, "implementation", f"{normalized} (inherent)", line))
             else:
                 trait, subject = normalized.split(" for ", 1)
-                raw_subject = line.split(" for ", 1)[1].split(" where ", 1)[0]
+                raw_subject = impl_line.split(" for ", 1)[1].split(" where ", 1)[0]
                 owners = [module for module in modules if subject.startswith(module)]
-                parameters = re.findall(r"(?:^|,\s*)(?:const\s+)?('?\w+)", line[5:line.find(">")])
-                source_owned = not line.startswith("impl<") or any(
+                parameters = re.findall(r"(?:^|,\s*)(?:const\s+)?('?\w+)",
+                                        impl_line[5:impl_line.find(">")])
+                uses_subject_parameter = any(
                     re.search(rf"(?<!\w){re.escape(name)}(?!\w)", raw_subject)
                     for name in parameters
                 )
+                blanket = (
+                    impl_line.startswith("impl<") and not uses_subject_parameter
+                    and BLANKET_TRAIT.match(without_generics(trait))
+                )
                 if owners and not AUTO_TRAIT.match(trait) and (
-                    source_owned or any(trait.startswith(module) for module in modules)
+                    not blanket or any(trait.startswith(module) for module in modules)
                 ):
                     module = max(owners, key=len)
                     name = f"{subject} as {trait}"
@@ -112,10 +114,11 @@ def parse(text: str) -> tuple[str, list[Item]]:
                 module = max(owners, key=len, default=root)
                 items.append(Item(module, "member", name, line))
             continue
-        name = item_name(line, match.end())
+        kind = match.group("kind")
+        start = match.end() + (4 if kind == "static" and line[match.end():].startswith("mut ") else 0)
+        name = item_name(line, start)
         owners = [module for module in modules if name.startswith(f"{module}::")]
         module = max(owners, key=len, default=root)
-        kind = match.group("kind")
         direct_child = "::" not in name.removeprefix(f"{module}::")
         if kind == "trait":
             include_nested_functions = direct_child
