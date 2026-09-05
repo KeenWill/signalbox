@@ -13,6 +13,7 @@ be asked to demonstrate on demand.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import re
 import stat
@@ -50,35 +51,13 @@ if os.environ.get("FAKE_DOCKER_HANGS_ON") == command:
 if command == "version":
     sys.exit(1) if os.environ.get("FAKE_DOCKER_DOWN") else print("27.0.0")
 elif command == "ps":
+    assert "--format" in sys.argv and sys.argv[sys.argv.index("--format") + 1] == "json"
     with open(os.environ["FAKE_DOCKER_PS_ARGUMENTS"], "w") as log:
         log.write("\\n".join(sys.argv[1:]))
     if os.environ.get("FAKE_DOCKER_PS_REFUSED"):
         print(os.environ["FAKE_DOCKER_PS_REFUSED"], file=sys.stderr)
         sys.exit(1)
     print(os.environ["FAKE_DOCKER_PS"], end="")
-elif command == "inspect":
-    if os.environ.get("FAKE_DOCKER_INSPECT_REFUSED"):
-        print(os.environ["FAKE_DOCKER_INSPECT_REFUSED"], file=sys.stderr)
-        sys.exit(1)
-    if os.environ.get("FAKE_DOCKER_INSPECT_SILENTLY_FAILS"):
-        sys.exit(1)
-    inventory = dict(
-        line.split(" ", 1)
-        for line in os.environ["FAKE_DOCKER_INSPECT"].splitlines()
-    )
-    assert sys.argv[2] == "--format", sys.argv
-    missing = 0
-    for container_id in sys.argv[4:]:
-        if container_id in inventory:
-            print(f"{container_id} {inventory[container_id]}")
-        else:
-            missing += 1
-            print(f"Error: No such object: {container_id}", file=sys.stderr)
-    if os.environ.get("FAKE_DOCKER_INSPECT_NOTE"):
-        print(os.environ["FAKE_DOCKER_INSPECT_NOTE"], file=sys.stderr)
-    if os.environ.get("FAKE_DOCKER_INSPECT_NOTE_IS_FATAL"):
-        sys.exit(1)
-    sys.exit(1 if missing else 0)
 elif command == "rm":
     assert "--force" in sys.argv and "--volumes" in sys.argv, sys.argv
     if os.environ.get("FAKE_DOCKER_RM_REFUSED"):
@@ -168,11 +147,7 @@ SWEEP_TIMEOUT_SECONDS = 60
 # so a leaked deadline from this sweep is the only thing the count can find.
 LEAK_PROBE_DEADLINE_SECONDS = 883
 
-REFUSED_INSPECTION = "Error response from daemon: authorization denied"
-
 REFUSED_REMOVAL = "Error response from daemon: removal is denied by policy"
-
-HARMLESS_INSPECTION_NOTE = "WARNING: the legacy inspect format is deprecated"
 
 HARMLESS_REMOVAL_NOTE = "WARNING: --volumes is deprecated in favour of -v"
 
@@ -374,11 +349,6 @@ def run_sweep(
     listing_refused: str | None = None,
     volume_listing_refused: str | None = None,
     dangling_volumes: int = 0,
-    vanished: tuple[str, ...] = (),
-    inspection_refused: str | None = None,
-    inspection_fails_silently: bool = False,
-    inspection_note: str | None = None,
-    inspection_note_is_fatal: bool = False,
     gone_before_removal: tuple[str, ...] = (),
     removal_refused: str | None = None,
     removal_fails_silently: bool = False,
@@ -387,10 +357,7 @@ def run_sweep(
 ) -> SweepRun:
     """Invoke the real sweep against one fake inventory, outside test bodies.
 
-    `vanished` names containers the listing reports but inspection no longer
-    finds, reproducing a container removed between the two calls.
-    `inspection_refused` and `inspection_fails_silently` instead reproduce an
-    inspection that failed for a reason other than a container disappearing.
+    Docker's JSON listing is the controlled inventory consumed by the sweep.
     """
     with tempfile.TemporaryDirectory() as scratch:
         scratch_path = Path(scratch)
@@ -399,12 +366,22 @@ def run_sweep(
         listing_log = scratch_path / "listing-arguments.txt"
         environment = dict(os.environ)
         environment["PATH"] = f"{scratch_path}:{environment['PATH']}"
-        listed = [i for i, _ in inventory] + list(vanished)
-        environment["FAKE_DOCKER_PS"] = "".join(f"{i}\n" for i in listed)
+        listing = []
+        for container_id, rest in inventory:
+            stamp, status, image = rest.split(" ", 2)
+            created = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            listing.append(
+                json.dumps(
+                    {
+                        "ID": container_id,
+                        "CreatedAt": created.strftime("%Y-%m-%d %H:%M:%S %z UTC"),
+                        "State": status,
+                        "Image": image,
+                    }
+                )
+            )
+        environment["FAKE_DOCKER_PS"] = "".join(f"{row}\n" for row in listing)
         environment["FAKE_DOCKER_PS_ARGUMENTS"] = str(listing_log)
-        environment["FAKE_DOCKER_INSPECT"] = "\n".join(
-            f"{i} {rest}" for i, rest in inventory
-        )
         environment["FAKE_DOCKER_RM_LOG"] = str(removal_log)
         environment["FAKE_DOCKER_DANGLING"] = "".join(
             f"volume{n}\n" for n in range(dangling_volumes)
@@ -413,10 +390,6 @@ def run_sweep(
         environment.pop("FAKE_DOCKER_HANGS_ON", None)
         environment.pop("FAKE_DOCKER_VOLUME_REFUSED", None)
         environment.pop("FAKE_DOCKER_PS_REFUSED", None)
-        environment.pop("FAKE_DOCKER_INSPECT_REFUSED", None)
-        environment.pop("FAKE_DOCKER_INSPECT_SILENTLY_FAILS", None)
-        environment.pop("FAKE_DOCKER_INSPECT_NOTE", None)
-        environment.pop("FAKE_DOCKER_INSPECT_NOTE_IS_FATAL", None)
         environment.pop("FAKE_DOCKER_RM_REFUSED", None)
         environment.pop("FAKE_DOCKER_RM_SILENTLY_FAILS", None)
         environment["FAKE_DOCKER_RM_GONE"] = ",".join(gone_before_removal)
@@ -430,10 +403,6 @@ def run_sweep(
             environment["FAKE_DOCKER_RM_NOTE"] = removal_note
         if removal_note_is_fatal:
             environment["FAKE_DOCKER_RM_NOTE_IS_FATAL"] = "1"
-        if inspection_note is not None:
-            environment["FAKE_DOCKER_INSPECT_NOTE"] = inspection_note
-        if inspection_note_is_fatal:
-            environment["FAKE_DOCKER_INSPECT_NOTE_IS_FATAL"] = "1"
         if not daemon_reachable:
             environment["FAKE_DOCKER_DOWN"] = "1"
         survival_log = scratch_path / "survived.txt"
@@ -452,10 +421,6 @@ def run_sweep(
             environment["FAKE_DOCKER_PS_REFUSED"] = listing_refused
         if volume_listing_refused is not None:
             environment["FAKE_DOCKER_VOLUME_REFUSED"] = volume_listing_refused
-        if inspection_refused is not None:
-            environment["FAKE_DOCKER_INSPECT_REFUSED"] = inspection_refused
-        if inspection_fails_silently:
-            environment["FAKE_DOCKER_INSPECT_SILENTLY_FAILS"] = "1"
         if cancel_with is not None:
             completed = cancel_a_hung_sweep(arguments, environment, start_log, cancel_with)
             time.sleep((hang_seconds or 0) + 1)
@@ -628,92 +593,6 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.removed, [])
         self.assertIn("9 dangling volume(s) remain", run.stdout)
 
-    def test_dangling_volumes_are_reported_when_every_candidate_vanished(self) -> None:
-        run = run_sweep(
-            [],
-            arguments=["--apply"],
-            vanished=("gone111",),
-            dangling_volumes=3,
-        )
-
-        self.assertEqual(run.status, 0, run.stderr)
-        self.assertIn("gone before it could be inspected", run.stdout)
-        self.assertIn("3 dangling volume(s) remain", run.stdout)
-
-    def test_a_container_removed_mid_sweep_does_not_abort_the_rest(self) -> None:
-        run = run_sweep(
-            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
-            arguments=["--apply"],
-            vanished=("gone222",),
-        )
-
-        self.assertEqual(run.status, 0, run.stderr)
-        self.assertEqual(run.removed, ["old111"])
-
-    def test_every_container_vanishing_exits_clean(self) -> None:
-        run = run_sweep(
-            [],
-            arguments=["--apply"],
-            vanished=("gone111", "gone222"),
-        )
-
-        self.assertEqual(run.status, 0, run.stderr)
-        self.assertEqual(run.removed, [])
-        self.assertIn("gone before it could be inspected", run.stdout)
-
-    def test_a_refused_inspection_fails_instead_of_claiming_every_container_vanished(
-        self,
-    ) -> None:
-        run = run_sweep(
-            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
-            arguments=["--apply"],
-            inspection_refused=REFUSED_INSPECTION,
-        )
-
-        self.assertEqual(run.status, 1)
-        self.assertEqual(run.removed, [])
-        self.assertIn("other than a container disappearing", run.stderr)
-        self.assertIn(REFUSED_INSPECTION, run.stderr)
-        self.assertNotIn("gone before it could be inspected", run.stdout)
-
-    def test_a_silent_inspection_failure_fails_instead_of_reporting_a_clean_sweep(
-        self,
-    ) -> None:
-        run = run_sweep(
-            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
-            arguments=["--apply"],
-            inspection_fails_silently=True,
-        )
-
-        self.assertEqual(run.status, 1)
-        self.assertEqual(run.removed, [])
-        self.assertIn("other than a container disappearing", run.stderr)
-        self.assertNotIn("gone before it could be inspected", run.stdout)
-
-    def test_a_failure_carrying_an_unrelated_stderr_line_is_not_read_as_a_race(
-        self,
-    ) -> None:
-        run = run_sweep(
-            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
-            arguments=["--apply"],
-            inspection_note=REFUSED_INSPECTION,
-            inspection_note_is_fatal=True,
-        )
-
-        self.assertEqual(run.status, 1)
-        self.assertEqual(run.removed, [])
-        self.assertIn("other than a container disappearing", run.stderr)
-
-    def test_a_successful_inspection_that_warns_on_stderr_still_sweeps(self) -> None:
-        run = run_sweep(
-            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
-            arguments=["--apply"],
-            inspection_note=HARMLESS_INSPECTION_NOTE,
-        )
-
-        self.assertEqual(run.status, 0, run.stderr)
-        self.assertEqual(run.removed, ["old111"])
-
     def test_a_container_removed_before_the_sweep_reaches_it_does_not_abort_removal(
         self,
     ) -> None:
@@ -839,17 +718,6 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.removed, [])
         self.assertIn("did not answer the container listing within 1s", run.stderr)
 
-    def test_a_daemon_that_hangs_on_inspection_fails_instead_of_blocking(self) -> None:
-        run = run_sweep(
-            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
-            arguments=["--apply", "--deadline-seconds", "1"],
-            hangs_on="inspect",
-        )
-
-        self.assertEqual(run.status, 1)
-        self.assertEqual(run.removed, [])
-        self.assertIn("did not answer the container inspection within 1s", run.stderr)
-
     def test_a_daemon_that_hangs_on_removal_fails_instead_of_blocking(self) -> None:
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
@@ -885,25 +753,11 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.removed, [])
         self.assertIn("did not answer the container listing within 1s", run.stderr)
 
-    def test_a_pipeline_child_that_refuses_to_stop_does_not_outlive_the_sweep(
-        self,
-    ) -> None:
-        run = run_sweep(
-            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
-            arguments=["--apply", "--deadline-seconds", "1"],
-            hangs_on="inspect",
-            hang_seconds=6,
-            ignores_term=True,
-        )
-
-        self.assertEqual(run.status, 1)
-        self.assertEqual(run.survived, [], "the refusing call kept talking to the daemon")
-
     def test_a_daemon_call_that_overran_its_deadline_is_not_left_running(self) -> None:
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
             arguments=["--apply", "--deadline-seconds", "1"],
-            hangs_on="inspect",
+            hangs_on="ps",
             hang_seconds=4,
         )
 
@@ -914,7 +768,7 @@ class SweepTestContainersTest(unittest.TestCase):
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
             arguments=["--apply"],
-            hangs_on="inspect",
+            hangs_on="ps",
             hang_seconds=4,
             cancel_with=signal.SIGTERM,
         )
@@ -926,7 +780,7 @@ class SweepTestContainersTest(unittest.TestCase):
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
             arguments=["--apply"],
-            hangs_on="inspect",
+            hangs_on="ps",
             hang_seconds=4,
             cancel_with=signal.SIGQUIT,
         )
@@ -938,7 +792,7 @@ class SweepTestContainersTest(unittest.TestCase):
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
             arguments=["--apply"],
-            hangs_on="inspect",
+            hangs_on="ps",
             hang_seconds=4,
             cancel_with=signal.SIGINT,
         )
@@ -950,7 +804,7 @@ class SweepTestContainersTest(unittest.TestCase):
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
             arguments=["--apply"],
-            hangs_on="inspect",
+            hangs_on="ps",
             hang_seconds=4,
             cancel_with=signal.SIGHUP,
         )
@@ -962,13 +816,13 @@ class SweepTestContainersTest(unittest.TestCase):
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
             arguments=["--apply", "--deadline-seconds", "2"],
-            hangs_on="inspect",
+            hangs_on="ps",
             hang_seconds=5,
             cancel_with=signal.SIGKILL,
         )
 
         self.assertEqual(run.status, -signal.SIGKILL)
-        self.assertEqual(run.survived, ["inspect"], DECLINED_TO_SIGNAL)
+        self.assertEqual(run.survived, ["ps"], DECLINED_TO_SIGNAL)
 
     def test_a_daemon_that_hangs_counting_volumes_still_reports_the_removals(
         self,
