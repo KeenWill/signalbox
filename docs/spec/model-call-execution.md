@@ -677,15 +677,16 @@ create.
 An observation that admits this path ends the predecessor attempt as
 `KnownFailure` but does not terminalize the turn. Under the session-scheduler
 lock, its atomic observation transaction applies the frozen `switch_now` action
-and either prepares the successor attempt and call or enters the pool's
-exhausted or contended disposition. It appends no `TurnFailed`, creates no
-terminal frontier, and does not reclassify pending steering while a successor or
-wait retains the active turn. A concurrently accepted stop is serialized by that
-same lock: when its applied-interrupt proof already exists, the known failure
-follows the ordinary stop-requested terminal path and no successor is created;
-when the observation wins first, the later stop targets the newly active
-successor. One commit can therefore never both terminalize the turn and
-authorize a successor.
+and either prepares the successor attempt or enters the pool's exhausted or
+contended disposition; the successor's member is admitted and its call created
+at that attempt's later preparation. That transaction appends no `TurnFailed`,
+creates no terminal frontier, and does not reclassify pending steering while a
+successor or wait retains the active turn. A concurrently accepted stop is
+serialized by that same lock: when its applied-interrupt proof already exists,
+the known failure follows the ordinary stop-requested terminal path and no
+successor is created; when the observation wins first, the later stop targets
+the newly active successor. One commit can therefore never both terminalize the
+turn and authorize a successor.
 
 Three causes qualify and no others. Refusal never qualifies: it is provider
 judgment about the request, so another account would refuse the same content and

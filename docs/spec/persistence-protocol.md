@@ -2123,61 +2123,62 @@ capacity locks. The one that acquires the freed reservation releases its wait. A
 transaction finding no admissible member instead re-derives its ending from
 [the credential-availability machine](credential-availability.md) under those
 locks and stores whatever that row requires: where a bounded member still holds
-the pool it atomically rewrites its own wait's evidence to the live reservation
-identities now holding the bound and stays parked; where every formerly bounded
-member has become durably excluded, contention is over and the machine's
-wait-selection rule decides, so the wait is rewritten to the exhausted form
-exactly where some member's every active exclusion is one a wake can clear and
-**no wait is stored at all otherwise**, which instead terminalizes the turn with
-the cause that table gives its row. Deriving it from the surviving exclusions
-rather than from the configured value is what stops a `park` pool whose members
-are all excluded by this turn's own chain exclusions from being rewritten into a
-wait no wake could ever release. Storage never keeps a turn parked under a
-policy that says to fail it, and never parks one nothing could wake. Because the
-rewrite holds the capacity rows of every bounded member it names, a concurrent
-completion cannot release one of them between the read and the commit. A
-deferred constraint therefore never has to reject a losing waiter's call, and no
-stored wait names a released reservation or misses the only wake that concerned
-it. Entering either wait ends the call-free current attempt as
-`WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
-admits a member, creates its fresh successor attempt carrying that member's
-`Prepared` call, and consumes the wait; `stop_turn` instead atomically consumes
-it, creates the fresh immediate-successor attempt, applies the interrupt proof,
-ends that attempt `AfterCancellation(Cancelled)`, and terminalizes the turn.
-Each reservation has a closed `pending_spawn` state with no process identity and
-a `spawned { process_group_identity }` state carrying the child process group's
-reuse-safe host identity. Successful spawn replaces `pending_spawn` with
-`spawned` immediately, and that attach is guarded on the reservation still being
-`pending_spawn` for this exact reservation identity. The invocation path may not
-finish while that update's outcome is unknown: a failed or ambiguous commit is
-resolved before the caller proceeds. It rereads the reservation authoritatively
-— a committed `spawned` carrying this exact process-group identity is adopted,
-and a still-`pending_spawn` row is reattached under the same guard. Only when it
-can neither commit the attach nor confirm one does it terminate that exact
-process group, prove it absent, and close the reservation as lost in one
-transaction. Leaving a live child behind a `pending_spawn` row is what the
-startup rule below cannot recover from, so this path never exits into that
-state. Startup must resolve every prior-process `spawned` reservation before
-scheduling — proving that exact group absent, or terminating it and then proving
-absence — and only then closes it as lost; failure to establish absence fails
-startup. Retaining one for a later death notice is not admitted, because the
-terminal observation that would release it died with its daemon. It retains a
-`spawned` reservation owned by the live fenced process, whose observation path
-this daemon still owns. A prior-process `pending_spawn` reservation is ambiguous
-because its child may have started before the identity update, so startup fails
-before scheduling rather than releasing it without process-death proof. After
-that reconciliation and before scheduling is enabled, startup iterates the
-retained `contended` waits themselves rather than the currently bounded
-profiles, so a profile whose bound was removed still has an entry to evaluate.
-Each wait stores a complete nonempty bounded-member set, so startup evaluates
-every member in that set rather than one profile: a member the current
-registration leaves unbounded makes the wait eligible outright with no count to
-compare against, and a member still bounded makes it eligible when that
-profile's surviving live reservation count, taken under its capacity lock, is
-below the current bound. Any one such member suffices, since one admissible
-member is all preparation needs. A bound raised, lowered, or removed across a
-restart is therefore evaluated the same way for every member of every wait,
-without waiting for an unrelated release. These are the shapes required by
+the pool it atomically rewrites its own wait's reservation identities, exclusion
+evidence and derived deadline from current state and stays parked; where every
+formerly bounded member has become durably excluded, contention is over and the
+machine's wait-selection rule decides, so the wait is rewritten to the exhausted
+form exactly where some member's every active exclusion is one a wake can clear
+and **no wait is stored at all otherwise**, which instead terminalizes the turn
+with the cause that table gives its row. Deriving it from the surviving
+exclusions rather than from the configured value is what stops a `park` pool
+whose members are all excluded by this turn's own chain exclusions from being
+rewritten into a wait no wake could ever release. Storage never keeps a turn
+parked under a policy that says to fail it, and never parks one nothing could
+wake. Because the rewrite holds the capacity rows of every bounded member it
+names, a concurrent completion cannot release one of them between the read and
+the commit. A deferred constraint therefore never has to reject a losing
+waiter's call, and no stored wait names a released reservation or misses the
+only wake that concerned it. Entering either wait ends the call-free current
+attempt as `WithoutStop(YieldedToDurableWait)` in the same transaction. Release
+atomically consumes the wait and creates its fresh `Prepared` successor attempt,
+whose later preparation admits a member and creates its call; `stop_turn`
+instead atomically consumes it, creates the fresh immediate-successor attempt,
+applies the interrupt proof, ends that attempt `AfterCancellation(Cancelled)`,
+and terminalizes the turn. Each reservation has a closed `pending_spawn` state
+with no process identity and a `spawned { process_group_identity }` state
+carrying the child process group's reuse-safe host identity. Successful spawn
+replaces `pending_spawn` with `spawned` immediately, and that attach is guarded
+on the reservation still being `pending_spawn` for this exact reservation
+identity. The invocation path may not finish while that update's outcome is
+unknown: a failed or ambiguous commit is resolved before the caller proceeds. It
+rereads the reservation authoritatively — a committed `spawned` carrying this
+exact process-group identity is adopted, and a still-`pending_spawn` row is
+reattached under the same guard. Only when it can neither commit the attach nor
+confirm one does it terminate that exact process group, prove it absent, and
+close the reservation as lost in one transaction. Leaving a live child behind a
+`pending_spawn` row is what the startup rule below cannot recover from, so this
+path never exits into that state. Startup must resolve every prior-process
+`spawned` reservation before scheduling — proving that exact group absent, or
+terminating it and then proving absence — and only then closes it as lost;
+failure to establish absence fails startup. Retaining one for a later death
+notice is not admitted, because the terminal observation that would release it
+died with its daemon. It retains a `spawned` reservation owned by the live
+fenced process, whose observation path this daemon still owns. A prior-process
+`pending_spawn` reservation is ambiguous because its child may have started
+before the identity update, so startup fails before scheduling rather than
+releasing it without process-death proof. After that reconciliation and before
+scheduling is enabled, startup iterates the retained `contended` waits
+themselves rather than the currently bounded profiles, so a profile whose bound
+was removed still has an entry to evaluate. Each wait stores a complete nonempty
+bounded-member set, so startup evaluates every member in that set rather than
+one profile: a member the current registration leaves unbounded makes the wait
+eligible outright with no count to compare against, and a member still bounded
+makes it eligible when that profile's surviving live reservation count, taken
+under its capacity lock, is below the current bound. Any one such member
+suffices, since one admissible member is all preparation needs. A bound raised,
+lowered, or removed across a restart is therefore evaluated the same way for
+every member of every wait, without waiting for an unrelated release. These are
+the shapes required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 Reconstitution and wake must fail closed on partial, stale, or mismatched
 evidence. This paragraph constrains that future schema; no present storage

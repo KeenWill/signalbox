@@ -125,19 +125,21 @@ invocation ends; no reservation is taken against a member no invocation will
 start. A contended wait has five committing transactions that are never
 conflated: the admission that finds every candidate at its bound and inserts the
 wait; the rewrite from an exhausted wait whose cleared exclusion leaves the
-newly admissible member at its bound, which replaces the exclusion evidence with
-that member's live reservation identities; the reservation completion that frees
-capacity and makes the waiters it wakes eligible; the evidence rewrite by which
-a woken transaction that still finds every candidate at its bound replaces the
-wait's reservation identities, exclusion evidence and derived deadline from
-current state and stays parked; and the release, the call preparation that puts
-its Prepared call on a fresh successor attempt and consumes the wait in that
-same transaction, inserting a reservation only where the selected member is a
-`codex_home` one. An exhausted wait has four: the admission; the rewrite from a
-contended wait; the evidence rewrite by which a woken transaction that reruns
-admission and still selects an exhausted wait replaces the wait's exclusion
-evidence and deadline from current state and stays parked, so a past deadline
-never wakes it again; and the release. Lock order is
+newly admissible member at its bound, which recomputes the complete contended
+snapshot from current state — the remaining exclusions, the derived deadline,
+and every otherwise-admissible bounded member with its reservation identities;
+the reservation completion that frees capacity and makes the waiters it wakes
+eligible; the evidence rewrite by which a woken transaction that still finds
+every candidate at its bound replaces the wait's reservation identities,
+exclusion evidence and derived deadline from current state and stays parked; and
+the release, the call preparation that puts its Prepared call on a fresh
+successor attempt and consumes the wait in that same transaction, inserting a
+reservation only where the selected member is a `codex_home` one. An exhausted
+wait has four: the admission; the rewrite from a contended wait; the evidence
+rewrite by which a woken transaction that reruns admission and still selects an
+exhausted wait replaces the wait's exclusion evidence and deadline from current
+state and stays parked, so a past deadline never wakes it again; and the
+release. Lock order is
 [persistence protocol](../spec/persistence-protocol.md)'s.
 
 Wire: a parked turn projects an active transcript turn state that retains the
