@@ -18,27 +18,27 @@ and the user's request.
 
 Eligibility is an allow-list of registered bundle identities. A session template
 supplies instruction selectors that the session carries until its first
-activation, where one session-scheduler transaction resolves them against the
-turn's discovery and installs the allow-list
+turn-start manifest; the transaction that records that manifest resolves them
+against the turn's discovery and installs the allow-list
 ([configuration-and-credentials.md](../spec/configuration-and-credentials.md)).
 A session-specific replacement is its own durable command and carries at most as
 many selectors as a template's selector array. An absent allow-list makes no
 bundle eligible. Each entry pairs a bundle identity with the authorizing root
 the session reaches it through, because one bundle may be registered under
-several roots and the root fixes the paths and scope the model sees. A selector
-or replacement that resolves one bundle identity through more than one root is
-rejected before the allow-list is installed, so every resolved bundle identity
-is distinct.
+several roots and the root fixes the paths and scope the model sees. A bundle
+registered under more than one root is eligible only through its primary root,
+the first root whose rules yield it; a selector naming another root does not
+resolve it.
 
-The activation transaction copies the exact ordered eligibility list under the
-session scheduler lock and records its versioned SHA-256 hash in the turn-start
-manifest. The snapshot is immutable for the turn; a replacement affects only
-later activations. Installed eligibility is revalidated against the live
-configured-root catalog at activation and at startup recovery, and a root the
-configuration no longer declares closes its entries to listing, preview, and new
-admission, including for a turn retained active across the restart; an admission
-already recorded keeps its stored wrapper. A registered bundle absent from the
-snapshot cannot be enumerated, previewed, or admitted.
+The transaction that records a turn-start manifest copies the exact ordered
+eligibility list under the session scheduler lock and records its versioned
+SHA-256 hash in that manifest. The snapshot is immutable for the turn; a
+replacement affects only later activations. Installed eligibility is revalidated
+against the live configured-root catalog at activation and at startup recovery,
+and a root the configuration no longer declares closes its entries to listing,
+preview, and new admission, including for a turn retained active across the
+restart; an admission already recorded keeps its stored wrapper. A registered
+bundle absent from the snapshot cannot be enumerated, previewed, or admitted.
 
 Three tools expose the snapshot to the model. `instructions_list` enumerates the
 snapshot by cursor; a page carries a fixed maximum entry count within a fixed
@@ -85,12 +85,13 @@ address and order a page without parsing untrusted text. The daemon-resolved
 bundle evidence a delegated `instructions_read` decision sends to the approval
 judge is framed the same way, its repository-controlled strings inside this
 region and its prose-free members outside it. Every path a list result, a
-preview result, or that judge evidence carries is root-relative and names its
-root by the provider-safe reference
-([configuration-and-credentials.md](../spec/configuration-and-credentials.md)),
-never a canonical absolute path. The region is four LF-separated lines with no
-leading or trailing byte; the first, second, and fourth are literal and
-identical wherever a region appears:
+preview result, or that judge evidence carries is root-relative, never a
+canonical absolute path. A configured-root path names its root by the
+provider-safe reference
+([configuration-and-credentials.md](../spec/configuration-and-credentials.md));
+a workspace path names the closed workspace root kind. The region is four
+LF-separated lines with no leading or trailing byte; the first, second, and
+fourth are literal and identical wherever a region appears:
 
 ```text
 <signalbox_untrusted_repository_data>
@@ -247,8 +248,9 @@ present surface stores a nonempty one.
 ## Acceptance criteria
 
 A session whose template names an allow-list lists, previews, and reads exactly
-the bundles in its frozen snapshot; a session without one sees an empty catalog,
-and every read it attempts fails as ineligible.
+the bundles in its effective eligibility view, the frozen snapshot less the
+entries revalidation closed; a session without one sees an empty catalog, and
+every read it attempts fails as ineligible.
 
 An admissible `instructions_read` request is routed to the approval judge; a
 malformed or ineligible request closes before approval with no judge call. An
