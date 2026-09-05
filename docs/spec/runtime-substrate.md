@@ -349,17 +349,22 @@ that could add a model-visible tool, an instruction source, an external
 interaction or delegated execution, or that could replace the pinned executable;
 prompt text is never a capability boundary. Before spawn the adapter clears the
 parent environment and copies only its allowlist of home, executable and
-temporary paths, XDG, locale, certificate and proxy variables. Under the Claude
-Code CLI the invocation excludes ambient settings, sessions, slash commands,
-browser integration, plugins and built-in tools and allows only the declared MCP
-tool names; the initial event must report no slash commands, skills or plugins
-and must identify the pinned version, and any mismatch is stream-protocol
-boundary loss, not a relaxed invocation. A Claude Code tool proposal must name
-the private MCP namespace, match a declared schema name, carry a unique nonempty
-id and object arguments, and receive exactly one matching acknowledgement
-result. When an operation carries an explicit catalog-governed control, a CLI
-adapter validates the exact target capability record before checking its
-ambient-login reference and never delegates validation to the CLI.
+temporary paths, XDG, locale, certificate and proxy variables. An allowlisted
+proxy value that embeds URL userinfo or is not UTF-8 refuses the exchange as
+proven unsent before spawn, because the child would receive that credential
+verbatim. Under the Claude Code CLI the invocation excludes ambient settings,
+sessions, slash commands, browser integration, plugins and built-in tools and
+allows only the declared MCP tool names; the initial event must report no slash
+commands, skills or plugins and must identify the pinned version, and any
+mismatch is stream-protocol boundary loss, not a relaxed invocation. The one
+native hook the adapter installs is a session-start command that runs the
+private MCP bridge and holds the CLI until that bridge has served its tool list.
+A Claude Code tool proposal must name the private MCP namespace, match a
+declared schema name, carry a unique nonempty id and object arguments, and
+receive exactly one matching acknowledgement result. When an operation carries
+an explicit catalog-governed control, a CLI adapter validates the exact target
+capability record before checking its ambient-login reference and never
+delegates validation to the CLI.
 
 `expose_bytes` is the sole read path on a credential value, and the HTTP
 adapters call it for exactly two purposes: building request authentication and
@@ -397,20 +402,21 @@ boundaries and terminal flushes never re-enable provider-controlled bytes.
 
 Each CLI adapter's build derives its supported-version constant from the exact
 version in its pin manifest, so the manifest is the sole source. The daemon
-composition refuses startup before socket admission when its bounded probe
-cannot prove the installed executable reports that version. Before spending
-anything, the Codex smoke asserts that the reported version equals the supported
-version and compares the CLI's complete feature list, including stage and
-default, with an exact classified inventory. In every smoke workflow, forks are
-excluded by GitHub secret withholding and by three explicit repository-name
-comparisons, no credential is echoed or passed in argv, and the test binary
-comes from a credential-free build, so no build script or procedural macro runs
-while the key is readable. The direct-HTTP smokes reference their secret only in
-the step that spends the exchange. Each CLI smoke references it in a setup step
-before that: the Claude smoke writes it to a file and gives the exchange step
-only that path, and the Codex smoke pipes it on stdin into the CLI's own login,
-which writes the credential store the CLI then reads. Each CLI smoke removes
-what it materialized when the job ends.
+composition probes only the Codex CLI executable, and refuses startup before
+socket admission when its bounded probe cannot prove the installed executable
+reports that version. Nothing probes the Claude Code executable before an
+exchange begins. Before spending anything, the Codex smoke asserts that the
+reported version equals the supported version and compares the CLI's complete
+feature list, including stage and default, with an exact classified inventory.
+In every smoke workflow, forks are excluded by GitHub secret withholding and by
+three explicit repository-name comparisons, no credential is echoed or passed in
+argv, and the test binary comes from a credential-free build, so no build script
+or procedural macro runs while the key is readable. The direct-HTTP smokes
+reference their secret only in the step that spends the exchange. Each CLI smoke
+references it in a setup step before that: the Claude smoke writes it to a file
+and gives the exchange step only that path, and the Codex smoke pipes it on
+stdin into the CLI's own login, which writes the credential store the CLI then
+reads. Each CLI smoke removes what it materialized when the job ends.
 
 `OperatorFailureClass` states only a failure's severity and carries no user
 content, so shared telemetry may emit it while the underlying error keeps its
