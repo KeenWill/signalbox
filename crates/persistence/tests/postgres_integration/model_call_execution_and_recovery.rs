@@ -13,7 +13,7 @@ async fn active_credential_pool_fixture(
     pool: &sqlx::PgPool,
     seed: u128,
     pool_name: &str,
-    member_reference: &str,
+    member_references: &[&str],
 ) -> Result<(SessionId, TurnId, PostgresModelCallRepository), Box<dyn Error>> {
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
     let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
@@ -55,10 +55,18 @@ async fn active_credential_pool_fixture(
             .expect("one pool fixture target forms a catalog");
     let policy = CredentialPoolRuntimePolicy::new(
         pool_name.to_owned(),
-        vec![CredentialPoolRuntimeMember::new(
-            member_reference.to_owned(),
-            nonzero_priority(1),
-        )],
+        member_references
+            .iter()
+            .enumerate()
+            .map(|(position, reference)| {
+                CredentialPoolRuntimeMember::new(
+                    (*reference).to_owned(),
+                    nonzero_priority(
+                        u32::try_from(position + 1).expect("fixture membership fits u32"),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>(),
         signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion::Fail,
         CredentialPoolRuntimeAction::SwitchNow,
         CredentialPoolRuntimeAction::SwitchNow,
@@ -111,6 +119,66 @@ async fn model_call_outbox_order_guard_is_available(
     Ok(available)
 }
 
+async fn prepare_and_authorize_pool_call(
+    repository: &PostgresModelCallRepository,
+    session: SessionId,
+    seed: u128,
+) -> Result<(AuthorizedModelCall, String), Box<dyn Error>> {
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 1));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 2)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 3)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 4)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 5)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 6)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the pool member must checkpoint")
+    };
+    assert_eq!(checkpointed, call);
+    let PrepareInitialModelCallOutcome::Ready {
+        request,
+        credential_reference,
+        ..
+    } = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 7)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 8)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 9)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 10)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 12)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the checkpointed call must reload")
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(session, request.call().id())
+        .await?
+    else {
+        panic!("the checkpointed call must authorize")
+    };
+    Ok((*authorized, credential_reference.as_str().to_owned()))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn deferred_final_state_validation_claims_are_typed_and_transaction_local()
@@ -118,7 +186,7 @@ async fn deferred_final_state_validation_claims_are_typed_and_transaction_local(
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7730_u128;
     let (_session, turn, _repository) =
-        active_credential_pool_fixture(&pool, seed, "claim-pool", "claim-member").await?;
+        active_credential_pool_fixture(&pool, seed, "claim-pool", &["claim-member"]).await?;
 
     let mut transaction = pool.begin().await?;
     sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
@@ -164,7 +232,7 @@ async fn inv007_inv009_inv012_model_call_writers_guard_credential_before_outbox(
     let pool_name = "ordered-pool";
     let member_reference = "ordered-member";
     let (session, _turn, repository) =
-        active_credential_pool_fixture(&pool, seed, pool_name, member_reference).await?;
+        active_credential_pool_fixture(&pool, seed, pool_name, &[member_reference]).await?;
 
     let allocator_holder = lock_outbox_sequence_allocator(&pool).await?;
     let preparation = tokio::spawn({
@@ -516,6 +584,278 @@ async fn configured_quota_failure_records_pool_rotation_action_end_to_end()
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_rotation, (2, 1));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A transient failure retries the same credential after its reset, while the
+/// configured attempt bound turns the next failure into ordinary pool rotation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn transient_failure_retries_same_credential_until_bound_then_rotates()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x1534_0000_u128;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 3));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4)));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 5,
+            seed + 1,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 6,
+                seed + 1,
+                "retry one credential before rotating",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 7)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 8),
+            starting_frontier: Uuid::from_u128(seed + 9),
+            initial_attempt: Uuid::from_u128(seed + 10),
+        },
+    )
+    .await?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one pool fixture target forms a catalog");
+    let policy = CredentialPoolRuntimePolicy::new(
+        "transient-retry-pool",
+        vec![
+            CredentialPoolRuntimeMember::new("warm-member", nonzero_priority(1)),
+            CredentialPoolRuntimeMember::new("rotation-member", nonzero_priority(2)),
+        ],
+        signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    );
+    let mut repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("unused-default"),
+    )
+    .with_credential_pools(HashMap::from([(target, policy)]))
+    .with_same_credential_attempt_bound(
+        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
+    );
+
+    let (first, first_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
+    assert_eq!(first_reference, "warm-member");
+    let first_successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(first_successor)) =
+        repository
+            .commit_observation(
+                session,
+                first
+                    .observation_correlation()
+                    .bind_provider_failure_observation_with_retry_after(
+                        ProviderModelCallFailureCause::ProviderInternal,
+                        ProviderReportedTokenUsage::unreported(),
+                        Some(Duration::from_millis(1)),
+                        true,
+                    ),
+                signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                    failed: FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                    ),
+                    successor_attempt: first_successor_attempt,
+                },
+                |_| TurnId::from_uuid(Uuid::from_u128(seed + 123)),
+            )
+            .await?
+    else {
+        panic!("the first transient failure must create a successor")
+    };
+    assert!(!first_successor.backoff().is_zero());
+    sqlx::query(
+        "UPDATE credential_pool_availability_successor
+            SET retry_not_before = transaction_timestamp()
+          WHERE successor_turn_attempt_id = $1",
+    )
+    .bind(first_successor_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let (second, second_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 200).await?;
+    assert_eq!(second_reference, "warm-member");
+    let rotation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 220));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(rotation)) = repository
+        .commit_observation(
+            session,
+            second
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::Overloaded,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 221)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 222)),
+                ),
+                successor_attempt: rotation_attempt,
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 223)),
+        )
+        .await?
+    else {
+        panic!("the bound must create a rotation successor")
+    };
+    assert!(!rotation.backoff().is_zero());
+    sqlx::query(
+        "UPDATE credential_pool_availability_successor
+            SET retry_not_before = transaction_timestamp()
+          WHERE successor_turn_attempt_id = $1",
+    )
+    .bind(rotation_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let (_third, third_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 300).await?;
+    assert_eq!(third_reference, "rotation-member");
+    let durable_counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM model_call
+               WHERE session_id = $1 AND turn_id = $2
+                 AND credential_reference = 'warm-member'),
+             (SELECT count(*) FROM credential_pool_chain_exclusion
+               WHERE session_id = $1 AND turn_id = $2
+                 AND credential_reference = 'warm-member')",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_counts, (2, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A same-credential successor cannot become an implicit rotation when a
+/// durable action excludes its credential before preparation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_preparation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x1534_1000_u128;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        "retry-race-pool",
+        &["retry-member", "unauthorized-fallback"],
+    )
+    .await?;
+    let mut repository = repository.with_same_credential_attempt_bound(
+        std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
+    );
+    let (first, first_reference) =
+        prepare_and_authorize_pool_call(&repository, session, seed + 100).await?;
+    assert_eq!(first_reference, "retry-member");
+    let failed_call = first.observation_correlation().call();
+    let successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 120));
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(_)) = repository
+        .commit_observation(
+            session,
+            first
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::Overloaded,
+                    ProviderReportedTokenUsage::unreported(),
+                    Some(Duration::from_millis(1)),
+                    true,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                successor_attempt,
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 123)),
+        )
+        .await?
+    else {
+        panic!("the transient failure must authorize a retry successor")
+    };
+    sqlx::query(
+        "UPDATE credential_pool_availability_successor
+            SET retry_not_before = transaction_timestamp()
+          WHERE successor_turn_attempt_id = $1",
+    )
+    .bind(successor_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO credential_pool_member_action
+            (pool_name, credential_reference, action_kind,
+             observed_session_id, observed_turn_id,
+             observation_model_call_id, cause_kind)
+         VALUES ($1, $2, 'quarantine', $3, $4, $5, 'credential_rejected')",
+    )
+    .bind("retry-race-pool")
+    .bind("retry-member")
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(failed_call.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let PrepareInitialModelCallOutcome::PoolExhausted(_) = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 130)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 131)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 132)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 133)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 134)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 135)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the retry successor must not rotate to another member")
+    };
+    let calls: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM model_call WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(calls, 1);
+
     pool.close().await;
     drop(container);
     Ok(())

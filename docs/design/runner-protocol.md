@@ -76,15 +76,15 @@ user-command-bound workspace operation, and never registration mutation, grant
 creation, lease offer, claim, or dispatch.
 
 `promote_pending_runner` is the user command for the fact that this daemon's
-active runner is durably gone. It requires the recorded active enrollment's
-connection to be durably lost and the pending candidate to be connected, then
-revokes the predecessor and constructs the active enrollment and validated
-registration from the exact pending facts in one transaction. It provisions no
-workspace, consumes no receipt, touches no session placement, creates no lease,
-and fabricates no turn or frontier. A session pinned to the promoted predecessor
-stays lost until its own user replacement runs. The command generalizes to
-several runners as the fact that one of this daemon's active runners is gone and
-a successor for it is pending.
+active runner is durably gone, or, with several runners, that one of this
+daemon's active runners is gone and a successor for it is pending. It requires
+the recorded active enrollment's connection to be durably lost and the pending
+candidate to be connected, then revokes the predecessor and constructs the
+active enrollment and validated registration from the exact pending facts in one
+transaction. It provisions no workspace, consumes no receipt, touches no session
+placement, creates no lease, and fabricates no turn or frontier. A session
+pinned to the promoted predecessor stays lost until its own user replacement
+runs.
 
 For a pinned repository-backed loss, `replace_lost_runner` first durably claims
 the user command and its complete request, then creates one single-use
@@ -107,16 +107,16 @@ the command claim is recoverable: startup resumes the one nonterminal
 replacement command from its durable authorization and receipt rather than
 claiming again.
 
-Loss triggered by re-registration has its own recovery. When a live runner stops
+Re-registration triggers a loss with its own recovery: when a live runner stops
 advertising a capability that a pinned placement requires, reconciliation marks
 the placement lost while the connection and enrollment stay healthy. For that
-loss source only, the replacement command may name the same runner identity. A
-checked re-enrollment against the current connection revalidates the exact
-enrollment, runner, and authentication-reference correlations, requires the
-current registration to advertise every capability the successor placement
-request needs, and installs the successor placement, grant lineage, and semantic
-boundary exactly as a different-runner replacement does. Every other loss source
-keeps the different-runner requirement.
+loss source only, the replacement command may name the same runner identity;
+every other loss source keeps the different-runner requirement. A checked
+re-enrollment against the current connection revalidates the exact enrollment,
+runner, and authentication-reference correlations, requires the current
+registration to advertise every capability the successor placement request
+needs, and installs the successor placement, grant lineage, and semantic
+boundary exactly as a different-runner replacement does.
 
 ### Healthy-session relocation
 
