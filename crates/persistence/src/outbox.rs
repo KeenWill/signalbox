@@ -889,7 +889,7 @@ impl OutboxConsumerReader {
     pub async fn acknowledge(&self, sequence: u64) -> Result<(), OutboxDispatchError> {
         let mut transaction = self.pool.begin().await?;
         let delivered = lock_consumer_cursor(&mut transaction, self.consumer).await?;
-        if delivered == sequence {
+        if delivered >= sequence {
             transaction.rollback().await?;
             return Ok(());
         }
