@@ -28,7 +28,8 @@ object of the same name, and in both the complete content is the configured
 namespace UUID followed by one line feed. At startup `BlobStoreRegistry` checks
 the configuration against the recorded bindings, verifies the marker of every
 filesystem store and every routed S3 store, and hands out the adapters, which
-implement the `BlobStore` trait.
+implement the `BlobStore` trait. An S3 binding that no route names verifies its
+marker on first use instead.
 
 Ingest arrives over the process protocol as a chunked upload. The daemon spools
 the bytes to the staging directory while hashing them, publishes the object to
