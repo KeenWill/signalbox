@@ -38,10 +38,11 @@ observation and the terminal evidence.
 `ConversationMessage` is the closed typed history of text, tool calls and
 results, thinking with an optional signature, redacted thinking, and opaque
 provider-compaction blocks. Completed terminal evidence uses the same ordered
-response-part vocabulary for text, thinking, tool proposals, and provider
-compaction. A provider-compaction part carries one complete raw JSON content
-block unchanged across the runtime and bridge; adapters that cannot replay that
-provider-qualified part reject the operation before send.
+response-part vocabulary for text, thinking, redacted thinking, tool proposals,
+suppressed tool calls, and provider compaction. A provider-compaction part
+carries one complete raw JSON content block unchanged across the runtime and
+bridge; adapters that cannot replay that provider-qualified part reject the
+operation before send.
 
 `ModelRuntime` has two stages. `prepare` does all work that needs no provider
 traffic and returns an opaque one-shot capability or a typed failure.
