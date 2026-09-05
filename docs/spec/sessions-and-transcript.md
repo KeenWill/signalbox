@@ -331,10 +331,12 @@ tool-error detail.
 
 Defaults are immutable epochs identified by a positive 64-bit ordinal. Each
 replacement installs the checked successor ordinal as a new immutable row and
-moves the session's single current pointer. Explicit creation installs the
-caller's complete defaults value, including its dangerous-tool blanket;
-template-derived creation installs the resolved template's copy. The blanket
-then changes only when a replacement installs a complete later epoch.
+moves the session's single current pointer; a replacement whose current ordinal
+has no representable successor records a version-exhausted rejection instead.
+Explicit creation installs the caller's complete defaults value, including its
+dangerous-tool blanket; template-derived creation installs the resolved
+template's copy. The blanket then changes only when a replacement installs a
+complete later epoch.
 
 Configuration-free steering inherits its configuration from its source turn and
 reads no defaults. A predecessor turn's prepared or in-flight call keeps its
@@ -388,10 +390,11 @@ once and rejects reinstalling an earlier receipt after a later replacement.
 
 The paginated list joins current defaults with metadata and does not
 reconstitute the aggregate. Every requested tag must match, an empty set matches
-all sessions, archived sessions appear only when requested, and rows are ordered
-by session identity. A later page is a new snapshot: pagination guarantees
-deterministic keyset traversal, not a cross-page snapshot under concurrent
-creation or replacement.
+all sessions, a non-null title filter keeps only sessions whose title contains
+that exact case-sensitive substring, archived sessions appear only when
+requested, and rows are ordered by session identity. A later page is a new
+snapshot: pagination guarantees deterministic keyset traversal, not a cross-page
+snapshot under concurrent creation or replacement.
 
 A `Session` is an owned snapshot, not a live cache; any transition that depends
 on current defaults revalidates them inside its own transaction. The pre-commit
