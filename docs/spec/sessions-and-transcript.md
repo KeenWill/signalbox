@@ -170,16 +170,17 @@ reconstruct no provider-native material, and return blob facts as references
 without fetching bytes. Browser search accepts only the lexical strategy and
 passes text to PostgreSQL full-text search, so query operators are not product
 semantics and a future strategy cannot turn the request into a database query
-language. A lexical query examines a bounded candidate set, and a term absent
-from the index returns empty at once. The producers that feed the search
-projection are accepted input, steering input, final assistant text, tool
-arguments and results, current session metadata, and compaction summaries.
-Attachment filenames, attachment media metadata, and derived text artifacts are
-content classes the schema admits and a read returns; a compaction commit
-publishes its summary as a derived text artifact, and no producer publishes the
-two attachment classes. The search projection performs no implicit attachment
-reading, OCR, text extraction, or model pass. No browser read materializes or
-scans a session transcript.
+language. A search is global or scoped to one session, and a session-scoped
+search returns that session's entries only. A lexical query examines a bounded
+candidate set, and a term absent from the index returns empty at once. The
+producers that feed the search projection are accepted input, steering input,
+final assistant text, tool arguments and results, current session metadata, and
+compaction summaries. Attachment filenames, attachment media metadata, and
+derived text artifacts are content classes the schema admits and a read returns;
+a compaction commit publishes its summary as a derived text artifact, and no
+producer publishes the two attachment classes. The search projection performs no
+implicit attachment reading, OCR, text extraction, or model pass. No browser
+read materializes or scans a session transcript.
 
 There is no generic text, role, metadata, or other payload; every entry kind is
 a closed semantic fact. Entries reference accepted input and never copy its
@@ -424,9 +425,11 @@ than hiding a session. Session metadata changes publish a session fact through
 the same journal and invalidate a hot follow snapshot. Catalog order is total,
 by descending last activity with ascending session identity as tie-breaker, or
 by ascending session identity; catalog search is an exact case-sensitive
-substring of the title or the canonical session UUID. The catalog keeps only
-sessions carrying every required tag and excludes archived sessions unless they
-are requested.
+substring of the title or the canonical session UUID. A catalog continuation is
+bound to the order that issued it and is rejected under the other order. The
+catalog keeps only sessions carrying every required tag and excludes archived
+sessions unless they are requested. A catalog page, its exact total, and its
+cursor are read in one snapshot.
 
 The follow stream subscribes to the daemon's browser monitor fanout before
 reading the session state and its observed cursor from one repeatable-read
