@@ -55,17 +55,15 @@ blob-read is composed only when blob storage is configured. Each family's crate
 or daemon module documents its tools.
 
 Each approved request that reaches execution runs as one physical attempt
-through staged transactions. That promise is daemon-local: a lost runner lease
-for pure or idempotent work mints a fresh physical attempt that replaces the
-retired one ([runner-protocol](runner-protocol.md)). A prepare transaction mints
-the attempt and commits a `Prepared` row that fixes the request, owning turn,
-issuing turn attempt, effect class, locus, and dispatch generation before any
-executor work. An authorize transaction moves the attempt in flight under fresh
-locked state. The executor then runs outside any transaction, and a commit
-transaction records its evidence against the same correlation. A process-shared,
-turn-keyed dispatch gate in `crates/application/src/tool_dispatch_gate.rs`
-orders immediate interrupts against attempt checkpointing, preflight, the window
-from authorization to result commit, crash classification, and the continuation
+through staged transactions. A prepare transaction mints the attempt and commits
+a `Prepared` row that fixes the request, owning turn, issuing turn attempt,
+effect class, locus, and dispatch generation before any executor work. An
+authorize transaction moves the attempt in flight under fresh locked state. The
+executor then runs outside any transaction, and a commit transaction records its
+evidence against the same correlation. A process-shared, turn-keyed dispatch
+gate in `crates/application/src/tool_dispatch_gate.rs` orders immediate
+interrupts against attempt checkpointing, preflight, the window from
+authorization to result commit, crash classification, and the continuation
 checkpoint.
 
 A result entry in the transcript references a durable row rather than carrying
@@ -232,12 +230,8 @@ turn end.
 A declaration without an explicit posture follows one precedence: an
 `AlwaysConfirm` declaration is consulted before any blanket and stays undecided
 under it, then the frozen approve-all blanket, then the registry default, then
-fail-closed confirmation when no declaration exists. A runner-locus request
-instead resolves approval from the placement's exact permission override, then a
-workspace-restricted profile, then automatic approval only for a pure ambient
-tool; the session blanket and the registry default do not authorize a runner
-dispatch ([runner-protocol](runner-protocol.md)). The approval posture is part
-of the configuration a turn binds at origin acceptance
+fail-closed confirmation when no declaration exists. The approval posture is
+part of the configuration a turn binds at origin acceptance
 ([sessions-and-transcript](sessions-and-transcript.md)), and steering-derived
 work inherits the frozen value of its source turn. When the provider credential
 boundary suppresses a request's whole argument object, the application records a
@@ -498,3 +492,5 @@ trips under the scheduler lock.
   delivery of its terminal result to the parent: no present surface creates the
   child, and the daemon rejects execution until the placement-owned creation
   transaction exists; see [tool-loop design](../design/tool-loop.md).
+- Runner-locus execution rules: the lost-lease retry exception and the runner
+  approval ladder; see [runner protocol design](../design/runner-protocol.md).
