@@ -24,11 +24,9 @@ AUTO_TRAIT = re.compile(
 )
 
 
-class Item(NamedTuple):
-    module: str
-    category: str
-    name: str
-    declaration: str
+Item = NamedTuple(
+    "Item", [("module", str), ("category", str), ("name", str), ("declaration", str)]
+)
 
 
 def git_text(revision: str, path: Path) -> str:
@@ -43,8 +41,7 @@ def previous_text(path: Path, current: str) -> str:
     if base := os.environ.get("DOMAIN_SPINE_BASE"):
         return git_text(base, path) or current
     dirty = subprocess.run(
-        ["git", "diff", "--quiet", "HEAD", "--", path.as_posix()], check=False
-    )
+        ["git", "diff", "--quiet", "HEAD", "--", path.as_posix()], check=False)
     revision = "HEAD" if dirty.returncode == 1 else "HEAD^"
     return git_text(revision, path) or current
 
@@ -71,15 +68,20 @@ def parse(text: str) -> tuple[str, list[Item]]:
     modules = {match.group("name") for line in lines if (match := MODULE.match(line))}
     root = min(modules, key=lambda name: name.count("::"))
     items: list[Item] = []
-    include_nested_functions = False
+    include_nested_functions = include_associated_types = False
     for line in lines:
         if line.startswith(("impl ", "impl<")):
+            include_associated_types = False
             target = line.split(" where ", 1)[0]
             include_nested_functions = " for " not in target and any(
-                f"{module}::" in target for module in modules
-            )
+                f"{module}::" in target for module in modules)
             normalized = without_generics(line[4:]).split(" where ", 1)[0].strip()
-            if " for " in normalized:
+            if " for " not in normalized:
+                owners = [module for module in modules if normalized.startswith(module)]
+                if owners:
+                    module = max(owners, key=len)
+                    items.append(Item(module, "implementation", f"{normalized} (inherent)", line))
+            else:
                 trait, subject = normalized.split(" for ", 1)
                 raw_subject = line.split(" for ", 1)[1].split(" where ", 1)[0]
                 owners = [module for module in modules if subject.startswith(module)]
@@ -90,6 +92,7 @@ def parse(text: str) -> tuple[str, list[Item]]:
                     module = max(owners, key=len)
                     name = f"{subject} as {trait}"
                     items.append(Item(module, "implementation", name, line))
+                    include_associated_types = True
         match = DECLARATION.match(line)
         if match is None:
             if line.startswith(f"pub {root}::"):
@@ -105,7 +108,10 @@ def parse(text: str) -> tuple[str, list[Item]]:
         direct_child = "::" not in name.removeprefix(f"{module}::")
         if kind == "trait":
             include_nested_functions = direct_child
+            include_associated_types = direct_child
         if kind in {"struct", "enum", "union", "type", "trait"} and not direct_child:
+            if kind == "type" and include_associated_types:
+                items.append(Item(module, "associated type", name, line))
             continue
         if kind == "fn" and not (direct_child or include_nested_functions):
             continue
@@ -119,12 +125,9 @@ def parse(text: str) -> tuple[str, list[Item]]:
 def render(crate: str, path: Path) -> None:
     current_text = path.read_text()
     root, current = parse(current_text)
-    baseline = previous_text(path, current_text)
-    _, previous = parse(baseline) if baseline else (root, [])
-    current_counts = Counter(current)
-    previous_counts = Counter(previous)
-    added = current_counts - previous_counts
-    removed = previous_counts - current_counts
+    _, previous = parse(previous_text(path, current_text))
+    added = Counter(current) - Counter(previous)
+    removed = Counter(previous) - Counter(current)
     by_module: dict[str, list[Item]] = defaultdict(list)
     for item in current:
         by_module[item.module].append(item)
