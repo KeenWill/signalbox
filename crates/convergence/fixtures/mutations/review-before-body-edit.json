@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "pull-request body edit invalidates older review",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/lastEditedAt",
+      "value": "2026-09-05T13:00:00Z"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/lastEditedAt",
+      "value": "2026-09-05T13:00:00Z"
+    }
+  ]
+}

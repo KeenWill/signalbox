@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "outsider request does not authenticate a review",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/comments/nodes/0/authorAssociation",
+      "value": "NONE"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/comments/nodes/0/authorAssociation",
+      "value": "NONE"
+    }
+  ]
+}

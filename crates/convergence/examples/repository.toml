@@ -1,0 +1,18 @@
+repository = "KeenWill/signalbox"
+non_gating_check_patterns = []
+exempt_smoke_workflow_names = ["tool live smokes (report only)", "web search live smoke (report only)"]
+thread_limit = 10000
+page_limit = 100
+wave_cap = 5
+extended_wave_cap = 8
+
+[[reviewers]]
+login = "chatgpt-codex-connector"
+bot = true
+request_pattern = '@codex review(?:$|[^\w-])'
+verdict_marker = '<!-- codex-pull-request-review-summary -->'
+verdict_pattern = '\|\s*📝\s*\*\*Code Review\*\*\s*\|\s*✅\s*\*\*Completed\*\*.*?datetime="([^"]+)".*?\|\s*`([0-9a-f]{7,40})`\s*\|'
+escalation_marker = "escalated without disposition"
+trusted_requests = true
+post_green_requests = true
+completion_reaction = "THUMBS_UP"

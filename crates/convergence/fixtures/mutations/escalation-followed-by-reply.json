@@ -1,0 +1,220 @@
+{
+  "source": "settled.json",
+  "edge": "later non-disposition reply ends escalation",
+  "mutations": [
+    {
+      "path": "/previous",
+      "value": {
+        "head_oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+        "check_inventory": [
+          "CheckRun:required build"
+        ],
+        "authenticated_review_head": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+        "authenticated_review_id": "PRR_kwDOTWhy-88AAAABMUiacg",
+        "authenticated_review_request": {
+          "id": "IC_kwDOTWhy-88AAAABSvedMg",
+          "author": "KeenWill",
+          "author_association": "OWNER",
+          "body": "@codex review 417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+          "created_at": "2026-09-05T11:00:00Z",
+          "last_edited_at": null
+        },
+        "authenticated_review_body": "",
+        "authenticated_review_check_inventory": [
+          "CheckRun:required build"
+        ],
+        "known_codex_review_ids": [
+          "PRR_kwDOTWhy-88AAAABMUiacg-prior-0",
+          "PRR_kwDOTWhy-88AAAABMUiacg-prior-1",
+          "PRR_kwDOTWhy-88AAAABMUiacg-prior-2",
+          "PRR_kwDOTWhy-88AAAABMUiacg-prior-3",
+          "PRR_kwDOTWhy-88AAAABMUiacg"
+        ],
+        "review_wave_ids": [
+          "PRR_kwDOTWhy-88AAAABMUiacg-prior-0",
+          "PRR_kwDOTWhy-88AAAABMUiacg-prior-1",
+          "PRR_kwDOTWhy-88AAAABMUiacg-prior-2",
+          "PRR_kwDOTWhy-88AAAABMUiacg-prior-3",
+          "PRR_kwDOTWhy-88AAAABMUiacg"
+        ],
+        "review_wave_base_oid": "113746d23d6c7b398ef34464a071dca532791898"
+      }
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads",
+      "value": {
+        "totalCount": 1,
+        "nodes": [
+          {
+            "comments": {
+              "totalCount": 3,
+              "nodes": [
+                {
+                  "author": {
+                    "login": "chatgpt-codex-connector"
+                  },
+                  "authorAssociation": "NONE",
+                  "body": "A finding requires a disposition.",
+                  "createdAt": "2026-09-05T12:00:00Z",
+                  "id": "PRRC_kwDOTWhy-87q561i",
+                  "lastEditedAt": null,
+                  "pullRequestReview": {
+                    "id": "PRR_kwDOTWhy-88AAAABMUiacg"
+                  }
+                },
+                {
+                  "author": {
+                    "login": "KeenWill"
+                  },
+                  "authorAssociation": "OWNER",
+                  "body": "Escalated without disposition",
+                  "createdAt": "2026-09-05T13:00:00Z",
+                  "id": "IC_kwDOTWhy-88AAAABSvedMg",
+                  "lastEditedAt": null,
+                  "pullRequestReview": null
+                },
+                {
+                  "author": {
+                    "login": "KeenWill"
+                  },
+                  "authorAssociation": "OWNER",
+                  "body": "Additional context follows.",
+                  "createdAt": "2026-09-05T13:00:00Z",
+                  "id": "IC_kwDOTWhy-88AAAABSvedMg",
+                  "lastEditedAt": null,
+                  "pullRequestReview": null
+                }
+              ],
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+              }
+            },
+            "id": "PRRT_kwDOTWhy-86fkWZr",
+            "isResolved": false
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads",
+      "value": {
+        "totalCount": 1,
+        "nodes": [
+          {
+            "comments": {
+              "totalCount": 3,
+              "nodes": [
+                {
+                  "author": {
+                    "login": "chatgpt-codex-connector"
+                  },
+                  "authorAssociation": "NONE",
+                  "body": "A finding requires a disposition.",
+                  "createdAt": "2026-09-05T12:00:00Z",
+                  "id": "PRRC_kwDOTWhy-87q561i",
+                  "lastEditedAt": null,
+                  "pullRequestReview": {
+                    "id": "PRR_kwDOTWhy-88AAAABMUiacg"
+                  }
+                },
+                {
+                  "author": {
+                    "login": "KeenWill"
+                  },
+                  "authorAssociation": "OWNER",
+                  "body": "Escalated without disposition",
+                  "createdAt": "2026-09-05T13:00:00Z",
+                  "id": "IC_kwDOTWhy-88AAAABSvedMg",
+                  "lastEditedAt": null,
+                  "pullRequestReview": null
+                },
+                {
+                  "author": {
+                    "login": "KeenWill"
+                  },
+                  "authorAssociation": "OWNER",
+                  "body": "Additional context follows.",
+                  "createdAt": "2026-09-05T13:00:00Z",
+                  "id": "IC_kwDOTWhy-88AAAABSvedMg",
+                  "lastEditedAt": null,
+                  "pullRequestReview": null
+                }
+              ],
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+              }
+            },
+            "id": "PRRT_kwDOTWhy-86fkWZr",
+            "isResolved": false
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews",
+      "value": {
+        "totalCount": 1,
+        "nodes": [
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 1
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T12:00:00Z"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews",
+      "value": {
+        "totalCount": 1,
+        "nodes": [
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 1
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T12:00:00Z"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    }
+  ]
+}

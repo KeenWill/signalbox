@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "failed gating check",
+  "mutations": [
+    {
+      "path": "/observations/0/1/response/data/repository/object/statusCheckRollup/contexts/nodes/0/conclusion",
+      "value": "FAILURE"
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup/contexts/nodes/0/conclusion",
+      "value": "FAILURE"
+    }
+  ]
+}

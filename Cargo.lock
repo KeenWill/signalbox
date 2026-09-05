@@ -4156,6 +4156,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-convergence"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "flate2",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "signalbox-conversation-import-claude-code"
 version = "0.0.0"
 dependencies = [

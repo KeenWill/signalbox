@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "status rollup belongs to another head",
+  "mutations": [
+    {
+      "path": "/observations/0/1/response/data/repository/object/oid",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/oid",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    }
+  ]
+}

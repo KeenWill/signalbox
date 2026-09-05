@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "dismissed review is not quiet evidence",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews/nodes/0/state",
+      "value": "DISMISSED"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/nodes/0/state",
+      "value": "DISMISSED"
+    }
+  ]
+}

@@ -246,6 +246,14 @@ contradictory evidence is corruption and never an inferred result.
 The reviewer-verdict and usage-limit evidence rules belong to
 [tool loop](tool-loop.md).
 
+`signalbox-convergence` evaluates complete GitHub snapshots with an explicit
+reviewer and check policy. Its verdict combines thread dispositions,
+authenticated quiet reviews and exempt head changes, retained review waves,
+settled check inventories, current-head checks, mergeability, base ancestry,
+draft status, and description length. Incomplete pagination or a changed
+pull-request identity during decision revalidation is an error; the predicate
+performs no I/O.
+
 ## Planned
 
 - Concrete provider, model, and workspace adapters for the orchestration runner

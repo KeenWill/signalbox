@@ -1,0 +1,314 @@
+{
+  "source": "../pr-1566.json.gz",
+  "edge": "settled current-head authenticated quiet review",
+  "mutations": [
+    {
+      "path": "/observations",
+      "value": [
+        [
+          {
+            "query": "query($owner:String!,$name:String!,$number:Int!) { repository(owner:$owner,name:$name) { pullRequest(number:$number) { id number state title body lastEditedAt url isDraft reviewDecision author { login } baseRefName baseRefOid headRefName headRefOid headRepository { nameWithOwner } mergeable reviewThreads(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id isResolved comments(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id } } } } } comments(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } authorAssociation body createdAt lastEditedAt } } reviews(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } state body submittedAt lastEditedAt commit { oid } comments(first:1) { totalCount } } } reactions(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { content createdAt user { login } } } files(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { path changeType additions deletions } } } } }",
+            "variables": {
+              "name": "signalbox",
+              "number": 1566,
+              "owner": "KeenWill"
+            },
+            "response": {
+              "data": {
+                "repository": {
+                  "pullRequest": {
+                    "author": {
+                      "login": "KeenWill"
+                    },
+                    "baseRefName": "main",
+                    "baseRefOid": "113746d23d6c7b398ef34464a071dca532791898",
+                    "body": "",
+                    "comments": {
+                      "totalCount": 1,
+                      "nodes": [
+                        {
+                          "author": {
+                            "login": "KeenWill"
+                          },
+                          "authorAssociation": "OWNER",
+                          "body": "@codex review 417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                          "createdAt": "2026-09-05T11:00:00Z",
+                          "id": "IC_kwDOTWhy-88AAAABSvedMg",
+                          "lastEditedAt": null
+                        }
+                      ],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "files": {
+                      "totalCount": 0,
+                      "nodes": [],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "headRefName": "agent/domain-spine-generator",
+                    "headRefOid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                    "headRepository": {
+                      "nameWithOwner": "KeenWill/signalbox"
+                    },
+                    "id": "PR_kwDOTWhy-88AAAABCVHcjw",
+                    "isDraft": false,
+                    "lastEditedAt": null,
+                    "mergeable": "MERGEABLE",
+                    "number": 1566,
+                    "reactions": {
+                      "totalCount": 0,
+                      "nodes": [],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "reviewDecision": null,
+                    "reviewThreads": {
+                      "totalCount": 0,
+                      "nodes": [],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "reviews": {
+                      "totalCount": 1,
+                      "nodes": [
+                        {
+                          "author": {
+                            "login": "chatgpt-codex-connector"
+                          },
+                          "body": "",
+                          "comments": {
+                            "totalCount": 0
+                          },
+                          "commit": {
+                            "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+                          },
+                          "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+                          "lastEditedAt": null,
+                          "state": "COMMENTED",
+                          "submittedAt": "2026-09-05T12:00:00Z"
+                        }
+                      ],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "state": "OPEN",
+                    "title": "Generate full domain spine API snapshots",
+                    "url": "https://github.com/KeenWill/signalbox/pull/1566"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "query": "query($owner:String!,$name:String!,$head:GitObjectID!) { repository(owner:$owner,name:$name) { object(oid:$head) { ... on Commit { oid statusCheckRollup { id state contexts(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { __typename ... on CheckRun { name status conclusion completedAt } ... on StatusContext { context state createdAt } } } } } } } }",
+            "variables": {
+              "head": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "name": "signalbox",
+              "owner": "KeenWill"
+            },
+            "response": {
+              "data": {
+                "repository": {
+                  "object": {
+                    "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                    "statusCheckRollup": {
+                      "id": "fixture-rollup",
+                      "state": "SUCCESS",
+                      "contexts": {
+                        "totalCount": 1,
+                        "nodes": [
+                          {
+                            "__typename": "CheckRun",
+                            "name": "required build",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "completedAt": "2026-09-05T10:00:00Z"
+                          }
+                        ],
+                        "pageInfo": {
+                          "hasNextPage": false,
+                          "endCursor": null
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        [
+          {
+            "query": "query($owner:String!,$name:String!,$number:Int!) { repository(owner:$owner,name:$name) { pullRequest(number:$number) { id number state title body lastEditedAt url isDraft reviewDecision author { login } baseRefName baseRefOid headRefName headRefOid headRepository { nameWithOwner } mergeable reviewThreads(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id isResolved comments(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id } } } } } comments(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } authorAssociation body createdAt lastEditedAt } } reviews(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { id author { login } state body submittedAt lastEditedAt commit { oid } comments(first:1) { totalCount } } } reactions(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { content createdAt user { login } } } files(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { path changeType additions deletions } } } } }",
+            "variables": {
+              "name": "signalbox",
+              "number": 1566,
+              "owner": "KeenWill"
+            },
+            "response": {
+              "data": {
+                "repository": {
+                  "pullRequest": {
+                    "author": {
+                      "login": "KeenWill"
+                    },
+                    "baseRefName": "main",
+                    "baseRefOid": "113746d23d6c7b398ef34464a071dca532791898",
+                    "body": "",
+                    "comments": {
+                      "totalCount": 1,
+                      "nodes": [
+                        {
+                          "author": {
+                            "login": "KeenWill"
+                          },
+                          "authorAssociation": "OWNER",
+                          "body": "@codex review 417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                          "createdAt": "2026-09-05T11:00:00Z",
+                          "id": "IC_kwDOTWhy-88AAAABSvedMg",
+                          "lastEditedAt": null
+                        }
+                      ],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "files": {
+                      "totalCount": 0,
+                      "nodes": [],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "headRefName": "agent/domain-spine-generator",
+                    "headRefOid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                    "headRepository": {
+                      "nameWithOwner": "KeenWill/signalbox"
+                    },
+                    "id": "PR_kwDOTWhy-88AAAABCVHcjw",
+                    "isDraft": false,
+                    "lastEditedAt": null,
+                    "mergeable": "MERGEABLE",
+                    "number": 1566,
+                    "reactions": {
+                      "totalCount": 0,
+                      "nodes": [],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "reviewDecision": null,
+                    "reviewThreads": {
+                      "totalCount": 0,
+                      "nodes": [],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "reviews": {
+                      "totalCount": 1,
+                      "nodes": [
+                        {
+                          "author": {
+                            "login": "chatgpt-codex-connector"
+                          },
+                          "body": "",
+                          "comments": {
+                            "totalCount": 0
+                          },
+                          "commit": {
+                            "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+                          },
+                          "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+                          "lastEditedAt": null,
+                          "state": "COMMENTED",
+                          "submittedAt": "2026-09-05T12:00:00Z"
+                        }
+                      ],
+                      "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                      }
+                    },
+                    "state": "OPEN",
+                    "title": "Generate full domain spine API snapshots",
+                    "url": "https://github.com/KeenWill/signalbox/pull/1566"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "query": "query($owner:String!,$name:String!,$head:GitObjectID!) { repository(owner:$owner,name:$name) { object(oid:$head) { ... on Commit { oid statusCheckRollup { id state contexts(first:100) { totalCount pageInfo { hasNextPage endCursor } nodes { __typename ... on CheckRun { name status conclusion completedAt } ... on StatusContext { context state createdAt } } } } } } } }",
+            "variables": {
+              "head": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+              "name": "signalbox",
+              "owner": "KeenWill"
+            },
+            "response": {
+              "data": {
+                "repository": {
+                  "object": {
+                    "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                    "statusCheckRollup": {
+                      "id": "fixture-rollup",
+                      "state": "SUCCESS",
+                      "contexts": {
+                        "totalCount": 1,
+                        "nodes": [
+                          {
+                            "__typename": "CheckRun",
+                            "name": "required build",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "completedAt": "2026-09-05T10:00:00Z"
+                          }
+                        ],
+                        "pageInfo": {
+                          "hasNextPage": false,
+                          "endCursor": null
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "path": "/previous",
+      "value": {
+        "head_oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+        "check_inventory": [
+          "CheckRun:required build"
+        ]
+      }
+    },
+    {
+      "path": "/comparisons/113746d23d6c7b398ef34464a071dca532791898...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2/behind_by",
+      "value": 0
+    },
+    {
+      "path": "/blobs",
+      "value": {}
+    }
+  ]
+}
