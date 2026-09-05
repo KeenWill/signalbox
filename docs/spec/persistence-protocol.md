@@ -235,7 +235,8 @@ row. Any path that records a delegated child's result locks the parent and child
 session rows in ascending session id order before it locks the child's scheduler
 row. A transaction that takes more than one runner lock takes them in one fixed
 order: scheduler, enrollment or request heads, connection and loss heads,
-registration, placement, grant, lease, failure evidence.
+registration, placement, grant, lease, failure evidence; within one class it
+takes those rows in ascending order of the locked row's identity.
 
 Unsigned 64-bit ordinals are stored as numeric(20,0). What kind of thing an id
 names is known from its table and column, never from the UUID's bytes. No code
@@ -466,19 +467,18 @@ cascade-caused disposition is emitted on both.
 Every durable runner state change appends one runner-state-transition event per
 affected session in the transaction that commits it.
 
-Every pool-selected model call stores the policy identity it was authorized
-under beside its credential reference, as an insert-only fact, and the
-observation commit joins through the call to that exact stored policy before
-applying a trigger action, so a racing credential-history update cannot
-substitute a newer policy. A chain-exclusion row carries the correlation of its
-qualifying observation rather than its own generation, and holds an insert-only
-turn-local fact and a separately clearable state. Exhaustion evidence is one
-turn-correlated failure header plus contiguous member rows in policy order, each
-carrying its closed exclusion kind and optional reset. An availability successor
-is a predecessor-linked attempt with its own closed origin, distinct from the
-tool-loop continuation origin, and stores its predecessor call, qualifying
-cause, and non-acceptance evidence atomically. What these rows mean is owned by
-[credential-availability](credential-availability.md).
+Every pool-selected model call stores, beside its credential reference, an
+insert-only snapshot of the pool it was authorized under: the pool name, its
+ordered members, and its trigger actions. The observation commit joins through
+the call to that exact snapshot before applying a trigger action, so a racing
+credential-history update cannot substitute a newer policy. A chain-exclusion
+row carries the correlation of its qualifying observation rather than its own
+generation, as an insert-only turn-local fact. Exhaustion evidence is one
+turn-correlated failure header naming the pool and its cause. An availability
+successor is a predecessor-linked attempt with its own closed origin, distinct
+from the tool-loop continuation origin, and stores its predecessor call,
+qualifying cause, and non-acceptance evidence atomically. What these rows mean
+is owned by [credential-availability](credential-availability.md).
 
 ## Planned
 
