@@ -211,10 +211,12 @@ content, never transcript access.
 
 An owned session that waits for an operator is parked, or blocked on a goal that
 no automatic resumption will lift; a pending tool-approval decision is the
-separate waiting state. A module that parks something wrapping a session drives
-the session itself to parked. Attention states shown to operators are derived
-from durable facts by one classifier, and a read that encounters a state it does
-not recognize returns an error rather than a guess.
+separate waiting state. An active model call awaiting recovery is a further
+operator wait, ambiguous until the operator reconciles the turn. A module that
+parks something wrapping a session drives the session itself to parked.
+Attention states shown to operators are derived from durable facts by one
+classifier, and a read that encounters a state it does not recognize returns an
+error rather than a guess.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
@@ -406,13 +408,14 @@ substring of the title or the canonical session UUID.
 The follow stream subscribes to the daemon's browser monitor fanout before
 reading the snapshot, then emits the snapshot as its first item. Provider-text
 deltas queued when the snapshot completes are discarded, and a durable update
-queued with a cursor above the snapshot's is emitted after the snapshot. Lag
-confined to records the snapshot cursor covers is absorbed silently. Falling
-behind past covered records, or saturating the monitor while retained fragment
-text is draining, emits one positive-cursor resync item and ends the response;
-the client then replaces all transient presentation with a fresh live snapshot
-and resumes durable history above its cursor without reloading the historical
-transcript.
+for the followed session queued with a cursor above the snapshot's is emitted
+after the snapshot. An update for another session advances the observed cursor
+and is not emitted. Lag confined to records the snapshot cursor covers is
+absorbed silently. Falling behind past covered records, or saturating the
+monitor while retained fragment text is draining, emits one positive-cursor
+resync item and ends the response; the client then replaces all transient
+presentation with a fresh live snapshot and resumes durable history above its
+cursor without reloading the historical transcript.
 
 The timeline sequence is allocated once across ordinary and delegation outbox
 events; it is append-only, totally ordered, independent of table offsets and
