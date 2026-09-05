@@ -45,13 +45,14 @@ configures.
 
 ## Design decisions
 
-A credential failure in the delivery layer, such as a rejected daemon-owned
-OAuth refresh or a credential-home identity that failed its walk, never enters
-this machine: it precedes any provider request, is typed as its own failure and
-quarantines the profile under
+A rejected daemon-owned OAuth refresh or a credential-home identity that failed
+its walk never enters this machine: each precedes any provider request, is typed
+as its own failure and quarantines the profile under
 [configuration and credentials](configuration-and-credentials.md). Why: a
 deployment misconfiguration is not a provider condition the pool's trigger
-policy routes around.
+policy routes around. A `file` delivery that cannot produce a usable credential
+quarantines nothing; its prepared call fails with that typed cause and reaches
+terminal.
 
 ## Boundary contracts
 

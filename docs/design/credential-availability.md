@@ -30,13 +30,15 @@ Contended-wait: nothing is admissible and at least one otherwise-admissible
 member was skipped only for its bound. The turn enters the
 credential-availability wait phase with closed cause contended. The attempt ends
 call-free WithoutStop(YieldedToDurableWait); the turn keeps its slot, appends no
-transcript entry, and is not terminal. Five wakes release it: a reservation
-release by one of the bounded members the wait names; the wait's deadline;
-startup's re-evaluation of retained contended waits against current
-registrations; a durable member-availability update; an operator clear of an
-exclusion. The last two matter because the wait also records excluded members,
-and one can become admissible while every bounded member stays saturated. A
-restart alone is not a wake.
+transcript entry, and is not terminal. Five wakes make it eligible to re-run
+admission: a reservation release by one of the bounded members the wait names;
+the wait's deadline; startup's re-evaluation of retained contended waits against
+current registrations; a durable member-availability update; an operator clear
+of an exclusion. A wake grants eligibility rather than release: only the
+transaction that acquires the freed reservation consumes the wait. The last two
+wakes matter because the wait also records excluded members, and one can become
+admissible while every bounded member stays saturated. A restart alone is not a
+wake.
 
 Exhausted-wait: nothing is admissible, nothing was skipped merely for a bound,
 and a wait is selected. The same wait phase with closed cause exhausted, and the
@@ -80,8 +82,10 @@ when some member's every active exclusion is one a wake can clear, so that one
 wake can readmit that whole member. No wake clears a chain exclusion or a
 `switch_next_turn` displacement, so a member holding either never qualifies,
 whatever else it holds. Where no member qualifies, no wait is selected and the
-exhaustion ends in a failure ending exactly as a `fail` pool would: post-failure
-fail at a fresh admission, wait-transition fail (after call) at a release.
+exhaustion ends in a failure ending exactly as a `fail` pool would. Whether this
+chain has issued a call chooses which: pre-call fail or post-failure fail at a
+fresh admission, wait-transition fail (no call) or wait-transition fail (after
+call) at a release.
 
 A contended wait that becomes exhausted re-runs the exhaustion policy rather
 than staying parked. When a woken contended waiter finds every formerly bounded

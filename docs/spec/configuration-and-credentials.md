@@ -2023,7 +2023,8 @@ protocol's 8 MiB frame limit even under worst-case JSON escaping. Each
   the value and nothing more; what each one does is owned by
   [the credential-availability machine](credential-availability.md), where the
   value acts only by selecting whether an exhaustion parks: `fail` never parks,
-  and `park` parks only while an exclusion a wake can clear remains.
+  and `park` parks only while some member's every active exclusion is one a wake
+  can clear.
 - `headroom_reserve_percent` — an optional pool-wide integer from 0 through 99.
 - the five closed trigger keys `on_quota_exhausted`, `on_rate_limited`,
   `on_overloaded`, `on_credential_rejected`, and `on_headroom_low`, each
