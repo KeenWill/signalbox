@@ -8,6 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+bstr = "1.12.1"
+gix-validate = "0.11.4"
 hex = "0.4.3"
 regex = { version = "1.12.2", default-features = false, features = ["std", "perf", "unicode"] }
 rpds = "1.2.1"
@@ -16,6 +18,7 @@ serde_json = { version = "1.0.140", features = ["arbitrary_precision", "unbounde
 serde_stacker = "0.1.14"
 sha2 = "0.11.0"
 uuid = { version = "1.24.0", default-features = false }
+url = "2.5.4"
 
 [lints]
 workspace = true

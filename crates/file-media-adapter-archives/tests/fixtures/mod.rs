@@ -255,8 +255,7 @@ impl ArchiveFixture {
 
     pub fn dictionary_zstd() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            // This frame header declares dictionary ID 1. Classification occurs before
-            // dictionary-less decompression.
+            // This frame header declares dictionary ID 1.
             bytes: b"\x28\xb5\x2f\xfd\x21\x01\x00\x01\x00\x00".to_vec(),
             media_type: "application/zstd",
             expected_format: "zstd",
@@ -504,16 +503,36 @@ impl ArchiveFixture {
         })
     }
 
-    pub fn disguised_v7_tar() -> Result<Self, Box<dyn Error>> {
+    pub fn v7_tar() -> Result<Self, Box<dyn Error>> {
         let mut header = Header::new_old();
         header.set_path("payload.txt")?;
         header.set_entry_type(EntryType::Regular);
         header.set_size(u64::try_from(PAYLOAD.len())?);
         header.set_mode(0o644);
         header.set_cksum();
-        let mut nested = header.as_bytes().to_vec();
-        nested.extend_from_slice(PAYLOAD);
-        nested.resize(1024, 0);
+        let mut bytes = header.as_bytes().to_vec();
+        bytes.extend_from_slice(PAYLOAD);
+        bytes.resize(2048, 0);
+        Ok(Self {
+            bytes,
+            media_type: "application/x-tar",
+            expected_format: "tar",
+            expected_name: "payload.txt",
+        })
+    }
+
+    pub fn disguised_v7_tar() -> Result<Self, Box<dyn Error>> {
+        let nested = Self::v7_tar()?.bytes;
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", &nested, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn disguised_dictionary_zstd() -> Result<Self, Box<dyn Error>> {
+        let nested = Self::dictionary_zstd()?.bytes;
         Ok(Self {
             bytes: zip_bytes(&[("payload.bin", &nested, ZipEntryKind::File)])?,
             media_type: "application/zip",
@@ -525,16 +544,6 @@ impl ArchiveFixture {
     pub fn disguised_empty_tar() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             bytes: zip_bytes(&[("payload.bin", &[0; 1_024], ZipEntryKind::File)])?,
-            media_type: "application/zip",
-            expected_format: "zip",
-            expected_name: "payload.bin",
-        })
-    }
-
-    pub fn disguised_dictionary_zstd() -> Result<Self, Box<dyn Error>> {
-        let nested = b"\x28\xb5\x2f\xfd\x21\x01\x00\x01\x00\x00";
-        Ok(Self {
-            bytes: zip_bytes(&[("payload.bin", nested, ZipEntryKind::File)])?,
             media_type: "application/zip",
             expected_format: "zip",
             expected_name: "payload.bin",

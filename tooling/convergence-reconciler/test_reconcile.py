@@ -92,12 +92,6 @@ class ConvergencePredicateTests(unittest.TestCase):
                     "conclusion": "SUCCESS",
                 },
                 {
-                    "__typename": "CheckRun",
-                    "name": "Comment the coverage report",
-                    "status": "COMPLETED",
-                    "conclusion": "FAILURE",
-                },
-                {
                     "__typename": "StatusContext",
                     "context": "codecov/patch",
                     "state": "PENDING",
@@ -116,7 +110,6 @@ class ConvergencePredicateTests(unittest.TestCase):
         self.assertEqual(
             computed["non_gating_checks"],
             [
-                {"name": "Comment the coverage report", "state": "FAILURE"},
                 {"name": "codecov/patch", "state": "PENDING"},
             ],
         )

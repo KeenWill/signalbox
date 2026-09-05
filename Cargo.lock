@@ -2275,9 +2275,9 @@ dependencies = [
 
 [[package]]
 name = "ipnet"
-version = "2.12.0"
+version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "iri-string"
@@ -4188,8 +4188,10 @@ dependencies = [
 name = "signalbox-domain"
 version = "0.0.0"
 dependencies = [
+ "bstr",
  "divan",
  "expect-test",
+ "gix-validate",
  "gungraun",
  "hex",
  "regex",
@@ -4199,6 +4201,7 @@ dependencies = [
  "serde_stacker",
  "sha2 0.11.0",
  "signalbox-expect-table",
+ "url",
  "uuid",
 ]
 
@@ -4427,6 +4430,7 @@ name = "signalbox-model-runtime-claude-cli"
 version = "0.0.0"
 dependencies = [
  "rustix 1.1.4",
+ "semver",
  "serde",
  "serde_json",
  "signalbox-model-runtime",
@@ -4441,6 +4445,7 @@ version = "0.0.0"
 dependencies = [
  "rustix 1.1.4",
  "schemars 1.2.2",
+ "semver",
  "serde",
  "serde_json",
  "signalbox-model-runtime",
@@ -4820,6 +4825,7 @@ dependencies = [
  "headers",
  "hex",
  "hmac",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
