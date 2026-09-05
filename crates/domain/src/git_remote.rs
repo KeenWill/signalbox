@@ -436,6 +436,38 @@ mod tests {
     }
 
     #[test]
+    fn invalid_numeric_hosts_are_refused() {
+        assert_destination_is_refused("https://1.2.3.999/repo");
+        assert_destination_is_refused("https://4294967296/repo");
+        assert_destination_is_refused("https://1.2.65536/repo");
+        assert_destination_is_refused("https://1.16777216/repo");
+        assert_destination_is_refused("https://1.2.3.4.5/repo");
+        assert_destination_is_refused("https://256.1/repo");
+        assert_destination_is_refused("https://09/repo");
+        assert_destination_is_refused("https://1.09/repo");
+        assert_destination_is_refused("https://0x100000000/repo");
+        assert_destination_is_refused("https://example.1/repo");
+        assert_destination_is_refused("https://1..2/repo");
+        assert_destination_is_refused("https://1.2.3.999./repo");
+    }
+
+    #[test]
+    fn valid_numeric_hosts_are_admitted() {
+        assert_destination_is_admitted("https://1/repo");
+        assert_destination_is_admitted("https://4294967295/repo");
+        assert_destination_is_admitted("https://1.2.65535/repo");
+        assert_destination_is_admitted("https://1.16777215/repo");
+        assert_destination_is_admitted("https://127.0.0.1/repo");
+        assert_destination_is_admitted("https://127.1./repo");
+        assert_destination_is_admitted("https://0x7f.1/repo");
+        assert_destination_is_admitted("https://0177.1/repo");
+        assert_destination_is_admitted("https://0x/repo");
+        assert_destination_is_admitted("https://0xFFFFFFFF/repo");
+        assert_destination_is_admitted("https://1.0x/repo");
+        assert_destination_is_admitted("https://example.0xg/repo");
+    }
+
+    #[test]
     fn a_destination_requiring_url_normalization_is_refused() {
         assert_destination_is_refused("https://example%2etest/repository.git");
         assert_destination_is_refused(r"https://example.test\repository.git");
