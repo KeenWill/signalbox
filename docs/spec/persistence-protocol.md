@@ -333,8 +333,9 @@ approval.
 Accepted user content is stored only in the ordered part satellites of the
 command and of the accepted input; neither parent row has a content column.
 
-A session metadata root is never deleted, so its absence is never read as an
-initial unwritten state, and its mutable fields cannot move to another session.
+Once a session has a recorded metadata write, its metadata root is never
+deleted, so root absence is the initial snapshot only before that first write,
+and the root's mutable fields cannot move to another session.
 
 A null delegate-denial reason means one thing everywhere: the rationale
 sanitized to nothing.
@@ -384,9 +385,10 @@ floored under the caller's configured deadline.
 
 A delegated terminal observation locks both endpoint session rows, then both
 endpoint scheduler rows, in ascending session-identity order, and only then the
-delegation row. A peer message locks both endpoint session rows FOR NO KEY
-UPDATE in ascending session-identity order, then both scheduler rows, and only
-then the relationship row. A descendant-scoped stop or interrupt locks the
+delegation row. A delegated await locks the issuing session, then its scheduler,
+then the relationship. A peer message locks both endpoint session rows FOR NO
+KEY UPDATE in ascending session-identity order, then both scheduler rows, and
+only then the relationship row. A descendant-scoped stop or interrupt locks the
 complete reachable session frontier in ascending session-identity order before
 the ordinary root or scheduler locks, then the relationships in spawning-request
 order.
@@ -399,8 +401,11 @@ insertion and the head's advance.
 
 Replacing session defaults locks the current-defaults pointer row FOR UPDATE
 before loading, and the compare-and-set update on that locked row is the
-applying check. The pointer has no guard trigger, so beyond its range check and
-deferred foreign key this is its only discipline.
+applying check. `SubmitInput` takes that same pointer FOR UPDATE after the
+session's scheduler row and holds it through origin insertion, so a replacement
+cannot commit between the frozen epoch it reads and the origin it writes. The
+pointer has no guard trigger, so beyond its range check and deferred foreign key
+this is its only discipline.
 
 Replacing session metadata locks the target session row FOR NO KEY UPDATE so
 concurrent writers serialize, samples the Postgres statement time once, and
@@ -478,7 +483,10 @@ Dispatch validates each record against durable state: an activation against the
 turn's attempt, a call transition against monotonic call state, and a terminal
 record against its turn and frontier. A context-compaction event whose
 compaction, producing call, summary, and result frontier do not correlate fails
-the dispatch.
+the dispatch. A tool-batch transition fails the dispatch unless its round,
+frontier, and attempt correlate: a proposed frontier is the round boundary, a
+projected frontier contains every result of the round, and a recovery attempt
+belongs to a request the named call produced.
 
 An applied submit-input that creates a turn origin appends an input-accepted
 event; pending steering appends nothing until terminal reclassification mints
