@@ -989,6 +989,33 @@ async fn the_destination_predicate_agrees_with_the_domain_newtype() -> Result<()
 
     assert_url_predicate_agrees(&pool, "https://example.test/namespace/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://example.test").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.3.999/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://4294967296/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.65536/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.16777216/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.3.4.5/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://256.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://09/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.09/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0x100000000/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://example.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1..2/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.3.999./repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://4294967295/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.2.65535/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.16777215/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://127.0.0.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://127.1./repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0x7f.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0177.1/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0x/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://0xFFFFFFFF/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://1.0x/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://example.0xg/repo").await?;
+    assert_url_predicate_agrees(&pool, "https://example%2etest/repo").await?;
+    assert_url_predicate_agrees(&pool, r"https://example.test\repo").await?;
+
     assert_url_predicate_agrees(&pool, "https://a").await?;
     assert_url_predicate_agrees(&pool, "https://example.test:8443/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://user@example.test/project.git").await?;

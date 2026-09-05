@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+use http::{HeaderName, HeaderValue};
 use opentelemetry::{
     Context as OTelContext, KeyValue,
     trace::{SpanBuilder, TraceContextExt as _, Tracer as _, TracerProvider as _},
@@ -207,8 +208,8 @@ enum EndpointTransport {
 }
 
 struct OtlpHeader {
-    name: String,
-    value: String,
+    name: HeaderName,
+    value: HeaderValue,
 }
 
 struct OtlpConfiguration {
@@ -455,17 +456,24 @@ fn parse_headers(content: &str) -> Result<Vec<OtlpHeader>, TelemetryConfiguratio
         let (name, value) = line
             .split_once('=')
             .ok_or_else(|| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
-        let normalized = name.to_ascii_lowercase();
-        if !valid_header_name(name) || !valid_header_value(value) {
+        if name.len() > MAX_HEADER_NAME_BYTES
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+            || value.is_empty()
+            || value.len() > MAX_HEADER_VALUE_BYTES
+            || !value.bytes().all(|byte| (b' '..=b'~').contains(&byte))
+        {
             return Err(header_error(TelemetryConfigurationFailure::InvalidHeader));
         }
-        if !names.insert(normalized.clone()) {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|_| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
+        if !names.insert(name.clone()) {
             return Err(header_error(TelemetryConfigurationFailure::DuplicateHeader));
         }
-        headers.push(OtlpHeader {
-            name: normalized,
-            value: value.to_owned(),
-        });
+        headers.push(OtlpHeader { name, value });
     }
     Ok(headers)
 }
@@ -485,19 +493,6 @@ fn validate_header_transport(
 
 fn header_error(failure: TelemetryConfigurationFailure) -> TelemetryConfigurationError {
     TelemetryConfigurationError::new(OTLP_HEADERS_FILE_ENVIRONMENT, failure)
-}
-
-fn valid_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_HEADER_NAME_BYTES
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
-}
-fn valid_header_value(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_HEADER_VALUE_BYTES
-        && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
 }
 
 /// Owns the provider and its bounded background batch processor.
@@ -576,8 +571,14 @@ fn build_http_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
     let headers = configuration
         .headers
         .iter()
-        .map(|header| (header.name.clone(), header.value.clone()))
-        .collect::<HashMap<_, _>>();
+        .map(|header| {
+            header
+                .value
+                .to_str()
+                .map(|value| (header.name.as_str().to_owned(), value.to_owned()))
+                .map_err(|_| ())
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::blocking::Client::builder()
         .timeout(OTLP_EXPORT_TIMEOUT)
@@ -616,14 +617,23 @@ fn build_grpc_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
 fn grpc_metadata(headers: &[OtlpHeader]) -> Result<MetadataMap, ()> {
     let mut metadata = MetadataMap::new();
     for header in headers {
-        if header.name.ends_with("-bin") {
-            let name = header.name.parse::<BinaryMetadataKey>().map_err(|_| ())?;
-            let mut value = BinaryMetadataValue::from_bytes(header.value.as_bytes());
+        let value = header.value.to_str().map_err(|_| ())?;
+        if header.name.as_str().ends_with("-bin") {
+            let name = header
+                .name
+                .as_str()
+                .parse::<BinaryMetadataKey>()
+                .map_err(|_| ())?;
+            let mut value = BinaryMetadataValue::from_bytes(value.as_bytes());
             value.set_sensitive(true);
             metadata.insert_bin(name, value);
         } else {
-            let name = header.name.parse::<AsciiMetadataKey>().map_err(|_| ())?;
-            let mut value = header.value.parse::<AsciiMetadataValue>().map_err(|_| ())?;
+            let name = header
+                .name
+                .as_str()
+                .parse::<AsciiMetadataKey>()
+                .map_err(|_| ())?;
+            let mut value = value.parse::<AsciiMetadataValue>().map_err(|_| ())?;
             value.set_sensitive(true);
             metadata.insert(name, value);
         }
@@ -1893,6 +1903,39 @@ mod tests {
             .expect("endpoint enables exporter");
 
         runtime.shutdown();
+    }
+
+    #[test]
+    fn otlp_headers_reject_http_tokens_outside_the_configuration_alphabet() {
+        let error = parse_headers("x!name=value")
+            .err()
+            .expect("punctuation is not admitted");
+        assert_eq!(
+            error.failure(),
+            super::TelemetryConfigurationFailure::InvalidHeader
+        );
+    }
+
+    #[test]
+    fn otlp_headers_reject_tabs_in_values() {
+        let error = parse_headers("x-name=left\tright")
+            .err()
+            .expect("tabs are not printable ASCII");
+        assert_eq!(
+            error.failure(),
+            super::TelemetryConfigurationFailure::InvalidHeader
+        );
+    }
+
+    #[test]
+    fn otlp_headers_accept_the_documented_name_and_value_alphabets() {
+        let headers = parse_headers("X.name_with-123=printable value !~")
+            .expect("documented header characters are admitted");
+        assert_eq!(headers[0].name.as_str(), "x.name_with-123");
+        assert_eq!(
+            headers[0].value.to_str().expect("ASCII value"),
+            "printable value !~"
+        );
     }
 
     #[test]
