@@ -76,7 +76,14 @@ Runner placement facts are a paged `read_runner_status` read beside the built
 an exclusive keyset `after`, and returns `runner_status`,
 `runner_operation_failure`, and `runner_workspace_leak` messages followed by
 `runner_status_end { runner_count, failure_count, leak_count, next_after }`.
-Each failure names its runner, the refused operation's correlation, one closed
+`after` and `next_after` are null or one tagged cursor object naming the last
+row the page emitted. The `operation_failure` variant carries the runner, the
+`operation_kind`, and the complete correlation arm that kind selects; the
+`workspace_leak` variant carries the runner, fact kind, locator, entry digest,
+and the leak fact's optional session and placement revision. Both variants are
+exclusive, failures order before leaks, and the traversal each one continues
+belongs to [persistence-protocol.md](../spec/persistence-protocol.md). Each
+failure names its runner, the refused operation's correlation, one closed
 daemon-actionable `category`, and the runner-authored `detail` object with its
 bounded `code`, `message`, and structured `payload`. The category set is exactly
 the closed daemon-actionable set the runner wire carries, member for member, so
@@ -90,6 +97,10 @@ the current state on reconnect. The event family is the extension point for
 later runner facts: a new fact adds a state and its members to this event kind,
 never a second kind. A snapshot's session summary carries the same runner
 object, with connection health present exactly for a pinned placement.
+`replace_lost_runner`, `abandon_lost_runner`, and `promote_pending_runner` are
+planned wire commands whose durable request, replay, and recovery semantics stay
+in [identity-and-commands.md](../spec/identity-and-commands.md) and
+[runner-protocol.md](../spec/runner-protocol.md).
 
 `spawn_session` carries a bounded `task` and the closed relationship object and
 returns `session_spawned { tool_request_id, child_session_id, relationship }`.
