@@ -114,13 +114,14 @@ automatic resumption will lift, or held in an exhausted recovery wait; a pending
 tool-approval decision is the separate waiting state. An ambiguous model call
 whose automatic reconciliation budget is exhausted is a further operator wait
 until the operator reconciles the turn; an ambiguous external-effect tool
-attempt whose budget is exhausted stays an exhausted recovery wait with operator
-action required until the deferred tool-recovery surface exists. A turn awaiting
-runner recovery is an operator wait too; the replacement and abandonment
-commands that leave the lost state are planned. A module that parks something
-wrapping a session drives the session itself to parked. Attention states shown
-to operators are derived from durable facts by one classifier, and a read that
-encounters a state it does not recognize returns an error rather than a guess.
+attempt whose budget is exhausted stays an exhausted recovery wait, flagged for
+the operator, with no releasing command until the deferred tool-recovery surface
+exists. A turn awaiting runner recovery is an operator wait too; the replacement
+and abandonment commands that leave the lost state are planned. A module that
+parks something wrapping a session drives the session itself to parked.
+Attention states shown to operators are derived from durable facts by one
+classifier, and a read that encounters a state it does not recognize returns an
+error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
 daemon core; no module implements any of them except the core-integrated
