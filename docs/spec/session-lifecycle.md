@@ -106,9 +106,12 @@ from durable facts by one classifier, and a read that encounters a state it does
 not recognize returns an error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
-daemon core; no module implements any of them. Lifecycle behavior or an event
-kind a module needs and core does not provide is added to core, and modules
-never reconstruct events by joining core tables.
+daemon core; no module implements any of them. A dispatched
+[repo-watch](repo-watch.md) session is the exception: the module holds a start
+lease over the wait for that session's first model call, and an expired lease
+ends the session through an ordinary goal stop rather than a lifecycle deadline.
+Lifecycle behavior or an event kind a module needs and core does not provide is
+added to core, and modules never reconstruct events by joining core tables.
 
 The attention classifier that
 [sessions and the transcript](sessions-and-transcript.md) owns is a projection
@@ -118,16 +121,18 @@ An absent configured bound leaves a deadline unbounded. An owned session in a
 deadline-bearing state with no deadline row is a violation.
 
 Parking overrides the turn projection: it suspends a live turn in place, the
-turn keeps its phase, and no model call, tool execution, or delivery proceeds
-while the session is parked.
+turn keeps its phase, and no model call, tool execution, or delivery starts
+while the session is parked. Work already in flight is not cancelled by the
+park: an in-flight model call runs to its end and records its result.
 
 Verified achievement is recorded only when the declared finish check passes.
 
 Lifecycle members default from the creation cause: module dispatch creates an
-owned session whose finish condition is the external gate, and an interactive
-session is unmonitored with no finish condition. Attaching a goal to an
-unmonitored session records it as owned, with the adoption journaled to the
-attaching actor, in the same transaction.
+owned session whose finish condition is the external gate, a delegated child is
+owned with no finish condition, and an interactive session is unmonitored with
+no finish condition. Attaching a goal to an unmonitored session records it as
+owned, with the adoption journaled to the attaching actor, in the same
+transaction.
 
 An unmonitored session has no deadlines and no automatic resumption; no external
 sweep acts on it, and it is excluded from occupancy accounting. Turn-liveness
