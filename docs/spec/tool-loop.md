@@ -212,7 +212,8 @@ it does not leave the call in flight, persist the inadmissible proposal, or
 partially commit the response.
 
 Approval visits requests in proposal order and the turn parks on the earliest
-undecided request. A turn has at most one live tool attempt, and approved
+undecided request. No request in a batch executes while any request in that
+batch is undecided. A turn has at most one live tool attempt, and approved
 requests execute in proposal order. The next model round does not begin until
 every request has one durable logical resolution: executed, denied, or closed by
 turn end.
