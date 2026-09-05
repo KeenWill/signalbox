@@ -84,8 +84,8 @@ that adds the field states how each earlier version reconstitutes.
 
 ## Compatibility constraints
 
-- The actor storage convention stays extensible to a program arm and a module
-  arm, and nothing assumes the submit-input actor is always the user.
+- The actor storage convention stays extensible to a program arm, and nothing
+  assumes the submit-input actor is always the user.
 - Replace-session-defaults gains no actor field until a non-user boundary issues
   it.
 - Imported-creation version 4 and create-session version 5 stay unwritten; no
