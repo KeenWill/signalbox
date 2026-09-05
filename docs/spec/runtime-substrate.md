@@ -261,12 +261,12 @@ withholding in every adapter.
 `ProviderErrorEvidence::non_acceptance_proven` is an adapter-owned typed fact,
 never inferred from `ProviderErrorKind` or provider prose. This proof separates
 the `successor` and `terminal` endings of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine);
-this page owns the evidence algebra that carries it. Adapters set the proof
-alongside `ProviderError` for the exact quota-exhausted, rate-limited, and
-overloaded provider responses whose protocol semantics establish non-acceptance.
-Each adapter owns its exhaustive native mapping; the provider bridge preserves
-the proof without deriving it from `ProviderErrorKind`, status retryability, or
+[the credential-availability machine](credential-availability.md); this page
+owns the evidence algebra that carries it. Adapters set the proof alongside
+`ProviderError` for the exact quota-exhausted, rate-limited, and overloaded
+provider responses whose protocol semantics establish non-acceptance. Each
+adapter owns its exhaustive native mapping; the provider bridge preserves the
+proof without deriving it from `ProviderErrorKind`, status retryability, or
 native prose. Classification alone remains insufficient, and absence of the
 proof keeps the known failure terminal.
 
