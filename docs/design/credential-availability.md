@@ -122,14 +122,17 @@ of otherwise-admissible bounded members with their reservation identities. A
 capacity reservation is one per-member invocation reservation, taken by the
 selecting preparation for the selected member only and released when the
 invocation ends; no reservation is taken against a member no invocation will
-start. A contended wait has four committing transactions that are never
+start. A contended wait has five committing transactions that are never
 conflated: the admission that finds every candidate at its bound and inserts the
-wait; the reservation completion that frees capacity and makes the waiters it
-wakes eligible; the evidence rewrite by which a woken transaction that still
-finds every candidate at its bound replaces the wait's reservation identities
-and stays parked; and the release, the call preparation that puts its Prepared
-call on a fresh successor attempt and consumes the wait in that same
-transaction, inserting a reservation only where the selected member is a
+wait; the rewrite from an exhausted wait whose cleared exclusion leaves the
+newly admissible member at its bound, which replaces the exclusion evidence with
+that member's live reservation identities; the reservation completion that frees
+capacity and makes the waiters it wakes eligible; the evidence rewrite by which
+a woken transaction that still finds every candidate at its bound replaces the
+wait's reservation identities, exclusion evidence and derived deadline from
+current state and stays parked; and the release, the call preparation that puts
+its Prepared call on a fresh successor attempt and consumes the wait in that
+same transaction, inserting a reservation only where the selected member is a
 `codex_home` one. An exhausted wait has four: the admission; the rewrite from a
 contended wait; the evidence rewrite by which a woken transaction that reruns
 admission and still selects an exhausted wait replaces the wait's exclusion
@@ -182,6 +185,10 @@ spec page states.
   from a terminal one.
 - Every attempt a release opens names the wait-release origin; the continuation
   chain stays total over attempts.
+- A release extends the built preparation transaction, which admits a member and
+  inserts its `Prepared` call on an attempt that already exists, to also open
+  the successor attempt and consume the wait; no release commits a `Prepared`
+  attempt that owns no call.
 
 ## Acceptance criteria
 

@@ -60,10 +60,7 @@ Every credential-pool selection attempt ends in exactly one ending of this
 machine, and that ending fixes every projection any specification page states of
 it.
 
-Every other page's treatment of this machine is one link to this page, with at
-most a sentence naming the projection that page owns; no other page describes a
-pool-selection ending, and where another page and this page disagree, this page
-governs. Turn phase and attempt disposition belong to
+Turn phase and attempt disposition belong to
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md); continuation
 origins and durable records to [persistence protocol](persistence-protocol.md);
 transcript producers and entries to

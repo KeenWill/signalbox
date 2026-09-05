@@ -2140,12 +2140,12 @@ deferred constraint therefore never has to reject a losing waiter's call, and no
 stored wait names a released reservation or misses the only wake that concerned
 it. Entering either wait ends the call-free current attempt as
 `WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
-consumes the wait and creates its fresh `Prepared` successor attempt;
-`stop_turn` instead atomically consumes it, creates the fresh
-immediate-successor attempt, applies the interrupt proof, ends that attempt
-`AfterCancellation(Cancelled)`, and terminalizes the turn. Each reservation has
-a closed `pending_spawn` state with no process identity and a
-`spawned { process_group_identity }` state carrying the child process group's
+admits a member, creates its fresh successor attempt carrying that member's
+`Prepared` call, and consumes the wait; `stop_turn` instead atomically consumes
+it, creates the fresh immediate-successor attempt, applies the interrupt proof,
+ends that attempt `AfterCancellation(Cancelled)`, and terminalizes the turn.
+Each reservation has a closed `pending_spawn` state with no process identity and
+a `spawned { process_group_identity }` state carrying the child process group's
 reuse-safe host identity. Successful spawn replaces `pending_spawn` with
 `spawned` immediately, and that attach is guarded on the reservation still being
 `pending_spawn` for this exact reservation identity. The invocation path may not
