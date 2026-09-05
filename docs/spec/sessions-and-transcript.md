@@ -1083,9 +1083,9 @@ commit boundaries by this page, and update-event delivery by
 **Committed unimplemented functionality — pre-call pool exhaustion.** A third
 `TurnFailed` producer serves the `pre-call fail` and
 `wait-transition fail (no call)` endings of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine):
-an active turn exhausts its frozen pool before any model call is prepared and
-that exhaustion selects no wait. Its single transaction ends the current attempt
+[the credential-availability machine](credential-availability.md): an active
+turn exhausts its frozen pool before any model call is prepared and that
+exhaustion selects no wait. Its single transaction ends the current attempt
 `KnownFailure`, appends the marker after the attempt's starting frontier,
 terminalizes the turn `Failed`, and emits both the ordinary `turn_failed` update
 and the typed `turn_credential_pool_exhausted` event. The sealed failure and
@@ -1095,8 +1095,8 @@ present transcript writer can produce this shape.
 
 That third producer serves two endings, which share its commit shape exactly.
 This page owns the transcript-producer column of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-and that column is total over all nine endings: `pre-call fail` and
+[the credential-availability machine](credential-availability.md), and that
+column is total over all nine endings: `pre-call fail` and
 `wait-transition fail (no call)` use this producer; `post-failure fail` and
 `terminal` use the existing model-call known-failure closure, because their turn
 did issue a call and that closure is already the writer which commits one; and

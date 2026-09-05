@@ -884,46 +884,46 @@ Locks per transaction, in acquisition order:
   the rest of this bullet are the protocol that functionality must follow, not a
   guarantee this build provides. This bullet fixes which objects each
   credential-pool transaction takes, in what order, and in which mode.
-  [The credential-availability machine](credential-availability.md#the-credential-availability-machine)
-  names the transaction that commits each selection ending. A transaction that
-  admits a wait or proves exhaustion without preparing a call takes the
-  scheduler lock and the action heads below and no cursor row, because it
-  selects nothing; the admission that creates a contended wait additionally
-  holds capacity rows, as stated further down. Credential-pool call preparation
-  additionally locks the action head of every member of the pinned policy it may
-  select, in profile-reference byte order, immediately after the scheduler lock
-  and before it reads any exclusion state. The mode follows what the transaction
-  does to that member and not which path reached it: `FOR SHARE` for a member
-  whose exclusion state it only reads, and `FOR UPDATE` for one it writes —
-  including the member whose pending `switch_next_turn` displacement a
-  successful preparation consumes, which is a write, not a read. This holds for
-  every preparation alike, including the one that releases a
-  credential-availability wait, so no path acquires a weaker mode by arriving
-  through a wait. It then locks every potentially selected bounded profile's
-  shared capacity row `FOR UPDATE`, in the same order, before reading
-  reservation counts. When `round_robin` decides among the first admitted
-  priority's members, preparation next locks that immutable-policy-and-priority
-  cursor row `FOR UPDATE` before reading the cursor, choosing a member, or
-  advancing it with `Prepared`. It rereads the protected selection facts after
-  acquiring each lock and holds all of them through the `Prepared` insert. A
-  transaction that mints, activates, or clears a credential exclusion — a
-  terminal observation applying a pool trigger, a delivery-layer quarantine, or
-  an operator clear — takes those same action heads `FOR UPDATE` at that same
-  ordering position. Share and exclusive modes conflict, so one of the two
-  transactions waits: a `Prepared` insert either precedes the exclusion commit
-  or reads the member as already excluded. This is what a selection needs when
-  it takes no other lock the writer takes — an unbounded `first_listed` member
-  acquires neither a capacity row nor a cursor row. Releasing a bounded
-  profile's reservation takes that profile's capacity row `FOR UPDATE` at the
-  same position and holds it through the atomic release-and-wake commit, and a
-  woken waiter rewriting its own wait evidence takes the capacity rows of every
-  bounded member that evidence names, in the same byte order. A release and a
-  snapshot rewrite therefore cannot interleave: no wait can commit naming a
-  reservation another transaction has already released, and no release can
-  publish its wake between a loser's read and its rewrite. No other path may
-  take a scheduler lock while holding an action-head, capacity-, or cursor-row
-  lock; take an action-head lock while holding a capacity-row or cursor-row
-  lock; or take a capacity-row lock while holding a cursor-row lock.
+  [The credential-availability machine](credential-availability.md) names the
+  transaction that commits each selection ending. A transaction that admits a
+  wait or proves exhaustion without preparing a call takes the scheduler lock
+  and the action heads below and no cursor row, because it selects nothing; the
+  admission that creates a contended wait additionally holds capacity rows, as
+  stated further down. Credential-pool call preparation additionally locks the
+  action head of every member of the pinned policy it may select, in
+  profile-reference byte order, immediately after the scheduler lock and before
+  it reads any exclusion state. The mode follows what the transaction does to
+  that member and not which path reached it: `FOR SHARE` for a member whose
+  exclusion state it only reads, and `FOR UPDATE` for one it writes — including
+  the member whose pending `switch_next_turn` displacement a successful
+  preparation consumes, which is a write, not a read. This holds for every
+  preparation alike, including the one that releases a credential-availability
+  wait, so no path acquires a weaker mode by arriving through a wait. It then
+  locks every potentially selected bounded profile's shared capacity row
+  `FOR UPDATE`, in the same order, before reading reservation counts. When
+  `round_robin` decides among the first admitted priority's members, preparation
+  next locks that immutable-policy-and-priority cursor row `FOR UPDATE` before
+  reading the cursor, choosing a member, or advancing it with `Prepared`. It
+  rereads the protected selection facts after acquiring each lock and holds all
+  of them through the `Prepared` insert. A transaction that mints, activates, or
+  clears a credential exclusion — a terminal observation applying a pool
+  trigger, a delivery-layer quarantine, or an operator clear — takes those same
+  action heads `FOR UPDATE` at that same ordering position. Share and exclusive
+  modes conflict, so one of the two transactions waits: a `Prepared` insert
+  either precedes the exclusion commit or reads the member as already excluded.
+  This is what a selection needs when it takes no other lock the writer takes —
+  an unbounded `first_listed` member acquires neither a capacity row nor a
+  cursor row. Releasing a bounded profile's reservation takes that profile's
+  capacity row `FOR UPDATE` at the same position and holds it through the atomic
+  release-and-wake commit, and a woken waiter rewriting its own wait evidence
+  takes the capacity rows of every bounded member that evidence names, in the
+  same byte order. A release and a snapshot rewrite therefore cannot interleave:
+  no wait can commit naming a reservation another transaction has already
+  released, and no release can publish its wake between a loser's read and its
+  rewrite. No other path may take a scheduler lock while holding an action-head,
+  capacity-, or cursor-row lock; take an action-head lock while holding a
+  capacity-row or cursor-row lock; or take a capacity-row lock while holding a
+  cursor-row lock.
 
 - **Automatic operation reconciliation**: discovery locks the singleton
   discovery-cursor row `FOR UPDATE` and retains it through discovery,
@@ -2026,8 +2026,7 @@ mid-turn would either readmit the failed profile or make the turn unable to
 record why it stayed excluded.
 
 Pre-call exhaustion — the `pre-call fail` and `wait-transition fail (no call)`
-endings of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+endings of [the credential-availability machine](credential-availability.md),
 whose durable-records column this page owns — uses one turn-correlated failure
 header with cause exactly `credential_pool_exhausted`, the current attempt, and
 the immutable policy identity, plus contiguous member rows in policy order
@@ -2122,30 +2121,29 @@ its wake are never visible apart. One release can wake several waits while
 admitting one, so each woken transaction reruns admission under the same
 capacity locks. The one that acquires the freed reservation releases its wait. A
 transaction finding no admissible member instead re-derives its ending from
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine)
-under those locks and stores whatever that row requires: where a bounded member
-still holds the pool it atomically rewrites its own wait's evidence to the live
-reservation identities now holding the bound and stays parked; where every
-formerly bounded member has become durably excluded, contention is over and the
-machine's wait-selection rule decides, so the wait is rewritten to the exhausted
-form exactly where an exclusion a wake can clear remains and **no wait is stored
-at all otherwise**, which instead terminalizes the turn with the cause that
-table gives its row. Deriving it from the surviving exclusions rather than from
-the configured value is what stops a `park` pool whose members are all excluded
-by this turn's own chain exclusions from being rewritten into a wait no wake
-could ever release. Storage never keeps a turn parked under a policy that says
-to fail it, and never parks one nothing could wake. Because the rewrite holds
-the capacity rows of every bounded member it names, a concurrent completion
-cannot release one of them between the read and the commit. A deferred
-constraint therefore never has to reject a losing waiter's call, and no stored
-wait names a released reservation or misses the only wake that concerned it.
-Entering either wait ends the call-free current attempt as
-`WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
-consumes the wait and creates its fresh `Prepared` successor attempt;
-`stop_turn` instead atomically consumes it, creates the fresh
-immediate-successor attempt, applies the interrupt proof, ends that attempt
-`AfterCancellation(Cancelled)`, and terminalizes the turn. Each reservation has
-a closed `pending_spawn` state with no process identity and a
+[the credential-availability machine](credential-availability.md) under those
+locks and stores whatever that row requires: where a bounded member still holds
+the pool it atomically rewrites its own wait's evidence to the live reservation
+identities now holding the bound and stays parked; where every formerly bounded
+member has become durably excluded, contention is over and the machine's
+wait-selection rule decides, so the wait is rewritten to the exhausted form
+exactly where an exclusion a wake can clear remains and **no wait is stored at
+all otherwise**, which instead terminalizes the turn with the cause that table
+gives its row. Deriving it from the surviving exclusions rather than from the
+configured value is what stops a `park` pool whose members are all excluded by
+this turn's own chain exclusions from being rewritten into a wait no wake could
+ever release. Storage never keeps a turn parked under a policy that says to fail
+it, and never parks one nothing could wake. Because the rewrite holds the
+capacity rows of every bounded member it names, a concurrent completion cannot
+release one of them between the read and the commit. A deferred constraint
+therefore never has to reject a losing waiter's call, and no stored wait names a
+released reservation or misses the only wake that concerned it. Entering either
+wait ends the call-free current attempt as `WithoutStop(YieldedToDurableWait)`
+in the same transaction. Release atomically consumes the wait and creates its
+fresh `Prepared` successor attempt; `stop_turn` instead atomically consumes it,
+creates the fresh immediate-successor attempt, applies the interrupt proof, ends
+that attempt `AfterCancellation(Cancelled)`, and terminalizes the turn. Each
+reservation has a closed `pending_spawn` state with no process identity and a
 `spawned { process_group_identity }` state carrying the child process group's
 reuse-safe host identity. Successful spawn replaces `pending_spawn` with
 `spawned` immediately, and that attach is guarded on the reservation still being

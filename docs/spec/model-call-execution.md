@@ -639,13 +639,13 @@ outcome (INV-025, INV-026); a known failure fails the attempt and turn unless
 its pool authorizes an availability successor against a *different* eligible
 profile ([availability successor calls](#availability-successor-calls)) — the
 `terminal` and `successor` rows of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-which states the four ordered gates that decide between them; a failure ends
-`terminal` at the first gate it fails — and ambiguity parks the turn for
-recovery. That exception is substitution, never repetition: no path re-issues a
-call against the profile that failed. A later scheduler pass never treats an
-issued unclassified call as fresh authorization. Why: a lost acknowledgement
-cannot prove the provider did not act, so repetition risks undisclosed duplicate
+[the credential-availability machine](credential-availability.md), which states
+the four ordered gates that decide between them; a failure ends `terminal` at
+the first gate it fails — and ambiguity parks the turn for recovery. That
+exception is substitution, never repetition: no path re-issues a call against
+the profile that failed. A later scheduler pass never treats an issued
+unclassified call as fresh authorization. Why: a lost acknowledgement cannot
+prove the provider did not act, so repetition risks undisclosed duplicate
 provider effects and spend; recording ambiguity is preferred to an invented
 exactly-once claim.
 
@@ -654,17 +654,16 @@ exactly-once claim.
 The rule above governs repetition: one durable authorization never reaches the
 provider twice. It does not govern substitution of the credential that failed,
 which is the `successor` ending of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
-A `KnownFailed` call whose cause is one of the three availability causes —
+[the credential-availability machine](credential-availability.md). A
+`KnownFailed` call whose cause is one of the three availability causes —
 `provider_quota_exhausted`, `provider_rate_limited`, or `provider_overloaded` —
 and whose pool configures `switch_now` for that cause may be followed by a
 *successor call*: a distinct model call, on a successor turn attempt, against
 the next admitted member of the same credential pool
 ([configuration-and-credentials](configuration-and-credentials.md#credential-pools-and-selection)).
 This is the `successor` row of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-which owns every other projection of it; this section owns the call's own
-mechanics.
+[the credential-availability machine](credential-availability.md), which owns
+every other projection of it; this section owns the call's own mechanics.
 
 The predecessor stays terminal and stays `KnownFailed`; nothing reclassifies it,
 and its pinned target, pinned credential reference, and reported usage remain
@@ -745,19 +744,18 @@ does only while some exclusion a wake can clear remains — together with whethe
 this **availability chain** has already issued a call, the chain and not the
 turn, since a later tool round opens a fresh chain against a turn that has
 already issued calls. Every such ending, and every projection of each, is
-defined by
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+defined by [the credential-availability machine](credential-availability.md).
 
 This page owns the terminal-evidence-and-cause column of
-[that table](credential-availability.md#the-credential-availability-machine). A
-chain that already observed a qualifying provider failure carries that last
-observed cause and its `ProviderError` evidence. A turn that reached an
-exhausted pool before issuing any call instead carries the distinct
-`credential_pool_exhausted` preparation cause together with the frozen policy's
-durable member-exclusion evidence; it never fabricates provider evidence and
-never borrows a stale provider cause, because no provider request was issued for
-it to have observed. A parked turn carries no terminal evidence at all: it has
-not terminalized, and is not one of this page's terminal outcomes.
+[that table](credential-availability.md). A chain that already observed a
+qualifying provider failure carries that last observed cause and its
+`ProviderError` evidence. A turn that reached an exhausted pool before issuing
+any call instead carries the distinct `credential_pool_exhausted` preparation
+cause together with the frozen policy's durable member-exclusion evidence; it
+never fabricates provider evidence and never borrows a stale provider cause,
+because no provider request was issued for it to have observed. A parked turn
+carries no terminal evidence at all: it has not terminalized, and is not one of
+this page's terminal outcomes.
 
 **Implemented behavior — typed pool exhaustion.** A sealed
 `CredentialPoolExhaustedModelCallTurn` carries the pool identity separately from

@@ -289,8 +289,8 @@ per-turn provenance. The following extensions remain undecided:
 
 - **Automatic fallback.** Decided and specified: what a selection attempt can
   end as, and every projection of each ending, by
-  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine);
-  the qualifying causes and the successor-call shape by
+  [the credential-availability machine](spec/credential-availability.md); the
+  qualifying causes and the successor-call shape by
   [availability successor calls](spec/model-call-execution.md#availability-successor-calls);
   the pool grammar, per-membership ranking, and closed action vocabulary by
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
