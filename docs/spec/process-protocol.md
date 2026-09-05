@@ -123,7 +123,10 @@ provider-native model identifier, or mutable configuration operation. The
 imported-entry projection carries no tool fields, results, thinking, media,
 source-event payload, absence detail, or raw record, so the immutable aggregate
 stays the authority. No delegation event embeds or links the child transcript.
-Storage-version columns are not exposed as wire-version fields.
+Storage-version columns are not exposed as wire-version fields. An opaque
+provider-compaction semantic entry projects only a non-text marker carrying its
+turn and producing-call identities; its provider replay bytes never cross
+protocol output.
 
 Pool construction requires a non-cloneable capability that borrows the live
 fence session, so a copied generation value cannot construct work after the
