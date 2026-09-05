@@ -552,9 +552,11 @@ scheduling beyond the configured list.
 
 The daemon refers to a credential by its non-secret name everywhere except at
 the point of use. No credential value, credential file path, or database URL
-appears in a log, an error, or a durable record. The daemon redacts the exact
-credential value from provider text before it truncates that text. A credential
-for one repository never authorizes a request to another.
+appears in a log, an error, or a durable record. For a profile whose credential
+value the daemon resolves, the daemon redacts that exact value from provider
+text before it truncates the text; a delivery that gives the daemon no value
+receives credential-shape redaction instead. A credential for one repository
+never authorizes a request to another.
 
 A poll that fails, is rejected, or cannot be parsed commits no cursor and no
 events. A commit appends the cursor and its events together under an expected
