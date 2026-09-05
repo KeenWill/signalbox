@@ -127,7 +127,8 @@ The browser descriptor route returns no raw blob, normalized record, host path,
 or source repository location.
 
 A failed import may leave unregistered store orphans but never an unreachable
-catalog row. Why: the database never references bytes the store lacks.
+catalog row. Why: raw blobs are published before the aggregate transaction, so
+the database never references bytes the store lacks.
 
 The display title is presentation evidence, not identity: it never participates
 in the source digest, the conversation identity, or the unique source-identity
