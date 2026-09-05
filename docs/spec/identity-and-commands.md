@@ -449,7 +449,7 @@ daemon-minted aggregate identifiers — `session_id`, turn identities, phase, an
 failure-class fields — in the two render forms described under Encoding. The
 same events may carry closed classification tokens that name no aggregate: the
 tool-loop failed-attempt event adds the dispatched catalog tool name and the
-closed tool error kind ([tool-loop](tool-loop.md#serialized-staged-execution)).
+closed tool error kind ([tool-loop](tool-loop.md)).
 
 No telemetry site emits a caller-supplied `DurableCommandId` in any form: no raw
 UUID, prefix, digest, or token appears in any `tracing` call in the codebase.

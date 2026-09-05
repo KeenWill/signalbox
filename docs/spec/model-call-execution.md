@@ -261,12 +261,11 @@ and absence never selects a credential. A session composed without a workspace
 therefore advertises exactly the tools that can execute in it and no placement
 combination is rejected merely for being workspace-free
 ([runner protocol and placement](runner-protocol.md#session-composition) owns
-the composition axes, and
-[tool-loop](tool-loop.md#registry-placement-and-effect-metadata) owns which
-declarations carry a workspace requirement). Why: advertising a tool that cannot
-be admitted at lease claim spends a model round to learn what preparation had
-already determined, and accurate advertisement is cheaper than a late refusal.
-An exact-identity selector binds that runner and registration revision for a
+the composition axes, and [tool-loop](tool-loop.md) owns which declarations
+carry a workspace requirement). Why: advertising a tool that cannot be admitted
+at lease claim spends a model round to learn what preparation had already
+determined, and accurate advertisement is cheaper than a late refusal. An
+exact-identity selector binds that runner and registration revision for a
 possible first dispatch, so its loss produces `RunnerLostBeforePin`. A
 capability-class selector freezes the class and required availability, not a
 runner identity; the eventual first dispatch may select only a then-current

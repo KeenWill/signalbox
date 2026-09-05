@@ -567,11 +567,10 @@ Heading text, `name`, and `description` are repository-controlled bytes, and
 preview returns them through an `Auto` tool with no admission decision behind
 it. That asymmetry holds only if the result states the authority those bytes
 carry. A tool result is durably referenced from semantic history and rendered
-into later calls by the owning
-[tool result contract](tool-loop.md#result-authority-and-the-continuation-boundary),
-so without framing this path could put tens of kilobytes of source text into
-every later call while bypassing the `AlwaysConfirm` gate, the rendered-byte
-manifest, and projection-only provenance that admission exists to impose.
+into later calls by the owning [tool result contract](tool-loop.md), so without
+framing this path could put tens of kilobytes of source text into every later
+call while bypassing the `AlwaysConfirm` gate, the rendered-byte manifest, and
+projection-only provenance that admission exists to impose.
 
 Preview therefore returns every repository-controlled string inside an
 explicitly delimited untrusted-data region of its result, under a fixed
@@ -671,18 +670,16 @@ a touched file, or present in a template. Version one admits only by the closed
 variants and triggering evidence.
 
 `instructions_read` declares the `AlwaysConfirm` permission default required of
-every entry in the owning
-[tool catalog](tool-loop.md#provider-bridge-and-daemon-catalog), together with
-the explicit `Delegated` approval posture. Together they mean that an admission
-is decided by the approval judge against the session's commissioned brief, not
-by prompting a person. The
-[approval policy](tool-loop.md#approval-policy-and-decision-sources) gives that
-combination this meaning: an explicit `Delegated` posture is authoritative and
-parks the request for a judge, and it is the one posture that satisfies an
-`AlwaysConfirm` declaration, because a judge is not a blanket but a distinct
-decider that can still deny the request or escalate it to the user. The
-resulting decision is recorded as `Delegate`, naming the exact model call that
-made it and retaining the judge rationale.
+every entry in the owning [tool catalog](tool-loop.md), together with the
+explicit `Delegated` approval posture. Together they mean that an admission is
+decided by the approval judge against the session's commissioned brief, not by
+prompting a person. The [approval policy](tool-loop.md) gives that combination
+this meaning: an explicit `Delegated` posture is authoritative and parks the
+request for a judge, and it is the one posture that satisfies an `AlwaysConfirm`
+declaration, because a judge is not a blanket but a distinct decider that can
+still deny the request or escalate it to the user. The resulting decision is
+recorded as `Delegate`, naming the exact model call that made it and retaining
+the judge rationale.
 
 The declaration is `AlwaysConfirm` rather than `Auto` or `Confirm` because
 eligibility authorizes which bundles a session may admit, not that the model may
@@ -716,12 +713,11 @@ creating and executing the attempt, so a `bundle_id` outside the turn's
 effective eligibility view — the frozen snapshot as narrowed by any recovery
 revocation, not the snapshot alone — would otherwise reach judge preparation
 with no evidence to build from. This is therefore the family's declared
-[pre-approval admissibility check](tool-loop.md#intra-turn-rounds-and-request-batches):
-the request resolves through the owning request-level transition before
-approval, carrying the typed `not_eligible` reason and creating no approval
-state, no judge call, and no metadata in the result. What that transition
-records and how the batch proceeds afterwards belong to the
-[tool loop](tool-loop.md#intra-turn-rounds-and-request-batches) and are stated
+[pre-approval admissibility check](tool-loop.md#not-built): the request resolves
+through the owning request-level transition before approval, carrying the typed
+`not_eligible` reason and creating no approval state, no judge call, and no
+metadata in the result. What that transition records and how the batch proceeds
+afterwards belong to the [tool loop](tool-loop.md#not-built) and are stated
 there, not here; this page owns only which condition makes the request
 inadmissible. In particular no tool attempt is created, so the typed reason for
 this one case lives on the request rather than on an attempt row — the exception
@@ -783,10 +779,10 @@ file observes daemon-local state, exactly as `blob_read` does under the same
 classification.
 
 The three names use an underscore rather than a dot because the owning
-[`ToolRequest` name grammar](tool-loop.md#intra-turn-rounds-and-request-batches)
-admits only ASCII letters, digits, underscore, and hyphen. A dotted name could
-be advertised but never converted into the durable request the admission flow
-requires, so the family would be unusable at the first proposal.
+[`ToolRequest` name grammar](tool-loop.md) admits only ASCII letters, digits,
+underscore, and hyphen. A dotted name could be advertised but never converted
+into the durable request the admission flow requires, so the family would be
+unusable at the first proposal.
 
 Each tool advertises a closed JSON-object argument schema with no additional
 properties, and neither schema accepts a session identity — every request takes
@@ -854,13 +850,12 @@ audit, and recovery read, independently of what a provider is shown. The two
 pre-approval reasons are the exception, because their transition creates no
 attempt: `not_eligible` and `invalid_arguments` resolved before approval store
 their reason on the request itself, under the owning
-[request-level transition](tool-loop.md#intra-turn-rounds-and-request-batches),
-and replay, audit, and recovery read it there. Looking for an attempt in those
-two cases would find none, and creating one would recreate exactly the orphan
-that transition exists to avoid.
+[request-level transition](tool-loop.md#not-built), and replay, audit, and
+recovery read it there. Looking for an attempt in those two cases would find
+none, and creating one would recreate exactly the orphan that transition exists
+to avoid.
 
-What the model sees is the owning
-[tool error algebra](tool-loop.md#provider-bridge-and-daemon-catalog), whose
+What the model sees is the owning [tool error algebra](tool-loop.md), whose
 `kind` is closed and contains none of these reasons. This page does not widen
 that algebra: adding kinds that exactly one family can emit would make every
 adapter and every unrelated tool carry them. The mapping is instead fixed here,
@@ -970,24 +965,22 @@ constraint, not a description of present behavior: no present tool supplies
 head or an `InstructionAdmission`.
 
 Each `instructions_read` request has a replay-stable tool-request identity. The
-owning
-[tool result-commit transaction](tool-loop.md#serialized-staged-execution)
-atomically commits its receipt-only result and, for a successful fresh read,
-appends one `InstructionAdmission` naming the prior admitted-set hash, bundle,
-rendered evidence, exact rendered wrapper bytes, and request identity. The
-immutable admission row is the version-one plaintext authority for later
-projections even if the workspace source changes or disappears. Replaying that
-identity returns the same receipt and admission linkage; a conflicting replay is
-corruption. A failed request appends neither admission nor a changed set.
+owning [tool result-commit transaction](tool-loop.md#not-built) atomically
+commits its receipt-only result and, for a successful fresh read, appends one
+`InstructionAdmission` naming the prior admitted-set hash, bundle, rendered
+evidence, exact rendered wrapper bytes, and request identity. The immutable
+admission row is the version-one plaintext authority for later projections even
+if the workspace source changes or disappears. Replaying that identity returns
+the same receipt and admission linkage; a conflicting replay is corruption. A
+failed request appends neither admission nor a changed set.
 
 After a tool batch, preparation folds successful admissions in durable request
 order and ignores idempotent repeats. The owning continuation transaction in
-[tool-loop](tool-loop.md#result-authority-and-the-continuation-boundary) creates
-exactly one successor manifest with the next model call. Thus several reads in
-one batch aggregate into one boundary, and a crash after tool-result commit but
-before continuation leaves admissions that the next preparation
-deterministically folds. Process memory and the live workspace are never
-authority for the admitted set.
+[tool-loop](tool-loop.md#not-built) creates exactly one successor manifest with
+the next model call. Thus several reads in one batch aggregate into one
+boundary, and a crash after tool-result commit but before continuation leaves
+admissions that the next preparation deterministically folds. Process memory and
+the live workspace are never authority for the admitted set.
 
 ## Projection rather than transcript append
 

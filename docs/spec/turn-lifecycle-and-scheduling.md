@@ -1032,9 +1032,8 @@ The occupied-slot delivery outcomes implemented here are:
   `InterruptUnavailableWhileAwaitingApproval { active_turn }` without accepting
   an input: the wait remains parked until its canonical decision command
   resolves the approval obligation, and the interrupt is neither a denial nor a
-  bypass of the decision command
-  ([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
-  deny-first caller protocol).
+  bypass of the decision command ([tool-loop](tool-loop.md) owns the deny-first
+  caller protocol).
 
 ## Runner-loss session recovery
 

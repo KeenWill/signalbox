@@ -39,8 +39,7 @@ represented and bounded; it does not endorse what that content says.
 `ExternalEffect` declarations. Both declarations default to `Confirm`, and the
 shipped configuration resolves both exact tool names to the `Human` approval
 posture. The resulting precedence over the session blanket and the durable
-approval flow are owned by
-[Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
+approval flow are owned by [Approval policy and decision sources](tool-loop.md).
 An operator must therefore make an explicit policy choice before either tool can
 execute automatically.
 

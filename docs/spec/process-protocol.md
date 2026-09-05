@@ -822,8 +822,7 @@ when a distinct earlier stop already carries the proof, and
 `interrupt_unavailable_while_awaiting_approval` when the active turn is parked
 on a tool-approval wait, which a stop can neither decide nor bypass — the caller
 denies the pending request through `decide_tool_request` first, then stops
-([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
-deny-first caller protocol).
+([tool-loop](tool-loop.md) owns the deny-first caller protocol).
 
 `decide_tool_request` carries the canonical user decision command for one
 pending tool request. A claimed command identity reaches the durable replay
@@ -841,15 +840,14 @@ first.
 
 `override_denied_tool_request` carries the canonical user override command for
 one delegate-denied tool request; its behavior is owned by
-[tool-loop](tool-loop.md#approval-policy-and-decision-sources). A claimed
-command identity reaches the durable replay boundary unconditionally (INV-012).
-Unlike `decide_tool_request`, the named session is part of the canonical payload
-— the recorded override is a session-scoped standing fact consumed by a later
-proposal — so an other-session request is the transaction's recorded
-`tool_request_not_in_session` rejection, not a pre-command refusal. Every
-outcome is the recorded result of the canonical command: an applied override
-returns the `tool_denial_overridden` receipt; the recorded rejections are
-`tool_request_not_found`, `tool_request_not_in_session`,
+[tool-loop](tool-loop.md). A claimed command identity reaches the durable replay
+boundary unconditionally (INV-012). Unlike `decide_tool_request`, the named
+session is part of the canonical payload — the recorded override is a
+session-scoped standing fact consumed by a later proposal — so an other-session
+request is the transaction's recorded `tool_request_not_in_session` rejection,
+not a pre-command refusal. Every outcome is the recorded result of the canonical
+command: an applied override returns the `tool_denial_overridden` receipt; the
+recorded rejections are `tool_request_not_found`, `tool_request_not_in_session`,
 `tool_request_not_delegate_denied`, `tool_request_not_terminally_denied`, and
 `tool_denial_already_overridden`.
 
@@ -1951,20 +1949,19 @@ restatement of the result content. The set has no ambiguous member because a
 physically ambiguous attempt never becomes an execution result: it stays the
 turn's ambiguity set and projects as `tool_closed`, which names only the tool
 request and therefore carries no attempt and no `execution` object
-([tool-loop](tool-loop.md#serialized-staged-execution)). Admitting an
-`ambiguous` outcome here would have obliged clients to accept an
-execution-result state no domain transition can produce. The relocation members
-are the same ones every other relocation-bearing projection carries, so a
-working-directory move is visible in tool evidence exactly as a runner move is.
-The profile label is evidence metadata, not text that a tool can forge.
+([tool-loop](tool-loop.md)). Admitting an `ambiguous` outcome here would have
+obliged clients to accept an execution-result state no domain transition can
+produce. The relocation members are the same ones every other relocation-bearing
+projection carries, so a working-directory move is visible in tool evidence
+exactly as a runner move is. The profile label is evidence metadata, not text
+that a tool can forge.
 
 The process projection resolves the domain's reference-only tool entries before
 crossing the wire. Tool use carries the exact checked name and exact
 normalized-or-scrubbed-undecodable arguments. Execution, denial, and closure
 carry the same provider-neutral success text or compact typed failure JSON
-defined by [tool-loop](tool-loop.md#provider-bridge-and-daemon-catalog). A
-client therefore never needs private storage access to reconstruct tool-bearing
-conversation history.
+defined by [tool-loop](tool-loop.md). A client therefore never needs private
+storage access to reconstruct tool-bearing conversation history.
 
 The following imported-entry variants exist in the protocol. An imported
 semantic entry always identifies its source with `imported_conversation_id` and
@@ -2047,9 +2044,9 @@ request and receipt frame vocabulary, terminal-client verbs, and daemon
 implemented. The composed process surface admits only exact already-issued model
 work for terminal operation and recovery; it never lets a client fabricate model
 provenance. The model-facing tool names and arguments are owned by
-[tool-loop](tool-loop.md#session-delegation-tool-family). Each request carries
-the invoking session, turn, and `tool_request_id`, which must reconstitute one
-matching logical request before any mutation occurs.
+[tool-loop](tool-loop.md). Each request carries the invoking session, turn, and
+`tool_request_id`, which must reconstitute one matching logical request before
+any mutation occurs.
 
 Logical-request reconstitution alone is not execution authority. Before a first
 mutation, the daemon must also reconstitute the exact authorized, executable

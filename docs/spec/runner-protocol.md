@@ -266,20 +266,20 @@ owns that configuration meaning. Why: the daemon has to decide before a model
 call whether a session can clone anything at all, and independent inventories of
 keys and profiles cannot answer that — only the pairing shows whether an entry
 is anonymous or requires the profile this session was granted
-([tool loop](tool-loop.md#registry-placement-and-effect-metadata) owns the
-advertisement condition that reads it). Workspace and sandbox inventories are
-their closed vocabularies. A reconnect inventory contains at most one lease, one
-unacknowledged terminal result, one workspace operation, one unacknowledged
-operation failure, and one unacknowledged leak-report page because execution,
-workspace work, and report delivery are each serial. Digests detect replay
-disagreement and confer no authority. `rejected` codes are
-`unsupported_version`, `unsupported_digest_version`, `malformed_frame`,
-`enrollment_conflict`, `enrollment_revoked`, `registration_rejected`,
-`stale_connection`, `correlation_mismatch`, `policy_rejected`,
-`workspace_conflict`, `runner_lost`, `unavailable`, or `shutting_down`. Any
-frame outside the state shown by the table, a duplicate with unequal canonical
-payload, or an acknowledgement without its durable predecessor is fatal and
-advances nothing. Equal replay returns or resends the same recorded answer.
+([tool loop](tool-loop.md) owns the advertisement condition that reads it).
+Workspace and sandbox inventories are their closed vocabularies. A reconnect
+inventory contains at most one lease, one unacknowledged terminal result, one
+workspace operation, one unacknowledged operation failure, and one
+unacknowledged leak-report page because execution, workspace work, and report
+delivery are each serial. Digests detect replay disagreement and confer no
+authority. `rejected` codes are `unsupported_version`,
+`unsupported_digest_version`, `malformed_frame`, `enrollment_conflict`,
+`enrollment_revoked`, `registration_rejected`, `stale_connection`,
+`correlation_mismatch`, `policy_rejected`, `workspace_conflict`, `runner_lost`,
+`unavailable`, or `shutting_down`. Any frame outside the state shown by the
+table, a duplicate with unequal canonical payload, or an acknowledgement without
+its durable predecessor is fatal and advances nothing. Equal replay returns or
+resends the same recorded answer.
 
 Digest bytes are pinned rather than left to each implementation. Every digest is
 the lowercase 64-character hex SHA-256 of a domain-separated, version-tagged
@@ -1029,8 +1029,8 @@ arguments, paths, or working directory are defined relative to a session
 repository is advertised only to a session that has one; a workspace-free
 session advertises exactly the tools that can run in it
 ([model-call execution](model-call-execution.md#frontier-rendering) owns the
-snapshot, and [tool loop](tool-loop.md#registry-placement-and-effect-metadata)
-owns the declarations). No combination is rejected for being workspace-free.
+snapshot, and [tool loop](tool-loop.md) owns the declarations). No combination
+is rejected for being workspace-free.
 
 Why: treating a session as a repository clone on the one runner produces a
 defect wherever that assumption surfaces — a credential inferred for a

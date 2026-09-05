@@ -692,7 +692,7 @@ described neither, and judging them against its repository, head, and base
 values would both apply a fence to work it never named and route their
 escalations down the unattended path below rather than to the user whose goal it
 is. The tool approval contract governs their quoted rendering and the judge's
-decision use in [tool loop](tool-loop.md#approval-policy-and-decision-sources).
+decision use in [tool loop](tool-loop.md).
 
 **Implemented behavior.** An operator-commissioned dispatch supplies the same
 immutable authority for a session no rule dispatched. The `commission_session`
