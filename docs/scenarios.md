@@ -89,8 +89,7 @@ INV-tagged test names and attached doc comments.
   successor on a new attempt against the same target and a different credential
   profile, under
   [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
-  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine),
-  and
+  [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
   No partial draft becomes final content. A later authorized call must retain
   steering already committed to turn history.
@@ -720,8 +719,7 @@ INV-tagged test names and attached doc comments.
   call that pin the same target, a different eligible profile from that pool,
   the predecessor call, and the qualifying cause, as owned by
   [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
-  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine),
-  and
+  [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
 - **State transitions:** Predecessor call → known availability failure and
   predecessor attempt → known failed; turn → successor eligible; successor

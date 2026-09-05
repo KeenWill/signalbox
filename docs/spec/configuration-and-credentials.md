@@ -21,11 +21,10 @@ operator-chosen model-provider profile names are implemented in
 `apps/signalboxd/src/credential_pools.rs` and
 `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, durable
 trigger actions and chain exclusions, the availability successor calls owned by
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-together with durable per-call pool-policy snapshots, are implemented. Codex
-`codex_home` admission and the per-member `CODEX_HOME` the selected profile
-delivers to each Codex CLI child are implemented in
-`apps/signalboxd/src/credential_pools.rs` and
+[the credential-availability machine](credential-availability.md), together with
+durable per-call pool-policy snapshots, are implemented. Codex `codex_home`
+admission and the per-member `CODEX_HOME` the selected profile delivers to each
+Codex CLI child are implemented in `apps/signalboxd/src/credential_pools.rs` and
 `crates/model-runtime-codex-cli/src/runtime.rs`. Codex `file` and `oauth`,
 capacity reservations, and legacy family-to-reference migration remain committed
 unimplemented functionality as labeled below. Every other paragraph on this page
@@ -131,8 +130,7 @@ The open-workspace live snapshot, follow route, and resynchronization semantics
 are owned by
 [its live-session section](sessions-and-transcript.md#bounded-browser-live-session-projection).
 The descriptor, content, and download routes beneath `/api/blobs/{digest}` are
-the same-origin surface owned by
-[blob storage](blob-storage.md#browser-delivery-views-and-derivations).
+the same-origin surface owned by [blob storage](blob-storage.md).
 
 `GET /api/attention` returns at most 32 session summaries from one read-only
 repeatable-read snapshot, ordered by session identity. A continuation names the
@@ -268,8 +266,7 @@ read during startup. Provider and integration credential files remain lazy. A
 currently routed S3 blob store is the sole static-file exception: after database
 connection and the configuration-independent recovery scan, startup reads that
 explicit credential to perform the marker and lifecycle checks owned by
-[blob storage](blob-storage.md#stores-routing-and-configuration), before socket
-admission or scheduling.
+[blob storage](blob-storage.md), before socket admission or scheduling.
 
 The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout setting;
 it constructs each adapter with its defaults. The
@@ -845,11 +842,10 @@ it, and commit rechecks the value against the actual appended byte count.
 The optional `[blob_storage]` table, its one-through-32 store catalog, distinct
 store-name and namespace-UUID bindings, exact filesystem and S3 fields, static
 credential grammar, routes, bounds, and absent-state compatibility are owned by
-the
-[blob-storage configuration contract](blob-storage.md#stores-routing-and-configuration).
-This configuration loader rejects every disagreement before runtime composition
-and applies the ordinary protected-file checks to the explicit S3 credential
-file; no ambient credential source enters the resulting adapter configuration.
+the [blob-storage configuration contract](blob-storage.md). This configuration
+loader rejects every disagreement before runtime composition and applies the
+ordinary protected-file checks to the explicit S3 credential file; no ambient
+credential source enters the resulting adapter configuration.
 
 The optional `[web_fetch]` table has exactly one `allowed_origins` array. It
 contains at most 64 distinct bare HTTP(S) origins: scheme, host, and optional
@@ -2001,7 +1997,7 @@ typed startup failures rather than retained-and-inert — `round_robin`,
 and a `switch_now` whose adapter cannot prove the cause. What each admitted
 value is defined to mean is stated below, and what a selection attempt can end
 as is owned by
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+[the credential-availability machine](credential-availability.md).
 
 A credential pool is the set of profiles that may substitute for one another for
 one model family. Its name is 1 through 256 UTF-8 bytes, unpadded, and NUL-free,
@@ -2021,10 +2017,10 @@ protocol's 8 MiB frame limit even under worst-case JSON escaping. Each
   fail startup because no durable cursor or capacity observation supplies them.
 - `on_pool_exhausted` — one closed value, `park` or `fail`. This grammar admits
   the value and nothing more; what each one does is owned by
-  [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-  where the value acts only by selecting whether an exhaustion parks: `fail`
-  never parks, and `park` parks only while an exclusion a wake can clear
-  remains.
+  [the credential-availability machine](credential-availability.md), where the
+  value acts only by selecting whether an exhaustion parks: `fail` never parks,
+  and `park` parks only while some member's every active exclusion is one a wake
+  can clear.
 - `headroom_reserve_percent` — an optional pool-wide integer from 0 through 99.
 - the five closed trigger keys `on_quota_exhausted`, `on_rate_limited`,
   `on_overloaded`, `on_credential_rejected`, and `on_headroom_low`, each
@@ -2236,18 +2232,18 @@ preparation prefers the member the session's most recent `Prepared` call on that
 pool pinned, including a call that later failed under `stay`, so a session stays
 on one account until a trigger displaces it. When the pool admits no member,
 which ending the attempt reaches is owned by
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
-Quarantine is durable and scoped to the profile rather than to the pool that
-observed it, because a rejected credential is a property of the account: a
-profile ranked in two pools is excluded from both. It is cleared only by an
-explicit operator command, or by a probe that costs nothing and calls no model
-where the adapter offers one — never by a timer, since a revoked credential does
-not heal on a schedule, and never by a restart. Why an operator command rather
-than rediscovery: for a `codex_home` or `oauth` profile the repair is an
-interactive re-authorization the operator performs, so the operator knows the
-moment it is fixed, and rediscovering it instead would spend a real model call
-to learn what they could have said. Reading a quarantine record is never on the
-recovery path for acknowledged work, so INV-034 is unaffected.
+[the credential-availability machine](credential-availability.md). Quarantine is
+durable and scoped to the profile rather than to the pool that observed it,
+because a rejected credential is a property of the account: a profile ranked in
+two pools is excluded from both. It is cleared only by an explicit operator
+command, or by a probe that costs nothing and calls no model where the adapter
+offers one — never by a timer, since a revoked credential does not heal on a
+schedule, and never by a restart. Why an operator command rather than
+rediscovery: for a `codex_home` or `oauth` profile the repair is an interactive
+re-authorization the operator performs, so the operator knows the moment it is
+fixed, and rediscovering it instead would spend a real model call to learn what
+they could have said. Reading a quarantine record is never on the recovery path
+for acknowledged work, so INV-034 is unaffected.
 
 The exact future operator-clear request, target correlations, replay behavior,
 and receipt are owned by
@@ -2823,8 +2819,7 @@ No present composition supplies any of the topics below.
   be: an upgrade may not change which credential an existing session resolves.
   Each existing entry therefore becomes a **singleton policy retaining exactly
   the stored reference** — one member at priority 1, no headroom reserve,
-  `first_listed`,
-  [`on_pool_exhausted = "fail"`](credential-availability.md#the-credential-availability-machine),
+  `first_listed`, [`on_pool_exhausted = "fail"`](credential-availability.md),
   and `stay` for every trigger — which reproduces the one-account, no-failover
   behavior that entry already had. Expanding the entry to whatever pool the
   document now maps that family to is the one thing it must not do: that would

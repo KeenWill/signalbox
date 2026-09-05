@@ -6,9 +6,9 @@ commit-observation effects, assistant content, intra-turn tool rounds and final
 turn completion, provider failure classification into physical dispositions, and
 the retry prohibition. What a credential-pool selection attempt can end as, and
 every projection of each ending, is owned by
-[credential availability](credential-availability.md); this page owns the
-terminal-evidence-and-cause column of that table and the successor call's own
-mechanics. Tool requests, approvals, attempts, and continuation are owned by
+[credential availability](credential-availability.md); this page owns each
+ending's terminal evidence and cause and the successor call's own mechanics.
+Tool requests, approvals, attempts, and continuation are owned by
 [tool-loop](tool-loop.md). Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
@@ -153,8 +153,7 @@ messages:
 
 - `OriginAcceptedInput` renders as a user-role message with its checked accepted
   input parts in order; text remains exact text and each attachment becomes the
-  exact bounded textual stub owned by
-  [blob storage](blob-storage.md#attachment-visibility-and-model-reads);
+  exact bounded textual stub owned by [blob storage](blob-storage.md);
 - `SteeringAcceptedInput` renders the referenced accepted input through that
   same ordered part projection;
 - `ModelIdentityChanged` renders as the structured provider-neutral identity
@@ -537,8 +536,7 @@ provenance for the parent command.
    cancellation closure. Reusing a successful check through the bounded
    turn-scoped verification inventory is committed unimplemented functionality
    until a blob-store adapter supplies the immutable-generation token required
-   by [blob storage](blob-storage.md#wire-vocabulary); current later ranges
-   therefore reverify.
+   by [blob storage](blob-storage.md); current later ranges therefore reverify.
 4. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
    commits `Prepared -> InFlight`. A `Prepared` owning attempt moves
@@ -638,33 +636,30 @@ automatic retry after a known failure and no automatic retry of an ambiguous
 outcome (INV-025, INV-026); a known failure fails the attempt and turn unless
 its pool authorizes an availability successor against a *different* eligible
 profile ([availability successor calls](#availability-successor-calls)) — the
-`terminal` and `successor` rows of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-which states the four ordered gates that decide between them; a failure ends
-`terminal` at the first gate it fails — and ambiguity parks the turn for
-recovery. That exception is substitution, never repetition: no path re-issues a
-call against the profile that failed. A later scheduler pass never treats an
-issued unclassified call as fresh authorization. Why: a lost acknowledgement
-cannot prove the provider did not act, so repetition risks undisclosed duplicate
+`terminal` and `successor` endings of
+[the credential-availability machine](credential-availability.md), which states
+the four ordered gates that decide between them; a failure ends `terminal` at
+the first gate it fails — and ambiguity parks the turn for recovery. That
+exception is substitution, never repetition: no path re-issues a call against
+the profile that failed. A later scheduler pass never treats an issued
+unclassified call as fresh authorization. Why: a lost acknowledgement cannot
+prove the provider did not act, so repetition risks undisclosed duplicate
 provider effects and spend; recording ambiguity is preferred to an invented
 exactly-once claim.
 
 ### Availability successor calls
 
 The rule above governs repetition: one durable authorization never reaches the
-provider twice. It does not govern substitution of the credential that failed,
-which is the `successor` ending of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
-A `KnownFailed` call whose cause is one of the three availability causes —
+provider twice. It does not govern substitution of the credential that failed. A
+`KnownFailed` call whose cause is one of the three availability causes —
 `provider_quota_exhausted`, `provider_rate_limited`, or `provider_overloaded` —
 and whose pool configures `switch_now` for that cause may be followed by a
 *successor call*: a distinct model call, on a successor turn attempt, against
 the next admitted member of the same credential pool
 ([configuration-and-credentials](configuration-and-credentials.md#credential-pools-and-selection)).
-This is the `successor` row of
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-which owns every other projection of it; this section owns the call's own
-mechanics.
+This substitution is the `successor` ending of
+[the credential-availability machine](credential-availability.md), which owns
+every other projection of it; this section owns the call's own mechanics.
 
 The predecessor stays terminal and stays `KnownFailed`; nothing reclassifies it,
 and its pinned target, pinned credential reference, and reported usage remain
@@ -678,15 +673,18 @@ create.
 An observation that admits this path ends the predecessor attempt as
 `KnownFailure` but does not terminalize the turn. Under the session-scheduler
 lock, its atomic observation transaction applies the frozen `switch_now` action
-and either prepares the successor attempt and call or enters the pool's
-exhausted or contended disposition. It appends no `TurnFailed`, creates no
-terminal frontier, and does not reclassify pending steering while a successor or
-wait retains the active turn. A concurrently accepted stop is serialized by that
-same lock: when its applied-interrupt proof already exists, the known failure
-follows the ordinary stop-requested terminal path and no successor is created;
-when the observation wins first, the later stop targets the newly active
-successor. One commit can therefore never both terminalize the turn and
-authorize a successor.
+and either prepares the successor attempt or enters the pool's exhausted or
+contended disposition; the successor's member is admitted and its call created
+at that attempt's later preparation. That transaction appends no `TurnFailed`,
+creates no terminal frontier, and does not reclassify pending steering while a
+successor or wait retains the active turn. A concurrently accepted stop is
+serialized by that same lock: when its applied-interrupt proof already exists,
+the known failure follows the ordinary stop-requested terminal path and no
+successor is created; when the observation wins first, the later stop targets
+the newly active successor. One commit can therefore never both terminalize the
+turn and authorize a successor. A later preparation that finds the pool
+exhausted ends that call-free successor attempt as a pre-call exhaustion: its
+terminal cause is pool exhaustion and it records no provider cause.
 
 Three causes qualify and no others. Refusal never qualifies: it is provider
 judgment about the request, so another account would refuse the same content and
@@ -741,18 +739,19 @@ path below rather than calling a failed member again.
 
 When no member remains admissible, which ending the attempt reaches is decided
 by whether the exhaustion selects a wait — which `fail` never does and `park`
-does only while some exclusion a wake can clear remains — together with whether
-this **availability chain** has already issued a call, the chain and not the
-turn, since a later tool round opens a fresh chain against a turn that has
-already issued calls. Every such ending, and every projection of each, is
-defined by
-[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+does only when some member's every active exclusion is one a wake can clear —
+together with whether this **availability chain** has already issued a call, the
+chain and not the turn, since a later tool round opens a fresh chain against a
+turn that has already issued calls. Every such ending, and every projection of
+each, is defined by
+[the credential-availability machine](credential-availability.md).
 
-This page owns the terminal-evidence-and-cause column of
-[that table](credential-availability.md#the-credential-availability-machine). A
-chain that already observed a qualifying provider failure carries that last
-observed cause and its `ProviderError` evidence. A turn that reached an
-exhausted pool before issuing any call instead carries the distinct
+This page owns the terminal evidence and cause of each ending named by
+[the credential-availability machine](credential-availability.md). An attempt
+whose observation closed a qualifying provider failure carries that last
+observed cause and its `ProviderError` evidence. A call-free attempt that
+reached an exhausted pool, whether a fresh chain or a deferred successor whose
+preparation found exhaustion, instead carries the distinct
 `credential_pool_exhausted` preparation cause together with the frozen policy's
 durable member-exclusion evidence; it never fabricates provider evidence and
 never borrows a stale provider cause, because no provider request was issued for
