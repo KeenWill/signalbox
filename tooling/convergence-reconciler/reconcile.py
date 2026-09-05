@@ -687,18 +687,15 @@ query($id: ID!, $after: String!) {
             # meaningful changed. Reconfirm the persisted review directly
             # against the live (non-dismissed) review set and the checks'
             # current state rather than losing the evidence outright.
-            review_still_valid = isinstance(persisted_review_id, str) and (
-                record.get("authenticated_review_body") == pull_request["body"]
-            ) and (
-                pull_request["observed_codex_reviews"].get(persisted_review_id)
+            review_still_valid = (
+                isinstance(persisted_review_id, str)
+                and record.get("authenticated_review_body")
+                == pull_request["body"]
+                and persisted_head == pull_request["head_oid"]
+                and live_codex_review_oids.get(persisted_review_id)
                 == persisted_head
-                or (
-                    persisted_head == pull_request["head_oid"]
-                    and live_codex_review_oids.get(persisted_review_id)
-                    == persisted_head
-                    and checks_currently_green
-                    and inventory_unchanged_since_authentication
-                )
+                and checks_currently_green
+                and inventory_unchanged_since_authentication
             )
             if (
                 review_still_valid
@@ -1787,9 +1784,10 @@ def normalize_review_threads(
             ),
             default=None,
         )
+        thread_replies = comments[latest_reviewer_index + 1 :]
         author_replies = [
             comment
-            for comment in comments[latest_reviewer_index + 1 :]
+            for comment in thread_replies
             for effective_at in [comment_effective_at(comment)]
             if comment.get("authorAssociation")
             in TRUSTED_REVIEW_REQUEST_ASSOCIATIONS
@@ -1805,8 +1803,18 @@ def normalize_review_threads(
             disposition_kind(comment.get("body") or "")
             for comment in author_replies
         ]
-        latest_disposition = next(
-            (kind for kind in reversed(dispositions) if kind is not None),
+        current_escalation = bool(thread_replies) and (
+            thread_replies[-1].get("authorAssociation")
+            in TRUSTED_REVIEW_REQUEST_ASSOCIATIONS
+            and disposition_kind(thread_replies[-1].get("body") or "")
+            == "escalated"
+        )
+        latest_disposition = "escalated" if current_escalation else next(
+            (
+                kind
+                for kind in reversed(dispositions)
+                if kind in {"fixed", "declined"}
+            ),
             None,
         )
         fixing_commits = [
@@ -1842,7 +1850,7 @@ def normalize_review_threads(
         dispositioned = (
             bool(informational_answers)
             if informational
-            else any(kind is not None for kind in dispositions)
+            else latest_disposition is not None
         )
         if informational and informational_answers:
             disposition_at = max(
@@ -1857,7 +1865,7 @@ def normalize_review_threads(
         normalized_thread = {
             "isResolved": thread["isResolved"],
             "isDispositioned": dispositioned,
-            "isEscalated": latest_disposition == "escalated",
+            "isEscalated": current_escalation,
             "isInformational": informational,
             "latestReviewerAt": latest_reviewer_at,
             "dispositionAt": disposition_at,

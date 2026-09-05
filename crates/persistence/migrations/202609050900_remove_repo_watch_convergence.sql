@@ -1,5 +1,65 @@
 -- Retire repository-watch and convergence-sweep decision state.
 
+ALTER TABLE repo_watch_rule_evaluation
+    DISABLE TRIGGER repo_watch_rule_evaluation_is_append_only;
+UPDATE repo_watch_rule_evaluation
+   SET outcome_kind = 'target_closed'
+ WHERE outcome_kind = 'target_converged';
+
+ALTER TABLE repo_watch_dispatch_obligation
+    DISABLE TRIGGER repo_watch_dispatch_obligation_maintains_pull_request_count;
+ALTER TABLE repo_watch_dispatch_obligation
+    DISABLE TRIGGER repo_watch_dispatch_obligation_maintains_repository_count;
+UPDATE repo_watch_dispatch_obligation
+   SET settled_kind = 'target_closed'
+ WHERE settled_kind = 'target_converged';
+SET CONSTRAINTS ALL IMMEDIATE;
+
+ALTER TABLE repo_watch_rule_evaluation
+    DROP CONSTRAINT repo_watch_rule_evaluation_outcome_kind_check,
+    ADD CONSTRAINT repo_watch_rule_evaluation_outcome_kind_check CHECK (
+        outcome_kind = ANY (ARRAY[
+            'not_matched'::text,
+            'target_closed'::text,
+            'occupied'::text,
+            'coalesced'::text,
+            'cooldown'::text,
+            'dispatched'::text
+        ])
+    );
+
+ALTER TABLE repo_watch_dispatch_obligation
+    DROP CONSTRAINT repo_watch_dispatch_obligation_settled_kind_check,
+    DROP CONSTRAINT repo_watch_dispatch_obligation_settlement_shape_check,
+    ADD CONSTRAINT repo_watch_dispatch_obligation_settled_kind_check CHECK (
+        settled_kind IS NULL OR settled_kind = ANY (ARRAY[
+            'dispatched'::text,
+            'deactivated'::text,
+            'target_closed'::text
+        ])
+    ),
+    ADD CONSTRAINT repo_watch_dispatch_obligation_settlement_shape_check CHECK (
+        (settled_kind IS NULL
+            AND settled_dispatch_id IS NULL
+            AND settled_at IS NULL)
+        OR (settled_kind = 'dispatched'
+            AND settled_dispatch_id IS NOT NULL
+            AND settled_at IS NOT NULL)
+        OR (settled_kind = ANY (ARRAY[
+                'deactivated'::text,
+                'target_closed'::text
+            ])
+            AND settled_dispatch_id IS NULL
+            AND settled_at IS NOT NULL)
+    );
+
+ALTER TABLE repo_watch_rule_evaluation
+    ENABLE TRIGGER repo_watch_rule_evaluation_is_append_only;
+ALTER TABLE repo_watch_dispatch_obligation
+    ENABLE TRIGGER repo_watch_dispatch_obligation_maintains_pull_request_count;
+ALTER TABLE repo_watch_dispatch_obligation
+    ENABLE TRIGGER repo_watch_dispatch_obligation_maintains_repository_count;
+
 -- A no-model-activity target could own a commissioned-dispatch module park.
 -- Removing that target removes the module's authority, so lift only the exact
 -- parks it owned before dropping the ownership record. The migration is one

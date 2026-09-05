@@ -367,6 +367,92 @@ async fn forward_migration_removes_retired_convergence_schema() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn forward_migration_converts_retired_convergence_outcomes() -> Result<(), Box<dyn Error>> {
+    const PRE_REMOVAL_MIGRATION: i64 = 202_609_020_022;
+    let (_container, pool) = postgres_pool().await?;
+    MIGRATOR.run_to(PRE_REMOVAL_MIGRATION, &pool).await?;
+    let evaluation_event = Uuid::from_u128(0x89_910);
+    let obligation = Uuid::from_u128(0x89_911);
+    let mut connection = pool.acquire().await?;
+
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_rule_evaluation
+            (repository, rule_id, rule_version, event_id, cursor_generation,
+             event_ordinal, outcome_kind, pull_request_number)
+         VALUES ('signalbox/repository', 'fixture-rule', 1, $1, 1, 1,
+                 'target_converged', 41)",
+    )
+    .bind(evaluation_event)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_obligation
+            (obligation_id, repository, rule_id, rule_version,
+             singleton_scope, singleton_repository, first_repository,
+             first_event_id, latest_event_id, matched_event_count,
+             external_blocking_session_id, settled_kind, settled_at)
+         VALUES ($1, 'signalbox/repository', 'fixture-rule', 1, 'repo',
+                 'signalbox/repository', 'signalbox/repository', $2, $2, 1,
+                 $3, 'target_converged', statement_timestamp())",
+    )
+    .bind(obligation)
+    .bind(evaluation_event)
+    .bind(Uuid::from_u128(0x89_912))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
+
+    MIGRATOR.run(&pool).await?;
+
+    let outcomes = sqlx::query_as::<_, (String, String)>(
+        "SELECT
+            (SELECT outcome_kind FROM repo_watch_rule_evaluation
+              WHERE event_id = $1),
+            (SELECT settled_kind FROM repo_watch_dispatch_obligation
+              WHERE obligation_id = $2)",
+    )
+    .bind(evaluation_event)
+    .bind(obligation)
+    .fetch_one(&pool)
+    .await?;
+    let constraint_definitions = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conname = ANY ($1::text[])
+          ORDER BY conname",
+    )
+    .bind(
+        [
+            "repo_watch_rule_evaluation_outcome_kind_check",
+            "repo_watch_dispatch_obligation_settled_kind_check",
+            "repo_watch_dispatch_obligation_settlement_shape_check",
+        ]
+        .as_slice(),
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        outcomes,
+        ("target_closed".to_owned(), "target_closed".to_owned())
+    );
+    assert_eq!(constraint_definitions.len(), 3);
+    assert!(
+        constraint_definitions
+            .iter()
+            .all(|definition| !definition.contains("target_converged"))
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn forward_migration_restores_convergence_owned_session_park() -> Result<(), Box<dyn Error>> {
     const PRE_REMOVAL_MIGRATION: i64 = 202_609_020_022;
     let (_container, pool) = postgres_pool().await?;

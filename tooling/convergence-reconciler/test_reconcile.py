@@ -1077,6 +1077,40 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
+    def test_persisted_review_is_invalidated_by_a_body_only_finding(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        inventory = ["CheckRun:required build"]
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": "head",
+                "authenticated_review_id": "review-a",
+                "authenticated_review_body": "description",
+                "authenticated_review_check_inventory": inventory,
+                "check_inventory": inventory,
+            },
+            "head_oid": "head",
+            "body": "description",
+            "authenticated_quiet_review_oids": [],
+            "authenticated_review_ids": {},
+            "observed_codex_reviews": {"review-a": "head"},
+            "live_codex_review_oids": {},
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required build",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+            "check_rollup_state": "SUCCESS",
+            "quiet_review_head_oids": [],
+        }
+
+        client._restore_persisted_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+
     def test_persisted_review_not_restored_when_no_longer_live(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         pull_request = {
@@ -2485,6 +2519,34 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         self.assertFalse(normalized[0]["isEscalated"])
         self.assertEqual(normalized[0]["dispositionKind"], "declined")
+
+    def test_later_non_disposition_reply_ends_an_escalation(self) -> None:
+        threads = [
+            {
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"author": {"login": "reviewer"}, "body": "Finding"},
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "Escalated without disposition",
+                        },
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "Additional context.",
+                        },
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")
+
+        self.assertFalse(normalized[0]["isEscalated"])
+        self.assertFalse(normalized[0]["isDispositioned"])
+        self.assertIsNone(normalized[0]["dispositionKind"])
 
     def test_wave_five_escalation_is_eligible_without_extension(self) -> None:
         self._assert_escalation_boundary(wave=5, total_waves=5, eligible=True)

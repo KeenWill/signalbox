@@ -1,14 +1,13 @@
 # Pull-request convergence reconciler
 
 `reconcile.py` is the repository's authoritative operational loop and
-convergence predicate for keeping a selected set of
-GitHub pull requests moving. It reads GitHub directly with `gh api graphql`,
-decides from that snapshot whether each pull request has converged, and invokes
-operator-supplied commands when an unconverged pull request has no active work.
-Only pull requests whose head repository is the configured repository are
-eligible; matching branch names from forks are never tracked or dispatched. It
-has no Signalbox daemon, service, or database integration and uses only the
-Python 3 standard library.
+convergence predicate for keeping a selected set of GitHub pull requests moving.
+It reads GitHub directly with `gh api graphql`, decides from that snapshot
+whether each pull request has converged, and invokes operator-supplied commands
+when an unconverged pull request has no active work. Only pull requests whose
+head repository is the configured repository are eligible; matching branch names
+from forks are never tracked or dispatched. It has no Signalbox daemon, service,
+or database integration and uses only the Python 3 standard library.
 
 The script writes one JSON log record for every decision. By default those
 records go to standard error and a compact operator summary goes to standard
@@ -50,16 +49,15 @@ one current GitHub snapshot:
    or decline disposition from a repository owner, member, or collaborator.
    Question, informational, and note threads require a substantive answer. A
    thread carrying the exact terminal marker `Escalated without disposition`
-   remains open and is reported separately without causing another dispatch.
-   No body-only review has the aggregate decision `CHANGES_REQUESTED`.
+   remains open and is reported separately without causing another dispatch. No
+   body-only review has the aggregate decision `CHANGES_REQUESTED`.
 2. Unless every changed file is planning-only under the repository banner rule,
    a trusted repository member explicitly requested Codex review naming the
    current head OID, and `chatgpt-codex-connector` subsequently produced either
    its completed-summary approval reaction or an empty-body review with no
    comments or with every finding validly declined and resolved. Authenticated
-   evidence is retained for an unchanged head across
-   later check reruns only while its settled check-context identity inventory
-   remains unchanged.
+   evidence is retained for an unchanged head across later check reruns only
+   while its settled check-context identity inventory remains unchanged.
 3. A check rollup exists on the commit whose OID equals the current head OID,
    every gating check is green, and the nonempty check-context inventory is
    unchanged from the preceding tick.
@@ -72,7 +70,7 @@ one current GitHub snapshot:
 
 The escalation marker is valid at wave five only when no extension was taken,
 and at the wave-eight hard stop. It is not accepted during extension waves six
-or seven.
+or seven, and it must be the thread's exact last reply.
 
 A completed check run is green when its conclusion is `SUCCESS`, `NEUTRAL`, or
 `SKIPPED`; a commit status is green only when it is `SUCCESS`. Queued, pending,
@@ -98,23 +96,22 @@ case-sensitive shell-pattern matching. Matching and previously tracked open pull
 requests are then fetched in batches of 20, including their first 100 review
 threads, changed files, and check contexts. Each current base/head OID pair is
 compared and then re-read in a separate request so a racing base advance cannot
-converge from stale evidence. Planning-only status checks changed files one at
-a time and stops at the first ineligible file; every file must carry the banner
-at the head and, unless newly added, at the base. Additional
-thread or check pages use dynamically aliased GraphQL fields, up to 20
-continuations in one request. The fetched review-thread count must equal the
-connection's `totalCount`, otherwise the tick fails closed. Review-thread
-identity, resolution, reviewer edit time, and disposition evidence and the
-complete check census are traversed a second time and must remain identical
-before the final OID check. Review-thread comments, top-level comments, and
-reviews are also paginated. REST compare
-requests conservatively classify post-review rename-only, source-comment-only,
-and proven clean base-forward
-changes; a base forward must be a single merge of the reviewed head and exact
-current base whose complete patch matches the base delta. REST pull-request-file
-requests recover base paths for renamed planning files. Previously watched node
-IDs are folded into the listing call so merged and closed pull requests can be
-recorded once and then omitted from future queries.
+converge from stale evidence. Planning-only status checks changed files one at a
+time and stops at the first ineligible file; every file must carry the banner at
+the head and, unless newly added, at the base. Additional thread or check pages
+use dynamically aliased GraphQL fields, up to 20 continuations in one request.
+The fetched review-thread count must equal the connection's `totalCount`,
+otherwise the tick fails closed. Review-thread identity, resolution, reviewer
+edit time, and disposition evidence and the complete check census are traversed
+a second time and must remain identical before the final OID check.
+Review-thread comments, top-level comments, and reviews are also paginated. REST
+compare requests conservatively classify post-review rename-only,
+source-comment-only, and proven clean base-forward changes; a base forward must
+be a single merge of the reviewed head and exact current base whose complete
+patch matches the base delta. REST pull-request-file requests recover base paths
+for renamed planning files. Previously watched node IDs are folded into the
+listing call so merged and closed pull requests can be recorded once and then
+omitted from future queries.
 
 ## Decision flow
 
@@ -133,13 +130,12 @@ The active-work command runs only for an unconverged pull request outside its
 cool-off. Exit status 0 means active, 1 means inactive, and any other status is
 an error that prevents dispatch. The dispatch command runs only after an
 inactive result. Immediately before each dispatch, a fresh timestamp is taken
-and the state file records a cool-off
-fence. A definite start failure removes that fence. Every outcome after the
-child starts, including a nonzero exit or timeout, keeps it because dispatch may
-have happened. This prevents an ambiguous command outcome or later tick failure
-from causing an immediate duplicate dispatch. Both
-commands are run directly, without a shell, and receive two appended positional
-arguments:
+and the state file records a cool-off fence. A definite start failure removes
+that fence. Every outcome after the child starts, including a nonzero exit or
+timeout, keeps it because dispatch may have happened. This prevents an ambiguous
+command outcome or later tick failure from causing an immediate duplicate
+dispatch. Both commands are run directly, without a shell, and receive two
+appended positional arguments:
 
 1. the decimal pull-request number;
 2. one compact JSON object containing the head and base refs, exact head and

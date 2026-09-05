@@ -9660,7 +9660,6 @@ pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
     TargetClosed,
-    TargetConverged,
     Occupied,
     Cooldown,
     Dispatched {
