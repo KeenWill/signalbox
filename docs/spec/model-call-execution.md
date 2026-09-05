@@ -5,12 +5,12 @@ one durable, at-most-once physical call and records what came back.
 
 ## Map
 
-The subsystem is the implemented model-call chain: rendering a context frontier
-into provider messages, the staged prepare, authorize-send, and
-commit-observation transactions, the tool rounds between calls, classification
-of the provider's answer into a physical disposition, and the prohibition on
-retrying a call. [credential-availability](credential-availability.md) owns what
-a credential-pool selection can end as; this page owns the evidence and cause a
+The subsystem is the model-call chain: rendering a context frontier into
+provider messages, the staged prepare, authorize-send, and commit-observation
+transactions, the tool rounds between calls, classification of the provider's
+answer into a physical disposition, and the prohibition on retrying a call.
+[credential-availability](credential-availability.md) owns what a
+credential-pool selection can end as; this page owns the evidence and cause a
 terminal call records and the mechanics of a successor call. Tool requests,
 approvals, and attempts belong to [tool-loop](tool-loop.md); turn and attempt
 lifecycle to [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
@@ -26,10 +26,9 @@ interaction. Its record, `CurrentModelCall` in
 `crates/domain/src/model_call.rs`, fixes at creation which turn and attempt own
 it, the frozen model selection, the provider target pinned for the turn, and the
 exact ordered context frontier it consumes. A live call is prepared, in flight,
-or cancellation-requested. Its terminal history is a separate ended record
-carrying one of five physical dispositions: `Completed`, `Refused`,
-`KnownFailed`, `Cancelled`, or `Ambiguous`, together with the provider's
-reported token usage and a usage-provenance discriminator.
+or cancellation-requested. When it ends, a separate ended record carries one of
+five physical dispositions, the provider's reported token usage, and a
+usage-provenance discriminator.
 
 `ModelCallExecution` in `crates/domain/src/model_execution.rs` is the aggregate:
 one active accepted-input turn in its running phase plus the one call owned by
@@ -64,11 +63,11 @@ share one call-scoped cancellation signal that resolves when an authoritative
 reload finds the call cancellation-requested or terminal. The authorize-send
 transaction moves the call to in flight. The commit-observation transaction
 reloads authority and commits the call disposition, the attempt and turn
-transitions, semantic entries, the terminal frontier, and the outbox rows in one
-transaction. `FatalExecutionSupervisor` in `apps/signalboxd` wraps execution and
-stops the process when a failure leaves nothing trustworthy to classify live;
-startup recovery in `crates/persistence/src/startup.rs` then classifies every
-retained call from durable evidence.
+transitions, semantic entries, the terminal frontier, and the outbox rows.
+`FatalExecutionSupervisor` in `apps/signalboxd` wraps execution and stops the
+process when a failure leaves nothing trustworthy to classify live; startup
+recovery in `crates/persistence/src/startup.rs` then classifies every retained
+call from durable evidence.
 
 The runtime bridge in `crates/model-provider-runtime` maps the runtime's typed
 terminal evidence to exactly one disposition: completed content to `Completed`,
@@ -96,32 +95,30 @@ successor turn attempt against the next admitted member of the same pool.
 `AvailabilitySuccessorModelCallTurn` is the aggregate transition that authorizes
 it.
 
-### Usage evidence
-
-Usage reads project terminal physical model calls without materializing the
-transcript; `UsageReader` in `crates/application/src/usage.rs` is the read port.
-Each projected row carries the call's target, a bounded non-secret
-credential-profile label, its usage provenance and input semantics, and its
-token axes, and the projection is append-only. Two read forms exist: an
+Usage evidence is a projection of terminal physical model calls that never
+materializes the transcript; `UsageReader` in `crates/application/src/usage.rs`
+is the read port. Each projected row carries the call's target, a bounded
+non-secret credential-profile label, its usage provenance and input semantics,
+and its token axes, and the projection is append-only. Two read forms exist: an
 aggregate report grouped by compatibility key, and a newest-first detail page
 with a keyset cursor.
 
 ## Decisions
 
-A terminal call record never reopens, because it is the record of what was
-externally done and rewriting it would let later facts silently change that
-record. The migration enforces the transition matrix, the immutability of
-terminal rows and authorization facts, and the target pin, because the schema
-backstops the aggregate against any buggy or racing writer, not just the audited
-one. The provider target is pinned as a turn fact before the first call exists
-and every call in the turn uses it, so a mutable alias or deployment change
-cannot enter a turn as recovery.
+A terminal call record never reopens, because it records what was externally
+done, and rewriting it would let later facts silently change that record. The
+migration enforces the transition matrix, the immutability of terminal rows and
+authorization facts, and the target pin, because the schema backstops the
+aggregate against any buggy or racing writer, not just the audited one. The
+provider target is pinned as a turn fact before the first call exists and every
+call in the turn uses it, so a mutable alias or deployment change cannot enter a
+turn as recovery.
 
 A call prepared before the input-semantics pin existed keeps a null pin and its
-reported axes exactly; the null, not a rewrite of the axes, is what keeps a read
-from deriving cost from possibly cache-inclusive input. Every present writer
-records usage provenance as `reported`; `estimated` exists in the closed
-vocabulary for a later explicit estimator, and no present writer selects it.
+reported axes exactly; the null, not a rewrite of the axes, keeps a read from
+deriving cost from possibly cache-inclusive input. Every present writer records
+usage provenance as `reported`; `estimated` exists in the closed vocabulary for
+a later explicit estimator.
 
 Reconstitution refuses every invalid shape rather than repairing it, because
 acting on a partially consistent projection could authorize a second provider
@@ -231,9 +228,8 @@ A failure with retained execution evidence after its one reconciliation pass, an
 ambiguous commit outcome, an unwind, or cancellation raises the fatal signal and
 the process exits nonzero, because startup recovery is the one audited path that
 classifies an issued call from durable evidence, and a live process that cannot
-construct a trustworthy result must stop rather than improvise. Same-incarnation
-retained-evidence reconciliation gets exactly one production pass before fatal
-escalation; repeated same-incarnation drains are exercised only by tests.
+construct a trustworthy result must stop rather than improvise. Repeated
+same-incarnation reconciliation drains are exercised only by tests.
 
 An aggregate usage read consumes a bounded count of newest matching calls and
 returns a bounded count of groups, recording truncation when either bound is
@@ -312,11 +308,11 @@ after the in-flight commit is known. Credential-pool effects derived from an
 observation reload the immutable policy identity pinned by that prepared call,
 not the session's current credential-history head, and every derived record
 commits with the observation's exact correlation in the same all-or-nothing
-transaction as the terminal evidence and the disposition it selects; no side
-commits alone. The application owns all candidate identity minting, and
-persistence uses or discards candidates but never mints its own. An ambiguous
-commit is never resolved by replay; the next pass rereads authoritative state
-before any later action.
+transaction as the terminal evidence and the disposition it selects. The
+application owns all candidate identity minting, and persistence uses or
+discards candidates but never mints its own. An ambiguous commit is never
+resolved by replay; the next pass rereads authoritative state before any later
+action.
 
 A physical call completion is never treated alone as proof that the logical turn
 completed. A `KnownFailed` call retains only the closed provider-error
