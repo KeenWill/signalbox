@@ -185,9 +185,9 @@ Turn activation and recovery surface a commit-boundary failure as infrastructure
 with the ambiguity flag set, because they mint fresh identities instead of
 claiming a command identifier, and replay cannot resolve them.
 
-Among command-handling repositories only the tool loop classifies its failures
-for operators; the others distinguish corruption from infrastructure in their
-error types and classify nothing yet.
+Operator classification is adopted per repository: the command repositories that
+implement the classifier map their failures into the shared taxonomy, and the
+rest distinguish corruption from infrastructure in their error types alone.
 
 A stopped delegated child keeps its physical execution evidence; eligibility
 excludes it through its logical terminal proof, and a late provider response is
@@ -242,8 +242,8 @@ ownership, or authority from a UUID; listing rows by identifier for display or
 paging is not such a derivation.
 
 A new migration's version prefix is greater than every existing one. Once a
-migration is recorded in any deployed database, or once its pull request merges,
-it is immutable: fix it with a new forward migration, never by editing,
+migration is recorded in any deployed database, or once its pull request merges
+to main, it is immutable: fix it with a new forward migration, never by editing,
 replacing, or renumbering the file. The one exception is a full collapse to a
 regenerated baseline, allowed only while no production deployment exists.
 
