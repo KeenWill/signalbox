@@ -49,20 +49,22 @@ code-host, workspace, conversation, plan, session-delegation, goal-declaration,
 local Git, and execution tools. Each family's crate or daemon module documents
 its tools.
 
-Each approved request runs as one physical attempt through staged transactions.
-A prepare transaction mints the attempt and commits a `Prepared` row that fixes
-the request, owning turn, issuing turn attempt, effect class, locus, and
-dispatch generation before any executor work. An authorize transaction moves the
-attempt in flight under fresh locked state. The executor then runs outside any
-transaction, and a commit transaction records its evidence against the same
-correlation. A process-shared, turn-keyed dispatch gate in
-`crates/application/src/tool_dispatch_gate.rs` orders immediate interrupts
-against attempt checkpointing, preflight, the window from authorization to
-result commit, crash classification, and the continuation checkpoint.
+Each approved request that reaches execution runs as one physical attempt
+through staged transactions. A prepare transaction mints the attempt and commits
+a `Prepared` row that fixes the request, owning turn, issuing turn attempt,
+effect class, locus, and dispatch generation before any executor work. An
+authorize transaction moves the attempt in flight under fresh locked state. The
+executor then runs outside any transaction, and a commit transaction records its
+evidence against the same correlation. A process-shared, turn-keyed dispatch
+gate in `crates/application/src/tool_dispatch_gate.rs` orders immediate
+interrupts against attempt checkpointing, preflight, the window from
+authorization to result commit, crash classification, and the continuation
+checkpoint.
 
 A result entry in the transcript references a durable row rather than carrying
-content: an execution result names the terminal attempt, a denial names the
-request, a delegation result names the `await_session` request whose child
+content, except a delegation result, which embeds the delegation outcome and its
+optional content: an execution result names the terminal attempt, a denial names
+the request, a delegation result names the `await_session` request whose child
 produced it, foreground or background, and the child whose durable result
 completed it, and `ToolClosed` names a request whose turn ended before it
 completed ordinary execution, whether it was still undecided, approved but not
