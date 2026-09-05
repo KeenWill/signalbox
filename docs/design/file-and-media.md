@@ -45,7 +45,8 @@ and its registered output reader uniquely, and only strong-signature or
 structural validation counts; a producer's own type claim, length, or digest is
 never evidence. A direct presentation requires the emitted type to equal the
 source's detected type and the source length to fit the view, process, and
-target bounds.
+target bounds. Derived bytes must fit those same target bounds, and bytes that
+exceed them fail the read.
 
 Preparation for a model call authenticates the persisted evidence for the
 referenced bytes instead of running a reader again, and rejects an unsupported
@@ -59,20 +60,23 @@ Registry construction keeps rejecting image, audio, and general-file views, and
 path has proved publication, registration, preparation, and failure behavior end
 to end. Any daemon composition supplies the existing rendered-frontier
 visibility proof to `FileUseResolver`; a catalog-presence check is no
-substitute. The service keeps re-inspecting on every read. The rich arm changes
-no adapter and adds no MIME branch to the executor, bridge, or daemon.
+substitute. Composed against a store-backed source neither tool is effect-free,
+so both are declared external-effect: a read is observable to the store
+operator, and a derived read publishes a blob. The service keeps re-inspecting
+on every read. The rich arm changes no adapter and adds no MIME branch to the
+executor, bridge, or daemon.
 
 ## Acceptance
 
 - `file_inspect` and `file_read` appear in the daemon catalog only when a
-  resolver backed by the rendered-frontier allow-set is composed; a digest
-  outside the current frontier fails authorization, and a repeated use is
-  selected only by its selector.
+  resolver backed by the rendered-frontier allow-set is composed, and both are
+  declared external-effect; a digest outside the current frontier fails
+  authorization, and a repeated use is selected only by its selector.
 - A rich read publishes and verifies, registers, then commits, in that order; a
   fault injected at each step commits no result, and the only residue is an
   unreferenced blob.
-- Derived bytes whose re-detection is ambiguous, or selects another type or
-  reader, fail the read and commit nothing.
+- Derived bytes fail the read and commit nothing when re-detection is ambiguous
+  or selects another type or reader, or when they exceed the target bounds.
 - Preparation rejects an unsupported presentation before send authorization and
   runs no reader.
 - Text and structured reads behave exactly as they do today.
