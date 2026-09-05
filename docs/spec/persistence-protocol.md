@@ -1920,7 +1920,7 @@ way. Each generation stores the exact provisioning tuple it was minted under —
 `client_id`, `token_url`, `device_authorization_url`, and ordered `scopes` — and
 every refresh and dispatch compares it with the current registration under the
 same profile lock, by the canonical components
-[configuration and credentials](configuration-and-credentials.md#boundary-contracts)
+[the configuration and credentials design](../design/configuration-and-credentials.md)
 defines rather than by the configured bytes; a difference quarantines instead of
 exchanging, so an edited endpoint cannot receive a token minted for another.
 This paragraph constrains the future schema; no present storage surface provides

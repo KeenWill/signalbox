@@ -173,11 +173,11 @@ production injects `SessionPlanRepository`.
 Model-provider credential paths live in catalog profiles rather than environment
 variables, because one variable cannot name several accounts.
 
-The production connection path refuses to parse while any libpq `PG*` variable,
-`SSL_CERT_FILE`, or `SSL_CERT_DIR` is present or a default password file exists.
-Why: the driver would seed whatever the URL omits from those channels, and the
-TLS backend takes its roots only from those two variables and adds a URL
-`sslrootcert` to that set rather than replacing it.
+The production connection path refuses to parse while one of the libpq
+connection variables it inspects, `SSL_CERT_FILE`, or `SSL_CERT_DIR` is present
+or a default password file exists. Why: the driver would seed whatever the URL
+omits from those channels, and the TLS backend takes its roots only from those
+two variables and adds a URL `sslrootcert` to that set rather than replacing it.
 
 The local test connection path keeps SQLx's behavior and no check confines its
 URL to a local cluster; the production refusals, not that path's name, protect
@@ -428,15 +428,15 @@ attribute, metric, or log field. `SIGNALBOX_OTLP_SERVICE_NAME` admits exactly
 resource starts empty, so no host, process, environment, or SDK attribute is
 added.
 
-Exported spans and events carry daemon-minted UUIDs and closed tokens only.
-Source location, thread fields, busy and idle time, links, and error conversion
-are disabled, and the fixed scope name is `signalboxd` with no version.
-`terminal_outcome` and `cause_code` are enum projections, never error messages,
-and a new cause requires a compiler-checked `ModelCallCauseToken`. Any other
-event name, module target, field set, malformed UUID, token value, or `error`
-field is rejected before the OpenTelemetry layer. Collector and transport errors
-emit one static content-free warning, drop the batch, and return success to the
-SDK.
+Exported spans and events carry daemon-minted UUIDs, closed tokens, and bounded
+unsigned counts only. Source location, thread fields, busy and idle time, links,
+and error conversion are disabled, and the fixed scope name is `signalboxd` with
+no version. `terminal_outcome` and `cause_code` are enum projections, never
+error messages, and a new cause requires a compiler-checked
+`ModelCallCauseToken`. Any other event name, module target, field set, malformed
+UUID, token value, or `error` field is rejected before the OpenTelemetry layer.
+Collector and transport errors emit one static content-free warning, drop the
+batch, and return success to the SDK.
 
 `GET /metrics` returns the registry, other paths return 404, and there is no
 authentication or TLS, so deployment network policy owns reachability. Counter
