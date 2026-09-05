@@ -293,9 +293,8 @@ per-turn provenance. The following extensions remain undecided:
   grammar, per-membership ranking, and closed action vocabulary by
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
   What remains open is the client projection: snapshots expose each call's usage
-  and the final turn state, while the predecessor, cause, and successor relation
-  is committed future storage that no present migration or repository operation
-  supplies. Blocks fallback UI, not fallback. (S22)
+  and the final turn state but not the durable predecessor, cause, and successor
+  relation. Blocks fallback UI, not fallback. (S22)
 - **Whether an automatic successor may cross adapter kinds.** Decided for the
   first slice: no. A pool's members share one adapter, so cross-kind
   substitution is inexpressible rather than merely disabled, and moving a

@@ -84,10 +84,12 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** A client disconnect does not cancel the call.
   Target-resolution failure creates no model call. Send preparation failure
   leaves the already-created call known-failed. No durable authorization is
-  retried, and an ambiguous outcome never creates a successor. When pool policy
-  selects `switch_now`, a proven availability failure may create the S22
-  successor on a new attempt against the same target and a different credential
-  profile, under [availability successor calls](spec/model-call-execution.md),
+  retried, and an ambiguous outcome never creates a successor. A proven
+  rate-limit, overload, or provider-internal failure may create the S22
+  successor on a new attempt against the same target and credential below its
+  bound before the pinned pool action applies. `switch_now` instead creates that
+  successor against a different eligible credential, under
+  [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
   No partial draft becomes final content. A later authorized call must retain
