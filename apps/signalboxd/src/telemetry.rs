@@ -457,8 +457,12 @@ fn parse_headers(content: &str) -> Result<Vec<OtlpHeader>, TelemetryConfiguratio
             .split_once('=')
             .ok_or_else(|| header_error(TelemetryConfigurationFailure::InvalidHeader))?;
         if name.len() > MAX_HEADER_NAME_BYTES
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
             || value.is_empty()
             || value.len() > MAX_HEADER_VALUE_BYTES
+            || !value.bytes().all(|byte| (b' '..=b'~').contains(&byte))
         {
             return Err(header_error(TelemetryConfigurationFailure::InvalidHeader));
         }
@@ -1899,6 +1903,39 @@ mod tests {
             .expect("endpoint enables exporter");
 
         runtime.shutdown();
+    }
+
+    #[test]
+    fn otlp_headers_reject_http_tokens_outside_the_configuration_alphabet() {
+        let error = parse_headers("x!name=value")
+            .err()
+            .expect("punctuation is not admitted");
+        assert_eq!(
+            error.failure(),
+            super::TelemetryConfigurationFailure::InvalidHeader
+        );
+    }
+
+    #[test]
+    fn otlp_headers_reject_tabs_in_values() {
+        let error = parse_headers("x-name=left\tright")
+            .err()
+            .expect("tabs are not printable ASCII");
+        assert_eq!(
+            error.failure(),
+            super::TelemetryConfigurationFailure::InvalidHeader
+        );
+    }
+
+    #[test]
+    fn otlp_headers_accept_the_documented_name_and_value_alphabets() {
+        let headers = parse_headers("X.name_with-123=printable value !~")
+            .expect("documented header characters are admitted");
+        assert_eq!(headers[0].name.as_str(), "x.name_with-123");
+        assert_eq!(
+            headers[0].value.to_str().expect("ASCII value"),
+            "printable value !~"
+        );
     }
 
     #[test]

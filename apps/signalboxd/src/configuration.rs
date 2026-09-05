@@ -879,6 +879,10 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "max_automatic_tool_rounds_per_turn",
         NumericBoundKind::Integer,
     ),
+    (
+        "max_same_credential_attempts_per_turn",
+        NumericBoundKind::Integer,
+    ),
     ("max_required_tags", NumericBoundKind::Integer),
     ("reconciliation_sweep_interval", NumericBoundKind::Duration),
     ("nudge_buffer_capacity", NumericBoundKind::Integer),
@@ -4207,7 +4211,7 @@ impl fmt::Display for HubModelConfigurationError {
         }
         // Startup telemetry formats this value, so the failing member and the
         // closed admission cause must both survive. The path never appears, as
-        // `configuration-and-credentials.md#the-codex_home-delivery` requires.
+        // `configuration-and-credentials.md` requires.
         if let Self::InvalidCredentialHome {
             credential_profile,
             failure,
@@ -4724,6 +4728,7 @@ min_metadata_page_size = 1
 max_metadata_page_size = 100
 max_review_findings_per_run = 32
 max_automatic_tool_rounds_per_turn = 32
+max_same_credential_attempts_per_turn = 2
 max_required_tags = 256
 reconciliation_sweep_interval = "1s"
 nudge_buffer_capacity = 1024
