@@ -72,7 +72,9 @@ attempt must render and count the then-current preview again. An estimate that
 returns no validated count falls through to ordinary uncounted activation, so
 the durable call's existing preparation and provider-error paths classify any
 definitive request or credential rejection instead of repeatedly contacting the
-count endpoint without a call record.
+count endpoint without a call record. A definitive attachment failure takes the
+same uncounted activation path without first invoking compaction. A reserved
+dispatch-start leaves an Anthropic turn queued before count or attachment I/O.
 
 Anthropic ordinary calls enable provider-default server-side compaction only for
 provider-model identifiers in the closed adapter mapping: the `claude-fable-5`,
