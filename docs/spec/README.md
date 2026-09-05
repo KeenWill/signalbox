@@ -33,9 +33,9 @@ page changes with the code that builds them.
 
 ## Page shape
 
-Every page has one title, one sentence saying what the subsystem is for, and
-exactly four sections in this order: Overview, Design decisions, Boundary
-contracts, Planned.
+Every subsystem specification page, but not this conventions page, has one
+title, one sentence saying what the subsystem is for, and exactly four sections
+in this order: Overview, Design decisions, Boundary contracts, Planned.
 
 Overview says what the subsystem is, its boundary, the shape of its data, its
 major parts, and how they relate. It may name the core type, table, or function

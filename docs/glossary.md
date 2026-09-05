@@ -72,13 +72,12 @@ further semantic effects without rewriting the call. Deferred design; see
 ## Tool request
 
 A logical request for one named tool operation with normalized arguments, policy
-state, and eventual logical outcome. Deferred design; see
-[tool safety](open-questions.md#tool-safety).
+state, and eventual logical outcome. See [tool loop](spec/tool-loop.md).
 
 ## Tool attempt
 
 One physical effort by a daemon-local or runner-local executor to perform a tool
-request. Deferred design; see [tool safety](open-questions.md#tool-safety).
+request. See [tool loop](spec/tool-loop.md).
 
 ## Creation cause
 
@@ -134,13 +133,12 @@ user, container, sandbox, and filesystem scope. Planned design; see
 
 Daemon-owned evaluation that determines whether a specific logical tool request
 is allowed, denied, or requires confirmation, plus any placement or constraint
-decision. Deferred design; see [tool safety](open-questions.md#tool-safety).
+decision. See [tool loop](spec/tool-loop.md).
 
 ## Approval
 
 A recorded human decision permitting or denying one exact logical tool request
-as presented to the user. Deferred design; see
-[tool safety](open-questions.md#tool-safety).
+as presented to the user. See [tool loop](spec/tool-loop.md).
 
 ## Executor placement
 
