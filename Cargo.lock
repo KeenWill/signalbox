@@ -4776,10 +4776,13 @@ dependencies = [
 name = "signalbox-web-contract"
 version = "0.0.0"
 dependencies = [
+ "hex",
+ "rust_decimal",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "signalbox-application",
+ "uuid",
 ]
 
 [[package]]
