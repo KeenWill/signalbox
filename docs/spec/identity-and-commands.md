@@ -1,7 +1,7 @@
 # Identity, commands, and telemetry correlation
 
 This subsystem gives every durable fact an opaque identity, records every caller
-command once so that replay is deterministic, and records who issued a command
+command once so replay is deterministic, and records who issued a command
 without granting that record any authority.
 
 ## Map
@@ -31,19 +31,19 @@ without a generation feature and cannot mint an identity, and
 The registry is the `durable_command` table. A registry row carries the command
 identifier, a closed command kind, a kind-scoped storage version, the claim
 time, and the issuer principal the admitting boundary stamped. Each admitted
-kind has one typed record family keyed one-to-one by command identifier, which
-holds the caller-supplied fields under check constraints and foreign keys. The
-canonical command payload is the typed domain value constructed at the boundary,
-not a serialization, and construction ordinarily precedes registry lookup.
-Reading the registry yields three error families: storage corruption,
+kind has one typed record family keyed one-to-one by command identifier; the
+record holds the caller-supplied fields under check constraints and foreign
+keys. The canonical command payload is the typed domain value constructed at the
+boundary, not a serialization, and construction ordinarily precedes registry
+lookup. Reading the registry yields three error families: storage corruption,
 infrastructure failure, and recorded domain rejection;
 `crates/persistence/src/command_registry.rs` defines the corruption family.
 
-`Actor` in `crates/domain` is the closed provenance of a command's initiating
-agency: the user, daemon core, the model output of one turn, the startup
-recovery scan, or the execution of one tool request. Only submit-input and
-metadata-replacement commands carry an actor in their durable payload. Actor
-answers who issued one command; a session's creation cause, owned by
+`Actor` in `crates/domain` records, from a closed set, what issued a command:
+the user, daemon core, the model output of one turn, the startup recovery scan,
+or the execution of one tool request. Only submit-input and metadata-replacement
+commands carry an actor in their durable payload. Actor answers who issued one
+command; a session's creation cause, owned by
 [sessions-and-transcript](sessions-and-transcript.md), answers why the session
 exists, and neither fact substitutes for the other.
 
@@ -128,7 +128,7 @@ every caller-supplied semantic field and excluding the command identifier. Why:
 the identifier is the lookup key that names the payload, not part of the meaning
 it names.
 
-For submit-input, equal replay returns the recorded result only after current
+For submit-input, equal replay returns the recorded result only when current
 durable state still proves that result correlates with committed effects;
 otherwise the adapter fails closed.
 

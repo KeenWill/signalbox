@@ -5,12 +5,12 @@ This design is not built; it extends
 
 ## Goal
 
-Close the gaps the identity and command subsystem has committed to: registry
-kinds for the runner recovery commands, production generators for three identity
-types that have storage but no writer, and the two reserved storage versions
-that carry runner placement. Actor attribution extends to every command family
-that records a caller's intent, including a program arm, so a program-driven
-turn is never recorded as user-issued.
+Build the items the identity and command subsystem has committed to but lacks:
+registry kinds for the runner recovery commands, production generators for three
+identity types that have storage but no writer, and the two reserved storage
+versions that carry runner placement. Actor attribution extends to every command
+family that records a caller's intent, including a program arm, so a
+program-driven turn is never recorded as user-issued.
 
 ## Shape
 
@@ -33,10 +33,10 @@ neither start another workspace nor acquire another meaning. Startup resumes an
 unterminated request before it admits clients.
 
 Abandonment is one ordinary claim-and-terminal-result transaction. Promotion is
-the one command in the set whose payload names no session: it carries the
+the one command in the set whose payload names no session, because the fact it
+acts on is that this daemon's active runner is durably gone. It carries the
 command identifier and the pending enrollment request it promotes, in one
-claim-and-terminal-result transaction, because the fact it acts on is that this
-daemon's active runner is durably gone.
+claim-and-terminal-result transaction.
 
 `ProviderTargetEvidenceId` gains a UUIDv7 generator in the slice that writes
 provider target evidence. `WorkspaceId`, `GitRemoteMintId`, and
