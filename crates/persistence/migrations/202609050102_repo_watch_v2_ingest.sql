@@ -13,9 +13,14 @@ CREATE TABLE repository_state (
     default_head_sha text NOT NULL,
     observed_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,
+    frontier_generation numeric(20,0) NOT NULL DEFAULT 0,
+    last_frontier_commit_digest bytea,
     CHECK (octet_length(repository) BETWEEN 1 AND 201),
     CHECK (octet_length(default_branch) BETWEEN 1 AND 255),
-    CHECK (default_head_sha ~ '^[0-9a-f]{40}$')
+    CHECK (default_head_sha ~ '^[0-9a-f]{40}$'),
+    CHECK (frontier_generation BETWEEN 0 AND 18446744073709551615),
+    CHECK (last_frontier_commit_digest IS NULL OR octet_length(last_frontier_commit_digest) = 32),
+    CHECK ((frontier_generation = 0) = (last_frontier_commit_digest IS NULL))
 );
 
 -- growth: one mutable row per pull request in a configured repository.

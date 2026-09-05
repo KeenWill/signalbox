@@ -143,7 +143,12 @@ pub enum EventAdmission {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FrontierEventAdmission {
     /// The frontier and ordered facts committed together.
-    Committed(Box<[EventAdmission]>),
+    Committed {
+        /// Generation assigned to this complete candidate.
+        generation: u64,
+        /// Admission of each ordered fact.
+        events: Box<[EventAdmission]>,
+    },
     /// A durable event identity was already bound to a different fact.
     ConflictingReuse,
     /// A newer frontier entry already committed for this repository.
@@ -355,6 +360,8 @@ pub enum StoreError {
     InvalidWebhookExpiry,
     /// The event retention boundary does not follow its recording time.
     InvalidEventRetention,
+    /// The supplied frontier generation has no successor.
+    InvalidFrontierGeneration,
     /// A fact in a frontier commit belongs to another repository.
     EventRepositoryMismatch,
     /// The checked rule exposed too many identity fields for the durable inventory.
@@ -371,6 +378,9 @@ impl fmt::Display for StoreError {
             Self::InvalidWebhookExpiry => "repository-watch webhook expiry is not after receipt",
             Self::InvalidEventRetention => {
                 "repository-watch event retention is not after recording"
+            }
+            Self::InvalidFrontierGeneration => {
+                "repository-watch frontier generation has no successor"
             }
             Self::EventRepositoryMismatch => {
                 "repository-watch event does not belong to the frontier repository"
@@ -392,6 +402,7 @@ impl Error for StoreError {
             Self::InvalidProviderIdentity
             | Self::InvalidWebhookExpiry
             | Self::InvalidEventRetention
+            | Self::InvalidFrontierGeneration
             | Self::EventRepositoryMismatch
             | Self::InvalidRuleFieldInventory
             | Self::InvalidDispatchBatch => None,
@@ -603,6 +614,7 @@ impl RepoWatchStore {
     pub async fn commit_frontier_candidate(
         &self,
         repository: &RepositorySlug,
+        expected_generation: u64,
         frontier: &RepoWatchEventIdentityFrontierV1,
         events: &[RepoWatchEventOccurrenceV1],
         recorded_at: OffsetDateTime,
@@ -617,6 +629,41 @@ impl RepoWatchStore {
             .execute(&mut *transaction)
             .await?;
         let frontier = frontier.entries().collect::<Vec<_>>();
+        let candidate_identity = frontier_candidate_identity(&frontier, events);
+        let current_generation: Decimal = sqlx::query_scalar(
+            "SELECT frontier_generation FROM repository_state
+              WHERE repository = $1 FOR UPDATE",
+        )
+        .bind(repository.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let expected = Decimal::from(expected_generation);
+        if current_generation != expected {
+            let exact_replay: bool = sqlx::query_scalar(
+                "SELECT frontier_generation = $2 + 1
+                        AND last_frontier_commit_digest = sha256($3)
+                   FROM repository_state WHERE repository = $1",
+            )
+            .bind(repository.as_str())
+            .bind(expected)
+            .bind(candidate_identity.as_slice())
+            .fetch_one(&mut *transaction)
+            .await?;
+            transaction.rollback().await?;
+            return if exact_replay {
+                Ok(FrontierEventAdmission::Committed {
+                    generation: expected_generation
+                        .checked_add(1)
+                        .ok_or(StoreError::InvalidFrontierGeneration)?,
+                    events: vec![EventAdmission::Replayed; events.len()].into_boxed_slice(),
+                })
+            } else {
+                Ok(FrontierEventAdmission::Stale)
+            };
+        }
+        let next_generation = expected_generation
+            .checked_add(1)
+            .ok_or(StoreError::InvalidFrontierGeneration)?;
         for entry in &frontier {
             let stale: Option<bool> = sqlx::query_scalar(
                 "SELECT sequence > $3 FROM frontier
@@ -666,10 +713,28 @@ impl RepoWatchStore {
             .execute(&mut *transaction)
             .await?;
         }
+        let advanced = sqlx::query(
+            "UPDATE repository_state
+                SET frontier_generation = $2,
+                    last_frontier_commit_digest = sha256($3),
+                    updated_at = statement_timestamp()
+              WHERE repository = $1 AND frontier_generation = $4",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(next_generation))
+        .bind(candidate_identity.as_slice())
+        .bind(expected)
+        .execute(&mut *transaction)
+        .await?;
+        if advanced.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(FrontierEventAdmission::Stale);
+        }
         transaction.commit().await?;
-        Ok(FrontierEventAdmission::Committed(
-            admissions.into_boxed_slice(),
-        ))
+        Ok(FrontierEventAdmission::Committed {
+            generation: next_generation,
+            events: admissions.into_boxed_slice(),
+        })
     }
 
     /// Releases one recurring stream after its rebuild subject has retired.
@@ -852,6 +917,30 @@ impl RepoWatchStore {
         transaction.commit().await?;
         Ok(true)
     }
+}
+
+fn frontier_candidate_identity(
+    frontier: &[signalbox_ownership_seam::RepoWatchEventIdentityFrontierEntryV1],
+    events: &[RepoWatchEventOccurrenceV1],
+) -> Vec<u8> {
+    let mut identity = b"signalbox-repo-watch-frontier-commit-v1".to_vec();
+    for entry in frontier {
+        identity.push(b'F');
+        identity.extend_from_slice(entry.stream_identity().as_slice());
+        identity.extend_from_slice(&entry.sequence().get().to_be_bytes());
+        match entry.pull_request_number() {
+            Some(number) => {
+                identity.push(1);
+                identity.extend_from_slice(&number.get().to_be_bytes());
+            }
+            None => identity.push(0),
+        }
+    }
+    identity.push(b'E');
+    for occurrence in events {
+        identity.extend_from_slice(occurrence.content_identity().as_bytes());
+    }
+    identity
 }
 
 async fn append_event(
