@@ -81,8 +81,9 @@ member it selected, because the displacement is the excluded member's record and
 consuming any other leaves it pending forever.
 
 Pre-call fail: a fresh admission finds every member excluded and this chain has
-issued no call. The turn terminalizes Failed and the call-free attempt ends
-KnownFailure. The pre-call exhaustion producer appends the `TurnFailed`
+issued no call, or the later preparation of a call-free successor attempt finds
+every member excluded. The turn terminalizes Failed and the call-free attempt
+ends KnownFailure. The pre-call exhaustion producer appends the `TurnFailed`
 transcript entry after the ended attempt's starting frontier in the transaction
 that terminalizes the turn. The ending carries no terminal evidence, because
 this chain issued no provider request and an earlier round's successful call is
