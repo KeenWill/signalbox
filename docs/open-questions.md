@@ -714,11 +714,10 @@ questions below remain open.
   and exact cancellation-delivery records remain open. Those remaining questions
   block only their corresponding adapter slices; the generic scaffold and first
   typed command family are not blocked. (S03, S04, S17, S25, S27)
-- **Update-event retention, pruning, and multiple daemon processes.** Version
-  one is owned by [process-protocol](spec/process-protocol.md). A pruning
-  watermark, follower retention guarantees, and any later multiple-daemon
-  shared-fan-out mechanism remain undecided. Blocks pruning and multi-daemon
-  deployment. (S24)
+- **Update-event retention across multiple daemon processes.** Version one is
+  owned by [process-protocol](spec/process-protocol.md). Follower retention
+  guarantees and any later multiple-daemon shared-fan-out mechanism remain
+  undecided. Blocks multi-daemon deployment. (S24)
 - **Swift client type generation.** Leaning: generated boundary types mapped to
   hand-written client domain types. Deferrable until the Swift client. (S01,
   S24)

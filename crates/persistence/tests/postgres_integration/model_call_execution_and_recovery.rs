@@ -1300,23 +1300,23 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         .execute(&pool)
         .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(completion_sequence)
     .execute(&pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(&pool)
     .await?;

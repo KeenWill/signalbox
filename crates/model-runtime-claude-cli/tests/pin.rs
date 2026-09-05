@@ -31,7 +31,7 @@ fn the_pin_manifest_uses_an_exact_version() {
 
     assert!(
         is_exact_pin(&pinned),
-        "package.json must pin {PIN_PACKAGE} at an exact `major.minor.patch` \
+        "package.json must pin {PIN_PACKAGE} at an exact release \
          version, not the range, tag, or alias {pinned}"
     );
 }
@@ -65,18 +65,9 @@ fn the_lockfile_root_dependency_matches_the_manifest() {
     );
 }
 
-/// Whether `version` is an exact `major.minor.patch` pin: exactly three
-/// dot-separated components, each a nonempty run of ASCII digits — so a range
-/// (`^1.2.3`), tag (`latest`), alias, prerelease suffix, or wrong component
-/// count is rejected. Factored out of the manifest test so focused fixtures
-/// exercise both accepted and rejected shapes, not only the live manifest.
-fn is_exact_pin(version: &str) -> bool {
-    let components: Vec<&str> = version.split('.').collect();
-    components.len() == 3
-        && components
-            .iter()
-            .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
-}
+#[path = "../version_pin.rs"]
+mod version_pin;
+use version_pin::is_exact_pin;
 
 #[test]
 fn exact_pin_accepts_major_minor_patch() {
@@ -114,8 +105,8 @@ fn exact_pin_rejects_an_empty_component() {
 }
 
 #[test]
-fn exact_pin_rejects_a_prerelease_suffix() {
-    assert!(!is_exact_pin("2.1.220-beta"));
+fn exact_pin_rejects_a_prerelease() {
+    assert!(!is_exact_pin("2.1.220-beta.1"));
 }
 
 /// The manifest's declared dependency version, as the single value every
@@ -133,4 +124,9 @@ fn manifest_dependency() -> String {
 fn read_lockfile() -> serde_json::Value {
     serde_json::from_str(include_str!("../package-lock.json"))
         .expect("package-lock.json is valid JSON")
+}
+
+#[test]
+fn exact_pin_rejects_build_metadata() {
+    assert!(!is_exact_pin("2.1.220+build.1"));
 }

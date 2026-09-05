@@ -55,14 +55,16 @@ copy: an origin or steering entry names the accepted input, a tool-use entry
 names the completed producing call, a tool-execution-result entry names the
 attempt that owns the evidence, and a denial or turn-end closure entry names the
 request. An assistant-text entry carries the exact assistant text and names the
-call that produced it. A context summary carries the summary text its dedicated
-call produced and the inclusive range it stands for. An imported entry carries
-one normalized imported content value with its speaker attestation. A
-model-identity entry marks where executed history crossed to a different frozen
-model selection. Delegation entries record a delegated task, a delegation
-message, and a delivered result. A completed, cancelled, or failed turn ends
-with exactly one terminal marker; refused, reconciliation-required, and retired
-turns have none.
+call that produced it. A provider-compaction entry carries its producing call
+and one complete opaque block retained byte-for-byte for same-provider replay;
+the replay bytes are not assistant text and do not cross transcript protocol
+output. A context summary carries the summary text its dedicated call produced
+and the inclusive range it stands for. An imported entry carries one normalized
+imported content value with its speaker attestation. A model-identity entry
+marks where executed history crossed to a different frozen model selection.
+Delegation entries record a delegated task, a delegation message, and a
+delivered result. A completed, cancelled, or failed turn ends with exactly one
+terminal marker; refused, reconciliation-required, and retired turns have none.
 
 A `ContextCompaction` has six correlated immutable facts: its identity and
 optional predecessor, the source frontier, a dedicated model call, the

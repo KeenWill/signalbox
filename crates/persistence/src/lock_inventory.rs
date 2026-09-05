@@ -730,8 +730,8 @@ pub(crate) const PLAN_APPEND_ATTEMPT: &str = "SELECT attempt.attempt_id
  FOR SHARE OF attempt";
 
 pub(crate) const OUTBOX_DELIVERY: &str = "SELECT delivered_through
-           FROM outbox_delivery_state
-          WHERE singleton
+           FROM outbox_consumer_cursor
+          WHERE consumer_name = $1
           FOR UPDATE";
 
 pub(crate) const OUTBOX_SEQUENCE_ALLOCATOR: &str = "SELECT singleton
