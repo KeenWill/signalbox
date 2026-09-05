@@ -29,7 +29,8 @@ by one `migrate` call. Fifteen files form the baseline: one schema split by
 domain, applied only as a whole in filename order, with
 `HUB_FENCE_MIGRATION_VERSION` naming the last of them. Every later file is a
 forward migration on top of that baseline. SQLx records each applied file and
-its checksum in `_sqlx_migrations`.
+its checksum in `_sqlx_migrations`, and `.gitattributes` pins migration files to
+LF so an embedded file's checksum matches the recorded one on every checkout.
 
 The schema is normalized and purpose-specific: mutable current-state rows
 guarded by constraints and triggers, and append-only facts that triggers protect
@@ -114,7 +115,9 @@ backup that cannot restore fails silently until recovery.
 
 A stack holding a reserved prefix block does not renumber its migrations after a
 base merges while the reserved prefix still exceeds the highest prefix on
-`main`.
+`main`. A migration merged into a stack branch is immutable to the branches
+stacked on it, and only the pull request that adds a migration may still edit
+that file.
 
 Serialization of concurrent migration runs is SQLx behavior, relied on and not
 demonstrated in this repository.
@@ -173,6 +176,8 @@ so their order is auditable instead of scattered through query strings.
 Creating a session from an imported frontier takes no explicit row lock, because
 the selected imported aggregate is immutable and append-only.
 
+Approval-judge preparation takes the scheduler row before its insert, whose
+trigger locks the request row and then the active turn-lifecycle row.
 Approval-judge completion takes the session row FOR NO KEY UPDATE before the
 scheduler row so a goal-closing transition and the completion recheck exclude
 each other. Every goal transition takes that same session lock before it reads
