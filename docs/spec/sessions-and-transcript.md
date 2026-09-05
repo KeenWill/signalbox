@@ -49,9 +49,10 @@ an owned snapshot of one session's current durable state.
 The transcript is a sequence of semantic entries grouped into frontiers. A
 `SemanticTranscriptEntry` is one immutable semantic-history fact with its own
 identity, a source session, and a closed payload. Payloads reference rather than
-copy: an origin or steering entry names the accepted input, an assistant text or
-tool-use entry names the completed producing call, and a tool-result entry names
-the attempt that owns the evidence. A context summary carries the summary text
+copy: an origin or steering entry names the accepted input, a tool-use entry
+names the completed producing call, and a tool-result entry names the attempt
+that owns the evidence. An assistant-text entry carries the exact assistant text
+and names the call that produced it. A context summary carries the summary text
 its dedicated call produced and the inclusive range it stands for. An imported
 entry carries one normalized imported content value with its speaker
 attestation. A model-identity entry marks where executed history crossed to a
@@ -107,17 +108,17 @@ accepted-input, turn, attempt, call, or native tool records.
 
 Creation facts, defaults versions, placement events, command receipts, and
 scheduler registration are append-only, because in-place mutation would rewrite
-intent that later work consumed. The current-defaults pointer is the one mutable
-row in that set, because the existence of a version does not mean it was
-installed; only the pointer records the accepted current choice.
+intent that later work consumed. The current-defaults and current-placement
+pointers are the mutable rows in that set, because the existence of a version
+does not mean it was installed; only a pointer records the accepted current
+choice.
 
 Template-derived creation carries the caller's placement exactly as explicit
 creation does, because a resolved template supplies defaults and never a
-placement, and discarding a placement silently would run the session daemon-only
-while the caller believed it had a runner. Template provenance never joins
-defaults replacement, origin freezing, model-call preparation, imported
-continuation, or transcript content; the stored session has no template lookup,
-and every later consumer reads its durable defaults and provenance only.
+placement. Template provenance never joins defaults replacement, origin
+freezing, model-call preparation, imported continuation, or transcript content;
+the stored session has no template lookup, and every later consumer reads its
+durable defaults and provenance only.
 
 The placement read rule filters selected transcript reads only;
 conversation-list inventory is discovery and imported conversations are not
@@ -204,12 +205,12 @@ content, never transcript access.
 
 ## Boundary contracts
 
-An owned session that waits for an operator is in the parked state and no other;
-a pending tool-approval decision is the separate waiting state. A module that
-parks something wrapping a session drives the session itself to parked.
-Attention states shown to operators are derived from durable facts by one
-classifier, and a read that encounters a state it does not recognize returns an
-error rather than a guess.
+An owned session that waits for an operator is parked, or blocked on a goal that
+no automatic resumption will lift; a pending tool-approval decision is the
+separate waiting state. A module that parks something wrapping a session drives
+the session itself to parked. Attention states shown to operators are derived
+from durable facts by one classifier, and a read that encounters a state it does
+not recognize returns an error rather than a guess.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
@@ -300,7 +301,9 @@ A placed requester's readable scope is its parent directory's subtree, and a
 refusal is typed evidence carrying the requesting directory and a closed reason,
 never an empty successful result. A pathless requester has global conversation
 read: every target is allowed. A one-segment placement sits in the root
-directory and has global conversation read, including pathless sessions. The
+directory and is admitted only when the caller acknowledges root global read;
+that acknowledgement grants global conversation read, including pathless
+sessions, and a scoped construction of the same path is rejected. The
 conversation-introspection adapter applies the decision in the same
 repeatable-read transaction that opens the transcript cursor.
 
@@ -440,9 +443,10 @@ its source turn is active returns the accepted-input identity, its acceptance
 position, and the source turn immediately, and creates no turn or entry.
 Immediately before an initial or continuation call is prepared, one transaction
 appends one steering entry per pending input in acceptance order, derives one
-frontier extending the starting frontier, marks every input consumed, and
-inserts the prepared call against the extended frontier; the four effects commit
-or roll back together.
+frontier extending the frontier that call starts from, marks every input
+consumed, and inserts the prepared call against the extended frontier; the four
+effects commit or roll back together. An initial call starts from the turn's
+starting frontier and a continuation from the tool-result continuation frontier.
 
 Tool-use entries become history with the producing call's completed observation;
 tool-result entries become history only at the all-resolved continuation or
