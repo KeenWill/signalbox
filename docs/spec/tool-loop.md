@@ -667,7 +667,7 @@ nothing here; ambiguity is carried by the recovery wait above. Preflight
 failures that never reach admission — unknown names and argument-decode failures
 — are likewise silent, being model-authored rather than deployment facts.
 Telemetry field rules are owned by
-[identity-and-commands](identity-and-commands.md#durable-command-telemetry-correlation).
+[identity-and-commands](identity-and-commands.md#boundary-contracts).
 
 An interrupt against a tool recovery wait does not reinterpret or erase the
 ambiguous attempt. It materializes exactly one reference-only result per request
@@ -1025,14 +1025,12 @@ The same process-lifetime compiled catalog also declares these daemon tools:
 - `echo` requires exactly one `text` string and returns the same canonical
   compact `{"text": ...}` object. Its permission default is `Auto` and its
   effect class is `EffectFree`: execution observes no external state.
-- `blob_metadata`, as owned by the
-  [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
+- `blob_metadata`, as owned by the [blob-read tool contract](blob-storage.md),
   requires exactly one canonical blob `digest`. It returns text containing
   compact JSON with that `digest`, canonical-decimal-string `byte_length`, and
   canonical-decimal-string `replica_count`. Its permission default is `Auto` and
   its effect class is `EffectFree`.
-- `blob_read`, as owned by the
-  [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
+- `blob_read`, as owned by the [blob-read tool contract](blob-storage.md),
   requires exactly one canonical blob `digest` plus `offset_bytes` and
   `length_bytes` as canonical decimal-u64 strings. Length is 1 through 524,288
   bytes; checked offset plus length must lie within the blob. It returns text
@@ -1095,16 +1093,15 @@ The same process-lifetime compiled catalog also declares these daemon tools:
 
 Both blob tools authorize only digests present in attachment stubs in the
 rendered frontier for the issuing turn, under the owning
-[blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads).
-The read declaration's requested decoded length and one logical-read unit are
-charged once by tool-request identity to durable per-turn counters before
-authorization; replay never charges twice. Before authorization, a digest absent
-from the rendered frontier closes the `Prepared` attempt as
-`KnownFailed(PreauthorizationRejected)` with exact fixed detail
-`blob_not_visible`; a reservation that would exceed 2,097,152 bytes closes it
-the same way with exact fixed detail `blob_turn_byte_budget_exceeded`, and a
-reservation that would exceed 64 logical reads closes it with exact fixed detail
-`blob_turn_read_count_exceeded`. That kind is what separates a durable
+[blob-read tool contract](blob-storage.md). The read declaration's requested
+decoded length and one logical-read unit are charged once by tool-request
+identity to durable per-turn counters before authorization; replay never charges
+twice. Before authorization, a digest absent from the rendered frontier closes
+the `Prepared` attempt as `KnownFailed(PreauthorizationRejected)` with exact
+fixed detail `blob_not_visible`; a reservation that would exceed 2,097,152 bytes
+closes it the same way with exact fixed detail `blob_turn_byte_budget_exceeded`,
+and a reservation that would exceed 64 logical reads closes it with exact fixed
+detail `blob_turn_read_count_exceeded`. That kind is what separates a durable
 request-scoped resource or visibility refusal from a malformed argument the
 model can correct by rewriting the call, so the closed set carries it as its own
 member rather than folding it into `InvalidArguments`. Any closure resolves the
@@ -1430,7 +1427,7 @@ column are owned by
 Defaults-bearing command records at kind-scoped storage version 1 reconstitute
 with `DangerousToolAutoApproval::Disabled`. The current kind-scoped versions and
 their compatibility gates are owned by
-[identity and commands](identity-and-commands.md#durable-command-records) and
+[identity and commands](identity-and-commands.md) and
 [persistence protocol](persistence-protocol.md#relational-representation).
 Registry inspection validates the supported version set for the selected kind
 rather than applying one global version constant.
