@@ -134,12 +134,8 @@ pub struct Digest(String);
 impl Digest {
     /// Checks the complete lowercase digest text.
     pub fn try_new(value: String) -> Result<Self, ValueError> {
-        if value.len() == 64
-            && value
-                .as_bytes()
-                .iter()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        {
+        let mut decoded = [0_u8; 32];
+        if hex::decode_to_slice(&value, &mut decoded).is_ok() && hex::encode(decoded) == value {
             Ok(Self(value))
         } else {
             Err(ValueError::Digest)
@@ -152,13 +148,7 @@ impl Digest {
     }
 
     pub(crate) fn from_sha256(bytes: [u8; 32]) -> Self {
-        let mut encoded = String::with_capacity(64);
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        bytes.into_iter().for_each(|byte| {
-            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        });
-        Self(encoded)
+        Self(hex::encode(bytes))
     }
 }
 
