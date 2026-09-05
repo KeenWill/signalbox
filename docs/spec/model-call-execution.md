@@ -60,13 +60,19 @@ context window less the output ceiling and the required prompt; when even the
 first safe prefix cannot fit that budget, no call is prepared and one
 transaction fails the turn as a compaction wall.
 
-For compaction-capable Anthropic model families, ordinary calls enable
-provider-default server-side compaction. Each returned compaction block is an
-opaque ordered semantic entry replayed unchanged as Anthropic assistant content;
-other adapters reject it, and earlier semantic entries remain append-only. A
-non-null summary replaces the call's reported input for later headroom
-accounting, while a null summary is a replayable no-op, and Anthropic iteration
-usage is stored as the sum of the reported iterations.
+Anthropic ordinary calls enable provider-default server-side compaction only for
+provider-model identifiers in the closed adapter mapping: the `claude-fable-5`,
+`claude-mythos-5`, `claude-mythos-preview`, `claude-opus-5`, `claude-opus-4-6`,
+`claude-opus-4-7`, `claude-opus-4-8`, `claude-sonnet-5`, and `claude-sonnet-4-6`
+family stems, including their dated suffixes. Each returned compaction block is
+an opaque ordered semantic entry replayed unchanged as Anthropic assistant
+content; unsupported Anthropic targets and other adapters reject it, and earlier
+semantic entries remain append-only. The block's durable nullable `content` fact
+separately classifies its input as replaced or retained for later headroom
+accounting: non-null replaces the pre-compaction input and null is a replayable
+no-op. This classification does not rewrite billing evidence. Anthropic
+iteration usage remains the sum of every reported iteration on the call's four
+usage axes.
 
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
@@ -90,15 +96,15 @@ recovery in `crates/persistence/src/startup.rs` then classifies every retained
 call from durable evidence.
 
 The runtime bridge in `crates/model-provider-runtime` maps the runtime's typed
-terminal evidence to exactly one disposition: completed text and tool-call
-content to `Completed`, refusal to `Refused`, a provider error or other proof of
-non-acceptance to `KnownFailed`, cancellation before send or confirmed
-cancellation to `Cancelled`, and loss after possible acceptance to `Ambiguous`.
-The requested selection, the pinned resolved target, and the provider-reported
-identity are three separate facts, and the bridge is the one place that relates
-the third to the second. Exactly one of three relations holds: exact, alias
-concretion (the configured spelling followed by a dated snapshot qualifier), or
-different lineage.
+terminal evidence to exactly one disposition: completed text, provider
+compaction blocks, and tool-call content to `Completed`, refusal to `Refused`, a
+provider error or other proof of non-acceptance to `KnownFailed`, cancellation
+before send or confirmed cancellation to `Cancelled`, and loss after possible
+acceptance to `Ambiguous`. The requested selection, the pinned resolved target,
+and the provider-reported identity are three separate facts, and the bridge is
+the one place that relates the third to the second. Exactly one of three
+relations holds: exact, alias concretion (the configured spelling followed by a
+dated snapshot qualifier), or different lineage.
 
 `apply_terminal_observation` derives one of seven outcomes from fresh state, and
 persistence commits the outcome atomically with its outbox rows. Ambiguity parks
@@ -367,9 +373,12 @@ applied-interrupt proof a physical cancellation is an unstopped known failure,
 and a stop-requested attempt whose call ends known-failed still fails and cannot
 admit a successor, because the physical result has not proven cancellation.
 
-`Completed` admits only text and tool-call parts: empty text and empty thinking
-blocks are dropped, while thinking with text and redacted thinking fail the
-adapter stage closed as unsupported material, because no durable semantic
+`Completed` admits only text, provider-compaction, and tool-call parts. A
+provider-compaction part must be a complete validated `compaction` object, must
+contain no prepared credential, and is retained byte-for-byte for replay while
+only a non-text marker crosses the process protocol. Empty text and empty
+thinking blocks are dropped, while thinking with text and redacted thinking fail
+the adapter stage closed as unsupported material, because no durable semantic
 representation exists for either. Tool content and a tool-use finish must agree;
 either one without the other is a known failure. The dedicated compaction call
 rejects every tool and suppressed-tool part, because its completion must be

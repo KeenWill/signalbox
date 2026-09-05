@@ -871,6 +871,10 @@ and closed:
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
   outcome-authoritative producing-call provenance;
+- `ProviderCompaction { producing_call, block }` — a complete opaque
+  provider-compaction object retained byte-for-byte for same-provider replay;
+  its replay bytes are not assistant text and do not cross transcript protocol
+  output;
 - `AssistantToolUse { producing_call, request }` — one logical request from the
   completed producing call, with name and arguments resolved through the request
   record;
