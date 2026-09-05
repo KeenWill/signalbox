@@ -198,9 +198,10 @@ use ordinary HTTP bodies rather than JSON wrapping.
 
 ### Bounded browser usage and cost reads
 
-The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes,
-their filters, pagination, compatibility grouping, and read-time configured-cost
-semantics are owned by [Usage evidence](model-call-execution.md).
+The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes read
+the usage projection [model-call-execution](model-call-execution.md) owns; their
+filters, bounds, cursors, and cost labels are the web contract under
+`crates/web-contract`.
 
 `deterministic_test_router` supplies a database-free page plus bounded read,
 mutation, and two-item stream routes. It composes the same bootstrap, mutation

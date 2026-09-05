@@ -14,9 +14,8 @@ policy contains the pinned profile with the expected adapter and delivery kind.
 It carries a program-declared structured-output contract through preparation
 into runtime enforcement. It records refusal content as a semantic entry. It
 records durable provider-target evidence. It lets a user resolve an unstopped
-ambiguity. It shows a client that a successor is being selected. It delivers
-streaming deltas as transient drafts. It carries the workspace-instruction
-region into the model operation as its own typed part.
+ambiguity. It carries the workspace-instruction region into the model operation
+as its own typed part.
 
 ## Shape
 
@@ -105,14 +104,6 @@ authority transfers from the ambiguous call to the replacement, so at most one
 call determines the turn's outcome. The ambiguous call stays terminal and
 unchanged.
 
-A transient client update announces that an availability successor is being
-selected, naming the predecessor call and its cause. It is not a transcript
-entry and leaves no durable record.
-
-The runtime already collects text, thinking, and tool-argument deltas. The
-daemon delivers them to clients as transient drafts. An early observation pauses
-delivery, commits the observation durably, and resumes the stream.
-
 The prepared model operation carries a separate optional typed
 workspace-instruction region unchanged into the model operation's
 workspace-instructions slot. Preparation rebuilds it from the exact
@@ -155,11 +146,6 @@ are the only present recovery behaviors. The terminal ambiguous call is never
 rewritten, and a later interrupt proof is carried by the reconciliation marker
 and its correlated successor, not by rewriting the ended attempt.
 
-No client update announces successor selection; chains are visible only through
-durable records after the fact.
-
-Deltas are collected and never delivered, and nothing depends on their delivery.
-
 The model operation's system prompt carries only the frozen defaults prompt, and
 no present code concatenates any other source into it.
 
@@ -192,12 +178,6 @@ substitution.
 
 A user can accept the duplicate risk on a parked ambiguity, a replacement call
 runs on a new attempt, and the original call stays terminal `Ambiguous`.
-
-A client observes that a successor is being selected before the successor call
-commits.
-
-A client receives text deltas while a call is in flight, and an early
-observation is durable before the stream resumes.
 
 A session with admitted workspace instructions sends them as one region between
 system policy and history, and the system prompt is unchanged.

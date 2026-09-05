@@ -133,15 +133,17 @@ The renderer skips every imported entry other than attested text: source events
 and content absence are not conversational, imported tool identities do not
 exist here, thinking is source-private, and media has no admitted projection.
 
-A uniqueness violation observed while applying a compaction completion is a
-decided fact, not a retryable database failure: the completion fails closed and
-its in-flight call is left to startup recovery, because the identities are
-pinned by then and an identical retry would fail the same way. The output
-ceiling and the context window are operator-declared per catalog selection and
-never inferred from provider or model names. The daemon reserves the full
-configured output ceiling before each continuation even for an adapter that can
-only render the ceiling as advisory context, so such a deployment keeps its
-intended reply budget rather than the model's larger capability ceiling.
+A required bounded deployment prompt is the dedicated compaction call's system
+prompt; the session system prompt is never substituted for it. A uniqueness
+violation observed while applying a compaction completion is a decided fact, not
+a retryable database failure: the completion fails closed and its in-flight call
+is left to startup recovery, because the identities are pinned by then and an
+identical retry would fail the same way. The output ceiling and the context
+window are operator-declared per catalog selection and never inferred from
+provider or model names. The daemon reserves the full configured output ceiling
+before each continuation even for an adapter that can only render the ceiling as
+advisory context, so such a deployment keeps its intended reply budget rather
+than the model's larger capability ceiling.
 
 The headroom guard reads the newest reported input from any terminal ordinary
 call since the last compaction, whatever its disposition. Why: a failed or
@@ -191,16 +193,18 @@ different answer. Credential resolution failure and credential rejection never
 admit a successor: both are deployment misconfiguration, and moving to another
 account hides the account that is broken.
 
-A successor prepared when a parked wait releases carries the predecessor call
-and its non-acceptance proof in its origin, so it is that failure's authorized
-successor rather than the start of a fresh chain. Releasing a wait never
-readmits the member whose failure parked the turn, because otherwise a
-one-member `switch_now` pool configured to park would wake at its deadline, drop
-the sole exclusion, and call the same profile again without bound. Goal
-disposition keys on whether the observation selected a wait, not on the pool's
-configured action, so a park pool whose members are all excluded blocks like any
-other failure rather than staying current forever; [goal-mode](goal-mode.md)
-owns the disposition.
+A successful call ends its availability chain, and a later tool round starts a
+fresh one, so a round that exhausts the pool before calling carries no earlier
+round's failure. A successor prepared when a parked wait releases carries the
+predecessor call and its non-acceptance proof in its origin, so it is that
+failure's authorized successor rather than the start of a fresh chain. Releasing
+a wait never readmits the member whose failure parked the turn, because
+otherwise a one-member `switch_now` pool configured to park would wake at its
+deadline, drop the sole exclusion, and call the same profile again without
+bound. Goal disposition keys on whether the observation selected a wait, not on
+the pool's configured action, so a park pool whose members are all excluded
+blocks like any other failure rather than staying current forever;
+[goal-mode](goal-mode.md) owns the disposition.
 
 The identity relation is derived from the configured target's own family, never
 from a table of known provider identifiers, so a newly published model needs no
@@ -390,9 +394,5 @@ the sealed issued call carries is.
 - Durable provider-target evidence
   ([design](../design/model-call-execution.md)).
 - Unstopped ambiguity recovery ([design](../design/model-call-execution.md)).
-- Client visibility of availability-successor selection
-  ([design](../design/model-call-execution.md)).
-- Streaming deltas as transient drafts and the early-observation pause, commit,
-  and resume path ([design](../design/model-call-execution.md)).
 - The workspace-instruction region of the prepared model operation
   ([design](../design/model-call-execution.md)).
