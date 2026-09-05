@@ -249,7 +249,9 @@ The application's `CreateSession` request has no cause or ancestry input and
 fixes the interactive cause with no ancestry; the imported-frontier family
 records the interactive cause as well. A command naming a source-session
 ancestry is well formed but fails preparation with a nonterminal error that
-claims no command identifier.
+claims no command identifier. When a creation names no ownership or finish
+condition, a module-dispatched or delegated session is created owned, and a
+module-dispatched session takes an external-gate finish condition.
 
 Replay equality in both modes compares provenance, placement, start gate,
 ownership, and finish condition. Explicit creation also compares the complete
