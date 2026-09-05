@@ -14,11 +14,11 @@ resumes from durable state and never repeats a side effect unknowingly. A lost
 runner is replaced or promoted only by a user command, and a session whose
 runner stopped advertising a required capability recovers on that same runner.
 Each placement has exactly one writable root that the runner can re-identify
-after a restart, releases when the placement retires, and reports as a leak when
-it cannot be released. Restricted tools run inside a namespace with no host
-interface, reach the network only through a hostname-checked HTTPS broker, and
-run Git only under configuration the runner forces and a canonical-URL check the
-model cannot defeat.
+after a restart; a manifest-backed root is released when the placement retires
+and reported as a leak when it cannot be released. Restricted tools run inside a
+namespace with no host interface, reach the network only through a
+hostname-checked HTTPS broker, and run Git only under configuration the runner
+forces and a canonical-URL check the model cannot defeat.
 
 ## Design
 
@@ -308,9 +308,10 @@ Positive placement revisions, the `RunnerPlacementChanged` boundary, the runner
 event family, and the placement fields of session-creation records stay
 compatible with a relocation that no loss caused.
 
-No present or future code admits concurrent tool execution on one runner or
-enables repository hooks, because the canonical binding check depends on the
-adjacency of its resolve and use invocations.
+The canonical binding check depends on the adjacency of its resolve and use
+invocations, which the one global execution permit and disabled repository hooks
+provide; code that admits concurrent tool execution on one runner or enables
+repository hooks is a change to this design.
 
 The gate that admits `enroll` only while no other active enrollment exists is a
 development boundary; nothing built forecloses several runners enrolled at once.

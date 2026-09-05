@@ -389,7 +389,7 @@ authority over prose that already owns it, free to drift from the page it
 paraphrases. Multiple simultaneously enrolled runners and user-directed
 relocation of a healthy session are committed functionality that version one
 defers rather than open questions
-([runner protocol and placement](spec/runner-protocol.md#design-decisions)). The
+([runner protocol and placement](spec/runner-protocol.md#planned)). The
 questions below remain open.
 
 - **Runner workstation tool execution.** No present runner surface executes a

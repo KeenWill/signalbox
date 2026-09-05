@@ -1,8 +1,8 @@
 # Runner protocol and placement
 
 The runner protocol enrolls `signalbox-runner` processes with `signalboxd`,
-records what each runner offers, and binds a session to one runner, one
-credential profile, and one sandbox profile.
+records what each runner offers, and binds a session to at most one runner, at
+most one credential profile, and one sandbox profile.
 
 ## Overview
 
@@ -167,17 +167,18 @@ starts at first.
 
 Workspace, repository, credentials, and sandbox are independent axes of one
 session: a choice on any axis constrains no other, and no axis is inferred from
-another. Every combination is a stated choice at creation; a request that
-selects nothing on an axis states that absence explicitly and receives absence,
-never a daemon- or runner-selected substitute, because a silently inferred
-credential is an authorization the user never granted. A placement with no
-repository performs no repository operation; with a named profile it still
-creates the grant for the session's other admitted dispatches. A profileless
-placement creates no grant, resolves no configured path, and injects no value. A
-repository-worktree requirement is satisfiable only when the selected
-registration advertises the per-session worktree capability and the repository
-key resolves in checked runner configuration to a credential-free HTTPS clone
-URL.
+another. Workspace, credentials, and sandbox are each a stated choice at
+creation; a repository is named only inside a worktree requirement. A request
+that selects no workspace or no credential profile states that absence
+explicitly and receives absence, never a daemon- or runner-selected substitute,
+because a silently inferred credential is an authorization the user never
+granted. A placement with no repository performs no repository operation; with a
+named profile it still creates the grant for the session's other admitted
+dispatches. A profileless placement creates no grant, resolves no configured
+path, and injects no value. A repository-worktree requirement is satisfiable
+only when the selected registration advertises the per-session worktree
+capability and the repository key resolves in checked runner configuration to a
+credential-free HTTPS clone URL.
 
 Ordinary attachment and lease creation accept only the exact pinned runner and
 the current grant; re-registration and reconnect change none of the pinned
