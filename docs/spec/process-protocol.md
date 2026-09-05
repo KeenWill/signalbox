@@ -261,11 +261,12 @@ projection or spool failure before transmission returns `unavailable` and
 exposes no partial snapshot. Every bounded sequence read is a start message, its
 items, and an end message carrying the count. A session metadata page orders its
 summaries by strictly increasing session identity, continuing after the
-requested cursor. The client spools each complete snapshot or page into an
-owner-private anonymous temporary file and treats it as authoritative only after
-the end message arrives and its counts, indices, fragment sequence, session, and
-cursor validate. Snapshot deduplication uses the complete semantic identity of
-source session and entry; a second occurrence of that key fails the snapshot.
+requested cursor. The terminal client spools each complete snapshot or page into
+an owner-private anonymous temporary file. A client treats a snapshot or page as
+authoritative only after the end message arrives and its counts, indices,
+fragment sequence, session, and cursor validate. Snapshot deduplication uses the
+complete semantic identity of source session and entry; a second occurrence of
+that key fails the snapshot.
 
 The imported-conversation read is `imported_conversation_start` naming the
 inspected conversation, one `imported_conversation_entry` per normalized entry,
