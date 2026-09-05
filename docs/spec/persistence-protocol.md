@@ -279,9 +279,9 @@ publishes after the commit. Delivery is ordered and at-least-once, and consumers
 deduplicate by cursor. A runner transition event is validated against the
 placement revision it names, never against the session's current placement.
 
-Module-owned schemas contain only derived or module-local state, which may be
-pruned. Outbox records with a sequence below every per-consumer delivery cursor
-may be pruned.
+Schemas whose names begin with `mod_` contain only derived or module-local
+state, which may be pruned. Outbox records with a sequence below every
+per-consumer delivery cursor may be pruned.
 
 Domain types carry no SQLx or serialization traits. Each adapter module decodes
 its own rows through explicit fallible functions and assembles a checked input;
@@ -320,7 +320,7 @@ prefix block in its description, and sibling stacks pick disjoint blocks.
 
 A regenerated baseline omits `_sqlx_migrations`, which the migrator creates
 itself. It carries the seed rows a schema-only dump discards: the
-outbox-sequence, outbox-delivery, and hub-fence singletons and both
+outbox-sequence and hub-fence singletons, each outbox-consumer cursor, and both
 automatic-reconciliation cursors. The old files are deleted in the same commit
 that adds it, because a tree carrying both chains would collide on every create.
 
