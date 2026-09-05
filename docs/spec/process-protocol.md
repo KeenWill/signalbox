@@ -96,10 +96,13 @@ The socket's immediate parent directory must be owner-private even when the
 socket node itself is mode 0600, because not every Unix enforces socket-node
 permissions. Every ancestor above that parent must be owned by root or the
 effective user. A group- or other-writable ancestor is admitted only when it is
-sticky and its child is owned by the effective user. Socket filesystem access is
-the deployment boundary; the daemon adds no application-level file-owner proof.
-The absence of authentication is provisional: remote access needs an
-authenticated identity and revocation design that does not exist, recorded in
+sticky and its child is owned by the effective user. A daemon holds an exclusive
+lock beside the socket for its lifetime and pins the bound inode, and it unlinks
+a socket path only after revalidating that pin, so a restart never removes a
+live successor's socket. Socket filesystem access is the deployment boundary;
+the daemon adds no application-level file-owner proof. The absence of
+authentication is provisional: remote access needs an authenticated identity and
+revocation design that does not exist, recorded in
 [open-questions.md](../open-questions.md).
 
 A denial on the wire requires a reason although the domain command admits its
@@ -134,7 +137,9 @@ identifiers. They never contain source bytes, host or credential paths, raw or
 unsanitized provider payloads, SQL, or user content other than a bounded,
 credential-redacted provider error body; a tool failure may name a bounded
 workspace-relative path. Retained source content, such as an imported transcript
-entry, is not diagnostic evidence.
+entry, is not diagnostic evidence. The guarantee covers protocol output and
+diagnostic evidence; a local log recording a rejected workspace configuration
+names the configured root.
 
 The transport is local-machine and single-user; the protocol has no
 authentication, no authorization exchange, and no remote transport.
