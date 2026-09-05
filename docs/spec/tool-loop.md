@@ -429,17 +429,18 @@ is truncated together with its continuation cursor, and a verdict never treats a
 partial evidence page as complete. The reviewer verdict is parsed from review
 bodies and issue comments merged in code-host timestamp order, and a usage-limit
 response is recognized separately as one exact canonical text. Only the reviewer
-bot account supplies a verdict, and it must carry a line whose whole content is
-the `Reviewed commit:` label followed by a 7-to-40-character hexadecimal
-revision, with only emphasis or backtick markers around them. The authenticated
-job-log endpoint is the sole redirect-shaped exchange: after one 302 the adapter
-validates the location, pins a wholly public destination set, and downloads
-credential-free. A read transport or server failure is an executor
-infrastructure failure, while a mutation transport loss, server failure, or
-malformed acknowledgement is commit-ambiguous. `change_request_thread_reply` and
-`change_request_thread_resolve` query thread ownership before they mutate, and a
-failure of that query classifies the mutation as not dispatched rather than
-ambiguous. The adapter never returns code-host response bodies as error detail.
+bot account supplies a verdict or a usage-limit response, and a verdict must
+carry a line whose whole content is the `Reviewed commit:` label followed by a
+7-to-40-character hexadecimal revision, with only emphasis or backtick markers
+around them. The authenticated job-log endpoint is the sole redirect-shaped
+exchange: after one 302 the adapter validates the location, pins a wholly public
+destination set, and downloads credential-free. A read transport or server
+failure is an executor infrastructure failure, while a mutation transport loss,
+server failure, or malformed acknowledgement is commit-ambiguous.
+`change_request_thread_reply` and `change_request_thread_resolve` query thread
+ownership before they mutate, and a failure of that query classifies the
+mutation as not dispatched rather than ambiguous. The adapter never returns
+code-host response bodies as error detail.
 
 Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round
