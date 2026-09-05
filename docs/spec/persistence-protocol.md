@@ -248,7 +248,8 @@ A new migration's version prefix is greater than every existing one. Once a
 migration is recorded in any deployed database, or once its pull request merges
 to main, it is immutable: fix it with a new forward migration, never by editing,
 replacing, or renumbering the file. The one exception is a full collapse to a
-regenerated baseline, allowed only while no production deployment exists.
+regenerated baseline, allowed only while there is exactly one deployment and no
+release.
 
 A durable row that does not decode produces a typed corruption error. The row is
 never normalized into a nearby valid value, never repaired or dropped on load,
@@ -305,8 +306,10 @@ decode. A collapse changes bookkeeping, not rows, and retires none of them.
 Closed variant sets are text discriminators under check constraints, with
 payload columns present exactly when the discriminator requires them. A fact
 spanning several tables uses deferrable, initially deferred foreign keys and
-constraint triggers, so its rows may be inserted in any order while every commit
-boundary sees the complete shape.
+constraint triggers, so its rows may be inserted in any order the triggers
+permit while every commit boundary sees the complete shape. A multipart receipt
+inserts its satellites first, because a satellite insert is rejected once the
+parent row has sealed the receipt.
 
 Accepted user content is stored only in the ordered part satellites of the
 command and of the accepted input; neither parent row has a content column.
@@ -352,7 +355,9 @@ source attempt is still in flight.
 
 The first model-call insertion of a turn takes the transaction-scoped
 model-activity advisory lock keyed by session; inactivity parking takes the
-pull-request target lock and then that same model-activity lock.
+pull-request target lock and then that same model-activity lock. A
+pursuit-starting goal on a pull-request target takes that target lock before it
+checks for a competing live session and claims the command.
 
 Every automatic-reconciliation claim, application, and failure-record
 transaction installs a local `lock_timeout` before it reads or writes anything,
