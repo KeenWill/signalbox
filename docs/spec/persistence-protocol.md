@@ -2187,8 +2187,8 @@ surface provides it.
 - [Graded approval judging](../open-questions.md#graded-approval-judging) owns
   the unresolved graded fields in the durable audit shape for approval-judge
   calls and decisions. The existing
-  [goal-mode compatibility constraint](goal-mode.md#compatibility-constraints)
-  owns retention of both the provider-offered and repository-committed outcomes.
+  [goal-mode compatibility constraint](goal-mode.md) owns retention of both the
+  provider-offered and repository-committed outcomes.
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is admitted only for the tool-loop yield/approval path.
