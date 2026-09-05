@@ -15,8 +15,8 @@ structure a view returns. Its two agent tools are declared through the
 The same bytes have three descriptions. A blob digest names immutable bytes and
 carries no type fact. A file use is a caller's declaration about one use of
 those bytes: their length, the attachment intent, and a media type. A validated
-file is one reader's byte-derived evidence about the same bytes, together with
-the ordered views the reader offers for them.
+file is one reader's byte-derived evidence about those bytes, together with the
+ordered views the reader offers for them.
 
 `signalbox-file-media-runtime` is the provider-neutral core: the checked
 declaration and value types, the registry, the detection and validation
@@ -92,7 +92,7 @@ files, fetches external resources, or recurses into embedded containers.
 Recognized encrypted or locked content is a terminal outcome, and no password
 channel exists.
 
-A reader revision is immutable. An earlier durable tool result keeps what the
+A reader revision is immutable, so an earlier durable tool result keeps what the
 model saw while a later request may use a newer revision. Why: a durable result
 is never reclassified.
 
