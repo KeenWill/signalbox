@@ -24,8 +24,8 @@ cross-session, non-successor, or duplicated reference. The record kind already
 carries the replacement and abandonment states; the transactions that produce
 them do not exist.
 
-A daemon transaction retires a workspace release the runner never acknowledged,
-so a lost runner leaves no release outstanding.
+A daemon transaction retires a workspace release the lost runner never
+acknowledged, so a lost runner leaves no release outstanding.
 
 Runner operation-failure evidence is stored in the transaction that resolves the
 correlated operation as refused, and the daemon acknowledges the failure to the
@@ -95,8 +95,9 @@ Replacement and abandonment each commit in one transaction with one
 runner-state-transition event per affected session, and the placement snapshot
 writer is unchanged.
 
-After a runner is lost, no workspace release stays unacknowledged; a daemon
-transaction has retired it.
+After a runner is lost, no workspace release that runner held stays
+unacknowledged; a daemon transaction has retired it. Releases held by reachable
+runners stay pending.
 
 Every acknowledged operation failure is readable after restart, and an equal
 retransmission returns the recorded receipt.

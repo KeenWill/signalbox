@@ -42,9 +42,9 @@ conflicting reuse are owned by
 [identity-and-commands](identity-and-commands.md); this page owns their storage.
 
 Every SQL statement issued from Rust that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`, together with a record of the locks
-that triggers take inside the schema. That inventory documents the lock order
-stated under Contracts.
+`crates/persistence/src/lock_inventory.rs`, and that inventory documents the
+lock order stated under Contracts. Locks taken inside triggers are stated in the
+migrations that define them.
 
 Reconstitution turns rows back into domain values and returns one complete value
 or a typed corruption error. Failures that reach an operator are classified in
@@ -155,9 +155,8 @@ transactions: it commits its registry row, pending typed command, and prepared
 call before provider work, and a later session-locked transaction settles the
 command exactly once.
 
-Every explicit row lock lives in one reviewed inventory so lock order is
-auditable instead of scattered through query strings; trigger-resident locks are
-recorded there because they fire outside the Rust inventory's view.
+Every explicit row lock taken from Rust lives in one reviewed inventory so lock
+order is auditable instead of scattered through query strings.
 
 Creating a session from an imported frontier takes no explicit row lock, because
 the selected imported aggregate is immutable and append-only.
