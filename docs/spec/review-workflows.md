@@ -770,8 +770,7 @@ targets, runs with their pass, individual findings, or an identity-ordered run
 finding list. It additionally exposes the closed orchestration start, import,
 concern, judgment-plan, judgment-effect, repair, publication, and read
 operations consumed by the client-fed adapter. Exact wire shapes, bounds, and
-compatibility are owned by
-[the process protocol](process-protocol.md#client-requests).
+compatibility are owned by [the process protocol](process-protocol.md).
 
 Starting a run requires an existing target plus an accepted input whose
 canonical session and origin turn agree with the requested pass. Fresh run and

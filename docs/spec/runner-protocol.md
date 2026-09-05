@@ -446,11 +446,11 @@ duplicates could make a page boundary silently omit retained evidence. The
 locator is relative to the runner state root and not to any repository, so a
 workspace-free private root, staging, and trash are all nameable. It carries no
 absolute host path, matching the projection in
-[process protocol](process-protocol.md#client-requests). Each page carries the
-prior page digest, null only on page one, so equal replay is exact and omission
-or reordering fails closed. The runner journals the report and current page
-until `workspace_leak_recorded`. The daemon durably stages pages by report and
-page, then atomically replaces the runner-status leak snapshot only when it
+[process protocol](process-protocol.md). Each page carries the prior page
+digest, null only on page one, so equal replay is exact and omission or
+reordering fails closed. The runner journals the report and current page until
+`workspace_leak_recorded`. The daemon durably stages pages by report and page,
+then atomically replaces the runner-status leak snapshot only when it
 acknowledges the final page; an interrupted newer report never erases the prior
 complete one. Reconnect inventory names the exact retained page and resumes at
 its durable acknowledgement boundary.

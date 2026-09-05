@@ -212,8 +212,7 @@ stream, complete settings on creation/defaults reads and receipts, provenance-
 preserving overrides on defaults replacement and origin-producing input, typed
 unsupported-setting results, and the two durable settings events above.
 Transcript snapshot completeness is owned by
-[process-protocol](process-protocol.md#transcript-snapshots), and the
-legacy-null cutover is owned by
+[process-protocol](process-protocol.md), and the legacy-null cutover is owned by
 [persistence-protocol](persistence-protocol.md#relational-representation).
 
 The capability projection never exposes a mapped fast serving identity. Client

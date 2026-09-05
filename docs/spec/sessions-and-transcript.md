@@ -1134,7 +1134,7 @@ a `queue` submit create an accepted origin turn with frozen configuration;
 `queue` binds its acceptance to the exact active turn it follows. A `steer`
 submit instead creates configuration-free pending steering bound to that exact
 source turn. The closed wire spelling and typed receipts are owned by
-[process-protocol](process-protocol.md#client-requests).
+[process-protocol](process-protocol.md).
 
 The accepted input owns the one immutable authoritative content value; the
 `accepted_input` row admits exactly three guarded updates from pending steering:

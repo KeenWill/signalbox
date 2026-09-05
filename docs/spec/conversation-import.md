@@ -367,7 +367,7 @@ State refusals name `conversation_import_already_in_progress` or
 declared size, and actual size when append or commit knows it; a
 declaration/assembly mismatch names both counts. Converter refusals use the
 closed class and ordinal inventory in the
-[process protocol's conversation-import refusal mapping](process-protocol.md#server-messages).
+[process protocol's conversation-import refusal mapping](process-protocol.md).
 Errors and logs contain classes and ordinals only, never source content,
 source-derived identifiers, paths, or parser excerpts. Database failure is
 `commit_ambiguous`, so the operator may retry the exact format and source bytes.
@@ -395,7 +395,7 @@ identity, its exact source-speaker attestation, its normalized content kind, and
 — for an entry whose content is attested `Text` — that text's exact leading
 scalars bounded to 256 UTF-8 bytes with an explicit truncation marker. The
 complete message sequence and its bounds are owned by the
-[process protocol](process-protocol.md#server-messages).
+[process protocol](process-protocol.md).
 
 The read exposes no imported content a transcript snapshot does not already
 carry: it bounds exactly the attested text that snapshot carries in full and
@@ -414,7 +414,7 @@ concrete position. Because an imported conversation is immutable, the resolution
 is stable and an exact replay names the same boundary. An out-of-range position
 on an existing imported conversation is a rejection naming the selectable range,
 not an absent-identity `not_found`; both classifications are owned by the
-[process protocol](process-protocol.md#server-messages).
+[process protocol](process-protocol.md).
 
 ### Bounded browser discovery and continuation
 

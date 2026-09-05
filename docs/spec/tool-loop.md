@@ -191,12 +191,12 @@ A user decision is the canonical `DecideToolRequest` command: user-global
 Unicode with no leading/trailing POSIX whitespace; it is therefore safe to
 render without copying unbounded or terminal-control content. Equality excludes
 only the command identifier. The `decide_tool_request` request in
-[process-protocol](process-protocol.md#client-requests) is the client surface
-that issues this command; its wire posture requires a denial reason even though
-the command admits an absent one. Registry lookup precedes current-state
-validation; equal replay returns the recorded applied-or-rejected result,
-cross-kind or different-payload reuse conflicts, and a pre-commit failure claims
-no identity (INV-012).
+[process-protocol](process-protocol.md) is the client surface that issues this
+command; its wire posture requires a denial reason even though the command
+admits an absent one. Registry lookup precedes current-state validation; equal
+replay returns the recorded applied-or-rejected result, cross-kind or
+different-payload reuse conflicts, and a pre-commit failure claims no identity
+(INV-012).
 
 A delegated request first commits the same `awaiting_tool_approval` park as a
 human request. The daemon then prepares and authorizes one dedicated approval
@@ -280,10 +280,9 @@ two independently durable commands, not one atomic deny-and-end command; after
 decision progression opens execution, the ordinary dispatch-gate race between
 remaining tool work and the interrupt applies. On the wire this composition is
 `decide_tool_request` followed by `stop_turn`
-([process-protocol](process-protocol.md#client-requests)); a `stop_turn` against
-the parked wait records the typed
-`interrupt_unavailable_while_awaiting_approval` rejection and leaves the wait
-intact.
+([process-protocol](process-protocol.md)); a `stop_turn` against the parked wait
+records the typed `interrupt_unavailable_while_awaiting_approval` rejection and
+leaves the wait intact.
 
 A judge denial the user disagrees with is reversed forward, never in place: the
 denial is terminal (INV-027), and the session may re-propose after a denial
