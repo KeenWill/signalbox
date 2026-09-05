@@ -7,10 +7,12 @@ of stored rows into domain values, and the transactional outbox.
 ## Overview
 
 `crates/persistence` holds the Postgres representation. It uses SQLx on Tokio:
-the Postgres driver, one `PgPool`, and an embedded migrator. Domain types live
-in `crates/domain` and know nothing of the database; each persistence module
-decodes its own rows and hands checked input to the domain for validation. What
-the rows mean is owned elsewhere: session semantics by
+the Postgres driver, one `PgPool`, and an embedded migrator. The production
+connection parser forces certificate and hostname verification regardless of a
+weaker `sslmode` in the database URL; only the local test path disables TLS.
+Domain types live in `crates/domain` and know nothing of the database; each
+persistence module decodes its own rows and hands checked input to the domain
+for validation. What the rows mean is owned elsewhere: session semantics by
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and the command claim protocol by
@@ -500,18 +502,21 @@ record against its turn and frontier. A terminal record naming a transcript
 entry must name that frontier's last member, and a reconciliation-required
 record must name the turn's own ambiguous call or tool attempt. A
 context-compaction event whose compaction, producing call, summary, and result
-frontier do not correlate fails the dispatch. A tool-batch transition fails the
-dispatch unless its round, frontier, and attempt correlate: a proposed frontier
-is the round boundary, a projected frontier contains every result of the round,
-and a recovery attempt belongs to a request the named call produced.
+frontier do not correlate fails the dispatch. A session-terminal record fails
+the dispatch unless the session's lifecycle row matches its outcome, cause, end
+timestamp, stop stickiness, superseder, and actor. A tool-batch transition fails
+the dispatch unless its round, frontier, and attempt correlate: a proposed
+frontier is the round boundary, a projected frontier contains every result of
+the round, and a recovery attempt belongs to a request the named call produced.
 
 An applied submit-input that creates a turn origin appends an input-accepted
 event; pending steering appends nothing until terminal reclassification mints
-its successor turn and appends the correlated event. Binding an already-accepted
-turn to a goal generation appends nothing. A stop or supersede that makes a
-queued goal turn ineligible appends a retired turn-terminal event in the same
-transaction, and supersede appends that retirement before the replacement's
-input-accepted event.
+its successor turn and appends the correlated event. Turn activation appends the
+turn's activation event in the activating transaction. Binding an
+already-accepted turn to a goal generation appends nothing. A stop or supersede
+that makes a queued goal turn ineligible appends a retired turn-terminal event
+in the same transaction, and supersede appends that retirement before the
+replacement's input-accepted event.
 
 The transaction that terminalizes a session's last live turn settles the
 session's pending closure at commit through a deferred constraint trigger, so
