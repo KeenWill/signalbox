@@ -65,6 +65,8 @@ refused, and neither side waits on it further.
 
 ### Successor enrollment, promotion, and replacement
 
+Several runners are enrolled with one daemon at once.
+
 After durable predecessor loss, one successor `enroll` may be admitted as a
 provisioning-only pending replacement candidate. It receives the same identity
 shapes plus a pending enrollment and pending registration revision; at most one
@@ -310,9 +312,13 @@ No present or future code admits concurrent tool execution on one runner or
 enables repository hooks, because the canonical binding check depends on the
 adjacency of its resolve and use invocations.
 
+The gate that admits `enroll` only while no other active enrollment exists is a
+development boundary; nothing built forecloses several runners enrolled at once.
+
 The domain gate in `replace_lost_runner` that refuses a same-runner successor,
-and the tests that pin that refusal, contradict the same-runner recovery above
-and flip when the replacement command is built.
+and the test that pins that refusal after registration-triggered loss,
+contradict the same-runner recovery above and flip when the replacement command
+is built.
 
 Every transaction this design adds takes runner locks in the order
 [persistence protocol](../spec/persistence-protocol.md) fixes and holds no
@@ -326,11 +332,13 @@ retained result is resent until `result_recorded`. After a runner or daemon
 crash, reconnect reconciliation reaches the same durable state as an
 uninterrupted exchange, and no lease is stranded or repeated.
 
-A pending successor enrolls after durable loss, admits only heartbeat, leak
-reconciliation, and one command-bound workspace operation, and becomes active
-only through `promote_pending_runner` or `replace_lost_runner`. A pinned session
-lost to re-registration is replaced onto the same runner, without abandonment,
-once that runner advertises the required capability again.
+A second runner enrolls while the first stays active, and every runner-scoped
+fact stays per runner. A pending successor enrolls after durable loss, admits
+only heartbeat, leak reconciliation, and one command-bound workspace operation,
+and becomes active only through `promote_pending_runner` or
+`replace_lost_runner`. A pinned session lost to re-registration is replaced onto
+the same runner, without abandonment, once that runner advertises the required
+capability again.
 
 `move_healthy_session` relocates a healthy session or changes its working
 directory with a `RunnerPlacementChanged` entry and no loss.

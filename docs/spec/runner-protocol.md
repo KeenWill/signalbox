@@ -57,10 +57,6 @@ One runner runs on the same host and under the same effective user as
 `signalboxd`. That user is the trust boundary, so the authentication-reference
 identity is correlated with the stored enrollment and is not a secret.
 
-The single-runner rule is a short-term development boundary, not a design
-commitment. Several runners enrolled with one daemon at once is a requirement,
-and nothing built may foreclose it.
-
 Positive placement revisions, the `RunnerPlacementChanged` boundary, the runner
 event family, and the placement fields of session-creation records stay
 compatible with a relocation that no loss caused. Why: a user-directed move of a
@@ -236,8 +232,11 @@ A session's dotted placement path is advanced after creation only by the
 - Lease offer, claim, dispatch, result and failure spooling, and
   reconnect-inventory reconciliation over the wire, under one global execution
   permit per runner: [runner protocol design](../design/runner-protocol.md).
-- Pending successor enrollment, promotion, and the replacement command,
-  including same-runner recovery after registration-triggered loss:
+- Several runners enrolled with one daemon at once:
+  [runner protocol design](../design/runner-protocol.md).
+- Pending successor enrollment, promotion, and the replacement command:
+  [runner protocol design](../design/runner-protocol.md).
+- Same-runner replacement after registration-triggered loss:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:
   [runner protocol design](../design/runner-protocol.md).

@@ -550,24 +550,24 @@ Representation rules, all enforced in the schema:
   that arm to its typed authorization, release, or offered-lease record and to
   the same runner; a unique constraint permits only one retained failure for an
   exact operation correlation. Each arm admits exactly the category/correlation
-  pairs owned by [runner protocol](runner-protocol.md); every other pair is
-  rejected. Code, message, payload, aggregate detail size, JSON member-name
-  grammar, container cardinality, and depth carry the exact checks owned by
-  [runner protocol](runner-protocol.md); none is stored in a generic payload
-  column or normalized on admission. The record and its JSON text reject update,
-  delete, and truncate. Admission inserts that evidence in the same transaction
-  that resolves the correlated operation as refused. Provisioning can then
-  produce no `workspace_ready` receipt; a release can produce neither
-  `workspace_released` nor a second refusal and is retired as refused; and an
-  offered lease can produce no `lease_claim` and terminalizes with exact
-  no-execution evidence. Deferred checks require exactly one of the operation's
-  success and refusal proofs and preserve the failure after the mutable
-  operation head retires. Equal retransmission rereads the equal record and
-  returns `operation_failure_recorded`; unequal reuse is a correlation error.
-  Why: acknowledging volatile detail would let a restart forget evidence
-  operator inspection must reproduce, while delaying the operation transition
-  until after acknowledgement would leave the runner resending a failure the
-  daemon had already acted on.
+  pairs the `runner-wire` crate checks; every other pair is rejected. Code,
+  message, payload, aggregate detail size, JSON member-name grammar, container
+  cardinality, and depth carry the exact checks the `runner-wire` crate owns;
+  none is stored in a generic payload column or normalized on admission. The
+  record and its JSON text reject update, delete, and truncate. Admission
+  inserts that evidence in the same transaction that resolves the correlated
+  operation as refused. Provisioning can then produce no `workspace_ready`
+  receipt; a release can produce neither `workspace_released` nor a second
+  refusal and is retired as refused; and an offered lease can produce no
+  `lease_claim` and terminalizes with exact no-execution evidence. Deferred
+  checks require exactly one of the operation's success and refusal proofs and
+  preserve the failure after the mutable operation head retires. Equal
+  retransmission rereads the equal record and returns
+  `operation_failure_recorded`; unequal reuse is a correlation error. Why:
+  acknowledging volatile detail would let a restart forget evidence operator
+  inspection must reproduce, while delaying the operation transition until after
+  acknowledgement would leave the runner resending a failure the daemon had
+  already acted on.
 - Both creation command families store the caller's optional placement.
   `create_session_command` and `create_session_from_imported_frontier_command`
   carry the complete request — selector kind with its runner identity or class
