@@ -1207,7 +1207,7 @@ Locks per transaction, in acquisition order:
   one the release exchange exists only for the checked same-runner
   re-enrollment, where registration reconciliation retired the placement while
   the connection and enrollment stayed healthy
-  ([runner protocol and placement](runner-protocol.md#not-built)). Why: both
+  ([runner protocol and placement](runner-protocol.md#planned)). Why: both
   frames that can retire a release require the holding runner to acknowledge
   deletion or report cleanup failure, so a release addressed to an unreachable
   identity is a durable record redelivered after every restart with no

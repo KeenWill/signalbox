@@ -389,7 +389,7 @@ authority over prose that already owns it, free to drift from the page it
 paraphrases. Multiple simultaneously enrolled runners and user-directed
 relocation of a healthy session are committed functionality that version one
 defers rather than open questions
-([runner protocol and placement](spec/runner-protocol.md#decisions)). The
+([runner protocol and placement](spec/runner-protocol.md#design-decisions)). The
 questions below remain open.
 
 - **Runner workstation tool execution.** No present runner surface executes a
@@ -586,7 +586,7 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   allowlist, an emptied credential-helper list, disabled repository hooks, and
   an effective-URL check that binds every remote-reaching operation to its
   canonical repository after Git's own rewrite expansion
-  ([runner protocol and placement](spec/runner-protocol.md#not-built)). That
+  ([runner protocol and placement](spec/runner-protocol.md#planned)). That
   posture is not a closed set: configuration that changes what Git runs rather
   than where it connects is neutralized only where a command-line setting names
   it, so each new key is found rather than excluded. Putting the administrative

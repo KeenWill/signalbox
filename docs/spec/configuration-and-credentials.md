@@ -1284,9 +1284,9 @@ supplies them:
   applies, so the profile does not contain a deliberately hostile program.
 
 This is not the runner's `WorkspaceRestricted` profile described by
-[sandbox profiles and approval](runner-protocol.md#not-built), which
-additionally drops capabilities and brokers egress through a hostname allowlist,
-and which no present runner surface provides.
+[sandbox profiles and approval](runner-protocol.md#planned), which additionally
+drops capabilities and brokers egress through a hostname allowlist, and which no
+present runner surface provides.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and
@@ -2940,11 +2940,11 @@ push; preserving the path is the authorization boundary, not a convenience.
 Binding the helper to the provisioned workspace would also leave the operation
 that introduces a session's first repository unauthorizable, because a clone
 runs in a writable root whose manifest names no repository key at all
-([runner protocol and placement](runner-protocol.md#not-built)). The runner
-scrubs the exact value and its JSON-string-escaped form from admitted stdout,
-stderr, and result text before forwarding. This reduces accidental echo; it
-cannot prevent model-controlled code from transforming or using the value within
-its granted repository scope, which is an accepted restricted-profile cost.
+([runner protocol and placement](runner-protocol.md#planned)). The runner scrubs
+the exact value and its JSON-string-escaped form from admitted stdout, stderr,
+and result text before forwarding. This reduces accidental echo; it cannot
+prevent model-controlled code from transforming or using the value within its
+granted repository scope, which is an accepted restricted-profile cost.
 
 Unknown profiles fail before lease claim. A credential failure after a claimed
 dispatch is a fixed `ExecutionFailed` observation naming only the profile and

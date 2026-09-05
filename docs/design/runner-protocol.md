@@ -20,7 +20,7 @@ interface, reach the network only through a hostname-checked HTTPS broker, and
 run Git only under configuration the runner forces and a canonical-URL check the
 model cannot defeat.
 
-## Shape
+## Design
 
 ### Lease and dispatch
 
@@ -294,7 +294,7 @@ the right repository is no claim about what that repository serves.
 [The Git authority threat model](../spec/git-authority-threat-model.md) owns the
 attack narrative.
 
-## Constraints on present code
+## Compatibility constraints
 
 This design constrains sandbox, approval, workspace, credential, and generic
 execution behavior, and its per-tool compatibility constraints are binding on
@@ -324,7 +324,7 @@ Every transaction this design adds takes runner locks in the order
 [persistence protocol](../spec/persistence-protocol.md) fixes and holds no
 transaction open across runner I/O.
 
-## Acceptance
+## Acceptance criteria
 
 A session holds at most one live lease, a runner executes at most one dispatch
 at a time, every lease phase is journaled before the step it names, and a

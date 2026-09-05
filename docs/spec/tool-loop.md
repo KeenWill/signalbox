@@ -8,7 +8,7 @@ below.
 This page specifies the implemented daemon-owned tool subsystem. Its
 runner-locus paragraphs are committed unimplemented functionality that extends
 the same laws to the runner locus;
-[runner protocol and placement](runner-protocol.md#not-built) owns their present
+[runner protocol and placement](runner-protocol.md#planned) owns their present
 implementation status. This page owns logical tool requests, approval policy and
 decisions, physical tool attempts, result admission, intra-turn continuation,
 crash classification, the compiled registry, and the daemon-local catalog. Turn
@@ -465,7 +465,7 @@ registration remain undecided under
 [Daemon Git push transport](../open-questions.md#scheduling-and-runners).
 
 This daemon-local registry supplies no runner execution path. The
-[runner executable boundary](runner-protocol.md#not-built) owns the present
+[runner executable boundary](runner-protocol.md#planned) owns the present
 implementation status and committed compatibility constraints; the
 [runner workstation open question](../open-questions.md#scheduling-and-runners)
 owns the remaining undecided registry work.

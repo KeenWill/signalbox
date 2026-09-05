@@ -1010,7 +1010,7 @@ frozen direct selection changed, and finally appends its ordinary origin
 Session relocation has a session-level frontier boundary. Every transaction that
 installs a successor placement — loss replacement, and the committed
 user-directed move of a healthy session or of its working directory
-([runner protocol and placement](runner-protocol.md#not-built)) — appends one
+([runner protocol and placement](runner-protocol.md#planned)) — appends one
 `RunnerPlacementChanged` entry after the latest authoritative semantic frontier,
 or establishes a one-entry root when no frontier exists, and advances the
 session placement-frontier pointer with the placement revision. Active

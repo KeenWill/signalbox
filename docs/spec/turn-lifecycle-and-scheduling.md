@@ -1067,7 +1067,7 @@ expected current placement revision and either a different live exact runner,
 the one pending replacement enrollment it atomically activates, or — for a
 registration-triggered loss alone — a checked re-enrollment of the same runner
 against its current connection
-([runner protocol and placement](runner-protocol.md#not-built)). For a pinned
+([runner protocol and placement](runner-protocol.md#planned)). For a pinned
 loss, its transaction installs the checked successor placement and grant
 lineage, provisions a new revisioned workspace when the successor request
 requires one, appends the reference-only `RunnerPlacementChanged` semantic
@@ -1472,7 +1472,7 @@ from child transcript state nor depend on process-local wake memory.
   the same runner, are committed functionality with no command here yet; the
   placement-revision, transcript-boundary, and runner-event mechanisms this page
   drives must stay compatible with a relocation that no loss caused
-  ([runner protocol and placement](runner-protocol.md#not-built)).
+  ([runner protocol and placement](runner-protocol.md#planned)).
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.

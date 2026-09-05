@@ -229,7 +229,7 @@ enrollment-request identity it promotes, and it is a single atomic
 claim-and-terminal-result transaction: the deployment-scoped fact it acts on is
 that this daemon's active runner is durably gone, so no session placement is a
 required argument and none is mutated
-([runner protocol and placement](runner-protocol.md#not-built)).
+([runner protocol and placement](runner-protocol.md#planned)).
 
 `UpdateSessionPlacement` carries the target session, the exact expected current
 placement version, and the complete replacement placement. Its first handling

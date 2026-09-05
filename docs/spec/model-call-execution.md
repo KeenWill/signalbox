@@ -178,7 +178,7 @@ messages:
   inventing text. The same profile-specific text renders every relocation,
   including a working-directory move on the same runner and a later
   user-directed move of a healthy session
-  ([runner protocol and placement](runner-protocol.md#not-built)). What is
+  ([runner protocol and placement](runner-protocol.md#planned)). What is
   unavailable is authority to execute through the retired placement; the old
   path is no longer the active working directory or writable root. Physical
   files are not reported lost: a restricted successor exposes only its own

@@ -4,7 +4,7 @@ The runner protocol enrolls `signalbox-runner` processes with `signalboxd`,
 records what each runner offers, and binds a session to one runner, one
 credential profile, and one sandbox profile.
 
-## Map
+## Overview
 
 The daemon and the runner are two processes on one host under one effective
 user. `signalboxd` binds a Unix domain stream socket reserved for runners,
@@ -22,7 +22,7 @@ no capability class, tool, workspace capability, or sandbox profile, sends an
 empty reconnect inventory, and executes nothing. The daemon catalog that would
 admit such claims is empty; the runner advertises only the credential-profile
 names and repository entries its strict configuration carries. Leases, dispatch,
-workspaces, sandboxes, and recovery are listed under Not built.
+workspaces, sandboxes, and recovery are listed under Planned.
 
 The domain lives in `crates/domain/src/runner.rs` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,
@@ -45,14 +45,14 @@ first dispatch pins it to one runner, snapshots the registration it was
 validated against, and creates a `CredentialProfileGrant` when a profile was
 selected. A `RunnerLease` is the domain record of one tool attempt offered to
 that runner; its offer, claim, loss, and retry transitions are domain code, and
-the wire dispatch that would drive them is listed under Not built. A placement
+the wire dispatch that would drive them is listed under Planned. A placement
 changes only by explicit transition: replacing a lost runner and replacing the
 pinned credential profile each advance its revision. When a pinned runner is
 lost, the placement enters a lost state that only two user commands leave:
 replace, which installs a successor placement, and abandon, which retires the
 placement.
 
-## Decisions
+## Design decisions
 
 One runner runs on the same host and under the same effective user as
 `signalboxd`. That user is the trust boundary, so the authentication-reference
@@ -95,7 +95,7 @@ The workspace manifest carries the digest of the canonical clone URL rather than
 the URL. Why: the URL is credential-free, but its digest is sufficient identity
 and avoids repeating the operator's configuration value.
 
-## Contracts
+## Boundary contracts
 
 Every runner-scoped fact is recorded per runner, never per deployment: identity,
 enrollment, registration revision, connection and loss state, advertisement, and
@@ -228,7 +228,7 @@ transport threat narrative.
 [Sessions and transcript](sessions-and-transcript.md) owns the session's dotted
 placement path, which is not a runner placement fact.
 
-## Not built
+## Planned
 
 - Lease offer, claim, dispatch, result and failure spooling, and
   reconnect-inventory reconciliation over the wire, under one global execution
