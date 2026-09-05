@@ -370,7 +370,7 @@ same-runner recovery after a registration-triggered loss, deployment-scoped
 successor promotion, non-transferable workspace cleanup, pinned canonical digest
 bytes, runner-to-daemon failure frames, workspace-release acknowledgement,
 forced Git transport configuration, and the independent
-[session-composition axes](spec/runner-protocol.md#session-composition) in
+[session-composition axes](spec/runner-protocol.md) in
 [runner protocol and placement](spec/runner-protocol.md); the runner-recovery
 phase, the placement transcript payload, creation-record placement, and the
 runner event family in
@@ -387,8 +387,7 @@ reads it; a decision restated on this page would be a second authority over
 prose that already owns it, free to drift from the page it paraphrases. Multiple
 simultaneously enrolled runners and user-directed relocation of a healthy
 session are committed functionality that version one defers rather than open
-questions
-([runner protocol and placement](spec/runner-protocol.md#the-singleton-runner-rule-is-temporary)).
+questions ([runner protocol and placement](spec/runner-protocol.md#planned)).
 The questions below remain open.
 
 - **Runner workstation tool execution.** No present runner surface executes a
@@ -403,7 +402,7 @@ The questions below remain open.
   declaration and executor over an injected transport, but no production
   `GitPushTransport` exists. Remote authority and destination policy are decided
   and stated under
-  [remote destination authority](spec/git-authority-threat-model.md#remote-destination-authority):
+  [remote destination authority](spec/git-authority-threat-model.md):
   destinations are durable records an operator mints, scoped by workspace
   identity, and `https` only. The credential policy for a push and the
   production transport itself remain undecided; until they are decided the tool
@@ -500,8 +499,8 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Future tool-attempt retry.** General automatic retry, accepted-risk retry
   after ambiguity, idempotency-key policy, duplicate-risk controls, and retry
   resource limits beyond the sealed
-  [runner lease-loss transitions](spec/runner-protocol.md#effect-classes-and-runner-leases)
-  remain undecided. (S05, S06, S31)
+  [runner lease-loss transitions](spec/runner-protocol.md) remain undecided.
+  (S05, S06, S31)
 - **Ambiguous tool-wait resolution.** Who may record resolving evidence, how an
   exact accepted-risk continuation is represented, and which effects permit it
   beyond the
@@ -515,9 +514,9 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   revision are pinned and compared. Blocks runtime catalog mutation and safe
   rebinding across outstanding requests.
 - **Dynamic runner-catalog lifecycle.** Mutable behavior beyond the
-  [compiled version-one catalog](spec/runner-protocol.md#advertised-catalogs-and-daemon-authority)
-  requires representation, revision identity, change audit, compatibility, and
-  safe rebinding decisions.
+  [compiled version-one catalog](spec/runner-protocol.md) requires
+  representation, revision identity, change audit, compatibility, and safe
+  rebinding decisions.
 - **Execution-strategy configuration placement.** Whether a future
   serial/concurrent choice beyond the
   [fixed serial loop](spec/tool-loop.md#serialized-staged-execution) is a
@@ -528,8 +527,8 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   what durable resolution expiry creates remain undecided.
 - **Additional high-risk guardrails.** Operations that a future policy must
   never make automatic, richer values beyond the
-  [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
-  and dynamic replacement/equality semantics remain undecided.
+  [fixed profile/override ladder](spec/runner-protocol.md), and dynamic
+  replacement/equality semantics remain undecided.
 - **External approval-judge corpus adaptation.** Whether and how to adapt public
   agent-safety datasets such as R-Judge, AgentHarm, and ToolEmu into the
   approval-judge case schema remains undecided. A future mapping must select and
@@ -585,17 +584,16 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   allowlist, an emptied credential-helper list, disabled repository hooks, and
   an effective-URL check that binds every remote-reaching operation to its
   canonical repository after Git's own rewrite expansion
-  ([runner protocol and placement](spec/runner-protocol.md#workspace-provisioning-and-recovery)).
-  That posture is not a closed set: configuration that changes what Git runs
-  rather than where it connects is neutralized only where a command-line setting
-  names it, so each new key is found rather than excluded. Putting the
-  administrative directory and its configuration outside the model's reach would
-  retire the whole class instead of enumerating it, and needs its own design —
-  where that directory lives, how every invocation names it so the worktree
-  pointer cannot be repointed, what the sandbox binds, and what a session's own
-  `git` usage sees. Recorded as a design question rather than a blocker; the
-  forced configuration and the effective-URL check remain the version-one
-  boundary.
+  ([runner protocol and placement](spec/runner-protocol.md#planned)). That
+  posture is not a closed set: configuration that changes what Git runs rather
+  than where it connects is neutralized only where a command-line setting names
+  it, so each new key is found rather than excluded. Putting the administrative
+  directory and its configuration outside the model's reach would retire the
+  whole class instead of enumerating it, and needs its own design — where that
+  directory lives, how every invocation names it so the worktree pointer cannot
+  be repointed, what the sandbox binds, and what a session's own `git` usage
+  sees. Recorded as a design question rather than a blocker; the forced
+  configuration and the effective-URL check remain the version-one boundary.
 - **Several bound workspaces per session, and explicit session relocation.** A
   session binds one workspace root, derived from the configured root by the
   fixed session-UUID formula owned by

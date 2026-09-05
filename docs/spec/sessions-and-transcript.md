@@ -78,15 +78,14 @@ complete immutable request — runner selector, working-directory selection,
 credential-profile selection, workspace requirement, sandbox profile, and tool
 permission overrides — with every axis stated explicitly and none inferred from
 another; the axes and their independence are owned by
-[runner protocol and placement](runner-protocol.md#session-composition). Because
-placement is a caller-supplied semantic field, it participates in replay
-equality in both creation modes: replaying one command identity under a
-different placement, including under a placement where the first handling had
-none, is conflicting reuse rather than a corrected request. Template-derived
-creation carries the same placement field as explicit creation; a resolved
-template supplies defaults and never a placement, so the two choices compose
-instead of excluding each other and no selected placement can be silently
-discarded.
+[runner protocol and placement](runner-protocol.md). Because placement is a
+caller-supplied semantic field, it participates in replay equality in both
+creation modes: replaying one command identity under a different placement,
+including under a placement where the first handling had none, is conflicting
+reuse rather than a corrected request. Template-derived creation carries the
+same placement field as explicit creation; a resolved template supplies defaults
+and never a placement, so the two choices compose instead of excluding each
+other and no selected placement can be silently discarded.
 
 Application orchestration (`crates/application/src/create_session.rs`):
 
@@ -1011,16 +1010,16 @@ frozen direct selection changed, and finally appends its ordinary origin
 Session relocation has a session-level frontier boundary. Every transaction that
 installs a successor placement — loss replacement, and the committed
 user-directed move of a healthy session or of its working directory
-([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one))
-— appends one `RunnerPlacementChanged` entry after the latest authoritative
-semantic frontier, or establishes a one-entry root when no frontier exists, and
-advances the session placement-frontier pointer with the placement revision.
-Active continuation and the next eligible origin both extend that exact boundary
-before any execution on the successor placement. A same-revision,
-missing-record, non-prefix, cross-session, or second placement boundary fails
-closed. When the installing command runs while an authorized model call is still
-in flight, the boundary is appended only after that call's observation commits,
-so the call's own entries precede it and the prefix-only law holds
+([runner protocol and placement](runner-protocol.md#planned)) — appends one
+`RunnerPlacementChanged` entry after the latest authoritative semantic frontier,
+or establishes a one-entry root when no frontier exists, and advances the
+session placement-frontier pointer with the placement revision. Active
+continuation and the next eligible origin both extend that exact boundary before
+any execution on the successor placement. A same-revision, missing-record,
+non-prefix, cross-session, or second placement boundary fails closed. When the
+installing command runs while an authorized model call is still in flight, the
+boundary is appended only after that call's observation commits, so the call's
+own entries precede it and the prefix-only law holds
 ([turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)).
 The entry copies no runner advertisement, workspace path, credential fact, or
 tool output; the placement record remains its content authority. The provider
