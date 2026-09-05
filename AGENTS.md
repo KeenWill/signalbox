@@ -117,12 +117,12 @@ owner's private repositories may be named as provenance, not cited as rules.
   why the finding is declined. Accept a review finding only when it names a
   false statement (a claim the code or the page's own text contradicts), a
   broken link or cross-reference, a contradiction within the pull request's own
-  files, undecided material presented as committed, a failing gating check, or a
-  defect in the pull request's own behavior. Decline everything else in one line
-  and resolve the thread: restorations of inventories the code already owns
-  (producer lists, lock orders, dispatch correlations, admission-rule lists),
-  constants, grammars, conventions, hedges, tone, and new content. Reviewers
-  reward building less.
+  files, undecided material presented as committed, a failing gating check, a
+  defect in the pull request's own behavior, or a mechanism the task does not
+  need. Decline everything else in one line and resolve the thread: restorations
+  of inventories the code already owns (producer lists, lock orders, dispatch
+  correlations, admission-rule lists), constants, grammars, conventions, hedges,
+  tone, and new content. Reviewers reward building less.
 - Stacks: each pull request targets the branch below it and is reviewed against
   that base. Check that a base branch still exists before stacking on it; when a
   base merges, retarget or rebase the rest. Open pull requests early. Each push

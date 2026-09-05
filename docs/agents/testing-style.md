@@ -66,23 +66,6 @@ this repository, with identifiers shortened.
 
 ### Rewrites from the test sweeps
 
-Rule 2 — a loop whose cases are not identifiable in the failure output unrolls
-into named straight-line calls (domain sweep, `turn_attempt.rs`):
-
-```rust
-// Bad: three cases share one anonymous failure site inside a loop.
-for current in [running(), cancellation_stopped(), fatal_stopped()] {
-    let error = current.clone().begin_running().unwrap_err();
-    assert_eq!(error.into_parts(), (current, AttemptedTransition::BeginRunning));
-}
-
-// Good: unrolled onto a #[track_caller] check helper (rule 16); a
-// failure names the state that caused it.
-assert_begin_running_rejects_unchanged(running());
-assert_begin_running_rejects_unchanged(cancellation_stopped());
-assert_begin_running_rejects_unchanged(fatal_stopped());
-```
-
 Rules 4 and 5 — a facts struct with a canonical `matching` baseline turns eight
 positional arguments into one named perturbation (domain sweep, `session.rs`):
 
