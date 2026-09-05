@@ -41,12 +41,16 @@ placement request, and replay compares it with the created session's
 revision-one placement.
 
 The instruction admitted set is one durable table with one repository operation
-that writes it. Its row locks join `crates/persistence/src/lock_inventory.rs`,
-and a transaction takes the admitted-set head after the session's scheduler row
-and before the current-defaults pointer row and any credential-pool row, FOR
-SHARE to snapshot or replace and FOR UPDATE to admit; admission takes the
-current-defaults pointer FOR SHARE after that head and holds it through commit,
-so admission and defaults replacement serialize.
+that writes it, beside the immutable append-only admission record
+[workspace-instructions](../spec/workspace-instructions.md) commits, which holds
+each admission's prior set hash, bundle, rendered evidence, exact rendered
+wrapper bytes, and request identity independently of that mutable head. Its row
+locks join `crates/persistence/src/lock_inventory.rs`, and a transaction takes
+the admitted-set head after the session's scheduler row and before the
+current-defaults pointer row and any credential-pool row, FOR SHARE to snapshot
+or replace and FOR UPDATE to admit; admission takes the current-defaults pointer
+FOR SHARE after that head and holds it through commit, so admission and defaults
+replacement serialize.
 
 Credential-pool state, capacity reservations, and availability waits are durable
 rows with locks recorded in the same inventory. A transaction takes the
@@ -101,7 +105,7 @@ failure the daemon had already acted on.
 
 Every new table follows the spec page: typed records with kind-scoped storage
 versions, append-only facts under triggers, events appended in the committing
-transaction, and every explicit row lock recorded in the inventory.
+transaction, and the row locks the inventory names issued from that file.
 
 ## Acceptance criteria
 

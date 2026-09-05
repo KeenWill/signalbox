@@ -124,8 +124,9 @@ session-local append-only event sequence folded into current state. Why:
 database-level invariants stay declarative over current-state rows, while plan
 and goal history is retained product evidence rather than an implementation log.
 
-Immutable fact tables reject update, delete, and truncate through triggers
-rather than by convention, because restart trusts durable rows as evidence.
+Immutable fact tables reject update and delete through triggers rather than by
+convention, and the guarded table families reject truncate as well, because
+restart trusts durable rows as evidence.
 
 The session system prompt joins its selection key through a generated SHA-256
 digest, because megabyte text cannot be a btree key, and an absent prompt is
@@ -322,6 +323,10 @@ parent row has sealed the receipt.
 An applied `SubmitInput` receipt references its accepted-input or interruption
 effect, and the schema rejects a receipt with no matching effect.
 
+An applied `OverrideDeniedToolRequest` receipt retains its user-override effect
+row; triggers and a one-shot consumption column admit at most one consuming
+approval.
+
 Accepted user content is stored only in the ordered part satellites of the
 command and of the accepted input; neither parent row has a content column.
 
@@ -388,9 +393,9 @@ before loading, and the compare-and-set update on that locked row is the
 applying check. The pointer has no guard trigger, so beyond its range check and
 deferred foreign key this is its only discipline.
 
-Replacing session metadata locks the target session row, samples the Postgres
-statement time once, and writes that exact value to both the current root and
-the applied receipt.
+Replacing session metadata locks the target session row FOR NO KEY UPDATE so
+concurrent writers serialize, samples the Postgres statement time once, and
+writes that exact value to both the current root and the applied receipt.
 
 Graceful shutdown closes the pool and waits for every outstanding checkout
 before closing the guard session; a shutdown that is omitted or cancelled
