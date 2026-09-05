@@ -3,7 +3,7 @@
 Conversation import stores a transcript another program produced as an immutable
 record, and a session can later be created from any of its entry boundaries.
 
-## Map
+## Overview
 
 An imported conversation (`ImportedConversation`) is one snapshot of an external
 transcript. The daemon mints its identity; its content identity is a digest over
@@ -61,7 +61,7 @@ entries around a position. The terminal and inspection wire shapes are owned by
 [process-protocol](process-protocol.md). The browser DTOs are defined in the
 web-contract crate; the daemon's web adapter serves the routes that carry them.
 
-## Decisions
+## Design decisions
 
 External history is stored as its own aggregate. Why: replaying it as native
 execution would fabricate the evidence chain the native lifecycle invariants
@@ -139,7 +139,7 @@ constraint.
 
 Committed tests and fixtures are entirely synthetic.
 
-## Contracts
+## Boundary contracts
 
 Errors, logs, and diagnostic evidence contain classes, counts, and identifiers
 the daemon generated. They never contain source bytes, file paths, provider
@@ -226,7 +226,7 @@ the catalog the raw records converge onto are owned by
 [blob-storage](blob-storage.md). The rule that no database transaction spans
 store I/O is owned by [persistence-protocol](persistence-protocol.md).
 
-## Not built
+## Planned
 
 - Usage evidence on imported entries, with cost derived at read time from the
   price window covering the attested timestamp:

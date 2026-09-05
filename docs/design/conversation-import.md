@@ -10,7 +10,7 @@ never stored as money. A converter can consume a blob-backed source directly
 from the blob substrate as a stream, so a source need not be assembled in memory
 before conversion.
 
-## Shape
+## Design
 
 Usage on an imported entry is source attestation like every other field: the
 entry records the counts the source attested, in the same three-way attestation
@@ -28,7 +28,7 @@ whole-source path produces, with the same identity, raw records, entries, and
 frontiers for the same bytes. The terminal single-file path and the chunked
 socket path keep their bounded whole-source conversion.
 
-## Constraints on present code
+## Compatibility constraints
 
 No present surface supplies a blob-backed source to a converter, and no imported
 entry carries usage; the content vocabulary has no usage variant.
@@ -47,7 +47,7 @@ A blob-backed read follows the blob contract in
 [blob-storage](../spec/blob-storage.md): the bytes are verified against the
 recorded hash, and no database transaction spans the store read.
 
-## Acceptance
+## Acceptance criteria
 
 The same source bytes imported through the terminal path and through a
 blob-backed path resolve to one imported conversation with one identity. Peak
