@@ -1,5 +1,7 @@
 use std::error::Error;
 
+use rust_decimal::Decimal;
+
 use super::migrated_postgres;
 
 #[tokio::test]
@@ -36,6 +38,39 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
     .fetch_one(&pool)
     .await?;
     assert_eq!(public_table_grants, 0);
+
+    let module_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name
+           FROM information_schema.tables
+          WHERE table_schema = 'mod_repo_watch'
+          ORDER BY table_name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        module_tables,
+        [
+            "core_event_cursor",
+            "pr_state",
+            "repository_state",
+            "webhook_body",
+            "webhook_delivery",
+            "webhook_disposition",
+        ]
+    );
+
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET ROLE mod_repo_watch")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SET search_path = mod_repo_watch, pg_catalog")
+        .execute(&mut *connection)
+        .await?;
+    let cursor: Decimal =
+        sqlx::query_scalar("SELECT applied_through FROM core_event_cursor WHERE singleton")
+            .fetch_one(&mut *connection)
+            .await?;
+    assert_eq!(cursor, Decimal::ZERO);
 
     drop(pool);
     drop(container);

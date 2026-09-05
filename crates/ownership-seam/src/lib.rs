@@ -7,8 +7,9 @@
 use std::future::Future;
 
 pub use signalbox_domain::{
-    CreateSession, DurableCommandId, GoalUserAction, GoalUserCommand, SessionId,
-    SessionLifecycleCommand, SessionLifecycleOperation, SubmitInput,
+    BranchName, CommitSha, CreateSession, DurableCommandId, GoalUserAction, GoalUserCommand,
+    PullRequestBody, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepositorySlug,
+    SessionId, SessionLifecycleCommand, SessionLifecycleOperation, SubmitInput,
 };
 pub use signalbox_persistence::mapping::GoalEventDiscriminator as GoalEventKind;
 pub use signalbox_persistence::outbox::{
@@ -22,7 +23,8 @@ pub use signalbox_persistence::outbox::{
 use signalbox_persistence::outbox::{
     DispatchedOutboxEvent, DispatchedOutboxEventKind, OutboxConsumer, OutboxConsumerReader,
 };
-use sqlx::{PgPool, types::time::OffsetDateTime};
+use sqlx::PgPool;
+pub use sqlx::types::time::OffsetDateTime;
 
 /// One of the eight lifecycle event families visible to ownership modules.
 #[derive(Clone, Debug, Eq, PartialEq)]
