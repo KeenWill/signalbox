@@ -178,9 +178,9 @@ messages:
   inventing text. The same profile-specific text renders every relocation,
   including a working-directory move on the same runner and a later
   user-directed move of a healthy session
-  ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
-  What is unavailable is authority to execute through the retired placement; the
-  old path is no longer the active working directory or writable root. Physical
+  ([runner protocol and placement](runner-protocol.md#not-built)). What is
+  unavailable is authority to execute through the retired placement; the old
+  path is no longer the active working directory or writable root. Physical
   files are not reported lost: a restricted successor exposes only its own
   namespace, while an ambient successor may still expose an old path,
   particularly after a same-runner move. Why: reporting deletion or
@@ -260,9 +260,8 @@ matching optional profile satisfies preparation. No absent/present pair matches,
 and absence never selects a credential. A session composed without a workspace
 therefore advertises exactly the tools that can execute in it and no placement
 combination is rejected merely for being workspace-free
-([runner protocol and placement](runner-protocol.md#session-composition) owns
-the composition axes, and
-[tool-loop](tool-loop.md#registry-placement-and-effect-metadata) owns which
+([runner protocol and placement](runner-protocol.md) owns the composition axes,
+and [tool-loop](tool-loop.md#registry-placement-and-effect-metadata) owns which
 declarations carry a workspace requirement). Why: advertising a tool that cannot
 be admitted at lease claim spends a model round to learn what preparation had
 already determined, and accurate advertisement is cheaper than a late refusal.
