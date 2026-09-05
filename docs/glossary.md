@@ -2,9 +2,9 @@
 
 This glossary is a terminology index into the living specification under
 [docs/spec](spec/README.md). Each term carries one working definition and a link
-to the spec page (or section) that owns its full semantics; terms whose designs
-are accepted but not yet distilled into any spec page are marked as deferred
-design and link to [open questions](open-questions.md).
+to the spec page (or section) that owns its full semantics; a term whose design
+is accepted but not built links to its design document under `docs/design/`, and
+a term that is still undecided links to [open questions](open-questions.md).
 
 ## Session
 
@@ -60,25 +60,26 @@ provider against one exact resolved target and context frontier. See
 
 The sole model call eligible to determine one provider interaction's completion,
 refusal, failure, or cancellation; authority transfer is deferred design. See
-[model-call open edges](spec/model-call-execution.md#open-edges).
+[model-call execution design](design/model-call-execution.md).
 
 ## Provider-target mismatch invalidation
 
 A typed value recorded when trusted mismatch evidence is first learned after the
 outcome-authoritative call completed but before its turn terminalized, stopping
 further semantic effects without rewriting the call. Deferred design; see
-[model-call open edges](spec/model-call-execution.md#open-edges).
+[model-call execution design](design/model-call-execution.md).
 
 ## Tool request
 
 A logical request for one named tool operation with normalized arguments, policy
-state, and eventual logical outcome. Deferred design; see
-[tool safety](open-questions.md#tool-safety).
+state, and eventual logical outcome. See [tool loop](spec/tool-loop.md).
 
 ## Tool attempt
 
 One physical effort by a daemon-local or runner-local executor to perform a tool
-request. Deferred design; see [tool safety](open-questions.md#tool-safety).
+request. See [tool loop](spec/tool-loop.md) for daemon-local attempts;
+runner-local execution is planned design in
+[runner protocol design](design/runner-protocol.md).
 
 ## Creation cause
 
@@ -114,38 +115,37 @@ authority for turn cancellation. See
 
 An outbound-connected process that declares capabilities and execution-boundary
 properties, then performs selected runner-local tool attempts under one
-deployment identity. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners).
+deployment identity. Planned design; see
+[runner protocol design](design/runner-protocol.md).
 
 ## Runner property evidence
 
 The declared, configured, verified, and effective evidence distinctions used
-when selecting and explaining a runner. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners).
+when selecting and explaining a runner. Planned design; see
+[runner protocol design](design/runner-protocol.md).
 
 ## Execution boundary
 
 The actual identity and isolation properties of a runner deployment, such as OS
-user, container, sandbox, and filesystem scope. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners).
+user, container, sandbox, and filesystem scope. Planned design; see
+[runner protocol design](design/runner-protocol.md).
 
 ## Tool policy
 
 Daemon-owned evaluation that determines whether a specific logical tool request
 is allowed, denied, or requires confirmation, plus any placement or constraint
-decision. Deferred design; see [tool safety](open-questions.md#tool-safety).
+decision. See [tool loop](spec/tool-loop.md).
 
 ## Approval
 
 A recorded human decision permitting or denying one exact logical tool request
-as presented to the user. Deferred design; see
-[tool safety](open-questions.md#tool-safety).
+as presented to the user. See [tool loop](spec/tool-loop.md).
 
 ## Executor placement
 
 The selected location for a physical tool attempt: a daemon-local executor or a
-runner-local executor on an identified runner. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners).
+runner-local executor on an identified runner. Planned design; see
+[runner protocol design](design/runner-protocol.md).
 
 ## Known failure
 
