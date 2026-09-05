@@ -60,6 +60,14 @@ context window less the output ceiling and the required prompt; when even the
 first safe prefix cannot fit that budget, no call is prepared and one
 transaction fails the turn as a compaction wall.
 
+Anthropic prospective input counting is the one provider interaction permitted
+before activation and before a `model_call` exists. The accepted input, frozen
+session epoch, pinned target preview, and credential pin authorize that
+stateless estimate; it has no completion semantics and creates no call outcome.
+Only a successful estimate can enter the counted activation transaction. A
+failed or cancelled estimate leaves the turn queued, and any later attempt must
+render and count the then-current preview again.
+
 Anthropic ordinary calls enable provider-default server-side compaction only for
 provider-model identifiers in the closed adapter mapping: the `claude-fable-5`,
 `claude-mythos-5`, `claude-mythos-preview`, `claude-opus-5`, `claude-opus-4-6`,
@@ -330,13 +338,14 @@ freeze.
 
 Missing usage fields stay missing and are never invented; classification does
 not derive usage from the disposition, content, context, or provider family, and
-adapters need no separate counting operation. Historical compaction calls with
-unknown cache-inclusion semantics are treated as cache-exclusive, so the guard
-may overcount but never omits reported cache axes. A definitive request-size
-failure on a frontier the prospective call preserves forces one automatic
-compaction when no later accepted call or completed compaction supersedes it,
-even without reported usage. Missing usage does not trigger the tool-result
-headroom boundary, and inconsistent producing-call evidence fails closed.
+classification issues no separate counting operation. Historical compaction
+calls with unknown cache-inclusion semantics are treated as cache-exclusive, so
+the guard may overcount but never omits reported cache axes. A definitive
+request-size failure on a frontier the prospective call preserves forces one
+automatic compaction when no later accepted call or completed compaction
+supersedes it, even without reported usage. Missing usage does not trigger the
+tool-result headroom boundary, and inconsistent producing-call evidence fails
+closed.
 
 A trustworthy ordinary capability failure commits the prepared-to-known-failed
 closure with attempt and turn failure in a separate guarded transaction. Every
