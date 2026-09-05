@@ -171,12 +171,15 @@ without fetching bytes. Browser search accepts only the lexical strategy and
 passes text to PostgreSQL full-text search, so query operators are not product
 semantics and a future strategy cannot turn the request into a database query
 language. A lexical query examines a bounded candidate set, and a term absent
-from the index returns empty at once. Attachment filenames, attachment media
-metadata, and derived text artifacts are content classes the schema admits and a
-read returns; a compaction commit publishes its summary as a derived text
-artifact, and no producer publishes the two attachment classes. The search
-projection performs no implicit attachment reading, OCR, text extraction, or
-model pass. No browser read materializes or scans a session transcript.
+from the index returns empty at once. The producers that feed the search
+projection are accepted input, steering input, final assistant text, tool
+arguments and results, current session metadata, and compaction summaries.
+Attachment filenames, attachment media metadata, and derived text artifacts are
+content classes the schema admits and a read returns; a compaction commit
+publishes its summary as a derived text artifact, and no producer publishes the
+two attachment classes. The search projection performs no implicit attachment
+reading, OCR, text extraction, or model pass. No browser read materializes or
+scans a session transcript.
 
 There is no generic text, role, metadata, or other payload; every entry kind is
 a closed semantic fact. Entries reference accepted input and never copy its
@@ -422,23 +425,26 @@ by ascending session identity; catalog search is an exact case-sensitive
 substring of the title or the canonical session UUID.
 
 The follow stream subscribes to the daemon's browser monitor fanout before
-reading the snapshot, then emits the snapshot as its first item. Provider-text
-deltas queued when the snapshot completes are discarded, and a durable update
-for the followed session queued with a cursor above the snapshot's is emitted
-after the snapshot. An update for another session advances the observed cursor
-and is not emitted. Lag confined to records the snapshot cursor covers is
-absorbed silently. Falling behind past covered records, or saturating the
-monitor while retained fragment text is draining, emits one positive-cursor
-resync item and ends the response; the client then replaces all transient
-presentation with a fresh live snapshot and resumes durable history above its
-cursor without reloading the historical transcript.
+reading the session state and its observed cursor from one repeatable-read
+snapshot, then emits that snapshot as its first item. Provider-text deltas
+queued when the snapshot completes are discarded, and a durable update for the
+followed session queued with a cursor above the snapshot's is emitted after the
+snapshot. An update for another session advances the observed cursor and is not
+emitted. Lag confined to records the snapshot cursor covers is absorbed
+silently. Falling behind past covered records, or saturating the monitor while
+retained fragment text is draining, emits one positive-cursor resync item and
+ends the response; the client then replaces all transient presentation with a
+fresh live snapshot and resumes durable history above its cursor without
+reloading the historical transcript.
 
 The timeline sequence is allocated once across ordinary and delegation outbox
 events; it is append-only, totally ordered, independent of table offsets and
 query plans, and never renumbered. Another session's events may create gaps, so
 a navigator carries session and sequence and opens an unloaded region with an
-around read; arithmetic adjacency is never required. Continuation repeats only
-the boundary address, never an item in the next keyset window.
+around read, which bounds the indexed prefix and suffix candidates before
+sorting their union by distance from the address; arithmetic adjacency is never
+required. Continuation repeats only the boundary address, never an item in the
+next keyset window.
 
 Browser DTOs are generated from the Rust web-contract schema, and application
 values, persistence rows, browser DTOs, and presentation items remain distinct.
@@ -549,7 +555,10 @@ active lifecycle, and every other outcome terminalizes it. Message delivery
 remains available after a terminal outcome.
 
 A user termination command carries a parent-alone or parent-and-descendants
-scope, and parent-alone does not evaluate descendants. If a child already has
+scope, and parent-alone does not evaluate descendants. Each evaluated edge
+applies its stored relationship policy: a background relationship keeps the
+child running, and a bound relationship takes its `on_parent_stopped` or
+`on_parent_cancelled` action according to the command. If a child already has
 its unique terminal result, the edge records already-terminal with the new
 parent command provenance and an exact check of that prior result, creating no
 second result; traversal still visits that child's outgoing relationships.
