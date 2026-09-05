@@ -213,18 +213,18 @@ content, never transcript access.
 
 ## Boundary contracts
 
-An owned session that waits for an operator is parked, or blocked on a goal that
-no automatic resumption will lift; a pending tool-approval decision is the
-separate waiting state. An ambiguous model call whose automatic reconciliation
-budget is exhausted is a further operator wait until the operator reconciles the
-turn; an ambiguous external-effect tool attempt whose budget is exhausted stays
-an exhausted recovery wait with operator action required until the deferred
-tool-recovery surface exists. A turn awaiting runner recovery is an operator
-wait too, and only replacement or abandonment leaves the lost state. A module
-that parks something wrapping a session drives the session itself to parked.
-Attention states shown to operators are derived from durable facts by one
-classifier, and a read that encounters a state it does not recognize returns an
-error rather than a guess.
+An owned session that waits for an operator is parked, blocked on a goal that no
+automatic resumption will lift, or held in an exhausted recovery wait; a pending
+tool-approval decision is the separate waiting state. An ambiguous model call
+whose automatic reconciliation budget is exhausted is a further operator wait
+until the operator reconciles the turn; an ambiguous external-effect tool
+attempt whose budget is exhausted stays an exhausted recovery wait with operator
+action required until the deferred tool-recovery surface exists. A turn awaiting
+runner recovery is an operator wait too, and only replacement or abandonment
+leaves the lost state. A module that parks something wrapping a session drives
+the session itself to parked. Attention states shown to operators are derived
+from durable facts by one classifier, and a read that encounters a state it does
+not recognize returns an error rather than a guess.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
