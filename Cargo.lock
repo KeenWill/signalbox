@@ -4499,6 +4499,7 @@ name = "signalbox-process-protocol"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "hex",
  "serde",
  "serde_json",
  "signalbox-blob-store",

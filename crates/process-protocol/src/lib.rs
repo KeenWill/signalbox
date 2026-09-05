@@ -369,11 +369,8 @@ pub struct CanonicalDigest(String);
 impl CanonicalDigest {
     /// Checks the exact lowercase hexadecimal digest spelling.
     pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        if value.len() != 64
-            || value
-                .bytes()
-                .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
-        {
+        let mut decoded = [0_u8; 32];
+        if hex::decode_to_slice(&value, &mut decoded).is_err() || hex::encode(decoded) != value {
             return Err(CanonicalValueError::Digest);
         }
         Ok(Self(value))
@@ -1734,12 +1731,6 @@ impl BlobChunk {
 }
 
 fn parse_decimal_u64(value: &str) -> Result<u64, CanonicalValueError> {
-    if value.is_empty()
-        || (value.len() > 1 && value.starts_with('0'))
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(CanonicalValueError::Decimal);
-    }
     let parsed = value
         .parse::<u64>()
         .map_err(|_| CanonicalValueError::Decimal)?;
