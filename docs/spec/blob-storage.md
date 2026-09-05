@@ -26,17 +26,20 @@ storage class; each store has a name, a namespace UUID, and a kind, either
 holds a private `.signalbox-blob-namespace-v1` file, an S3 bucket holds an
 object of the same name, and in both the complete content is the configured
 namespace UUID followed by one line feed. At startup `BlobStoreRegistry` checks
-the configuration against the recorded bindings and the markers, then hands out
-the adapters, which implement the `BlobStore` trait.
+the configuration against the recorded bindings, verifies the marker of every
+filesystem store and every routed S3 store, and hands out the adapters, which
+implement the `BlobStore` trait. An S3 binding that no route names verifies its
+marker on first use instead.
 
 Ingest arrives over the process protocol as a chunked upload. The daemon spools
 the bytes to the staging directory while hashing them, publishes the object to
 the store the route selects, verifies the published object, then records the
 catalog rows. Reads reach the daemon over the process protocol, over the
 same-origin HTTP surface the browser client uses, and through the blob-read tool
-family a model calls. All three read through one runtime that walks the recorded
-replicas in order and serves a verified byte range. The request and response
-shapes live in `crates/process-protocol` and on
+family a model calls. All three serve content through one runtime that walks the
+recorded replicas in order and returns a verified byte range; a metadata read
+answers from the catalog and opens no store. The request and response shapes
+live in `crates/process-protocol` and on
 [process-protocol](process-protocol.md).
 
 The browser client asks for a descriptor of one use of a blob. The descriptor
