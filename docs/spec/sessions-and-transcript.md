@@ -42,9 +42,8 @@ Session configuration defaults are immutable numbered epochs holding the model
 selection, the dangerous-tool blanket, and an optional system prompt. A session
 points at its current epoch, and a turn freezes the current epoch when its
 origin input is accepted. Session metadata is a separate replaceable snapshot of
-title, tags, attributes, and an archive flag. The loaded `Session` aggregate
-holds identity, creation provenance, optional template provenance, and the
-current defaults epoch, and nothing else.
+title, tags, attributes, and an archive flag. The loaded `Session` aggregate is
+an owned snapshot of one session's current durable state.
 
 The transcript is a sequence of semantic entries grouped into frontiers. A
 `SemanticTranscriptEntry` is one immutable semantic-history fact with its own
