@@ -85,12 +85,12 @@ consuming any other leaves it pending forever.
 
 Pre-call fail: a fresh admission finds every member excluded and this chain has
 issued no call. The turn terminalizes Failed and the call-free attempt ends
-KnownFailure. The pre-call exhaustion producer is the third producer of the
-`TurnFailed` transcript entry; its entry is appended after the ended attempt's
-starting frontier in the transaction that terminalizes the turn. The ending
-carries no terminal evidence, because this chain issued no provider request and
-an earlier round's successful call is not this chain's evidence; its terminal
-cause is pool exhaustion, never a provider failure.
+KnownFailure. The pre-call exhaustion producer appends the `TurnFailed`
+transcript entry after the ended attempt's starting frontier in the transaction
+that terminalizes the turn. The ending carries no terminal evidence, because
+this chain issued no provider request and an earlier round's successful call is
+not this chain's evidence; its terminal cause is pool exhaustion, never a
+provider failure.
 
 Post-failure fail: a fresh admission finds every member excluded after this
 chain observed a qualifying provider failure. The turn terminalizes Failed and

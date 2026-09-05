@@ -68,13 +68,13 @@ earlier without terminalizing and the wait's attempt is immutable, so the same
 fresh call-free attempt is opened and ended KnownFailure and the turn
 terminalizes Failed. The continuation origin is the wait-release origin naming
 the consumed wait and this chain's predecessor call, its qualifying cause and
-its non-acceptance proof. The producer is the wait-transition failure producer,
-a fourth producer of `TurnFailed`, differing from the pre-call producer only in
-naming the predecessor call that supplied the cause. The terminal evidence is
-the predecessor's provider cause as a provider error, never pool exhaustion.
-This ending owes a wire shape that correlates the predecessor call with a
-terminal attempt that owns no call; the built failed shape carries a provider
-cause only inside a nonnull terminal model call, so it cannot serve.
+its non-acceptance proof. The producer is the wait-transition failure producer
+of `TurnFailed`, differing from the pre-call producer only in naming the
+predecessor call that supplied the cause. The terminal evidence is the
+predecessor's provider cause as a provider error, never pool exhaustion. This
+ending owes a wire shape that correlates the predecessor call with a terminal
+attempt that owns no call; the built failed shape carries a provider cause only
+inside a nonnull terminal model call, so it cannot serve.
 
 Wait selection: `park` and `fail` act through one question, whether this
 exhaustion selects a wait. `fail` never selects one. `park` selects one only
