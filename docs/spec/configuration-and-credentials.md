@@ -1605,13 +1605,11 @@ reference during cancellable request preparation, so a historical session keeps
 the profile it was created with. The value reaches the CLI through a private
 request-scoped settings store rather than the child environment: the key itself
 is never added to the environment the adapter assembles, and the store is
-removed when the prepared capability is dropped. How that store is constructed
-and applied — its file modes, the `apiKeyHelper` script and its fixed
-interpreter, and the one allowlisted child value the adapter replaces — is owned
-by the [credential-access boundary](runtime-substrate.md) and is not restated
-here. What this page fixes is which value seeds redaction: the exact resolved
-credential, retained in the one-shot capability, is what provider-controlled
-observations and terminal evidence are scrubbed against.
+removed when the prepared capability is dropped. The adapter code enforces how
+that store is built, its file modes and its helper script. What this page fixes
+is which value seeds redaction: the exact resolved credential, retained in the
+one-shot capability, is what provider-controlled observations and terminal
+evidence are scrubbed against.
 
 This is the delivery for every credential that has an external source of truth —
 provider API keys, and any long-lived bearer token a provider's own tooling

@@ -53,7 +53,7 @@ adapter decoded. A provider error may also carry an adapter-owned proof that the
 provider never accepted the request.
 [credential-availability](credential-availability.md) decides what that proof
 leads to; this page owns the evidence that carries it. Refusal evidence reaches
-callers only from the Codex CLI adapter.
+callers only from the Codex CLI and Claude Code CLI adapters.
 
 `SseFraming` is the provider-agnostic incremental parser both HTTP adapters
 build on, from transport byte chunks to event-stream records.
@@ -135,9 +135,10 @@ operator-unreviewed intermediary.
 Idle-connection reuse is disabled so every send opens a fresh connection; this
 removes stale-connection replay and lets a connect failure claim proven-unsent.
 
-The OpenAI adapter leaves the shared finish tokens `stop` and `length` unmapped,
-because `stop` cannot prove a natural stop and `length` cannot prove the output
-ceiling, and collapsing either would invent evidence.
+The OpenAI adapter maps `stop` to end of turn only when the request declared no
+stop sequences, because the provider uses one token for a natural stop and a
+stop-sequence hit. It leaves `length` unrecognized because that token cannot
+prove the output ceiling, and collapsing either would invent evidence.
 
 The Codex CLI adapter neither resumes nor persists a Codex thread; each call is
 a fresh invocation given the complete conversation frontier, so provider session
@@ -252,7 +253,9 @@ envelope arrived as an error response decoded before any stream began. A
 status-derived fallback, an absent or undecodable body, or an unmapped token
 carries no proof and keeps its status-classified kind. An SSE error record never
 carries the proof, so an availability failure that arrives mid-stream carries
-none.
+none. The Codex CLI adapter, which has no error envelope, admits the proof only
+when its event stream closes with a `turn.failed` event; a stream-level error
+that no matching `turn.failed` event closes carries none.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion, and an unrecognized finish token is boundary
@@ -273,11 +276,11 @@ examined the material that could open a tool call, whether or not it accepted
 that material. A tool call an earlier record already established outranks the
 withholding in every adapter.
 
-Streamed records must agree on identity: a missing or conflicting completion id,
-or a conflicting reported model, is a terminal protocol violation even on a
-mid-stream error record. Under the Claude Code CLI the first assistant event may
-name the provider-resolved model and every later assistant event must repeat
-that value.
+Under the OpenAI adapter streamed chunks must agree on identity: a missing or
+conflicting completion id, or a conflicting reported model, is a terminal
+protocol violation even on a mid-stream error record. Under the Claude Code CLI
+the first assistant event may name the provider-resolved model and every later
+assistant event must repeat that value.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
