@@ -39,10 +39,10 @@ Exhausted-wait: nothing is admissible, nothing was skipped merely for a bound,
 and a wait is selected. The same wait phase with closed cause exhausted, and the
 same attempt disposition. Its wakes are the deadline, a durable
 member-availability update, and an operator clear of an exclusion. The deadline
-is computed per member, not per exclusion: a member becomes admissible by time
+is computed per member, not per exclusion. A member becomes admissible by time
 passage exactly when every one of its active exclusions expires at the reset it
-reports, and it does so at the latest of them; the wait's deadline is the
-earliest such time across the members that qualify. A chain exclusion, a
+reports, and it does so at the latest of those resets. The wait's deadline is
+the earliest such time across the members that qualify. A chain exclusion, a
 `switch_next_turn` displacement and a profile quarantine never contribute a
 deadline, because each clears only by turn end, by another member being
 prepared, or by operator command. The wait is deadline-free only when no member
@@ -82,8 +82,8 @@ at a release.
 A contended wait that becomes exhausted re-runs the exhaustion policy rather
 than staying parked. When a woken contended waiter finds every formerly bounded
 candidate durably excluded, the pool's configured value decides afresh; a wait
-that is still selected is rewritten to the exhausted form instead of inserted
-afresh, and a `fail` pool terminalizes.
+that is still selected is rewritten in place to the exhausted form, and a `fail`
+pool terminalizes.
 
 Release: releasing a parked wait resumes the chain that parked and re-evaluates
 admission from current state. A chain exclusion stays as the spec page states

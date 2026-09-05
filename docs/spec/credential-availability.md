@@ -9,7 +9,7 @@ call fails with a cause the pool can route around.
 A credential pool is a ranked set of credential profiles a session's model calls
 may use. Its grammar, ranking, trigger vocabulary and admission rules are owned
 by [configuration and credentials](configuration-and-credentials.md). This page
-owns what a credential-pool selection attempt can end as.
+owns the endings of a credential-pool selection attempt.
 
 The machine runs in `crates/persistence/src/model_execution.rs` at two points.
 Preparation resolves the session's pool, admits the first member no durable
@@ -30,12 +30,12 @@ by the exclusions the pool's trigger policy writes, which
 [configuration and credentials](configuration-and-credentials.md) owns; the
 operator surface that clears them is on [process protocol](process-protocol.md).
 
-In this build a selection attempt reaches one of five endings: selected,
-pre-call fail, post-failure fail, successor and terminal. They split on whether
-selection admitted a member, whether this chain had already issued a call when
-exhaustion was found, and whether a failed call's cause, pinned action and proof
-authorize a successor. This build fails every exhaustion, whatever the pool's
-configured exhaustion value.
+A selection attempt reaches one of five endings: selected, pre-call fail,
+post-failure fail, successor and terminal. They split on whether selection
+admitted a member, whether this chain had already issued a call when exhaustion
+was found, and whether a failed call's cause, pinned action and proof authorize
+a successor. Every exhaustion fails, whatever exhaustion value the pool
+configures.
 
 ## Decisions
 
@@ -67,9 +67,8 @@ terminal evidence and the outcome it derives to
 [model-call execution](model-call-execution.md).
 
 A condition that asks whether a call has already been issued is scoped to the
-availability chain, not to the turn.
-[Model-call execution](model-call-execution.md) owns what bounds a chain; this
-page applies that scoping and does not define it.
+availability chain, not to the turn;
+[model-call execution](model-call-execution.md) owns what bounds a chain.
 
 Selected: a member was admitted. The selecting preparation inserts the call's
 prepared record and adds no turn phase. The same preparation consumes the
@@ -84,8 +83,7 @@ KnownFailure. The pre-call exhaustion producer is the third producer of the
 starting frontier in the transaction that terminalizes the turn. The ending
 carries no terminal evidence, because this chain issued no provider request and
 an earlier round's successful call is not this chain's evidence; its terminal
-cause is pool exhaustion, so it is never reported as a provider failure that did
-not happen.
+cause is pool exhaustion, never a provider failure.
 
 Post-failure fail: a fresh admission finds every member excluded after this
 chain observed a qualifying provider failure. The turn terminalizes Failed and
@@ -107,23 +105,23 @@ pins this ending.
 
 A chain exclusion removes the failed member for the remainder of the turn, not
 merely for the chain, and is insert-only: no passed reset, operator clear or
-availability update readmits that member before the turn ends. Why: it is what
-forbids an automatic retry against the profile that just failed. The turn-scoped
-key on `credential_pool_chain_exclusion` in the model-calls migration enforces
-the scope; nothing enforces that no path deletes a row.
+availability update readmits that member before the turn ends. Why: it forbids
+an automatic retry against the profile that just failed. The turn-scoped key on
+`credential_pool_chain_exclusion` in the model-calls migration enforces the
+scope; nothing enforces that no path deletes a row.
 
 A successor prepared after a rate-limit or overload failure is not sent before
-the provider's reported delay has passed, beneath a five-minute cap
+the provider's reported delay has passed, capped at five minutes
 (`MAX_AVAILABILITY_BACKOFF` in `crates/persistence/src/model_execution.rs`); a
 successor after a quota failure is immediate.
 
 Terminal: a known failure no successor is authorized to follow terminalizes the
 turn Failed exactly as it would with no pool. Four ordered gates decide terminal
-rather than successor, and the first gate that fails decides it: a stop was
-requested while the call was in flight; the cause is not one of the three
-qualifying causes; the pinned action for that cause is not `switch_now`; the
-adapter supplied no pre-stream proof. Why ordered: ordinary inputs fail several
-gates at once, and the first names the actionable reason.
+rather than successor, and the first to fail decides: a stop was requested while
+the call was in flight; the cause is not one of the three qualifying causes; the
+pinned action for that cause is not `switch_now`; the adapter supplied no
+pre-stream proof. Why ordered: ordinary inputs fail several gates at once, and
+the first names the actionable reason.
 
 ## Not built
 
