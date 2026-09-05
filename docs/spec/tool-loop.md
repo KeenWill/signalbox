@@ -50,14 +50,15 @@ does not decode against the selected tool's argument type, becomes a typed
 execution error later.
 
 The same transaction that classifies the producing call `Completed` appends one
-`AssistantText` or `AssistantToolUse { producing_call, request }` semantic entry
-per supported nonempty response part, preserving response order, and inserts
-every request record. Empty text blocks are omitted at the provider boundary and
-create no semantic entry; tool proposals are never omitted. The request row is
-the sole content authority: the semantic entry contains only the call/request
-references and never copies the name or arguments (INV-005). Request identity,
-call ownership, and ordinal are unique within the producing call, so equal
-proposals remain distinct logical requests.
+`AssistantText`, `AssistantToolUse { producing_call, request }`, or
+`ProviderCompaction` semantic entry per supported nonempty response part,
+preserving response order, and inserts every request record. Empty text blocks
+are omitted at the provider boundary and create no semantic entry; tool
+proposals and provider-compaction parts are never omitted. The request row is
+the sole content authority for tool use: the semantic entry contains only the
+call/request references and never copies the name or arguments (INV-005).
+Request identity, call ownership, and ordinal are unique within the producing
+call, so equal proposals remain distinct logical requests.
 
 All requests produced by one call are one batch. Approval decisions are resolved
 in proposal order, and the turn parks on the earliest undecided request.
