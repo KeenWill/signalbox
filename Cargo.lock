@@ -4331,6 +4331,8 @@ version = "0.0.0"
 dependencies = [
  "futures-timer",
  "futures-util",
+ "hex",
+ "mime",
  "serde",
  "serde_json",
  "tokio",
