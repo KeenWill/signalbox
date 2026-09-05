@@ -47,9 +47,10 @@ another module schema.
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
 GET requests. It is an external-I/O capability and receives no database handle.
 
-The module's non-login PostgreSQL role owns `mod_repo_watch`. It has no table
-privileges in `public`. Module SQL uses an unqualified search path confined to
-its schema. Core and other modules receive no privileges on the module tables.
+The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
+membership path back to the core identity, and has no table privileges in
+`public`. Module SQL uses an unqualified search path confined to its schema.
+Core and other modules receive no privileges on the module tables.
 
 The module schema contains twelve tables:
 
