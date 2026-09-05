@@ -9,9 +9,8 @@ Build the items the identity and command subsystem has committed to but lacks:
 registry kinds for the runner recovery commands, production generators for the
 four identity types that lack one, and the optional runner placement the two
 creation payloads lack. `Actor` gains a program arm that submit-input records,
-replace-session-defaults gains an actor field, and create-session adoption stays
-an explicit maintainer choice, so a program-driven turn is never recorded as
-user-issued.
+and create-session adoption stays an explicit maintainer choice, so a
+program-driven turn is never recorded as user-issued.
 
 ## Design
 
@@ -67,17 +66,16 @@ follows the existing convention: a new closed `actor_kind` spelling, a
 variant-shaped reference column under a check constraint, and inclusion in
 replay equality and hashing.
 
-Replace-session-defaults gains an actor field through a new kind-scoped storage
-version. Every earlier version reconstitutes with the user actor, which is
-truthful because its only constructor fixed it. Create-session actor adoption is
-a maintainer choice made explicitly; every existing version carries no actor and
-reconstitutes without one, and a version that adds the field states how each
-earlier version reconstitutes.
+Create-session actor adoption is a maintainer choice made explicitly; every
+existing version carries no actor and reconstitutes without one, and a version
+that adds the field states how each earlier version reconstitutes.
 
 ## Compatibility constraints
 
 - The actor storage convention stays extensible to a program arm, and nothing
   assumes the submit-input actor is always the user.
+- Replace-session-defaults gains no actor field until a non-user boundary issues
+  it.
 - Imported-creation version 4 and create-session version 5 stay unwritten; no
   writer uses either number and the decoders keep rejecting them.
 - Runner replacement is the only new kind that spans more than one transaction;
@@ -91,6 +89,8 @@ earlier version reconstitutes.
   test that names it.
 - An equal replay of a runner replacement during provisioning returns the
   pending disposition; after the result row commits it returns that result.
+- A runner replacement claimed but unterminated at process exit is resumed at
+  startup before clients are admitted, and terminates under its own identifier.
 - The workspace store and its operator verbs write `WorkspaceId`,
   `GitRemoteMintId`, and `GitRemoteWithdrawalId` rows from production
   generators, and no Postgres column gained an identity-generating default.
@@ -103,6 +103,4 @@ earlier version reconstitutes.
 - A program-issued submit-input records the program actor, and replaying its
   identifier under the user actor is conflicting reuse.
 - A module-composed initial input records a non-user actor.
-- A replace-session-defaults record at the new version carries its actor, and
-  every earlier version reconstitutes with the user actor.
 - No telemetry site emits a command identifier after the change.

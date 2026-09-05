@@ -46,10 +46,11 @@ the user, daemon core, the model output of one turn, the startup recovery scan,
 or the execution of one tool request. Only submit-input and metadata-replacement
 commands carry an actor in their durable payload. Repository watch and
 commissioned dispatch stamp a module issuer principal on the registry row and
-compose their initial input under the user actor. Actor answers who issued one
-command; a session's creation cause, owned by
-[sessions-and-transcript](sessions-and-transcript.md), answers why the session
-exists, and neither fact substitutes for the other.
+compose their initial input under the user actor. That module-composed input is
+the one automated action attributed to the user; the non-user actor that ends
+the exception is Planned. Actor answers who issued one command; a session's
+creation cause, owned by [sessions-and-transcript](sessions-and-transcript.md),
+answers why the session exists, and neither fact substitutes for the other.
 
 ## Design decisions
 
@@ -124,11 +125,13 @@ candidate is discarded.
 
 All claimed command identifiers live in one user-global registry; no command
 kind, session, or client has a separate namespace. The registry and every typed
-record table other than the compaction command's are append-only, enforced by
-`reject_immutable_record_change` triggers. A compaction command record moves
-once from pending to applied or failed under its own guard, which keeps its
-request fields immutable. A claimed identifier's recorded meaning is therefore
-never rewritten.
+record table are append-only, enforced by `reject_immutable_record_change`
+triggers, except two records that change once under their own guards. A
+compaction command record moves once from pending to applied or failed, which
+keeps its request fields immutable. A review-orchestration command's pending
+intent row is deleted only by the transaction that installs the command's
+terminal receipt. A claimed identifier's recorded meaning is therefore never
+rewritten.
 
 The boundary that admitted a command stamps the issuer principal on its registry
 row: the principal's kind and, for a module, the module name.
@@ -195,8 +198,6 @@ what errors and logs may contain is in [process-protocol](process-protocol.md).
 - A program arm of `Actor` and a program admissibility path for submit-input:
   [design](../design/identity-and-commands.md).
 - A non-user actor for module-composed initial inputs:
-  [design](../design/identity-and-commands.md).
-- An actor field on replace-session-defaults records:
   [design](../design/identity-and-commands.md).
 - Actor adoption on create-session records:
   [design](../design/identity-and-commands.md).
