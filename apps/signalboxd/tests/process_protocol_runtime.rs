@@ -38,7 +38,6 @@ use signalbox_application::{
     StaleActiveTurnBound, StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
     TurnLivenessScanInterval, UuidV7ModelCallExecutionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
-    scheduler_ordinary_pass_limit,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -2508,7 +2507,7 @@ const FLEET_PASS_ADMISSION_CAP: usize = 16;
 // One place inside the shared admission cap stays reserved for a
 // repository-watch dispatch start, so a fleet that saturates ordinary
 // scheduler capacity is one session smaller than the cap itself.
-const FLEET_SESSION_COUNT: usize = scheduler_ordinary_pass_limit(FLEET_PASS_ADMISSION_CAP);
+const FLEET_SESSION_COUNT: usize = FLEET_PASS_ADMISSION_CAP;
 // numeric-bound: test setup - preserves the ordinary production occupancy fixture
 const FLEET_BASELINE_OCCUPANCY_BOUND: Duration = Duration::from_secs(900);
 // numeric-bound: test deadline - exercises the production recovery path promptly

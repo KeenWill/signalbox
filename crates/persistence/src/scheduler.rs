@@ -13,9 +13,9 @@ use crate::mapping::{session_id_from_uuid, session_id_to_uuid};
 const RECONCILIATION_PAGE_SIZE: i64 = 16;
 
 fn next_page_state(
-    rows: &[(SessionId, SessionId, bool, bool)],
+    rows: &[(SessionId, SessionId, bool)],
 ) -> (Option<SessionId>, Option<SessionId>) {
-    let Some((last_session, scan_through, _, _)) = rows.last().copied() else {
+    let Some((last_session, scan_through, _)) = rows.last().copied() else {
         return (None, None);
     };
     if rows.len() == RECONCILIATION_PAGE_SIZE as usize && last_session != scan_through {
@@ -88,7 +88,7 @@ impl PostgresEligibilitySweep {
     ) -> Result<EligibilitySweepBatch, PostgresEligibilitySweepError> {
         let after = self.after.map(session_id_to_uuid);
         let scan_through = self.scan_through.map(session_id_to_uuid);
-        let rows = sqlx::query_as::<_, (Uuid, Uuid, bool, bool)>(
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, bool)>(
             "WITH swept AS (
                 SELECT queued.session_id
                   FROM turn_lifecycle AS queued
@@ -218,8 +218,7 @@ impl PostgresEligibilitySweep {
                         SELECT lifecycle.owned
                           FROM session_lifecycle AS lifecycle
                          WHERE lifecycle.session_id = candidates.session_id
-                    ), true) AS owned,
-                    false AS dispatch_start
+                    ), true) AS owned
                FROM candidates
                CROSS JOIN bounded
               WHERE bounded.scan_through IS NOT NULL
@@ -236,29 +235,23 @@ impl PostgresEligibilitySweep {
 
         let rows = rows
             .into_iter()
-            .map(|(session, scan_through, owned, dispatch_start)| {
+            .map(|(session, scan_through, owned)| {
                 (
                     session_id_from_uuid(session),
                     session_id_from_uuid(scan_through),
                     owned,
-                    dispatch_start,
                 )
             })
             .collect::<Vec<_>>();
         let next_state = next_page_state(&rows);
         let continuation = next_state.0.is_some();
         (self.after, self.scan_through) = next_state;
-        let dispatch_starts = rows
-            .iter()
-            .filter_map(|(session, _, _, priority)| (*priority).then_some(*session))
-            .collect::<HashSet<_>>();
         let unmonitored = rows
             .iter()
-            .filter_map(|(session, _, owned, _)| (!*owned).then_some(*session))
+            .filter_map(|(session, _, owned)| (!*owned).then_some(*session))
             .collect::<HashSet<_>>();
-        Ok(EligibilitySweepBatch::with_dispatch_starts(
-            rows.into_iter().map(|(session, _, _, _)| session).collect(),
-            dispatch_starts,
+        Ok(EligibilitySweepBatch::new(
+            rows.into_iter().map(|(session, _, _)| session).collect(),
             continuation,
         )
         .with_unmonitored(unmonitored))
@@ -294,19 +287,12 @@ mod tests {
         let continuing = sessions
             .iter()
             .copied()
-            .map(|session| (session, beyond_page, true, false))
+            .map(|session| (session, beyond_page, true))
             .collect::<Vec<_>>();
         let cycle_end = sessions
             .iter()
             .copied()
-            .map(|session| {
-                (
-                    session,
-                    *sessions.last().expect("page is nonempty"),
-                    true,
-                    false,
-                )
-            })
+            .map(|session| (session, *sessions.last().expect("page is nonempty"), true))
             .collect::<Vec<_>>();
 
         assert_eq!(

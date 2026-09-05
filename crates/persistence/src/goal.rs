@@ -52,6 +52,8 @@ const STORAGE_VERSION: i16 = 1;
 pub enum GoalExecutionFailureRecoveryCause {
     /// No safe context-compaction boundary fits the configured model window.
     ContextCompactionInputDoesNotFit,
+    /// An approval request required an operator but no interactive client existed.
+    HeadlessApprovalEscalation,
 }
 
 impl GoalExecutionFailureRecoveryCause {
@@ -59,12 +61,14 @@ impl GoalExecutionFailureRecoveryCause {
     pub const fn code(self) -> &'static str {
         match self {
             Self::ContextCompactionInputDoesNotFit => "context_compaction_input_does_not_fit",
+            Self::HeadlessApprovalEscalation => "headless_approval_escalation",
         }
     }
 
     fn parse(value: &str) -> Result<Self, GoalCorruption> {
         match value {
             "context_compaction_input_does_not_fit" => Ok(Self::ContextCompactionInputDoesNotFit),
+            "headless_approval_escalation" => Ok(Self::HeadlessApprovalEscalation),
             value => Err(GoalCorruption::Unsupported {
                 field: "goal_execution_failure_recovery cause_kind",
                 value: value.to_owned(),

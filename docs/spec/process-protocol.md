@@ -1225,16 +1225,13 @@ This avoids an aggregate frame-size limit.
 
 A successful `read_operator_status` response consists of `operator_status`
 messages: `kind=start`, zero or more rows from each section in this fixed order,
-then `kind=end` with one count per section. The row kinds are `held_slot`,
-`queued_obligation`, `pull_request_convergence`,
-`pending_stale_review_clearance`, `lifecycle_week`, and
-`lifecycle_deadline_violation`. The daemon reads the four repository-watch views
-bearing those respective concepts and the two session-lifecycle metric views in
-one read-only repeatable-read transaction. It streams their rows through
-server-side cursors into a temporary-file spool before writing the first
-response frame, so a database or encoding failure produces no partial successful
-snapshot and the request retains neither an unbounded row inventory nor a
-database transaction while the client reads.
+then `kind=end` with one count per section. The emitted row kinds are
+`lifecycle_week` and `lifecycle_deadline_violation`. The daemon reads the two
+session-lifecycle metric views in one read-only repeatable-read transaction. It
+streams their rows through server-side cursors into a temporary-file spool
+before writing the first response frame, so a database or encoding failure
+produces no partial successful snapshot and the request retains neither an
+unbounded row inventory nor a database transaction while the client reads.
 
 A `lifecycle_week` row carries one calendar week's session-lifecycle metrics:
 the week's UTC start as an ISO-8601 date, and each metric as its exact numerator

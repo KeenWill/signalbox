@@ -6995,7 +6995,6 @@ pub(crate) async fn insert_prepared_call(
     credential_pool_policy: Option<&CredentialPoolRuntimePolicy>,
     input_includes_cache_tokens: bool,
 ) -> Result<(), ModelCallRepositoryError> {
-    lock_model_activity_fence(connection, prepared.session()).await?;
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
     for steering in prepared.consumed_steering() {
@@ -7186,21 +7185,6 @@ pub(crate) async fn insert_prepared_call(
         },
     )
     .await?;
-    Ok(())
-}
-
-/// Serializes first model-call creation with module inactivity commands for one session.
-async fn lock_model_activity_fence(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!(
-            "convergence_model_activity:{}",
-            session.into_uuid()
-        ))
-        .execute(connection)
-        .await?;
     Ok(())
 }
 

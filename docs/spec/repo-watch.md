@@ -51,7 +51,7 @@ The module's non-login PostgreSQL role owns `mod_repo_watch`. It has no table
 privileges in `public`. Module SQL uses an unqualified search path confined to
 its schema. Core and other modules receive no privileges on the module tables.
 
-The module schema contains eleven tables:
+The module schema contains twelve tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections.
 - `frontier` holds one mutable occurrence counter per recurring event stream; an
@@ -61,7 +61,8 @@ The module schema contains eleven tables:
   caller-selected `retain_until`; a row is releasable after that boundary when
   no pending module command names it.
 - `rule` holds the active checked revision and content digest, while
-  `rule_revision` retains revision history needed by module dispatch records.
+  `rule_revision` retains revision history needed by module dispatch records;
+  `rule_field_fingerprint` binds each identity field to its checked digest.
 - `dispatch_ledger` records command identity, dispatch reference, rule revision,
   source event, command family, and settlement.
 - `webhook_delivery`, `webhook_body`, and `webhook_disposition` retain one
@@ -98,10 +99,11 @@ is a replay; different content is a conflict. Settlement changes a pending
 disposition exactly once.
 
 The former repository-watch runtime, webhook runtime, convergence task, operator
-routes, and public-schema persistence surface do not exist. Their derived data
-is disposable and the migration drops it without a backfill.
+routes, and public-schema persistence surface do not exist. The removal
+migration carries an existing headless approval block into the core-owned
+operator-required recovery record before dropping the disposable derived data.
 
 Contracts this page relies on but does not own: module-state pruning and outbox
 retention permission in [persistence protocol](persistence-protocol.md), session
 command behavior, and the module event/command/database boundary in the
-[ownership-seam design](../design/ownership-seam.md).
+[ownership seam](ownership-seam.md).

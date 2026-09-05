@@ -88,10 +88,9 @@ pub use blob_tools::{
     BlobToolConstructionError, BlobToolExecutor, BlobToolExecutorError, BlobTools,
 };
 pub use configuration::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, ConvergenceSweepConfiguration,
-    DaemonToolConfiguration, DerivedModelCallCost, FileCredentialAccess, HubModelConfiguration,
-    HubModelConfigurationError, ModelAdapter, ModelBillingRates, NumericBoundsConfiguration,
-    OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
+    FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelAdapter,
+    ModelBillingRates, NumericBoundsConfiguration, OPENAI_CREDENTIAL_REFERENCE,
     WorkspaceInstructionConfiguration,
 };
 pub use context_guard::{

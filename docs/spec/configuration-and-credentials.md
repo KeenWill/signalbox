@@ -159,13 +159,6 @@ streaming begins. The append-only change journal timestamps commits explicitly;
 historical creation is seeded only from the durable command claim time and never
 inferred from UUID bits.
 
-Five read-only repository-watch routes expose the durable operator projection:
-`GET /api/repository-watch/repositories`, `pull-requests`, `work`, `sessions`,
-and `activity`. They are read-only projections of the records
-[repository watch](repo-watch.md) describes. The activity route exposes
-independently selectable event and webhook cursors; an excluded feed cannot
-carry a cursor.
-
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and
 `web-contract.d.mts` TypeScript declarations under `clients/web/src/generated`

@@ -386,11 +386,8 @@ the sweep (INV-007).
 
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
   passes. Every explicit nonzero application bound, including the deployment's
-  configured bound, is capped at that shared admission cap. For a bound above
-  one, one place inside that bound is reserved for a repository-watch dispatch
-  with no model-call evidence, so ordinary recovery and execution passes can
-  occupy at most 15 places under the production bound and cannot consume the
-  start lane. Dispatch-start hints precede ordinary pending hints. The loop
+  configured bound, is capped at that shared admission cap. Dispatch-start hints
+  precede ordinary pending hints without reserving pass capacity. The loop
   coalesces pending hints by session, deduplicates a session already in flight
   while recording one priority-upgradable rerun, and keeps an in-progress sweep
   read alive across pass completions. A failed or panicked pass is logged and

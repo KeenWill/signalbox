@@ -1,5 +1,22 @@
--- Repository-watch v1 state is disposable derived data. The v2 module is not
--- dispatched yet, so cutover drops the old surface without a backfill.
+-- Repository-watch v1 state is disposable derived data. Preserve only the
+-- core-owned operator requirement before dropping the old surface.
+
+ALTER TABLE goal_execution_failure_recovery
+    DROP CONSTRAINT goal_execution_failure_recovery_cause_kind_closed,
+    ADD CONSTRAINT goal_execution_failure_recovery_cause_kind_closed
+    CHECK (cause_kind IN (
+        'context_compaction_input_does_not_fit',
+        'headless_approval_escalation'
+    ));
+
+INSERT INTO goal_execution_failure_recovery
+    (turn_id, session_id, cause_kind, recorded_at)
+SELECT escalation.turn_id,
+       escalation.session_id,
+       'headless_approval_escalation',
+       escalation.escalated_at
+  FROM repo_watch_headless_approval_escalation AS escalation
+ON CONFLICT (turn_id) DO NOTHING;
 
 DROP TRIGGER commissioned_dispatch_counts_pull_request_session
     ON commissioned_dispatch;
@@ -7,6 +24,7 @@ DROP TRIGGER repo_watch_dispatch_release_on_terminal_goal ON goal_event;
 DROP TRIGGER repo_watch_dispatch_release_on_terminal_turn ON turn_lifecycle;
 
 DROP VIEW repo_watch_current_pull_request_convergence,
+          convergence_sweep_parked_target,
           repo_watch_headless_approval_escalation_audit,
           repo_watch_held_dispatch_slot,
           repo_watch_outstanding_dispatch_obligation,
@@ -16,6 +34,8 @@ DROP VIEW repo_watch_current_pull_request_convergence,
 CASCADE;
 
 DROP TABLE repo_watch_achieved_dispatch_settlement,
+           convergence_sweep_event,
+           convergence_sweep_target,
            repo_watch_complete_poll,
            repo_watch_convergence_cutoff,
            repo_watch_convergence_cutoff_goal,
@@ -59,6 +79,8 @@ DROP TABLE repo_watch_achieved_dispatch_settlement,
            repo_watch_webhook_payload,
            repo_watch_webhook_pending
 CASCADE;
+
+DROP FUNCTION convergence_sweep_retry_budget();
 
 DO $drop_repo_watch_functions$
 DECLARE

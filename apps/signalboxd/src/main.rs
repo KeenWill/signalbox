@@ -14,7 +14,7 @@ use std::{
     fmt, fs,
     future::Future,
     num::NonZeroUsize,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     time::Duration,
@@ -321,20 +321,6 @@ impl HubConfiguration {
         self.github_token_file.clone()
     }
 
-    fn repository_watch_credential_conflicts(&self, configuration: &HubModelConfiguration) -> bool {
-        configuration.repository_watch().is_some_and(|watch| {
-            watch.repositories().iter().any(|repository| {
-                // A webhook secret is a repository-watch credential like the
-                // polling token, so the same credential boundary applies: neither
-                // may equal or alias the session GitHub credential.
-                credential_files_conflict(&self.github_token_file, repository.credential_file())
-                    || repository.webhook().is_some_and(|webhook| {
-                        credential_files_conflict(&self.github_token_file, webhook.secret_file())
-                    })
-            })
-        })
-    }
-
     fn brave_api_key_file(&self) -> PathBuf {
         self.brave_api_key_file.clone()
     }
@@ -374,88 +360,6 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
     process_artifacts
         .iter()
         .any(|process| runner_artifacts.iter().any(|runner| runner == process))
-}
-
-fn credential_files_conflict(left: &Path, right: &Path) -> bool {
-    let left = resolved_file_reference(left);
-    let right = resolved_file_reference(right);
-    left == right || same_file_identity(&left, &right)
-}
-
-#[cfg(unix)]
-fn same_file_identity(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
-        return false;
-    };
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(_left: &Path, _right: &Path) -> bool {
-    false
-}
-
-fn resolved_file_reference(path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        env::current_dir()
-            .map(|current| current.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    let mut resolved = normalize_file_reference(&absolute);
-    for _ in 0..40 {
-        let mut prefix = PathBuf::new();
-        let mut components = resolved.components();
-        let mut replacement = None;
-        while let Some(component) = components.next() {
-            prefix.push(component.as_os_str());
-            let Ok(metadata) = fs::symlink_metadata(&prefix) else {
-                return resolved;
-            };
-            if !metadata.file_type().is_symlink() {
-                continue;
-            }
-            let Ok(target) = fs::read_link(&prefix) else {
-                return resolved;
-            };
-            let mut target = if target.is_absolute() {
-                target
-            } else {
-                prefix
-                    .parent()
-                    .map_or(target.clone(), |parent| parent.join(target))
-            };
-            target.extend(components.map(|remaining| remaining.as_os_str()));
-            replacement = Some(normalize_file_reference(&target));
-            break;
-        }
-        let Some(replacement) = replacement else {
-            return fs::canonicalize(&resolved).unwrap_or(resolved);
-        };
-        resolved = replacement;
-    }
-    resolved
-}
-
-fn normalize_file_reference(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() && !path.is_absolute() {
-                    normalized.push(component.as_os_str());
-                }
-            }
-        }
-    }
-    normalized
 }
 
 fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
@@ -1423,16 +1327,6 @@ async fn run_hub(
         configured_usize("max_code_host_result_items")?,
         configured_usize("max_repository_file_content_bytes")?,
     );
-    if configuration.repository_watch_credential_conflicts(&model_configuration) {
-        let error = HubConfigurationError::new(
-            GITHUB_TOKEN_FILE_ENVIRONMENT,
-            RequiredSettingFailure::Conflicts,
-        );
-        return Err(erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Configuration(&error),
-        ));
-    }
     let daemon_tool_configuration = model_configuration.daemon_tools();
     let tool_composition = match daemon_tool_configuration {
         Some(_) => DaemonToolComposition::WithMappedFamilies,
@@ -1459,29 +1353,6 @@ async fn run_hub(
             SanitizedStartupCause::TemplateConfiguration(&error),
         )
     })?;
-    if let Some(repository_watch) = model_configuration.repository_watch() {
-        let declarations = template_configuration
-            .repo_watch_context_declarations()
-            .map_err(|error| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::TemplateConfiguration(&error),
-                )
-            })?;
-        repository_watch
-            .validate_template_contexts(&declarations)
-            .and_then(|()| {
-                repository_watch.validate_convergence_template(
-                    template_configuration.summaries().map(|(name, _)| name),
-                )
-            })
-            .map_err(|error| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::ModelConfiguration(&error),
-                )
-            })?;
-    }
     let anthropic_model_credentials = FileCredentialAccess::from_files(
         model_configuration
             .file_credential_profiles(ModelAdapter::Anthropic)
@@ -2641,13 +2512,12 @@ mod tests {
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
         RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
         SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
-        migrate_scan_then_schedule, openai_construction_cause, operator_filter,
-        process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
-        runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
-        validate_fenced_pool_min_connections,
+        combine_runtime_stop_cause, completed_runtime_outcome, database_close_failure_outcome,
+        drain_runtime_tasks, erase_startup_cause, fenced_pool_floor_reconciliation_policy,
+        graceful_shutdown_window, migrate_scan_then_schedule, openai_construction_cause,
+        operator_filter, process_runtime_failure_class, report_database_close_failure,
+        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
+        staging_sweep_failure_outcome, validate_fenced_pool_min_connections,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
@@ -3136,68 +3006,6 @@ mod tests {
                 RequiredSettingFailure::Conflicts,
             )
         );
-    }
-
-    #[test]
-    fn repository_watch_credential_cannot_equal_the_github_tool_credential() {
-        let credential = std::path::Path::new("/tmp/signalbox-github-token");
-
-        assert!(credential_files_conflict(credential, credential));
-    }
-
-    #[test]
-    fn repository_watch_credential_alias_cannot_reach_the_github_tool_credential() {
-        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
-        let credential = directory.path().join("github-token");
-        std::fs::write(&credential, []).expect("the credential fixture exists");
-        let alias = directory.path().join("watch-token");
-        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
-
-        assert!(credential_files_conflict(&credential, &alias));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn repository_watch_hard_link_cannot_reach_the_github_tool_credential() {
-        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
-        let credential = directory.path().join("github-token");
-        std::fs::write(&credential, []).expect("the credential fixture exists");
-        let hard_link = directory.path().join("watch-token");
-        std::fs::hard_link(&credential, &hard_link).expect("the credential hard link exists");
-
-        assert!(credential_files_conflict(&credential, &hard_link));
-    }
-
-    #[test]
-    fn dangling_repository_watch_alias_cannot_reach_the_github_tool_credential() {
-        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
-        let credential = directory.path().join("github-token");
-        let alias = directory.path().join("watch-token");
-        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
-
-        assert!(credential_files_conflict(&credential, &alias));
-    }
-
-    #[test]
-    fn unresolved_lexical_alias_cannot_reach_the_github_tool_credential() {
-        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
-        let credential = directory.path().join("github-token");
-        let alias = directory.path().join("pending/../github-token");
-
-        assert!(credential_files_conflict(&credential, &alias));
-    }
-
-    #[test]
-    fn dangling_intermediate_alias_cannot_reach_the_github_tool_credential() {
-        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
-        let target_directory = directory.path().join("pending-target");
-        let alias_directory = directory.path().join("pending-alias");
-        std::os::unix::fs::symlink(&target_directory, &alias_directory)
-            .expect("the intermediate credential alias exists");
-        let credential = target_directory.join("github-token");
-        let alias = alias_directory.join("github-token");
-
-        assert!(credential_files_conflict(&credential, &alias));
     }
 
     #[test]
