@@ -79,13 +79,15 @@ cause only inside a nonnull terminal model call, so it cannot serve.
 Wait selection: `park` and `fail` act through one question, whether this
 exhaustion selects a wait. `fail` never selects one. `park` selects one only
 when some member's every active exclusion is one a wake can clear, so that one
-wake can readmit that whole member. No wake clears a chain exclusion or a
-`switch_next_turn` displacement, so a member holding either never qualifies,
-whatever else it holds. Where no member qualifies, no wait is selected and the
-exhaustion ends in a failure ending exactly as a `fail` pool would. Whether this
-chain has issued a call chooses which: pre-call fail or post-failure fail at a
-fresh admission, wait-transition fail (no call) or wait-transition fail (after
-call) at a release.
+wake can readmit that whole member. No wake clears a chain exclusion, so a
+member holding one never qualifies, whatever else it holds. A pending
+`switch_next_turn` displacement is clearable, because an operator clear removes
+it and publishes the member-availability update that wakes the wait. Where no
+member qualifies, no wait is selected and the exhaustion ends in a failure
+ending exactly as a `fail` pool would. Whether this chain has issued a call
+chooses which: pre-call fail or post-failure fail at a fresh admission,
+wait-transition fail (no call) or wait-transition fail (after call) at a
+release.
 
 A contended wait that becomes exhausted re-runs the exhaustion policy rather
 than staying parked. When a woken contended waiter finds every formerly bounded
