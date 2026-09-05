@@ -46,6 +46,11 @@ documents the lock order stated under Contracts. Row locks issued inline
 elsewhere in Rust are stated at the statement that takes them, and locks taken
 inside triggers are stated in the migrations that define them.
 
+A program capability answer is appended to the program journal inside the
+transaction that commits its consequence. The append locks that run's journal
+sequence FOR UPDATE, inserts the frame, and advances the sequence, so the
+consequence and the answer commit together.
+
 Reconstitution turns rows back into domain values and returns one complete value
 or a typed corruption error. Failures that reach an operator are classified in
 `crates/application` as infrastructure, fail-closed corruption, identity
@@ -149,10 +154,12 @@ become a second semantic authority.
 Duplicate concurrent submission of a command is a database conflict on the
 registry, not an application race, and the loser rereads the winner.
 
-Compaction is the one built command whose claim and settlement are two
-transactions: it commits its registry row, pending typed command, and prepared
-call before provider work, and a later session-locked transaction settles the
-command exactly once.
+Compaction and review orchestration are the two built commands whose claim and
+settlement are separate transactions. Compaction commits its registry row,
+pending typed command, and prepared call before provider work, and a later
+session-locked transaction settles it exactly once. Review orchestration commits
+its registry row and immutable intent before returning its guard, and the
+guard's later transaction replaces that intent with the receipt.
 
 The row locks the lock inventory names are issued from that one reviewed file,
 so their order is auditable instead of scattered through query strings.
@@ -311,6 +318,9 @@ constraint triggers, so its rows may be inserted in any order the triggers
 permit while every commit boundary sees the complete shape. A multipart receipt
 inserts its satellites first, because a satellite insert is rejected once the
 parent row has sealed the receipt.
+
+An applied `SubmitInput` receipt references its accepted-input or interruption
+effect, and the schema rejects a receipt with no matching effect.
 
 Accepted user content is stored only in the ordered part satellites of the
 command and of the accepted input; neither parent row has a content column.
