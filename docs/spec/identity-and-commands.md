@@ -103,7 +103,7 @@ UUIDv7 implementation:
 seam. `WorkspaceId`, `GitRemoteMintId`, and `GitRemoteWithdrawalId` are in the
 same position: the durable schema that stores them exists and nothing writes it.
 What each identity scopes is stated under
-[remote destination authority](git-authority-threat-model.md#remote-destination-authority).
+[remote destination authority](git-authority-threat-model.md).
 
 Orchestration generates each fresh candidate immediately before the domain
 transition that creates the fact. Fixed-cardinality candidates are minted before

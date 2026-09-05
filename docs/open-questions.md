@@ -404,7 +404,7 @@ The questions below remain open.
   declaration and executor over an injected transport, but no production
   `GitPushTransport` exists. Remote authority and destination policy are decided
   and stated under
-  [remote destination authority](spec/git-authority-threat-model.md#remote-destination-authority):
+  [remote destination authority](spec/git-authority-threat-model.md):
   destinations are durable records an operator mints, scoped by workspace
   identity, and `https` only. The credential policy for a push and the
   production transport itself remain undecided; until they are decided the tool
