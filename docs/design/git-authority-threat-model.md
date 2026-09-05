@@ -57,8 +57,9 @@ tables to decide which roots the daemon may open.
 `WorkspaceRootPath` admits canonical bytes only and performs no normalization;
 no comparison-time normalization is added anywhere.
 
-The workspace and remote tables stay append-only; retiring is a new fact, never
-an update or a delete.
+The `workspace`, mint, and withdrawal tables stay append-only; retiring is a new
+fact, never an update or a delete. `configured_git_remote_live` is a projection
+of those facts, so a withdrawal deletes the retired mint from it.
 
 `WorkspaceOrigin` enumerates both variants without a wildcard, so a further tier
 cannot default to carrying no human act.
