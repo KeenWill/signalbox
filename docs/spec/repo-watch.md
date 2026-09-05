@@ -136,30 +136,32 @@ Cache admission is an accelerator, never a precondition: a resource that does
 not fit is shed, the poll continues, and that resource is refetched
 unconditionally next poll. The per-repository interval is measured start to
 start, so a cadence does not drift by the duration of its own attempt, and
-attempts never overlap. A webhook wake serializes with the repository task but
-may preempt the read-only provider sweep of an in-flight complete poll; rule
-activation, dispatch, webhook projection, and cursor commit stay outside that
-cancellation region. An attempt reuses a committed detail and settled check
-baseline for an open pull request only when the recorded fetch reached the
-durable cursor and observed every check terminal and a known mergeable state,
-because an uncommitted fetch proves nothing about a baseline it never replaced
-and neither a check completion nor a mergeability calculation moves
-`updated_at`. Reviews, threads, and reactions are re-fetched every attempt and
-replace their prior projections before comparison, because a reaction does not
-move `updated_at` and a delayed detail refresh must not defer a review dispatch
-signal; with no configured signal reviewer the poller issues no reaction
-request. A restart schedules the next complete poll at what remains of the
-configured cadence, measured from the durable record of the last completed sweep
-written inside that sweep's own commit and never from the process start, so
-frequent restarts neither multiply provider requests nor postpone the sweep;
-startup still drains durable webhook work first. Every completed provider
-identity the check projection returns enters the comparison baseline, so the
-provider's latest-attempt default cannot silently discard a completion between
-polls. When the newest run for a branch and workflow is queued or in progress,
-the branch projection keeps the later of the newest completed candidate and the
-prior completed baseline. A run enters the branch projection only when its
-head-repository identity equals the watched repository, so a same-named fork
-branch never enters it.
+attempts never overlap; an attempt that reaches or exceeds the interval starts
+the next poll one interval after it completes, because an already-elapsed
+deadline would never sleep and the task's other arms would never run. A webhook
+wake serializes with the repository task but may preempt the read-only provider
+sweep of an in-flight complete poll; rule activation, dispatch, webhook
+projection, and cursor commit stay outside that cancellation region. An attempt
+reuses a committed detail and settled check baseline for an open pull request
+only when the recorded fetch reached the durable cursor and observed every check
+terminal and a known mergeable state, because an uncommitted fetch proves
+nothing about a baseline it never replaced and neither a check completion nor a
+mergeability calculation moves `updated_at`. Reviews, threads, and reactions are
+re-fetched every attempt and replace their prior projections before comparison,
+because a reaction does not move `updated_at` and a delayed detail refresh must
+not defer a review dispatch signal; with no configured signal reviewer the
+poller issues no reaction request. A restart schedules the next complete poll at
+what remains of the configured cadence, measured from the durable record of the
+last completed sweep written inside that sweep's own commit and never from the
+process start, so frequent restarts neither multiply provider requests nor
+postpone the sweep; startup still drains durable webhook work first. Every
+completed provider identity the check projection returns enters the comparison
+baseline, so the provider's latest-attempt default cannot silently discard a
+completion between polls. When the newest run for a branch and workflow is
+queued or in progress, the branch projection keeps the later of the newest
+completed candidate and the prior completed baseline. A run enters the branch
+projection only when its head-repository identity equals the watched repository,
+so a same-named fork branch never enters it.
 
 GitHub can return a null head repository after a fork is deleted; the poller
 retains the prior canonical identity for that pull request, and a new pull
@@ -554,7 +556,8 @@ webhook's signature against the exact body bytes before it parses the body. The
 daemon stores a verified delivery before the listener returns 202. A webhook
 wake only prompts the daemon to process deliveries it has already stored; the
 stored deliveries, not the wake, are the record of pending work. Shadow mode
-writes no event row and never changes the cursor.
+writes no webhook-produced event row and never patches the cursor from a
+payload; a targeted poll it triggers writes as any poll does.
 
 The per-repository commit serializes competing commits and recognizes only an
 exact replay of candidate and occurrences. It coalesces an occurrence whose
@@ -627,7 +630,9 @@ fact about the pull request it stalled on: an event carrying a head other than
 the stalled one, or review activity against it.
 
 A completed approval-judge escalation judged under dispatch authority is an
-execution-failure terminal transition rather than an attended approval wait.
+execution-failure terminal transition rather than an attended approval wait,
+except while operator-commissioned authority still stands, when the turn keeps
+awaiting approval.
 
 While a pull request's lifecycle remains terminal, repository watch applies the
 parent-only stop to each generation-one goal it commissioned for that pull
