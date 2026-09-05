@@ -38,10 +38,10 @@ source content is the exact bytes of the agent document or the skill's
 `SKILL.md`, and a versioned SHA-256 over those bytes records what was available
 to the session. A skill's frontmatter is parsed for its name and description.
 
-The per-turn record is the `TurnInstructionManifest`. Every turn owns one
-turn-start manifest, which names the turn's discovery and carries the hashes of
-the turn's eligibility set and admitted set, both empty. It is the only manifest
-the daemon stores. Two paths record it
+The per-turn record is the `TurnInstructionManifest`. A turn that reaches
+preparation owns one turn-start manifest, which names the turn's discovery and
+carries the hashes of the turn's eligibility set and admitted set, both empty.
+It is the only manifest the daemon stores. Two paths record it
 ([turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md)). On the
 ordinary path the daemon scans after activation and records the manifest in a
 transaction of its own while the turn is still active; a turn that stops being

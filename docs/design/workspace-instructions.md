@@ -139,9 +139,10 @@ Each wrapper opens with a `<signalbox_workspace_instruction>` line, then one
 JSON line of metadata holding the bundle identity, kind, root kind, the
 provider-safe root reference for a configured root, the root-relative source
 path, and the source hash, then the budgeted source bytes between `<content>`
-and `</content>` lines, then the closing tag. Metadata strings use one canonical
-JSON escaping in which `<`, `>`, and `&` become the six-character escapes above;
-content replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;`. No
+and `</content>` lines, then the closing tag. The metadata line comes from one
+encoder: the compact `serde_json` encoding whose string escaping matches RFC
+8785, extended so `<`, `>`, and `&` become the six-character escapes above.
+Content replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;`. No
 repository byte can therefore terminate or fabricate an envelope. Canonical
 absolute paths never enter the region. The rendered hash is SHA-256 over the
 complete escaped wrapper.
