@@ -167,11 +167,12 @@ reconstruct no provider-native material, and return blob facts as references
 without fetching bytes. Browser search accepts only the lexical strategy and
 passes text to PostgreSQL full-text search, so query operators are not product
 semantics and a future strategy cannot turn the request into a database query
-language. Attachment filenames, attachment media metadata, and derived text
-artifacts are content classes the schema admits and a read returns, and no
-producer publishes them; the projection performs no implicit attachment reading,
-OCR, text extraction, or model pass. No browser read materializes or scans a
-session transcript.
+language. A lexical query examines a bounded candidate set, and a term absent
+from the index returns empty at once. Attachment filenames, attachment media
+metadata, and derived text artifacts are content classes the schema admits and a
+read returns, and no producer publishes them; the projection performs no
+implicit attachment reading, OCR, text extraction, or model pass. No browser
+read materializes or scans a session transcript.
 
 There is no generic text, role, metadata, or other payload; every entry kind is
 a closed semantic fact. Entries reference accepted input and never copy its
@@ -252,11 +253,12 @@ lifecycle satellite carrying the start gate, ownership, and finish condition,
 its scheduler registration, defaults version one, the current-defaults pointer,
 the typed command record, the registry claim, placement version one and its
 current-placement pointer, and the session-created outbox event together. A
-visible session never names a placement its creation command did not carry, and
-a carried placement is never dropped between the claim and the session. Every
-table in this set is append-only except the current-defaults and
-current-placement pointers and the lifecycle satellite, which lifecycle
-transitions update in place.
+session created by `CreateSession` never names a placement its command did not
+carry, and a carried placement is never dropped between the claim and the
+session. An imported-frontier creation carries no placement and synthesizes the
+fixed pathless placement as version one. Every table in this set is append-only
+except the current-defaults and current-placement pointers and the lifecycle
+satellite, which lifecycle transitions update in place.
 
 The daemon resolves the addressed imported aggregate to its canonical sealed
 frontier before constructing the command; the frontier names its own imported
@@ -402,13 +404,15 @@ by ascending session identity; catalog search is an exact case-sensitive
 substring of the title or the canonical session UUID.
 
 The follow stream subscribes to the daemon's browser monitor fanout before
-reading the snapshot, then emits the snapshot as its first item. Deltas queued
-when the snapshot completes are discarded, and lag confined to records the
-snapshot cursor covers is absorbed silently. Falling behind past covered
-records, or saturating the monitor while retained fragment text is draining,
-emits one positive-cursor resync item and ends the response; the client then
-replaces all transient presentation with a fresh live snapshot and resumes
-durable history above its cursor without reloading the historical transcript.
+reading the snapshot, then emits the snapshot as its first item. Provider-text
+deltas queued when the snapshot completes are discarded, and a durable update
+queued with a cursor above the snapshot's is emitted after the snapshot. Lag
+confined to records the snapshot cursor covers is absorbed silently. Falling
+behind past covered records, or saturating the monitor while retained fragment
+text is draining, emits one positive-cursor resync item and ends the response;
+the client then replaces all transient presentation with a fresh live snapshot
+and resumes durable history above its cursor without reloading the historical
+transcript.
 
 The timeline sequence is allocated once across ordinary and delegation outbox
 events; it is append-only, totally ordered, independent of table offsets and
