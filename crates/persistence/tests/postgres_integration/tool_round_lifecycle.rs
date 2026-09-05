@@ -674,6 +674,12 @@ async fn provider_compaction_releases_tool_continuation_input_headroom()
     let [request] = requests.as_slice() else {
         panic!("fixture has one request");
     };
+    let retained_input_tokens: Decimal =
+        sqlx::query_scalar("SELECT retained_input_tokens FROM model_call WHERE model_call_id = $1")
+            .bind(fixture.call.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(retained_input_tokens, Decimal::from(10_u64));
     let tool_repository = PostgresToolLoopRepository::new(pool.clone());
     tool_repository
         .decide(
@@ -3511,7 +3517,10 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
     .expect("the fixture contains tool proposals");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        });
     let outcome = model_repository
         .apply_terminal_observation(
             fixture.session,
@@ -3766,6 +3775,7 @@ async fn commit_stopped_tool_round(
                 .observation_correlation()
                 .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
                     response,
+                    retained_input_tokens: None,
                 }),
             ModelCallTerminalIdentities::StoppedToolRound(
                 StoppedToolRoundModelCallIdentities::new(

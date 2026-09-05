@@ -23,9 +23,9 @@ use signalbox_model_runtime::{
     MessagePart, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
     ModelInputTokenCounter, ModelOperation, ModelRuntime, ModelSettings, Observation,
     ObservationFact, PROVIDER_JSON_NESTING_LIMIT, PreparationFailure, PreparationOutcome,
-    ProviderErrorKind, ProviderRequestId, ReasoningLevel, RequestedTarget, ResolvedTarget,
-    StreamInterruption, StructuredOutputContract, TerminalEvidence, TerminalReport, ToolCallId,
-    ToolCallProposal, ToolName, UnsentCause,
+    ProviderCompactionMode, ProviderErrorKind, ProviderRequestId, ReasoningLevel, RequestedTarget,
+    ResolvedTarget, StreamInterruption, StructuredOutputContract, TerminalEvidence, TerminalReport,
+    ToolCallId, ToolCallProposal, ToolName, UnsentCause,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -956,6 +956,74 @@ async fn input_count_replays_compaction_for_a_supported_effective_fast_target() 
         serde_json::json!({"edits": [{"type": "compact_20260112"}]})
     );
     assert!(body.to_string().contains("preserved summary"));
+}
+
+#[tokio::test]
+async fn suppressed_generation_replay_still_sends_compaction_beta() {
+    let server = CannedServer::serving(vec![text_response()]).await;
+    let target = ResolvedTarget::new("claude-opus-5");
+    let mut config = AnthropicConfig::new(None);
+    config.base_url = server.base_url.clone();
+    config
+        .provider_compaction_targets
+        .insert(target.as_str().to_string());
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    let mut generated = operation("generate-suppressed-replay");
+    generated.resolved_target = target;
+    generated.provider_compaction = ProviderCompactionMode::Suppressed;
+    append_provider_compaction(&mut generated);
+
+    let _ = execute(&runtime, generated, CancellationSignal::never()).await;
+    let requests = server.recorded_requests();
+
+    assert!(
+        requests[0]
+            .contains("anthropic-beta: context-management-2025-06-27,compact-2026-01-12\r\n")
+    );
+    assert!(
+        sent_request_body(&server)
+            .get("context_management")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn suppressed_input_count_replay_still_sends_compaction_beta() {
+    let server =
+        CannedServer::serving(vec![http_response("200 OK", &[], br#"{"input_tokens":7}"#)]).await;
+    let target = ResolvedTarget::new("claude-opus-5");
+    let mut config = AnthropicConfig::new(None);
+    config.base_url = server.base_url.clone();
+    config
+        .provider_compaction_targets
+        .insert(target.as_str().to_string());
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    let mut counted = operation("count-suppressed-replay");
+    counted.resolved_target = target;
+    counted.provider_compaction = ProviderCompactionMode::Suppressed;
+    append_provider_compaction(&mut counted);
+
+    let outcome = runtime
+        .count_input_tokens(counted, CancellationSignal::never())
+        .await;
+    let requests = server.recorded_requests();
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Counted {
+            correlation: String::from("count-suppressed-replay"),
+            input_tokens: 7,
+        }
+    );
+    assert!(
+        requests[0]
+            .contains("anthropic-beta: context-management-2025-06-27,compact-2026-01-12\r\n")
+    );
+    assert!(
+        sent_request_body(&server)
+            .get("context_management")
+            .is_none()
+    );
 }
 
 #[tokio::test]

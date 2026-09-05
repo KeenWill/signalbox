@@ -3997,7 +3997,7 @@ async fn terminal_observation_closure_matches(
         ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
             completed_terminal_closure_matches(connection, session, observation, response).await
         }
-        ModelCallTerminalObservation::CompletedWithTools { response } => {
+        ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
             tool_round_terminal_closure_matches(connection, session, observation, response).await
         }
         ModelCallTerminalObservation::KnownFailed => {
@@ -7954,7 +7954,7 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::ToolRound(round) => {
-            persist_tool_round(connection, round, usage).await
+            persist_tool_round(connection, round, usage, retained_input_tokens).await
         }
         ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) => {
             lock_delegated_child_result_frontier(connection, cancelled.session(), cancelled.turn())
@@ -8544,13 +8544,15 @@ async fn persist_tool_round(
     connection: &mut PgConnection,
     round: &ToolRoundModelCallTurn,
     usage: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call(
+    persist_ended_call_with_retained_input(
         connection,
         round.session(),
         round.turn(),
         round.call(),
         usage,
+        retained_input_tokens,
     )
     .await?;
     persist_ended_attempt(connection, round.session(), round.turn(), round.attempt()).await?;

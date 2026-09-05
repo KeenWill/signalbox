@@ -2124,7 +2124,10 @@ fn classify_terminal(
                     );
                 };
                 classify(
-                    ModelCallTerminalObservation::CompletedWithTools { response },
+                    ModelCallTerminalObservation::CompletedWithTools {
+                        response,
+                        retained_input_tokens,
+                    },
                     ModelCallCauseCode::Completed,
                 )
             }
@@ -3013,6 +3016,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn provider_compaction_tool_completion_preserves_retained_input_measure() {
+        let completion = CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![
+                AssistantPart::ProviderCompaction {
+                    block_json: String::from(
+                        r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                    ),
+                },
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("provider-call-opaque"),
+                    name: ToolName::new("current_time"),
+                    arguments_json: String::from("{}"),
+                }),
+            ],
+            usage: TokenUsage::default(),
+        };
+
+        let classified = classify_terminal(
+            TerminalEvidence::CompletedWithProviderCompaction {
+                completion,
+                retained_input_tokens: 37,
+            },
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("provider compaction tool completion is representable");
+
+        assert!(matches!(
+            classified.observation,
+            ModelCallTerminalObservation::CompletedWithTools {
+                retained_input_tokens: Some(37),
+                ..
+            }
+        ));
+    }
+
     /// S10 / INV-002 / INV-005: runtime-native tool calls become ordered,
     /// normalized domain proposals without retaining provider identifiers.
     #[test]
@@ -3023,7 +3067,8 @@ mod tests {
             &configured("model-exact"),
         )
         .expect("tool-use completion is supported");
-        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
         else {
             panic!("tool-use finish produces a same-turn tool round");
         };
@@ -3067,7 +3112,8 @@ mod tests {
             &configured("model-exact"),
         )
         .expect("an empty thinking part must not fail a tool completion closed");
-        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
         else {
             panic!("the tool completion still yields its same-turn tool round");
         };
@@ -3161,7 +3207,8 @@ mod tests {
         )
         .expect("suppressed tool material has a bounded terminal classification");
 
-        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+            classified.observation
         else {
             panic!("suppressed tool material yields a same-turn denial round");
         };

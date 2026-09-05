@@ -2091,7 +2091,7 @@ fn apply_terminal_observation(
             )?;
             Ok(ModelCallTerminalOutcome::Completed(completed))
         }
-        ModelCallTerminalObservation::CompletedWithTools { response } => {
+        ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
             if let Some(proof) = cancellation_proof {
                 let ModelCallTerminalIdentities::StoppedToolRound(identities) = identities else {
                     return Err(ModelCallClosureError::IdentityShapeMismatch);
@@ -2339,6 +2339,9 @@ pub enum ModelCallTerminalObservation {
     CompletedWithTools {
         /// Ordered text and normalized proposals, proven to contain a tool.
         response: ToolUsingAssistantResponse,
+        /// Provider-reported input retained after an in-response compaction,
+        /// when the tool response contains a provider compaction block.
+        retained_input_tokens: Option<u64>,
     },
     /// Evidence establishes a known failure.
     KnownFailed,
@@ -2359,6 +2362,10 @@ impl ModelCallTerminalObservation {
                 retained_input_tokens,
                 ..
             } => Some(*retained_input_tokens),
+            Self::CompletedWithTools {
+                retained_input_tokens,
+                ..
+            } => *retained_input_tokens,
             _ => None,
         }
     }
@@ -7904,6 +7911,7 @@ mod tests {
                     AssistantResponsePart::ToolCall(tool_proposal("risky_tool", "{}")),
                 ])
                 .expect("the response contains one tool proposal"),
+                retained_input_tokens: None,
             },
         );
         let outcome = execution
@@ -8148,6 +8156,7 @@ mod tests {
                     AssistantResponsePart::ToolCall(tool_proposal("current_time", "{}")),
                 ])
                 .expect("the response contains tool proposals"),
+                retained_input_tokens: None,
             },
         );
         let outcome = execution
@@ -8311,6 +8320,7 @@ mod tests {
                     AssistantResponsePart::ToolCall(tool_proposal("current_time", "{}")),
                 ])
                 .expect("the response contains one tool proposal"),
+                retained_input_tokens: None,
             },
         );
         let outcome = execution

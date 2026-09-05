@@ -4574,7 +4574,10 @@ pub enum ModelCallTerminalObservation {
         response: Vec<AssistantResponsePart>,
         retained_input_tokens: u64,
     },
-    CompletedWithTools { response: ToolUsingAssistantResponse },
+    CompletedWithTools {
+        response: ToolUsingAssistantResponse,
+        retained_input_tokens: Option<u64>,
+    },
     KnownFailed,
     Refused,
     Cancelled,

@@ -1593,7 +1593,10 @@ async fn checkpoint_delegated_approval_at(
     .expect("the proposals form a tool-using response");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        });
     let ModelCallTerminalOutcome::ToolRound(round) = repository
         .apply_terminal_observation(
             session,

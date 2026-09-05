@@ -3632,7 +3632,10 @@ async fn checkpoint_suppressed_tool_round(
         .expect("the suppressed proposal forms one inert tool response");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        });
     let outcome = model_repository
         .apply_terminal_observation(
             fixture.session,
@@ -3759,7 +3762,10 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
     let observation = authorized
         .observation_correlation()
         .bind_terminal_observation_with_usage(
-            ModelCallTerminalObservation::CompletedWithTools { response },
+            ModelCallTerminalObservation::CompletedWithTools {
+                response,
+                retained_input_tokens: provider_compaction.as_ref().map(|_| 10),
+            },
             usage,
         );
     let identities = provider_compaction
@@ -5002,7 +5008,10 @@ async fn prepare_delegated_tool_crash_fixture(
     let observation = fixture
         .authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        });
     let outcome = fixture
         .repository
         .apply_terminal_observation(
@@ -5390,6 +5399,7 @@ async fn assert_delegated_nonterminal_reread_rejects_result(
                     .observation_correlation()
                     .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
                         response,
+                        retained_input_tokens: None,
                     }),
                 ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
                     vec![ToolResponsePartIdentity::tool_call(

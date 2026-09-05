@@ -14,10 +14,10 @@ use signalbox_model_runtime::{
     BoundaryLossEvidence, CancellationSignal, CredentialRedactingSink, DeliveryMode, ExchangeFacts,
     InputTokenCountOutcome, LossCause,
     MAX_BUFFERED_PROVIDER_RESPONSE_BYTES as MAX_BUFFERED_RESPONSE_BYTES,
-    MAX_STREAMED_PROVIDER_RESPONSE_BYTES as MAX_STREAMED_RESPONSE_BYTES, ModelInputTokenCounter,
-    ModelOperation, ModelRuntime, NativeErrorFacts, ObservationFact, ObservationSink,
-    PreparationDefect, PreparationFailure, PreparationOutcome, ProviderCompactionMode,
-    ProviderErrorEvidence, ProviderErrorKind, ProviderRequestId,
+    MAX_STREAMED_PROVIDER_RESPONSE_BYTES as MAX_STREAMED_RESPONSE_BYTES, MessagePart,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, NativeErrorFacts, ObservationFact,
+    ObservationSink, PreparationDefect, PreparationFailure, PreparationOutcome,
+    ProviderCompactionMode, ProviderErrorEvidence, ProviderErrorKind, ProviderRequestId,
     ResponsePrefixBudget as PrefixBudget, SseFraming, StreamInterruption, TerminalEvidence,
     TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
     boundary_loss_evidence as exchange_loss, emit_provider_observation as emit, parse_retry_after,
@@ -53,6 +53,21 @@ const fn anthropic_beta_header(
         (false, FastMode::Enabled) => Some(FAST_MODE_BETA),
         (false, FastMode::Disabled) => None,
     }
+}
+
+fn provider_compaction_beta_required<C>(
+    operation: &ModelOperation<C>,
+    provider_compaction_supported: bool,
+    server_compaction: bool,
+) -> bool {
+    server_compaction
+        || (provider_compaction_supported
+            && operation.messages.iter().any(|message| {
+                message
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::ProviderCompaction { .. }))
+            }))
 }
 
 /// The Anthropic Messages adapter.
@@ -404,6 +419,11 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         let delivery = operation.delivery;
         let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
             && provider_compaction_supported;
+        let provider_compaction_beta = provider_compaction_beta_required(
+            &operation,
+            provider_compaction_supported,
+            server_compaction,
+        );
         let stop_sequences = operation.settings.stop_sequences.clone();
         let mut builder = self
             .client
@@ -412,7 +432,9 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .header("anthropic-version", self.version_header.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        if let Some(beta_header) = anthropic_beta_header(request_fast_mode, server_compaction) {
+        if let Some(beta_header) =
+            anthropic_beta_header(request_fast_mode, provider_compaction_beta)
+        {
             builder = builder.header("anthropic-beta", beta_header);
         }
         let request = match build_http_request(builder) {
@@ -706,6 +728,11 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             .contains(operation.resolved_target.as_str());
         let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
             && provider_compaction_supported;
+        let provider_compaction_beta = provider_compaction_beta_required(
+            &operation,
+            provider_compaction_supported,
+            server_compaction,
+        );
         let wire_request = match build_request_with_fast_mode(
             &operation,
             request_fast_mode,
@@ -736,7 +763,9 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             .header("anthropic-version", self.version_header.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        if let Some(beta_header) = anthropic_beta_header(request_fast_mode, server_compaction) {
+        if let Some(beta_header) =
+            anthropic_beta_header(request_fast_mode, provider_compaction_beta)
+        {
             builder = builder.header("anthropic-beta", beta_header);
         }
         let request = match build_http_request(builder) {

@@ -2554,7 +2554,7 @@ where
                     self.ids.next_context_frontier_id(),
                 ))
             }
-            ModelCallTerminalObservation::CompletedWithTools { response } => {
+            ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
                 let mut approval_index = 0usize;
                 let mut continuing = Vec::with_capacity(response.parts().len());
                 let mut stopped = Vec::with_capacity(response.parts().len());
@@ -2672,7 +2672,7 @@ where
         advertised_tools: &[ToolDefinition],
         recorded_user_overrides: &[RecordedUserOverride],
     ) -> Box<[InitialToolApproval]> {
-        let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } = observation else {
             return Box::new([]);
         };
         let mut remaining_overrides: Vec<&RecordedUserOverride> =
@@ -3456,6 +3456,7 @@ mod tests {
         ModelCallTerminalObservation::CompletedWithTools {
             response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
                 .expect("fixture response contains tools"),
+            retained_input_tokens: None,
         }
     }
 
@@ -4823,6 +4824,7 @@ mod tests {
         ModelCallTerminalObservation::CompletedWithTools {
             response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
                 .expect("fixture response contains tools"),
+            retained_input_tokens: None,
         }
     }
 
@@ -5082,7 +5084,10 @@ mod tests {
             ),
         ])
         .expect("suppressed proposal remains one bounded logical request");
-        let observation = ModelCallTerminalObservation::CompletedWithTools { response };
+        let observation = ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+        };
 
         assert_eq!(
             service
