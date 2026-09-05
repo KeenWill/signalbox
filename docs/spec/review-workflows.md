@@ -129,9 +129,8 @@ recorded values and a distinct reuse is a conflict.
 The daemon constructs an attempt only when the start selection exactly matches
 the resolved review library; an absent library, changed version, changed stage
 or concern name, or reordered concern fails closed rather than falling back to
-daemon defaults. The initial concern inventory is closed; a different set
-requires a later accepted catalog contract rather than a new key under the
-present version.
+daemon defaults. The concern inventory a library may carry belongs to
+[configuration and credentials](configuration-and-credentials.md).
 
 Session execution evidence and attempt configuration agree through two
 independently checked bindings, the session's copied template provenance and the
@@ -163,8 +162,8 @@ Finding events and external-link attachments bind their exact pass result in the
 transaction that appends or attaches the effect, so every committed point is an
 aggregate the loaders can reconstitute.
 
-Terminal mutation commands print their generated command identity before socket
-I/O so an ambiguous attempt can be retried exactly.
+How the terminal prints a review mutation's command identity for exact retry
+belongs to [process protocol](process-protocol.md).
 
 ## Contracts
 

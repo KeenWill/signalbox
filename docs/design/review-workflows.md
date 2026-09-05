@@ -24,19 +24,22 @@ adapter constructs an external object identifier as an opaque canonical
 provider-wide key: it qualifies a repository-scoped host identifier with the
 canonical repository key before it constructs the attachment.
 
-The model adapter exposes one tool, `submit_review_findings`, forces exactly one
-call to it, disables parallel tool use, and decodes the call's arguments
-independently of the provider. The argument is one object with one required
-member, `findings`, an array of at most 32 finding objects; no object admits
-additional properties. Every finding object requires all eleven members:
-`file_path`, a string; `line_start` and `line_end`, either both null or both
-integers from 1 through 4294967295; `diff_side`, null, `left`, or `right`;
-`title` and `body`, strings; `severity`, one of `info`, `low`, `medium`, `high`,
-or `critical`; `is_real_confidence` and `severity_label_confidence`, integers
-from 0 through 10000; `category`, a string; and `recommended_fix`, a string or
-null. After decode, ordinary finding construction enforces that `line_end` is
-not below `line_start`, the byte bounds, the nonempty and U+0000 rules, target
-comparison evidence, and every typed vocabulary.
+The model adapter exposes one tool, `submit_review_findings`, disables parallel
+tool use, and decodes the call's arguments independently of the provider.
+Exactly one call to that tool is the pass's success condition; the adapter does
+not force the call, because the Anthropic runtime carries a named tool demand as
+an instruction only ([runtime substrate](../spec/runtime-substrate.md)). The
+argument is one object with one required member, `findings`, an array of at most
+32 finding objects; no object admits additional properties. Every finding object
+requires all eleven members: `file_path`, a string; `line_start` and `line_end`,
+either both null or both integers from 1 through 4294967295; `diff_side`, null,
+`left`, or `right`; `title` and `body`, strings; `severity`, one of `info`,
+`low`, `medium`, `high`, or `critical`; `is_real_confidence` and
+`severity_label_confidence`, integers from 0 through 10000; `category`, a
+string; and `recommended_fix`, a string or null. After decode, ordinary finding
+construction enforces that `line_end` is not below `line_start`, the byte
+bounds, the nonempty and U+0000 rules, target comparison evidence, and every
+typed vocabulary.
 
 The adapter fails the pass on no structured value, several values, malformed
 JSON, schema mismatch, a domain-invalid item, more than 32 items, or a failed
@@ -46,14 +49,18 @@ path; no proposal survives as untyped text or as a partial inventory. Free-form
 assistant text stays transcript evidence.
 
 A new application-store operation replaces the sealed incomplete repair outcome
-once every blocked finding has been reconciled to a fixed or surviving state,
-and publication becomes eligible against the inventory that reconciliation
-leaves.
+once every blocked finding has taken a transition the finding rules admit after
+a repair block: fixed, superseded, or stale. No blocked finding returns to the
+publication set; publication becomes eligible against the accepted findings the
+repair neither fixed nor blocked.
 
 After publication completes, a continuation runs one external-context-import
-pass per posted object. Each pass reports that object's state against its
-reservation and appends the next observation or binds a no-change result; the
-continuation never infers external state from the publication result.
+pass per posted link. The work names the attempt and the link, and the store
+keeps one continuation slot per attempt and link, so a resumed attempt tells the
+passes apart. A newly posted link carries no observation, so the pass appends
+observation one. A no-change result applies only after that observation exists;
+a resumed pass that finds it recorded binds one. The continuation never infers
+external state from the publication result.
 
 ## Constraints on present code
 
@@ -68,8 +75,8 @@ The sealed incomplete repair outcome stays a typed durable record that a later
 operation can replace; nothing derives publication eligibility from a blocked
 attempt in the meantime.
 
-The no-change pass result stays in the result vocabulary, because the
-post-publication continuation depends on it.
+The no-change pass result stays in the result vocabulary, because a resumed
+continuation pass depends on it.
 
 The external-link attachment stores its identifier as an opaque key and does not
 interpret it.
@@ -91,8 +98,8 @@ writable.
 An attachment identifier for a repository-scoped host object is the qualified
 canonical key.
 
-A blocked repair, once its findings are reconciled, reaches publication without
-a new attempt.
+A blocked repair, once each blocked finding is fixed, superseded, or stale,
+reaches publication without a new attempt, and no blocked finding is posted.
 
-A completed publication is followed by one import pass per posted object, and
-each pass binds that object's observation or no-change result.
+A completed publication is followed by one import pass per posted link, recorded
+under the attempt and link, and each link carries observation one afterward.
