@@ -22,7 +22,8 @@ AUTO_TRAIT = re.compile(
     r"panic::unwind_safe::(?:RefUnwindSafe|UnwindSafe))$"
 )
 BLANKET_TRAIT = re.compile(
-    r"^(?:alloc::borrow::ToOwned|core::(?:any::Any|borrow::Borrow(?:Mut)?|"
+    r"^(?:alloc::(?:borrow::ToOwned|string::ToString)|"
+    r"core::(?:any::Any|borrow::Borrow(?:Mut)?|"
     r"clone::CloneToUninit|convert::(?:From|Into|TryFrom|TryInto))|"
     r"equivalent::(?:Comparable|Equivalent)|hashbrown::Equivalent|"
     r"tracing::instrument::(?:Instrument|WithSubscriber)|typenum::type_operators::Same)$"
@@ -163,6 +164,8 @@ def render(crate: str, path: Path) -> None:
     current_text = path.read_text()
     root, current = parse(current_text)
     _, previous = parse(previous_text(path, current_text))
+    current = list(dict.fromkeys(current))
+    previous = list(dict.fromkeys(previous))
     added = Counter(current) - Counter(previous)
     removed = Counter(previous) - Counter(current)
     by_module: dict[str, list[Item]] = defaultdict(list)

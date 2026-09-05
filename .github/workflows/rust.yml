@@ -77,7 +77,7 @@ jobs:
                 # Binding process/specification prose and generated indexes
                 # run the complete bar even though they are Markdown.
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
-                  | docs/domain-spine.md | docs/invariants.md \
+                  | docs/api/* | docs/domain-spine.md | docs/invariants.md \
                   | docs/scenarios.md | docs/style.md)
                   rust=$((rust + 1))
                   ;;

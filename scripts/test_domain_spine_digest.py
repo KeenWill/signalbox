@@ -216,6 +216,7 @@ impl<T, U> core::convert::Into<U> for sample::Record where U: core::convert::Fro
 impl<T> core::any::Any for sample::Record where T: 'static
 impl<T> core::borrow::Borrow<T> for sample::Record where T: ?core::marker::Sized
 impl<T, U> core::convert::TryInto<U> for sample::Record where U: core::convert::TryFrom<T>
+impl<T> alloc::string::ToString for sample::Record where T: core::fmt::Display + ?core::marker::Sized
 """
         expected = """\
 sample
@@ -235,6 +236,37 @@ sample
                 digest.render("sample", snapshot)
 
         self.assertEqual(output.getvalue(), expected)
+
+    def test_duplicate_declarations_do_not_create_delta_multiplicity(self) -> None:
+        shared = "pub mod sample\npub struct sample::Service\n"
+        implementation = "impl sample::Service\n"
+        baseline = shared + implementation + implementation
+        current = shared + implementation
+        expected = """\
+sample
+  (root): types=1 traits=0 functions=0
+    added: none
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
+    def test_api_snapshots_are_rust_reaching_paths(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github/workflows/rust.yml"
+        ).read_text()
+
+        self.assertIn("docs/api/* | docs/domain-spine.md", workflow)
 
     def test_public_static_is_delta_item(self) -> None:
         baseline = "pub mod sample\n"
