@@ -1907,7 +1907,11 @@ impl PostgresModelCallRepository {
                         let backoff = availability_retry_backoff(
                             cause,
                             retry_after,
-                            same_credential_attempts,
+                            if retrying_same_credential {
+                                same_credential_attempts
+                            } else {
+                                1
+                            },
                             observation.call(),
                         );
                         let successor = execution
