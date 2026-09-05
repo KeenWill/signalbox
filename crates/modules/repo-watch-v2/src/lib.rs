@@ -9,11 +9,15 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use signalbox_ownership_seam::{
-    BranchName, CheckConclusion, ChecksOutcome, CommitSha, MergeableState, OffsetDateTime,
-    PullRequestBody, PullRequestNumber, PullRequestTitle, ReactionChange, ReactionSubject,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventOccurrenceV1,
-    RepoWatchEventTarget, RepoWatchRule, RepositorySlug, ReviewState,
+    BranchName, CheckConclusion, ChecksOutcome, CommandOutsideSeam, CommandSettlement, CommitSha,
+    CreateSession, FinishCondition, LifecycleEvent, LifecycleEventKind, MergeableState,
+    OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle, ReactionChange,
+    ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
+    RepoWatchEventOccurrenceV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState, SessionCommand,
+    SessionCommandKind, SessionLifecycleCommand, SessionLifecycleOperation, SessionOwnership,
+    StartGate, StopStickiness,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -166,6 +170,175 @@ pub enum RuleAdmission {
     Stale,
 }
 
+/// Result of idempotently recording one emitted command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchAdmission {
+    /// The complete action batch was new.
+    Inserted,
+    /// This rule revision and event already have a retained action batch.
+    Replayed,
+    /// A durable dispatch or command identity was already bound elsewhere.
+    ConflictingReuse,
+    /// The named rule revision is not currently active in this repository.
+    InactiveRule,
+}
+
+/// Module provenance retained beside one checked seam command.
+#[derive(Clone, Debug)]
+pub struct PlannedCommand {
+    dispatch: RepoWatchDispatchId,
+    action_ordinal: u64,
+    repository: RepositorySlug,
+    rule_id: RepoWatchRuleId,
+    rule_revision: RepoWatchRuleVersion,
+    event_id: signalbox_ownership_seam::RepoWatchEventId,
+    trigger_sequence: Option<u64>,
+    command: SessionCommand,
+}
+
+impl PlannedCommand {
+    fn new(
+        dispatch: RepoWatchDispatchId,
+        action_ordinal: u64,
+        rule: &RepoWatchRule,
+        event: &RepoWatchEvent,
+        trigger_sequence: Option<u64>,
+        command: SessionCommand,
+    ) -> Self {
+        Self {
+            dispatch,
+            action_ordinal,
+            repository: event.repository().clone(),
+            rule_id: rule.id().clone(),
+            rule_revision: rule.version(),
+            event_id: event.id(),
+            trigger_sequence,
+            command,
+        }
+    }
+
+    /// Returns the module-local dispatch reference.
+    pub const fn dispatch(&self) -> RepoWatchDispatchId {
+        self.dispatch
+    }
+
+    /// Returns the one-based position in the rule's ordered action batch.
+    pub const fn action_ordinal(&self) -> u64 {
+        self.action_ordinal
+    }
+
+    /// Returns the repository whose fact matched the rule.
+    pub const fn repository(&self) -> &RepositorySlug {
+        &self.repository
+    }
+
+    /// Returns the checked rule identity.
+    pub const fn rule_id(&self) -> &RepoWatchRuleId {
+        &self.rule_id
+    }
+
+    /// Returns the checked rule revision.
+    pub const fn rule_revision(&self) -> RepoWatchRuleVersion {
+        self.rule_revision
+    }
+
+    /// Returns the triggering normalized GitHub fact.
+    pub const fn event_id(&self) -> signalbox_ownership_seam::RepoWatchEventId {
+        self.event_id
+    }
+
+    /// Returns the lifecycle trigger, absent for a direct rule/event match.
+    pub const fn trigger_sequence(&self) -> Option<u64> {
+        self.trigger_sequence
+    }
+
+    /// Borrows the checked command sent through the seam.
+    pub const fn command(&self) -> &SessionCommand {
+        &self.command
+    }
+
+    /// Consumes the plan and returns its checked command.
+    pub fn into_command(self) -> SessionCommand {
+        self.command
+    }
+}
+
+/// Core-owned factory for the resolved create-session payload.
+pub trait CreateSessionCommandFactory {
+    /// Infrastructure or template-resolution failure.
+    type Error;
+
+    /// Builds a command with module-dispatch provenance for the supplied reference.
+    fn create_session(
+        &mut self,
+        dispatch: RepoWatchDispatchId,
+        template: &signalbox_ownership_seam::SessionTemplateName,
+        event: &RepoWatchEvent,
+    ) -> Result<CreateSession, Self::Error>;
+}
+
+/// Module-local source of opaque dispatch references.
+pub trait DispatchReferenceGenerator {
+    /// Returns the next dispatch reference.
+    fn next_dispatch(&mut self) -> RepoWatchDispatchId;
+}
+
+/// Why a lifecycle reaction did not fit repo-watch's closed command policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleReactionError {
+    /// Only session terminal and goal change events drive these reactions.
+    UnsupportedTrigger,
+    /// Only start release and sticky stop are repo-watch lifecycle reactions.
+    UnsupportedCommand,
+}
+
+impl fmt::Display for LifecycleReactionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::UnsupportedTrigger => {
+                "repository-watch lifecycle reaction has no admitted trigger"
+            }
+            Self::UnsupportedCommand => {
+                "repository-watch lifecycle reaction has no admitted command"
+            }
+        })
+    }
+}
+
+impl Error for LifecycleReactionError {}
+
+/// Why a matching event could not become a checked command batch.
+#[derive(Debug)]
+pub enum PlanRepositoryEventError<E> {
+    /// The core-owned command factory failed.
+    Factory(E),
+    /// The factory returned creation provenance outside the ownership seam.
+    CommandOutsideSeam,
+}
+
+impl<E: fmt::Display> fmt::Display for PlanRepositoryEventError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Factory(error) => write!(formatter, "create-session factory failed: {error}"),
+            Self::CommandOutsideSeam => {
+                formatter.write_str("create-session command is outside the ownership seam")
+            }
+        }
+    }
+}
+
+impl<E> Error for PlanRepositoryEventError<E>
+where
+    E: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Factory(error) => Some(error),
+            Self::CommandOutsideSeam => None,
+        }
+    }
+}
+
 impl WebhookDisposition {
     const fn storage(self) -> &'static str {
         match self {
@@ -193,6 +366,8 @@ pub enum StoreError {
     EventRepositoryMismatch,
     /// The checked rule exposed too many identity fields for the durable inventory.
     InvalidRuleFieldInventory,
+    /// Planned commands do not form one complete ordered rule/event batch.
+    InvalidDispatchBatch,
 }
 
 impl fmt::Display for StoreError {
@@ -213,6 +388,9 @@ impl fmt::Display for StoreError {
             Self::InvalidRuleFieldInventory => {
                 "repository-watch rule identity-field inventory is too large"
             }
+            Self::InvalidDispatchBatch => {
+                "repository-watch commands do not form one ordered dispatch batch"
+            }
         })
     }
 }
@@ -226,7 +404,8 @@ impl Error for StoreError {
             | Self::InvalidEventRetention
             | Self::InvalidFrontierGeneration
             | Self::EventRepositoryMismatch
-            | Self::InvalidRuleFieldInventory => None,
+            | Self::InvalidRuleFieldInventory
+            | Self::InvalidDispatchBatch => None,
         }
     }
 }
@@ -1009,6 +1188,233 @@ const fn reaction_change_storage(value: ReactionChange) -> &'static str {
     }
 }
 
+impl RepoWatchStore {
+    /// Atomically records one complete emitted action batch before submission.
+    pub async fn record_commands(
+        &self,
+        planned: &[PlannedCommand],
+        issued_at: OffsetDateTime,
+    ) -> Result<DispatchAdmission, StoreError> {
+        let Some(first) = planned.first() else {
+            return Err(StoreError::InvalidDispatchBatch);
+        };
+        if planned.iter().enumerate().any(|(index, command)| {
+            command.dispatch() != first.dispatch()
+                || command.repository() != first.repository()
+                || command.rule_id() != first.rule_id()
+                || command.rule_revision() != first.rule_revision()
+                || command.event_id() != first.event_id()
+                || command.trigger_sequence() != first.trigger_sequence()
+                || command.action_ordinal()
+                    != u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1)
+        }) {
+            return Err(StoreError::InvalidDispatchBatch);
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                hashtextextended(length($1)::text || ':' || $1 || $2, 0))",
+        )
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                hashtextextended('dispatch:' || $1::text, 0))",
+        )
+        .bind(first.dispatch().into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        let conflicting_dispatch: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM dispatch_ledger WHERE dispatch_ref = $1
+                  AND (repository IS DISTINCT FROM $2
+                       OR rule_id IS DISTINCT FROM $3
+                       OR rule_revision IS DISTINCT FROM $4
+                       OR event_id IS DISTINCT FROM $5
+                       OR trigger_sequence IS DISTINCT FROM $6))",
+        )
+        .bind(first.dispatch().into_uuid())
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .bind(Decimal::from(first.rule_revision().get()))
+        .bind(first.event_id().into_uuid())
+        .bind(first.trigger_sequence().map(Decimal::from))
+        .fetch_one(&mut *transaction)
+        .await?;
+        if conflicting_dispatch {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::ConflictingReuse);
+        }
+        let retained_actions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM dispatch_ledger
+              WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3
+                AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5",
+        )
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .bind(Decimal::from(first.rule_revision().get()))
+        .bind(first.event_id().into_uuid())
+        .bind(first.trigger_sequence().map(Decimal::from))
+        .fetch_one(&mut *transaction)
+        .await?;
+        if usize::try_from(retained_actions).ok() == Some(planned.len()) {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::Replayed);
+        }
+        if retained_actions != 0 {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::ConflictingReuse);
+        }
+        let active_revision: Option<Decimal> = sqlx::query_scalar(
+            "SELECT active_revision FROM rule
+              WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
+        )
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if active_revision != Some(Decimal::from(first.rule_revision().get())) {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::InactiveRule);
+        }
+        let mut inserted_count = 0_usize;
+        for command in planned {
+            inserted_count += usize::from(
+                sqlx::query(
+                    "INSERT INTO dispatch_ledger
+                        (dispatch_ref, action_ordinal, command_id, repository, rule_id,
+                         rule_revision, event_id, trigger_sequence, command_kind, status, issued_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10)
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(command.dispatch().into_uuid())
+                .bind(Decimal::from(command.action_ordinal()))
+                .bind(command.command().command_id().into_uuid())
+                .bind(command.repository().as_str())
+                .bind(command.rule_id().as_str())
+                .bind(Decimal::from(command.rule_revision().get()))
+                .bind(command.event_id().into_uuid())
+                .bind(command.trigger_sequence().map(Decimal::from))
+                .bind(command_kind_storage(command.command().kind()))
+                .bind(issued_at)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected()
+                    == 1,
+            );
+        }
+        if inserted_count == planned.len() {
+            transaction.commit().await?;
+            return Ok(DispatchAdmission::Inserted);
+        }
+        transaction.rollback().await?;
+        Ok(DispatchAdmission::ConflictingReuse)
+    }
+
+    /// Applies a command-settlement lifecycle event to the module ledger.
+    pub async fn settle_command(&self, event: &LifecycleEvent) -> Result<bool, StoreError> {
+        let LifecycleEventKind::CommandSettled { command, result } = event.kind() else {
+            return Ok(false);
+        };
+        let (status, rejection_kind) = match result {
+            CommandSettlement::Applied => ("applied", None),
+            CommandSettlement::Rejected { kind } => ("rejected", Some(kind.as_str())),
+        };
+        let updated = sqlx::query(
+            "UPDATE dispatch_ledger
+                SET status = $2, rejection_kind = $3, settled_at = $4
+              WHERE command_id = $1 AND status = 'pending'",
+        )
+        .bind(command.into_uuid())
+        .bind(status)
+        .bind(rejection_kind)
+        .bind(event.recorded_at())
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+}
+
+/// Reduces one normalized GitHub fact into held create-session commands.
+pub fn plan_repository_event<Ids, Factory>(
+    rules: &[RepoWatchRule],
+    event: &RepoWatchEvent,
+    ids: &mut Ids,
+    factory: &mut Factory,
+) -> Result<Vec<Vec<PlannedCommand>>, PlanRepositoryEventError<Factory::Error>>
+where
+    Ids: DispatchReferenceGenerator,
+    Factory: CreateSessionCommandFactory,
+{
+    let mut batches = Vec::new();
+    for rule in matching_rules(rules, event) {
+        let dispatch = ids.next_dispatch();
+        let mut commands = Vec::with_capacity(rule.actions().len());
+        for (index, action) in rule.actions().iter().enumerate() {
+            let RepoWatchRuleActionV1::DispatchSession { template } = action;
+            let command = factory
+                .create_session(dispatch, template, event)
+                .map_err(PlanRepositoryEventError::Factory)?
+                .with_lifecycle(
+                    StartGate::Held,
+                    SessionOwnership::Owned,
+                    Some(FinishCondition::ExternalGate),
+                );
+            commands.push(PlannedCommand::new(
+                dispatch,
+                u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
+                rule,
+                event,
+                None,
+                SessionCommand::create_session(command).map_err(|_: CommandOutsideSeam| {
+                    PlanRepositoryEventError::CommandOutsideSeam
+                })?,
+            ));
+        }
+        batches.push(commands);
+    }
+    Ok(batches)
+}
+
+/// Admits a start release or sticky stop driven by a lifecycle event.
+pub fn plan_lifecycle_reaction(
+    trigger: &LifecycleEvent,
+    dispatch: RepoWatchDispatchId,
+    rule: &RepoWatchRule,
+    event: &RepoWatchEvent,
+    command: SessionLifecycleCommand,
+) -> Result<PlannedCommand, LifecycleReactionError> {
+    if !matches!(
+        trigger.kind(),
+        LifecycleEventKind::SessionTerminal(_) | LifecycleEventKind::GoalChanged(_)
+    ) {
+        return Err(LifecycleReactionError::UnsupportedTrigger);
+    }
+    let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
+        || matches!(
+            command.operation(),
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Sticky,
+                ..
+            }
+        );
+    if !admitted {
+        return Err(LifecycleReactionError::UnsupportedCommand);
+    }
+    let command = SessionCommand::lifecycle(command)
+        .map_err(|_| LifecycleReactionError::UnsupportedCommand)?;
+    Ok(PlannedCommand::new(
+        dispatch,
+        1,
+        rule,
+        event,
+        Some(trigger.sequence()),
+        command,
+    ))
+}
+
 /// Returns configured rules whose checked matcher accepts one normalized fact.
 pub fn matching_rules<'a>(
     rules: &'a [RepoWatchRule],
@@ -1037,6 +1443,15 @@ const fn event_kind_storage(kind: RepoWatchEventKindNameV1) -> &'static str {
         RepoWatchEventKindNameV1::Unlabeled => "unlabeled",
         RepoWatchEventKindNameV1::BaseAdvanced => "base_advanced",
         RepoWatchEventKindNameV1::ReactionChanged => "reaction_changed",
+    }
+}
+
+const fn command_kind_storage(kind: SessionCommandKind) -> &'static str {
+    match kind {
+        SessionCommandKind::CreateSession => "create_session",
+        SessionCommandKind::SubmitInput => "submit_input",
+        SessionCommandKind::Goal => "goal",
+        SessionCommandKind::Lifecycle => "lifecycle",
     }
 }
 

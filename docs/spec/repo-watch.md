@@ -260,7 +260,8 @@ obligation eventually emits one action using the latest joined event plus the
 delivery member, never one action per joined event. The embedded event is the
 complete triggering durable fact, not reconstructed API state, and the matched
 count and boundary identities summarize collapse without replaying intermediate
-facts into the session.
+facts into the session. One dispatch reference names exactly one rule revision
+and event evaluation, including its complete ordered action batch.
 
 The goal statement is synthesized from the dispatching rule, the resolved
 template, and the typed parameters, and states only the rule, the template, and,

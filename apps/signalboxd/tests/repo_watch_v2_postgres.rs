@@ -7,19 +7,24 @@
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use rust_decimal::Decimal;
+use signalbox_domain::{
+    DirectModelSelection, ModelSelectionRequest, ModuleDispatch, SessionConfigurationDefaults,
+    SessionCreationProvenance,
+};
 use signalbox_module_repo_watch_v2::{
-    EventAdmission, FrontierEventAdmission, PullRequestLifecycle, PullRequestState, RepoWatchStore,
+    CreateSessionCommandFactory, DispatchAdmission, DispatchReferenceGenerator, EventAdmission,
+    FrontierEventAdmission, PullRequestLifecycle, PullRequestState, RepoWatchStore,
     RepositoryState, RuleAdmission, WebhookAdmission, WebhookDelivery, WebhookDisposition,
-    matching_rules,
+    matching_rules, plan_repository_event,
 };
 use signalbox_ownership_seam::{
-    BranchName, CommitSha, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventContentIdentityV1, RepoWatchEventId,
-    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1, RepoWatchLabelMatcher,
-    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
-    RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope, RepositorySlug,
-    SessionTemplateName, WorkflowName,
+    BranchName, CommitSha, CreateSession, DurableCommandId, OffsetDateTime, PullRequestBody,
+    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventContentIdentityV1, RepoWatchEventId, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1,
+    RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepositorySlug, SessionTemplateName, StartGate, WorkflowName,
 };
 use signalbox_persistence::{
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
@@ -36,6 +41,46 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_repo_watch_v2";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+struct FixedDispatchIds {
+    value: u128,
+    calls: usize,
+}
+
+impl DispatchReferenceGenerator for FixedDispatchIds {
+    fn next_dispatch(&mut self) -> RepoWatchDispatchId {
+        let value = self.value + self.calls as u128;
+        self.calls += 1;
+        RepoWatchDispatchId::from_uuid(Uuid::from_u128(value))
+    }
+}
+
+struct FixtureSessionFactory {
+    next_command: u128,
+}
+
+impl CreateSessionCommandFactory for FixtureSessionFactory {
+    type Error = std::convert::Infallible;
+
+    fn create_session(
+        &mut self,
+        dispatch: RepoWatchDispatchId,
+        _template: &SessionTemplateName,
+        _event: &RepoWatchEvent,
+    ) -> Result<CreateSession, Self::Error> {
+        let command = DurableCommandId::from_uuid(Uuid::from_u128(self.next_command));
+        self.next_command += 1;
+        Ok(CreateSession::new(
+            command,
+            SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                dispatch,
+            }),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(Uuid::from_u128(18)),
+            )),
+        ))
+    }
+}
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
     let container = Postgres::default()
@@ -153,9 +198,14 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             labels: RepoWatchLabelMatcher::default(),
             ..RepoWatchMatcherV1Input::default()
         }),
-        vec![RepoWatchRuleActionV1::DispatchSession {
-            template: SessionTemplateName::try_new(String::from("repo-watch"))?,
-        }],
+        vec![
+            RepoWatchRuleActionV1::DispatchSession {
+                template: SessionTemplateName::try_new(String::from("repo-watch"))?,
+            },
+            RepoWatchRuleActionV1::DispatchSession {
+                template: SessionTemplateName::try_new(String::from("repo-watch-followup"))?,
+            },
+        ],
         RepoWatchSingletonScope::Repository,
         Duration::ZERO,
     )?;
@@ -173,12 +223,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         RuleAdmission::Replayed
     );
     let fingerprint_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM mod_repo_watch.rule_field_fingerprint
+        "SELECT count(*) FROM rule_field_fingerprint
           WHERE repository = $1 AND rule_id = $2",
     )
     .bind(repository.as_str())
     .bind(rule.id().as_str())
-    .fetch_one(&core_pool)
+    .fetch_one(&module_pool)
     .await?;
     assert_eq!(
         usize::try_from(fingerprint_count)?,
@@ -197,12 +247,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?
     );
     let retained_revisions: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM mod_repo_watch.rule_revision
+        "SELECT count(*) FROM rule_revision
           WHERE repository = $1 AND rule_id = $2",
     )
     .bind(other_repository.as_str())
     .bind(rule.id().as_str())
-    .fetch_one(&core_pool)
+    .fetch_one(&module_pool)
     .await?;
     assert_eq!(retained_revisions, 1);
 
@@ -277,12 +327,124 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         FrontierEventAdmission::Stale
     );
-    let payload: Vec<u8> = sqlx::query_scalar(
-        "SELECT normalized_payload FROM mod_repo_watch.gh_event WHERE event_id = $1",
+    let mut ids = FixedDispatchIds {
+        value: 16,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory { next_command: 17 };
+    let plan_batches =
+        plan_repository_event(std::slice::from_ref(&rule), &event, &mut ids, &mut factory)?;
+    assert_eq!(plan_batches.len(), 1);
+    let plans = &plan_batches[0];
+    assert_eq!(plans.len(), 2);
+    assert_eq!(ids.calls, 1);
+    assert_eq!(plans[0].dispatch(), plans[1].dispatch());
+    assert_eq!(plans[0].action_ordinal(), 1);
+    assert_eq!(plans[1].action_ordinal(), 2);
+    let second_rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("branch-ci-second"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            repository: Some(repository.clone()),
+            labels: RepoWatchLabelMatcher::default(),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("repo-watch-second"))?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::ZERO,
+    )?;
+    let mut grouped_ids = FixedDispatchIds {
+        value: 40,
+        calls: 0,
+    };
+    let mut grouped_factory = FixtureSessionFactory { next_command: 42 };
+    let grouped = plan_repository_event(
+        &[rule.clone(), second_rule.clone()],
+        &event,
+        &mut grouped_ids,
+        &mut grouped_factory,
+    )?;
+    assert_eq!(grouped.len(), 2);
+    assert_eq!(grouped[0].len(), 2);
+    assert_eq!(grouped[1].len(), 1);
+    assert_ne!(grouped[0][0].dispatch(), grouped[1][0].dispatch());
+    let signalbox_ownership_seam::SessionCommandPayload::CreateSession(created) =
+        plans[0].command().clone().into_payload()
+    else {
+        panic!("matching dispatch action must produce create_session");
+    };
+    assert_eq!(created.start_gate(), StartGate::Held);
+    assert_eq!(
+        store.record_commands(plans, observed_at).await?,
+        DispatchAdmission::Inserted
+    );
+    assert_eq!(
+        store
+            .record_rule(&repository, &second_rule, observed_at)
+            .await?,
+        RuleAdmission::Inserted
+    );
+    let mut colliding_ids = FixedDispatchIds {
+        value: 16,
+        calls: 0,
+    };
+    let mut colliding_factory = FixtureSessionFactory { next_command: 80 };
+    let colliding_batches = plan_repository_event(
+        std::slice::from_ref(&second_rule),
+        &event,
+        &mut colliding_ids,
+        &mut colliding_factory,
+    )?;
+    assert_eq!(
+        store
+            .record_commands(&colliding_batches[0], observed_at)
+            .await?,
+        DispatchAdmission::ConflictingReuse
+    );
+    let mut replay_ids = FixedDispatchIds {
+        value: 30,
+        calls: 0,
+    };
+    let mut replay_factory = FixtureSessionFactory { next_command: 31 };
+    let replay_batches = plan_repository_event(
+        std::slice::from_ref(&rule),
+        &event,
+        &mut replay_ids,
+        &mut replay_factory,
+    )?;
+    assert_eq!(replay_batches.len(), 1);
+    let replay_plans = &replay_batches[0];
+    assert_eq!(
+        store.record_commands(replay_plans, observed_at).await?,
+        DispatchAdmission::Replayed
+    );
+    let retained_commands: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dispatch_ledger
+          WHERE repository = $1 AND rule_id = $2 AND event_id = $3",
     )
+    .bind(repository.as_str())
+    .bind(rule.id().as_str())
     .bind(event.id().into_uuid())
-    .fetch_one(&core_pool)
+    .fetch_one(&module_pool)
     .await?;
+    assert_eq!(retained_commands, 2);
+    assert!(
+        store
+            .deactivate_rule(&repository, rule.id().as_str(), observed_at)
+            .await?
+    );
+    assert_eq!(
+        store.record_commands(replay_plans, observed_at).await?,
+        DispatchAdmission::Replayed
+    );
+    let payload: Vec<u8> =
+        sqlx::query_scalar("SELECT normalized_payload FROM gh_event WHERE event_id = $1")
+            .bind(event.id().into_uuid())
+            .fetch_one(&module_pool)
+            .await?;
     let payload = String::from_utf8(payload)?;
     assert!(payload.contains("branch_workflow_run_completed"));
     assert!(payload.contains("\"workflow\":\"ci\""));
@@ -323,18 +485,18 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         FrontierEventAdmission::ConflictingReuse
     );
     let preceding_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM mod_repo_watch.gh_event WHERE event_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE event_id = $1")
             .bind(preceding_event.id().into_uuid())
-            .fetch_one(&core_pool)
+            .fetch_one(&module_pool)
             .await?;
     assert_eq!(preceding_count, 0);
     let frontier_sequence: Decimal = sqlx::query_scalar(
-        "SELECT sequence FROM mod_repo_watch.frontier
+        "SELECT sequence FROM frontier
           WHERE repository = $1 AND stream_identity = $2",
     )
     .bind(repository.as_str())
     .bind(stream.as_slice())
-    .fetch_one(&core_pool)
+    .fetch_one(&module_pool)
     .await?;
     assert_eq!(frontier_sequence, Decimal::from(2_u64));
     let stale_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
