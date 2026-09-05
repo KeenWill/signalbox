@@ -120,10 +120,10 @@ generation fence is unsupported.
 ## Boundary contracts
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
-identifiers. They never contain source bytes, host or credential paths, provider
-payloads, SQL, or user content; a tool failure may name a bounded
-workspace-relative path. Retained source content, such as an imported transcript
-entry, is not diagnostic evidence.
+identifiers. They never contain source bytes, host or credential paths, raw or
+unsanitized provider payloads, SQL, or user content; a tool failure may name a
+bounded workspace-relative path. Retained source content, such as an imported
+transcript entry, is not diagnostic evidence.
 
 The transport is local-machine and single-user; the protocol has no
 authentication, no authorization exchange, and no remote transport.
