@@ -270,18 +270,20 @@ without recording the retry in the database. Before anything has been sent to
 the provider, the daemon may prepare an unsent call again. After a known failure
 with proven non-acceptance, a rate-limited, overloaded or provider-internal call
 may start a new recorded attempt on the same credential after its durable
-backoff while that credential remains below the finite per-turn attempt bound.
-At the bound, or for another qualifying failure, `switch_now` starts a new
-attempt on another admitted credential and writes the failed member's durable
-chain exclusion. A call whose outcome is unknown is never retried automatically;
-the turn parks for recovery. A CLI harness may retry inside itself. Those
-retries are provider-internal; the daemon neither observes nor records them and
-adds no retries of its own. A migration constraint enforces one call per
-attempt. Successor selection and preparation skip chain-excluded members; that
-selection, not a constraint, enforces rotation no-reuse. The one-shot send
-capability, the per-attempt dispatch gate, the authorize-send commit, and
-startup parking of an issued call enforce at-most-once sending. Only the rule
-that no code retries a call without recording the retry is unenforced.
+backoff while that credential remains below
+`numeric_bounds.max_same_credential_attempts_per_turn`; its initial call and
+every successor call count. This retry precedes the pinned pool action. At the
+bound, or for another qualifying failure, `switch_now` starts a new attempt on
+another admitted credential and writes the failed member's durable chain
+exclusion. A call whose outcome is unknown is never retried automatically; the
+turn parks for recovery. A CLI harness may retry inside itself. Those retries
+are provider-internal; the daemon neither observes nor records them and adds no
+retries of its own. A migration constraint enforces one call per attempt.
+Successor selection and preparation skip chain-excluded members; that selection,
+not a constraint, enforces rotation no-reuse. The one-shot send capability, the
+per-attempt dispatch gate, the authorize-send commit, and startup parking of an
+issued call enforce at-most-once sending. Only the rule that no code retries a
+call without recording the retry is unenforced.
 
 The terminal transition stores the input, output, cache-creation, and cache-read
 token axes independently; a null axis means the provider did not supply it, and
