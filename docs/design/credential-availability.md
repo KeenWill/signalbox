@@ -120,15 +120,17 @@ Wire: a parked turn projects an active transcript turn state that retains the
 turn and its slot, never a terminal one, and no rejection detail. Pre-call fail
 and wait-transition fail (no call) project a turn state naming pool exhaustion,
 the live event `turn_failed`, and a typed `turn_credential_pool_exhausted` live
-event; the member evidence is readable through a read of the call-pinned pool
-policy, whose rejection detail for a policy it cannot resolve names the session,
-turn and policy. Which member served an ordinary selection, and whether a
-completed successor chain is shown to a client, stay undecided in
+event. Neither ending owns a call, so the member evidence is read through the
+pool-policy revision the admission resolved, which the failure or wait record
+carries. The read's rejection detail for a revision it cannot resolve names the
+session, turn and policy. Which member served an ordinary selection, and whether
+a completed successor chain is shown to a client, stay undecided in
 [open questions](../open-questions.md).
 
-Per-member evidence: the pre-call exhaustion record carries contiguous member
-rows in policy order, each naming the member's exclusion, widest scope first.
-Partial, foreign or stale evidence fails reconstitution closed.
+Per-member evidence: the pre-call exhaustion record names the pool-policy
+revision the admission resolved and carries contiguous member rows in policy
+order, each naming the member's exclusion, widest scope first. Partial, foreign
+or stale evidence fails reconstitution closed.
 
 Park on the pre-call path: a fresh admission that finds the pool exhausted
 consults the exhaustion value of the pool-policy revision it resolved. `park`
