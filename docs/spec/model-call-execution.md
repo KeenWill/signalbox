@@ -740,11 +740,12 @@ path below rather than calling a failed member again.
 
 When no member remains admissible, which ending the attempt reaches is decided
 by whether the exhaustion selects a wait — which `fail` never does and `park`
-does only while some exclusion a wake can clear remains — together with whether
-this **availability chain** has already issued a call, the chain and not the
-turn, since a later tool round opens a fresh chain against a turn that has
-already issued calls. Every such ending, and every projection of each, is
-defined by [the credential-availability machine](credential-availability.md).
+does only when some member's every active exclusion is one a wake can clear —
+together with whether this **availability chain** has already issued a call, the
+chain and not the turn, since a later tool round opens a fresh chain against a
+turn that has already issued calls. Every such ending, and every projection of
+each, is defined by
+[the credential-availability machine](credential-availability.md).
 
 This page owns the terminal-evidence-and-cause column of
 [that table](credential-availability.md). A chain that already observed a

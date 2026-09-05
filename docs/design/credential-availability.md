@@ -119,15 +119,16 @@ selecting preparation for the selected member only and released when the
 invocation ends; no reservation is taken against a member no invocation will
 start. A contended wait has four committing transactions that are never
 conflated: the admission that finds every candidate at its bound and inserts the
-wait; the reservation completion that publishes its wake; the evidence rewrite
-by which a woken transaction that still finds every candidate at its bound
-replaces the wait's reservation identities and stays parked; and the release
-that consumes the wait and creates a fresh Prepared successor attempt. An
-exhausted wait has four: the admission; the rewrite from a contended wait; the
-evidence rewrite by which a woken transaction that reruns admission and still
-selects an exhausted wait replaces the wait's exclusion evidence and deadline
-from current state and stays parked, so a past deadline never wakes it again;
-and the release. Lock order is
+wait; the reservation completion that frees capacity and makes the waiters it
+wakes eligible; the evidence rewrite by which a woken transaction that still
+finds every candidate at its bound replaces the wait's reservation identities
+and stays parked; and the release, the preparation that acquires the freed
+reservation with a fresh Prepared successor attempt and consumes the wait in
+that same transaction. An exhausted wait has four: the admission; the rewrite
+from a contended wait; the evidence rewrite by which a woken transaction that
+reruns admission and still selects an exhausted wait replaces the wait's
+exclusion evidence and deadline from current state and stays parked, so a past
+deadline never wakes it again; and the release. Lock order is
 [persistence protocol](../spec/persistence-protocol.md)'s.
 
 Wire: a parked turn projects an active transcript turn state that retains the
@@ -179,8 +180,9 @@ spec page states.
 
 - A `park` pool whose exhaustion snapshot holds a member whose every active
   exclusion expires enters exhausted-wait, keeps its slot, appends no
-  `TurnFailed`, and is released at the computed deadline; the released chain
-  admits that member and reaches selected.
+  `TurnFailed`, and becomes eligible to rerun admission at the computed
+  deadline; absent a competing state change that rerun admits that member and
+  reaches selected.
 - A `park` pool in which every member holds a chain exclusion of this turn,
   alone or beside an expiring exclusion, fails rather than parking: post-failure
   fail at a fresh admission, wait-transition fail (after call) at a release.
