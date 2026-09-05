@@ -45,19 +45,20 @@ reader, and the evidence is copied from the inspection. For a derived view the
 worker streams bytes through a separate bounded binary channel into
 generated-artifact ingest on [blob storage](../spec/blob-storage.md).
 
-Validated bytes publish and verify first, the blob registers in the catalog
-second, and the durable tool result commits last. A failure at any step commits
-no result; an unreferenced blob arises only from a publication failure after
-validation, never from an invalid derived payload. Before publication the daemon
-re-runs detection and validation over the completed staged bytes with the
-ordinary probe algorithm. Each rich view's `ReadViewDeclaration` carries a
-finite set of permitted canonical output types. The result must select one type
-in that set and its registered output reader uniquely, and a result outside the
-set is rejected; only strong-signature or structural validation counts, and a
-producer's own type claim, length, or digest is never evidence. Target bounds
-are two declarations each model adapter makes for an accepted media type and
-presentation kind: the maximum materialized byte length of one reference, and
-the projection from that length to the complete provider-wire payload, which
+For a derived read, validated bytes publish and verify first, the blob registers
+in the catalog second, and the durable tool result commits last. Any failure
+after publication and before the result commits leaves no result and may leave
+an unreferenced blob; invalid derived bytes publish nothing, and a direct read
+publishes and registers nothing. Before publication the daemon re-runs detection
+and validation over the completed staged bytes with the ordinary probe
+algorithm. Each rich view's `ReadViewDeclaration` carries a finite set of
+permitted canonical output types. The result must select one type in that set
+and its registered output reader uniquely, and a result outside the set is
+rejected; only strong-signature or structural validation counts, and a
+producer's own type claim, length, or digest is never evidence. Each target
+bound is the lower of the configured limit and the model adapter's limit for an
+accepted media type and presentation kind: one bounds the materialized bytes of
+one reference, the other the complete encoded provider-wire payload, which
 counts encoding and framing. A reference is admitted only when both hold, so
 emitted byte length alone is never the test. A direct presentation requires the
 emitted type to equal the source's detected type and the source length to fit
