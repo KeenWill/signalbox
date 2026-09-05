@@ -7,11 +7,11 @@ terminal, goal change, command settlement, injection settlement, and session
 ownership change. Every other core outbox event advances the module cursor
 without becoming module input.
 
-The output boundary accepts the existing typed create-session, submit-input,
-goal attach and resume, release-start, sticky stop, adopt, and ownership-release
-commands. Core handles them under an authenticated module principal. Modules do
-not mint turn, input, or frontier identities. Submission returns the exact
-durable command result; settlement events remain replayable lifecycle input.
+The output boundary exposes checked wrappers for the existing typed
+create-session, submit-input, goal attach and resume, release-start, sticky
+stop, adopt, and ownership-release commands. Modules do not mint turn, input, or
+frontier identities. Runtime submission is not wired while module dispatch is
+off; settlement events remain replayable lifecycle input.
 
 Each module owns reconstructible or module-local state in a `mod_` PostgreSQL
 schema. The schema is owned by a non-login role with no direct privileges on
