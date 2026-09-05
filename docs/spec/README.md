@@ -14,42 +14,43 @@ A prose claim about the system lives in exactly one of three places.
 subsystem with committed but unbuilt design, written for the agent that will
 build it; the document is deleted when its feature lands.
 [open-questions.md](../open-questions.md) holds undecided items. Nothing on a
-spec page describes behavior the code lacks except the lines under Not built.
-Two normative surfaces sit outside those homes:
+spec page describes behavior the code lacks except the lines under Planned. Two
+normative surfaces sit outside those homes:
 [domain-spine.md](../domain-spine.md) mirrors the public API shapes of the
 domain and application crates, and [invariants.md](../invariants.md) indexes the
 INV-tagged tests.
 
 A design document is titled `<Subsystem> design`, opens with one sentence saying
 it is not built and which spec page it extends, and has the sections Goal,
-Shape, Constraints on present code, and Acceptance. It keeps decisions, shapes,
-transitions, and acceptance criteria, and links the spec page for built behavior
-instead of restating it.
+Design, Compatibility constraints, and Acceptance criteria. It keeps decisions,
+shapes, transitions, and acceptance criteria, and links the spec page for built
+behavior instead of restating it.
 
 ## Page shape
 
 Every page has one title, one sentence saying what the subsystem is for, and
-exactly four sections in this order: Map, Decisions, Contracts, Not built.
+exactly four sections in this order: Overview, Design decisions, Boundary
+contracts, Planned.
 
-Map says what the subsystem is, its boundary, the shape of its data, its major
-parts, and how they relate. It may name the core type, table, or function a
-reader will look for; it never enumerates types, fields, variants, columns, or
+Overview says what the subsystem is, its boundary, the shape of its data, its
+major parts, and how they relate. It may name the core type, table, or function
+a reader will look for; it never enumerates types, fields, variants, columns, or
 CLI flags, which live in the code, the migration, and the example TOML. It is
 paragraphs, not lists, unless the content is a real sequence.
 
-Decisions states each rule in one sentence, with its reason in the same sentence
-or in one "Why:" sentence after it. The failure a rule prevents is stated only
-when a reader could not infer it. Owner rulings are decisions, and so are
-fences, phrased as what is deliberately not done. No decision restates a
+Design decisions states each rule in one sentence, with its reason in the same
+sentence or in one "Why:" sentence after it. The failure a rule prevents is
+stated only when a reader could not infer it. Owner rulings are decisions, and
+so are fences, phrased as what is deliberately not done. No decision restates a
 contract or a not-built line.
 
-Contracts holds the rules an implementing agent must honor, one paragraph each,
-and names the enforcer when one exists. Each repo-wide contract has one home
-page; every other page links to that page by name and never restates the
-contract.
+Boundary contracts holds the rules an implementing agent must honor, one
+paragraph each, and names the enforcer when one exists. Each repo-wide contract
+has one home page; every other page links to that page by name and never
+restates the contract.
 
-Not built has one line per committed unbuilt capability, naming it and linking
-its design document. Nothing else about unbuilt design appears on the page.
+Planned has one line per committed unbuilt capability, naming it and linking its
+design document. Nothing else about unbuilt design appears on the page.
 
 ## Prose standard
 
