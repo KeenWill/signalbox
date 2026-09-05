@@ -20,6 +20,7 @@ class OwnershipSeamCheckerTests(unittest.TestCase):
         core: str = "",
         module_sql: str | None = None,
         core_sql: str | None = None,
+        workspace_manifest: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -28,6 +29,8 @@ class OwnershipSeamCheckerTests(unittest.TestCase):
             (root / "crates" / "ownership-seam").mkdir()
             (root / "crates" / "persistence" / "src").mkdir(parents=True)
             (module / "Cargo.toml").write_text(manifest, encoding="utf-8")
+            if workspace_manifest is not None:
+                (root / "Cargo.toml").write_text(workspace_manifest, encoding="utf-8")
             (module / "src" / "lib.rs").write_text(source, encoding="utf-8")
             if module_sql is not None:
                 (module / "src" / "query.sql").write_text(module_sql, encoding="utf-8")
@@ -82,6 +85,22 @@ signalbox-persistence = { path = "../../persistence" }
 core_store = { package = "signalbox-persistence", git = "https://example.invalid/repo" }
 """,
             "",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Signalbox dependency", result.stderr)
+
+    def test_renamed_inherited_signalbox_dependency_is_rejected(self) -> None:
+        result = self.run_checker(
+            """[dependencies]
+core_store.workspace = true
+""",
+            "",
+            workspace_manifest="""[workspace]
+members = ["crates/modules/example"]
+
+[workspace.dependencies]
+core_store = { package = "signalbox-persistence", path = "crates/persistence" }
+""",
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden Signalbox dependency", result.stderr)
