@@ -6815,16 +6815,22 @@ async fn select_runtime_pool_credential(
     default_reference: ModelCallCredentialReference,
     policies: &CredentialPoolRuntimeCatalog,
 ) -> Result<SelectedRuntimePoolCredential, ModelCallRepositoryError> {
-    let predecessor: Option<Uuid> = sqlx::query_scalar(
-        "SELECT predecessor_model_call_id
-           FROM credential_pool_availability_successor
-          WHERE successor_turn_attempt_id = $1",
+    let predecessor: Option<(Uuid, bool)> = sqlx::query_as(
+        "SELECT successor.predecessor_model_call_id,
+                EXISTS (
+                    SELECT 1
+                      FROM credential_pool_chain_exclusion AS exclusion
+                     WHERE exclusion.predecessor_model_call_id =
+                           successor.predecessor_model_call_id
+                ) AS rotated
+           FROM credential_pool_availability_successor AS successor
+          WHERE successor.successor_turn_attempt_id = $1",
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)
     .await?;
-    let (policy, predecessor_reference) = match predecessor {
-        Some(predecessor) => {
+    let (policy, predecessor_reference, predecessor_rotated) = match predecessor {
+        Some((predecessor, rotated)) => {
             let policy = load_call_pool_policy(connection, predecessor)
                 .await?
                 .ok_or(ModelCallCorruption::Missing(
@@ -6838,9 +6844,9 @@ async fn select_runtime_pool_credential(
             .bind(predecessor)
             .fetch_one(&mut *connection)
             .await?;
-            (Some(policy), Some(reference))
+            (Some(policy), Some(reference), rotated)
         }
-        None => (policies.get(&target).cloned(), None),
+        None => (policies.get(&target).cloned(), None, false),
     };
     let Some(policy) = policy else {
         return Ok(SelectedRuntimePoolCredential {
@@ -6878,6 +6884,9 @@ async fn select_runtime_pool_credential(
                 .find(|member| member.credential_reference() == reference)
         })
         .or_else(|| {
+            if predecessor_reference.is_some() && !predecessor_rotated {
+                return None;
+            }
             policy
                 .members()
                 .iter()

@@ -107,7 +107,9 @@ retry tests pin this ending.
 
 A transient exclusion is the successor's durable retry deadline; after its reset
 the failed member is admitted again. A chain exclusion is written when a failure
-rotates the pool and removes that member for the remainder of the turn.
+rotates the pool and removes that member for the remainder of the turn. If
+another durable action excludes a retry successor's credential before
+preparation, that successor exhausts instead of selecting another member.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
