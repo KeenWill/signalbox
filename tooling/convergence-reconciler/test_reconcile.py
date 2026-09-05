@@ -1753,7 +1753,7 @@ class GitHubGraphQLTests(unittest.TestCase):
                 },
                 {
                     "dispositionKind": "fixed",
-                    "fixingCommit": "realcommit",
+                    "fixingCommit": "abcdef1",
                     "isDispositioned": True,
                 },
             ],
@@ -1764,9 +1764,10 @@ class GitHubGraphQLTests(unittest.TestCase):
                 raise GitHubNotFoundError("gh REST request failed: not found")
             return {
                 "status": "ahead",
-                "base_commit": {"sha": "merge-base"},
-                "head_commit": {"sha": "head"},
-                "merge_base_commit": {"sha": "merge-base"},
+                "total_commits": 1,
+                "commits": [{"sha": "head"}],
+                "base_commit": {"sha": "abcdef1234567890"},
+                "merge_base_commit": {"sha": "abcdef1234567890"},
             }
 
         with mock.patch.object(

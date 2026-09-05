@@ -485,15 +485,34 @@ query($id: ID!, $after: String!) {
                         validity[fixing_commit] = False
                     else:
                         base_commit = comparison.get("base_commit")
-                        head_commit = comparison.get("head_commit")
                         merge_base = comparison.get("merge_base_commit")
+                        commits = comparison.get("commits")
+                        total_commits = comparison.get("total_commits")
+                        status = comparison.get("status")
+                        base_sha = (
+                            base_commit.get("sha")
+                            if isinstance(base_commit, dict)
+                            else None
+                        )
+                        compared_head_is_current = (
+                            status == "identical"
+                            and base_sha == pull_request["head_oid"]
+                        ) or (
+                            status == "ahead"
+                            and isinstance(commits, list)
+                            and isinstance(total_commits, int)
+                            and total_commits == len(commits)
+                            and bool(commits)
+                            and isinstance(commits[-1], dict)
+                            and commits[-1].get("sha")
+                            == pull_request["head_oid"]
+                        )
                         validity[fixing_commit] = (
-                            comparison.get("status") in {"ahead", "identical"}
-                            and isinstance(base_commit, dict)
-                            and isinstance(head_commit, dict)
+                            isinstance(base_sha, str)
+                            and base_sha.startswith(fixing_commit.casefold())
                             and isinstance(merge_base, dict)
-                            and base_commit.get("sha") == merge_base.get("sha")
-                            and head_commit.get("sha") == pull_request["head_oid"]
+                            and base_sha == merge_base.get("sha")
+                            and compared_head_is_current
                         )
                 if not validity[fixing_commit]:
                     thread["isDispositioned"] = False
