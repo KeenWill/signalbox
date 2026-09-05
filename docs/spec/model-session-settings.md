@@ -15,9 +15,9 @@ value, and `ModelCapabilities` decides whether the selected model supports it.
 
 Settings resolve highest to lowest: per-call override, session override, the
 selected model's named settings profile, then the deployment global default.
-Each override is inherit, clear, or set(value): inherit consults the next layer,
-clear selects the provider default, and set requests the value. The profile
-catalog and the global default are daemon configuration, described on
+Each nullable override is inherit, clear, or set(value): inherit consults the
+next layer, clear selects the provider default, and set requests the value. The
+profile catalog and the global default are daemon configuration, described on
 [configuration-and-credentials.md](configuration-and-credentials.md). The three
 lower layers resolve when a session defaults epoch is installed; the per-call
 layer resolves at input acceptance, under the turn-binding rule on
