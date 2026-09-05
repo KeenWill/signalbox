@@ -94,7 +94,9 @@ can open is fixed by the configured root alone. `sandboxed_exec` and
 launch unshares the user, pid, ipc, uts, and network namespaces and mounts a
 fresh `/proc`. A container-process-namespace variant omits the pid unshare and
 read-only binds the existing `/proc`; it is admissible only when an outer
-container already isolates that namespace.
+container already isolates that namespace. The child inherits none of the
+daemon's environment and runs with a fixed variable set and a fixed bind-mount
+inventory.
 
 The optional `[tool_approval_postures]` table decides, per exact composed tool
 name, whether a request is approved by policy, judged by the approval judge, or
@@ -120,9 +122,11 @@ rejects `env_key` because it uses no child environment. `ambient` leaves login
 resolution to a CLI. `codex_home` names the login directory a Codex child
 receives as `CODEX_HOME`: delivery replaces the child's inherited `CODEX_HOME`
 with the admitted path of the profile the operation's reference names and leaves
-every other profile's path absent. Each `FileCredentialAccess` instance binds
-one consumer-scoped map of references to deployment paths, and a model adapter
-receives the complete file-profile catalog declared for it.
+every other profile's path absent. A configured home is admitted only as an
+existing, readable, nonempty directory, and startup fails otherwise. Each
+`FileCredentialAccess` instance binds one consumer-scoped map of references to
+deployment paths, and a model adapter receives the complete file-profile catalog
+declared for it.
 
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly
@@ -325,13 +329,16 @@ reports one undifferentiated authentication failure the adapter cannot split;
 every `codex_home` credential rejection follows the pool's configured
 `on_credential_rejected` action.
 
-Non-acceptance proof requires a decoded native error envelope naming the cause
-in a pre-stream error response. An SSE error record never carries the proof,
-whatever token it holds, because by then the provider has begun processing the
-request.
+An HTTP adapter proves non-acceptance only with a decoded native error envelope
+naming the cause in a pre-stream error response. An SSE error record never
+carries that proof, whatever token it holds, because by then the provider has
+begun processing the request. The Codex CLI proves non-acceptance instead
+through its machine-readable `turn.failed` closure, so a `codex_cli` pool admits
+`switch_now` on all three availability causes.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
-observed it, and nothing ends one.
+observed it, and nothing ends one. It applies to every session except one that
+has already completed a call through that member on the same pool.
 
 A session's credential history stores the preferred reference rather than the
 pool policy, so a fresh availability chain resolves the pool from the current
