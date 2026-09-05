@@ -17,15 +17,13 @@ snapshot to the call. A fresh admission reselects the member the session's most
 recent call on that pool used while no durable exclusion removes it, otherwise
 the first member in policy order that none removes. The commit that closes a
 failed call applies the action the pinned policy fixes for the failure's cause,
-and either prepares a successor attempt or terminalizes the turn. The
-successor's member is admitted and its call created at that attempt's
-preparation.
+and either terminalizes the turn or prepares a successor attempt, whose member
+is admitted and call created at that attempt's preparation.
 
 An availability chain begins at a fresh admission inside one turn and holds the
 call that admission prepares, if any, and every successor that follows a
 qualifying failure. [Model-call execution](model-call-execution.md) owns what
-bounds a chain, when a turn starts a fresh one, and the rule that no attempt is
-ever sent again with the credential that failed in that chain.
+bounds a chain and when a turn starts a fresh one.
 
 The durable records are the policy snapshot pinned to each call, one exclusion
 row for each member a qualifying failure in the turn removed, one successor row
@@ -74,10 +72,10 @@ availability chain, not to the turn;
 [model-call execution](model-call-execution.md) owns what bounds a chain.
 
 Selected: a member was admitted. The selecting preparation inserts the call's
-prepared record and adds no turn phase. The same preparation consumes the
-pending `switch_next_turn` displacement of the member it excluded, never of the
-member it selected, because the displacement is the excluded member's record and
-consuming any other leaves it pending forever.
+prepared record, adds no turn phase, and consumes the pending `switch_next_turn`
+displacement of the member it excluded, never of the member it selected, because
+the displacement is the excluded member's record and consuming any other leaves
+it pending forever.
 
 Pre-call fail: the attempt that finds every member excluded is call-free, either
 a fresh chain's admission or the later preparation of a deferred successor. The
@@ -97,34 +95,37 @@ evidence naming what failed. The rotation test in
 `crates/persistence/tests/postgres_integration/model_call_execution_and_recovery.rs`
 pins this ending.
 
-Successor: the pinned action for a qualifying cause is `switch_now`, a member
-remains, and the adapter supplied pre-stream proof that the provider never
-accepted the request. The turn stays active and keeps its slot; the predecessor
+Successor: the adapter supplied pre-stream proof that the provider never
+accepted the request, a stop was not requested, and either a transient cause has
+same-credential attempts remaining or the pinned action is `switch_now` and a
+member remains. The turn stays active and keeps its slot; the predecessor
 attempt ends KnownFailure without terminalizing, and the same commit prepares a
-successor attempt and writes the failed member's chain exclusion. That commit
-appends no `TurnFailed`: one commit never both terminalizes the turn and
-authorizes a successor. The same rotation test pins this ending.
+successor attempt. That commit appends no `TurnFailed`: one commit never both
+terminalizes the turn and authorizes a successor. The rotation and transient
+retry tests pin this ending.
 
-A chain exclusion removes the failed member for the remainder of the turn, not
-merely for the chain, and is insert-only: no passed reset, operator clear or
-availability update readmits that member before the turn ends. Why: it forbids
-an automatic retry against the profile that just failed. The turn-scoped key on
-`credential_pool_chain_exclusion` in the model-calls migration enforces the
-scope; nothing enforces that no path deletes a row.
+A transient exclusion is the successor's durable retry deadline; after its reset
+the failed member is admitted again. A chain exclusion is written when a failure
+rotates the pool and removes that member for the remainder of the turn. If
+another durable action excludes a retry successor's credential before
+preparation, that successor exhausts instead of selecting another member.
 
-A successor prepared after a rate-limit or overload failure waits the greater of
-the provider's reported delay and a local exponentially increasing jittered
-delay, capped at five minutes (`MAX_AVAILABILITY_BACKOFF` in
-`crates/persistence/src/model_execution.rs`); a reported delay longer than the
-cap is truncated to it. A successor after a quota failure is immediate.
+A successor prepared after a rate-limit, overload or provider-internal failure
+waits the greater of the provider's reported delay and a local exponentially
+increasing jittered delay, each capped at five minutes
+(`MAX_AVAILABILITY_BACKOFF` in `crates/persistence/src/model_execution.rs`). A
+successor after a quota failure is immediate. Quota and authentication failures
+bypass same-credential retry and apply their pinned actions immediately.
+
+The required finite positive
+`numeric_bounds.max_same_credential_attempts_per_turn` bounds recorded calls on
+one credential in one turn. At the bound a transient failure applies its pinned
+action instead of readmitting that credential.
 
 Terminal: a known failure no successor is authorized to follow terminalizes the
-turn Failed exactly as it would with no pool. Four gates are checked in order,
-and the first to fail decides terminal rather than successor: a stop was
-requested while the call was in flight; the cause is not one of the three
-qualifying causes; the pinned action for that cause is not `switch_now`; the
-adapter supplied no pre-stream proof. Why ordered: ordinary inputs fail several
-gates at once, and the first names the actionable reason.
+turn Failed exactly as it would with no pool. A stop request, missing pre-stream
+proof, non-transient cause without `switch_now`, or transient cause at its bound
+without `switch_now` authorizes no successor.
 
 ## Planned
 

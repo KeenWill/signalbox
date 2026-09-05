@@ -45,7 +45,7 @@ impl StructuredOutputContract {
         // `generated_contract_schema_serializes_as_raw_json` test exercises
         // this exact conversion boundary.
         let mut schema = schemars::schema_for!(T).to_value();
-        crate::json::sort_object_keys(&mut schema);
+        schema.sort_all_objects();
         #[expect(
             clippy::expect_used,
             reason = "serde_json::Value serialization is total; generated_contract_schema_serializes_as_raw_json enforces the boundary"
