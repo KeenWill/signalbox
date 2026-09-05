@@ -85,28 +85,8 @@ pub fn rendered_contract_schema<Contract: ToolContract + ?Sized>() -> serde_json
         object.remove("description");
     }
     let mut value = object_rooted_schema(value);
-    sort_json_object_keys(&mut value);
+    value.sort_all_objects();
     value
-}
-
-fn sort_json_object_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            object.sort_keys();
-            for nested in object.values_mut() {
-                sort_json_object_keys(nested);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for nested in values {
-                sort_json_object_keys(nested);
-            }
-        }
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => {}
-    }
 }
 
 /// JSON Schema keyword holding a schema root's reusable definitions.
@@ -766,7 +746,7 @@ pub mod __private {
                 insert_definition(definitions, String::from(name), definition);
             }
         }
-        super::sort_json_object_keys(&mut schema);
+        schema.sort_all_objects();
         schema
     }
 
