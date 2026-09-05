@@ -4182,6 +4182,7 @@ name = "signalbox-egress-transport"
 version = "0.0.0"
 dependencies = [
  "futures-util",
+ "ipnet",
  "reqwest",
  "rustls",
  "tokio",
