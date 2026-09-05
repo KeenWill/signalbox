@@ -26,8 +26,8 @@ covers waiting. Each of those states carries exactly one deadline; blocked and
 parked carry none. The admission and waiting bounds come from configuration. A
 parked session carries a machine-readable cause and the responder who must act,
 the operator queue or one module. An expired waiting deadline and a module park
-are the two paths into parked. The operator queue is exactly the set of parked
-sessions.
+are the two paths into parked. The operator queue is exactly the parked sessions
+whose recorded responder is the operator.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a finish check passed and declared when no check did. A failure is

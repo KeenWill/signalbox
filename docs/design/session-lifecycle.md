@@ -79,10 +79,10 @@ resources removes the session's worktree and container.
 
 ## Compatibility constraints
 
-No path terminalizes an owned session on a structural failure, an unknown
-failure, or an exhausted retry budget; a path that today ends the run as a
-blocked goal leaves the goal blocked and the session non-terminal, which is the
-state the parking driver will read.
+No automatic failure-handling path terminalizes an owned session on a structural
+failure, an unknown failure, or an exhausted retry budget; a path that today
+ends the run as a blocked goal leaves the goal blocked and the session
+non-terminal, which is the state the parking driver will read.
 
 No dispatch path that replaces parked work terminalizes the predecessor as
 failed; the predecessor stays in a state supersede can close.
