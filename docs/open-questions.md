@@ -134,7 +134,7 @@ per-turn provenance. The following extensions remain undecided:
 - **Whole-bundle unload.** Projection reserves removal at a later turn boundary,
   but unload authority, tombstone rendering, admitted-set history, and the
   model-facing operation remain foundation work. See the owning
-  [projection contract](spec/workspace-instructions.md#not-built).
+  [projection contract](spec/workspace-instructions.md#planned).
 
 ## Conversation import
 

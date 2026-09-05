@@ -13,7 +13,7 @@ later call of the session. Repository-supplied text reaches the model only
 inside labeled regions that hold it below the session system prompt and the
 user's request.
 
-## Shape
+## Design
 
 Eligibility is an allow-list of registered bundle identities bound to a session
 template and copied into the session at creation. A session-specific replacement
@@ -176,7 +176,7 @@ Workspace instructions are repository-supplied untrusted input. Their text has
 no authority to widen tools, reveal credentials, change sandbox placement,
 modify eligibility, or bypass system or user instructions.
 
-## Constraints on present code
+## Compatibility constraints
 
 The turn-start manifest and the migration trigger already fix the digest
 separators and the empty vectors of the eligibility, admitted-set, and manifest
@@ -199,7 +199,7 @@ permission from frontmatter before this design lands.
 No present command changes the empty eligibility or admitted sets, and no
 present surface stores a nonempty one.
 
-## Acceptance
+## Acceptance criteria
 
 A session whose template names an allow-list lists, previews, and reads exactly
 the bundles in its frozen snapshot; a session without one sees an empty catalog,

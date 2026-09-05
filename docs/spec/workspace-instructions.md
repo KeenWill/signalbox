@@ -4,7 +4,7 @@ The daemon discovers and registers the agent documents and Agent Skills a
 workspace or a registered directory supplies, and records for every turn which
 of them a model call could use.
 
-## Map
+## Overview
 
 A workspace instruction is an agent document or an agent skill that a repository
 or an operator supplies to guide a model. An agent document is a file named
@@ -55,7 +55,7 @@ in the tables that `crates/persistence/migrations/202609010007_workspaces.sql`
 creates; `apps/signalboxd/src/workspace_instruction_runtime.rs` runs discovery
 on both paths.
 
-## Decisions
+## Design decisions
 
 Signalbox reads the `AGENTS.md` and Agent Skills formats itself. Why: one
 reproducible path from file to model input, which host-local files cannot
@@ -77,7 +77,7 @@ Discovery does not follow symbolic links.
 
 The discovery safety limits are fixed by the daemon and not user-configurable.
 
-## Contracts
+## Boundary contracts
 
 The daemon alone assembles workspace-instruction context. It never falls back to
 an adapter's ambient loader and never substitutes a same-named bundle for the
@@ -133,7 +133,7 @@ Comparing two manifests does not require the live workspace.
 Reconstitution rejects a missing or mismatched manifest as typed storage
 corruption ([persistence-protocol.md](persistence-protocol.md)).
 
-## Not built
+## Planned
 
 - Adapter delivery: a daemon result reaches a model-runtime adapter only as
   explicit prepared model input; no present operation carries instruction input
