@@ -676,6 +676,7 @@ async fn s24_inv032_outbox_consumers_advance_independent_typed_prefixes()
     assert!(first.recorded_at().unix_timestamp() > 0);
     assert_eq!(repo_watch.read_next().await?, Some(first.clone()));
     repo_watch.acknowledge(first.sequence()).await?;
+    repo_watch.acknowledge(first.sequence()).await?;
 
     let second = repo_watch
         .read_next()
