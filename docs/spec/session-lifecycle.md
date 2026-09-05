@@ -18,10 +18,11 @@ session active, a turn awaiting approval or a child makes it waiting, and a turn
 in any recovery phase makes it recovering. A blocked goal with no live turn
 makes the session blocked. With no live turn and no blocked goal, the held state
 and whether a turn is queued decide: created becomes dispatched once a turn is
-queued, dispatched holds until a turn activates, and every other session reads
-active, which the attention classifier reads as idle. A terminal session stays
-terminal. Core writes the session state in the same transaction as the turn or
-goal transition that changes the projection, so the two machines never disagree.
+queued unless the start gate is held, dispatched holds until a turn activates,
+and every other session reads active, which the attention classifier reads as
+idle. A terminal session stays terminal. Core writes the session state in the
+same transaction as the turn or goal transition that changes the projection, so
+the two machines never disagree.
 
 Waiting carries a typed kind and the party expected to end the wait. Only an
 owned session carries a deadline, and its state sets the kind: admission covers
@@ -125,14 +126,16 @@ error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
 daemon core; no module implements any of them except the core-integrated
-[convergence](convergence-reconciliation.md) sweep, which owns its dispatch
-failure budget and parks the session as a module when that budget is exhausted.
-A dispatched [repo-watch](repo-watch.md) session is the other exception: the
-module holds a start lease over the wait for that session's first model call,
-and an expired lease ends the commissioned goal generation through a composed
-goal stop rather than a lifecycle deadline, leaving the session non-terminal.
-Lifecycle behavior or an event kind a module needs and core does not provide is
-added to core, and modules never reconstruct events by joining core tables.
+[convergence](repo-watch.md) sweep, which owns its dispatch failure budget and
+parks the session as a module when that budget is exhausted. A dispatched
+[repo-watch](repo-watch.md) session is the other exception: the module holds a
+start lease over the wait for that session's first model call, and an expired
+lease ends the commissioned goal generation through a composed goal stop rather
+than a lifecycle deadline, leaving the session non-terminal. Repo-watch also
+owns a dispatch-attempt budget, and an obligation that exhausts it parks the
+owned sessions it wraps as the module. Lifecycle behavior or an event kind a
+module needs and core does not provide is added to core, and modules never
+reconstruct events by joining core tables.
 
 The attention classifier that
 [sessions and the transcript](sessions-and-transcript.md) owns is a projection
@@ -179,7 +182,9 @@ Message injection (operator text, coordinator guidance, steering) is legal in
 every non-terminal state regardless of ownership, except while a terminal
 outcome is pending: a session in that window rejects injection. An injection is
 never silently lost: every accepted injection settles with a durable
-injection_settled receipt, and pending injections never block terminalization.
+injection_settled receipt, and pending injections never block terminalization. A
+turn awaiting a tool approval refuses interrupt delivery, and the other delivery
+modes stay legal.
 
 On session closure, remaining queued turns retire with cause session_closed and
 an open goal generation closes as session_closed; a user-stopped generation
