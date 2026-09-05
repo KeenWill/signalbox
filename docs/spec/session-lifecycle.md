@@ -55,14 +55,15 @@ The command surface creates a session, releases its start gate, submits input,
 attaches, resumes, or stops a goal, adopts, and releases; a release also settles
 a held start gate, so a session that already has queued work becomes dispatched.
 Five further commands close a session or lift a park: a session-level stop
-closes any non-terminal session unless a different terminal outcome is already
-pending, supersede closes it in favour of a named successor, abandon and close
-as failed close a parked session, and resume returns a parked session with no
-pending terminal outcome to its mapped state. A parked session with a blocked
-goal resumes through the goal's resume-with-guidance command; one with a
-pursuing goal may use the session-level resume. The goal command that
-[goal mode](goal-mode.md) calls supersede starts a new goal generation in the
-same session and is unrelated to the session outcome superseded.
+closes any non-terminal session, supersede closes it in favour of a named
+successor, abandon and close as failed close a parked session, and each of these
+closures is refused while a different terminal outcome is already pending;
+resume returns a parked session with no pending terminal outcome to its mapped
+state. A parked session with a blocked goal resumes through the goal's
+resume-with-guidance command; one with a pursuing goal may use the session-level
+resume. The goal command that [goal mode](goal-mode.md) calls supersede starts a
+new goal generation in the same session and is unrelated to the session outcome
+superseded.
 
 Modules observe the lifecycle through seven event kinds with typed payloads on
 the transactional outbox that [persistence protocol](persistence-protocol.md)
