@@ -347,6 +347,10 @@ per-turn provenance. The following extensions remain undecided:
   concrete served identity and a substitution as evidence rather than as
   operator diagnostics and a fail-closed error. Blocks the provider provenance
   schema. (S20–S23)
+- **Ambiguity-replacement credential authority.** Decide whether a replacement
+  call authorized by `DuplicateRiskAccepted` may reuse the ambiguous call's
+  credential profile or must select another eligible profile. Blocks ambiguity
+  replacement calls. (S04)
 
 ## Scheduling and runners
 
