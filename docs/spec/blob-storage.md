@@ -16,16 +16,16 @@ external spelling is the hexadecimal digest behind a `sha256:` prefix.
 PostgreSQL holds the catalog: one `blob` row per digest, one `blob_replica` row
 for every store that holds a verified copy, and one `blob_store_binding` row
 tying each store name to its namespace UUID. `BlobCatalogRepository` writes
-those rows and no present surface deletes them. Routing configuration decides
-only where a new write goes; the catalog is the record of where bytes are.
+those rows and no surface deletes them. Routing configuration decides only where
+a new write goes; the catalog is the record of where bytes are.
 
 The daemon configuration carries an optional `[blob_storage]` table. It names a
 staging directory, a maximum blob size, the stores, and one route for every
 storage class; each store has a name, a namespace UUID, and a kind, either
-`filesystem` or `s3`. Every store carries a namespace marker inside the store
-itself: a filesystem root holds a private `.signalbox-blob-namespace-v1` file
-and an S3 bucket holds an object of the same name, and in both the complete
-content is the configured namespace UUID followed by one line feed. At startup
+`filesystem` or `s3`. Every store carries a namespace marker inside the store: a
+filesystem root holds a private `.signalbox-blob-namespace-v1` file and an S3
+bucket holds an object of the same name, and in both the complete content is the
+configured namespace UUID followed by one line feed. At startup
 `BlobStoreRegistry` checks the configuration against the recorded bindings and
 the markers, then hands out the adapters, which implement the `BlobStore` trait.
 
@@ -42,7 +42,7 @@ response shapes live in `crates/process-protocol` and on
 The browser client asks for a descriptor of one use of a blob. The descriptor
 lists the views the server admits: metadata, download, a browser-native view for
 common image formats, and thumbnail and preview views that an isolated worker
-produces on demand. Each such production is recorded as a `BlobDerivation`, an
+produces on demand. Each production is recorded as a `BlobDerivation`, an
 immutable relation from input digests to output digests that names its producer.
 
 Accepted user content is `UserContent`, an ordered sequence of parts, each exact
@@ -67,9 +67,9 @@ edit.
 
 The namespace marker lives inside the store rather than in the daemon's
 configuration or database. Why: an absent mount must not be admitted as the
-recorded namespace because its path and device identity happen to be locally
-unique, and two locator strings that alias one bucket must disagree on their
-configured namespace UUIDs instead of being admitted as two replicas.
+recorded namespace because its path and device identity are locally unique, and
+two locator strings that alias one bucket must disagree on their configured
+namespace UUIDs instead of being admitted as two replicas.
 
 There is no replica-retirement state, so a configured binding cannot be removed
 while any `blob_replica` row names it, even after another replica exists
@@ -99,8 +99,8 @@ action.
 
 Content responses send an exact content length, advertise byte ranges, forbid
 media-type sniffing, and use the quoted digest as the ETag with immutable
-year-long caching. Why: the digest as ETag is what makes an immutable cache
-lifetime safe.
+year-long caching. Why: the digest as ETag makes an immutable cache lifetime
+safe.
 
 The terminal client escapes DEL and every C1 control code point inside the part
 JSON it prints, so the ordered part values stay parseable while text and
@@ -147,10 +147,10 @@ before socket work when a store name or namespace UUID is absent or disagrees.
 Moving one namespace to another locator preserves its UUID; assigning a locator
 to another namespace requires a fresh store name and UUID.
 
-Omitting the `[blob_storage]` table preserves startup only while the blob
-catalog is empty; once the catalog is nonempty, omission is a startup error.
-With the table absent, blob and conversation-import operations are unavailable
-rather than inventing a storage location.
+Startup succeeds without the `[blob_storage]` table only while the blob catalog
+is empty; once the catalog is nonempty, omission is a startup error. With the
+table absent, blob and conversation-import operations are unavailable rather
+than inventing a storage location.
 
 Configured stores name distinct physical namespaces. Startup compares each
 filesystem root's canonical path, device and inode identity, and mount ancestry
@@ -178,19 +178,19 @@ credential loss. An S3 binding that no route names is not lifecycle-queried at
 startup, and its read failures use the ordinary unavailable candidate outcome.
 
 All namespace-marker and lifecycle operations for routed S3 stores share one
-non-resetting five-minute monotonic startup deadline; changing stores or probe
-kinds never restarts it.
+five-minute monotonic startup deadline; changing stores or probe kinds never
+restarts it.
 
 Blobs may be multiple gigabytes, so every daemon path streams; bounded in-memory
 materialization exists only at consumers that name their bound.
 
-One direct read or one attachment-preparation pass owns a single 24-hour
-monotonic aggregate deadline across its whole ordered traversal of digests and
-replica candidates; moving to another candidate never restarts it. Direct blob
-reads and checked imported-aggregate loads share a non-waiting process-wide
-bound of 16 active traversals, and a request that cannot acquire one returns
-unavailable at once. How a model-originated read or a preparation pass hands off
-its scheduler slot around store I/O is owned by
+One direct read or one attachment-preparation pass has one 24-hour monotonic
+aggregate deadline across its whole ordered traversal of digests and replica
+candidates; moving to another candidate never restarts it. Direct blob reads and
+checked imported-aggregate loads share a process-wide bound of 16 active
+traversals, and a request that cannot acquire one returns unavailable at once.
+How a model-originated read or a preparation pass hands off its scheduler slot
+around store I/O is owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 A model-call attachment check binds its cancellation to the call's authoritative
@@ -239,11 +239,11 @@ generated-artifact route and catalog registration precede the derivation append.
 Derivation runs the current daemon executable through the configured
 filesystem-confined supervisor with no network and fixed deadline and
 concurrency bounds, and the digest of that executable is the implementation
-provenance. This worker is the first content-interpreting processor; every
-future reader of [file-and-media](file-and-media.md) likewise runs inside strong
-process isolation and treats input validation as defense in depth, because
-parser hardening is never complete and a payload that exploits a decoder defect
-must be contained by isolation.
+provenance. This worker and every content-interpreting reader of
+[file-and-media](file-and-media.md) run inside strong process isolation and
+treat input validation as defense in depth, because parser hardening is never
+complete and a payload that exploits a decoder defect must be contained by
+isolation.
 
 User content has exactly one canonical representation: single-text content is a
 one-part sequence, and no second spelling of equivalent content exists. The
