@@ -1578,6 +1578,10 @@ where
     }
 }
 
+/// Returns the greatest selectable imported position on a loaded aggregate.
+///
+/// An imported conversation's normalized entry sequence is nonempty and its
+/// positions are contiguous from one, so the entry count is that bound.
 pub(super) fn last_imported_position(conversation: &ImportedConversation) -> u64 {
     conversation
         .entries()
