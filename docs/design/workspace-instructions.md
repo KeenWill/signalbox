@@ -31,8 +31,9 @@ session scheduler lock and records its versioned SHA-256 hash in the turn-start
 manifest. The snapshot is immutable for the turn; a replacement affects only
 later activations. Installed eligibility is revalidated against the live
 configured-root catalog at activation and at startup recovery, and a root the
-configuration no longer declares revokes access to its entries, including for a
-turn retained active across the restart. A registered bundle absent from the
+configuration no longer declares closes its entries to listing, preview, and new
+admission, including for a turn retained active across the restart; an admission
+already recorded keeps its stored wrapper. A registered bundle absent from the
 snapshot cannot be enumerated, previewed, or admitted.
 
 Three tools expose the snapshot to the model. `instructions_list` enumerates the
@@ -57,9 +58,11 @@ named in a template. The only admission route is a model request through
 with an explicit Delegated approval posture, so the approval judge decides each
 admission against the session's brief. A person decides when the judge escalates
 and when the judge call itself ends in a terminal failure
-([tool-loop.md](../spec/tool-loop.md)). A request naming an ineligible bundle or
-carrying arguments that do not decode resolves before approval and creates no
-attempt.
+([tool-loop.md](../spec/tool-loop.md)). In a repository-watch session that no
+accepted steering or operator resumption attends, an escalation instead closes
+the batch, fails the turn, and blocks the goal. A request naming an ineligible
+bundle or carrying arguments that do not decode resolves before approval and
+creates no attempt.
 
 Every repository-controlled string a list or preview result carries, such as a
 display name, a source or scope path, a description, heading text, or skill
@@ -92,11 +95,11 @@ result-commit transaction ([tool-loop.md](../spec/tool-loop.md)). The row names
 the prior admitted-set head, the bundle, the rendered hash and byte length, the
 exact rendered wrapper bytes, and the request identity, and the session's
 admitted-set head advances to it. The row is the plaintext authority for every
-later projection even if the workspace source changes or disappears. A second
-request for an admitted bundle returns its durable already-admitted receipt
-without rereading the source and appends nothing; a replay returns its recorded
-receipt. Process memory and the live workspace are never authority for the
-admitted set.
+later projection even if the workspace source changes or disappears or its root
+leaves the configuration. A second request for an admitted bundle returns its
+durable already-admitted receipt without rereading the source and appends
+nothing; a replay returns its recorded receipt. Process memory and the live
+workspace are never authority for the admitted set.
 
 Admitted instructions are a model-input projection rebuilt each turn from the
 rendered bytes the admission rows retain, not transcript entries. Signalbox
@@ -114,10 +117,10 @@ outrank the region.
 The region is a fixed preamble, then one wrapper per admitted bundle in
 projection order, with one LF between consecutive parts and no leading or
 trailing byte. Projection order is the one canonical order the catalog also
-uses: documents before skills; documents by root, workspace roots before
-configured roots and each kind by canonical path, then scope depth, relative
-path, and bundle identity; skills by bundle identity; never admission order. The
-preamble is these exact bytes:
+uses: documents before skills; documents by root, the workspace root before
+configured roots and configured roots by provider-safe reference, then scope
+depth, relative path, and bundle identity; skills by bundle identity; never
+admission order. The preamble is these exact bytes:
 
 ```text
 <signalbox_workspace_instruction_preamble>
@@ -228,10 +231,11 @@ A session whose template names an allow-list lists, previews, and reads exactly
 the bundles in its frozen snapshot; a session without one sees an empty catalog,
 and every read it attempts fails as ineligible.
 
-An `instructions_read` request is routed to the approval judge. An approved
-fresh read appends one immutable admission, and the next model call carries one
-region holding the preamble and that bundle's wrapper, recorded in a successor
-manifest.
+An admissible `instructions_read` request is routed to the approval judge; a
+malformed or ineligible request closes before approval with no judge call. An
+approved fresh read appends one immutable admission, and the next model call
+carries one region holding the preamble and that bundle's wrapper, recorded in a
+successor manifest.
 
 A second read of an admitted bundle appends nothing, and a replay returns the
 recorded receipt.
