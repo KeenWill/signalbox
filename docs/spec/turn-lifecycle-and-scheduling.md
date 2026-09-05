@@ -11,10 +11,10 @@ queued, active, or terminal, and a terminal turn carries one closed disposition;
 the types live in `crates/domain/src/turn_lifecycle.rs`. A retired turn is a
 queued turn that never activated. At most one turn per session is active, and it
 holds the session's progressing slot. An active turn is running or parked in a
-durable wait: on a tool approval, on a recovery decision after an ambiguous
-operation, on a lost runner, or on a foreground delegated child. Every wait
-retains the slot. Which credential a model call uses, and what happens to the
-turn when none is available, is owned by
+durable wait that retains the slot: on a tool approval, on a recovery decision
+after an ambiguous operation, on a lost runner, or on a foreground delegated
+child. Which credential a model call uses, and what happens to the turn when
+none is available, is owned by
 [credential-availability](credential-availability.md).
 
 A turn attempt is one exclusive physical orchestration tenure;
@@ -316,9 +316,9 @@ parked in the model-call recovery wait. The authoritative transaction
 revalidates the expected active turn under the scheduler lock and records an
 active-turn mismatch, or no-active-turn when a winning decision emptied the
 slot. Equal interrupt replay returns the original applied result; a distinct
-later interrupt records interrupt-already-applied without accepting an input or
-replacing the proof. An interrupt delivered while the active turn is parked on a
-tool-approval wait records interrupt-unavailable without accepting an input.
+later interrupt records interrupt-already-applied without replacing the proof,
+an interrupt delivered while the active turn is parked on a tool-approval wait
+records interrupt-unavailable, and neither accepts an input.
 
 An active turn already at a runner boundary moves to the runner-recovery wait
 when its placement is marked lost; the loss projection is owned by
@@ -424,9 +424,9 @@ scheduler stops admitting passes, and liveness stops scanning. Finite handlers,
 the current dispatcher transaction, in-flight scheduler passes, and an in-flight
 liveness read or terminalization share a grace window of the configured longest
 model exchange plus a fixed cleanup margin. An admitted pass stops spending its
-occupancy bound and drains under that window. After its in-flight operation
-reaches a durable boundary, a pass checkpoints the active turn and returns
-without issuing another, and a successor resumes from that boundary.
+occupancy bound and drains under that window: after its in-flight operation
+reaches a durable boundary, it checkpoints the active turn and returns without
+issuing another, and a successor resumes from that boundary.
 
 ## Planned
 

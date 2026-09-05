@@ -1151,14 +1151,9 @@ async fn attention_snapshot(
 fn parse_session_catalog_query(raw: Option<&str>) -> Result<SessionCatalogQuery, ()> {
     let mut query = SessionCatalogQuery::default();
     let mut filter_bytes = 0_usize;
-    for pair in raw.unwrap_or_default().split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = decode_query_component(key)?;
-        let value = decode_query_component(value)?;
-        match key.as_str() {
+    for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+        let value = value.into_owned();
+        match key.as_ref() {
             "search" => {
                 filter_bytes = filter_bytes.checked_add(value.len()).ok_or(())?;
                 if filter_bytes > usize::from(max_attention_filter_utf8_bytes()) {
@@ -1195,51 +1190,9 @@ fn set_once(target: &mut Option<String>, value: String) -> Result<(), ()> {
     Ok(())
 }
 
-fn decode_query_component(raw: &str) -> Result<String, ()> {
-    let bytes = raw.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            b'%' => {
-                let high = bytes.get(index + 1).copied().and_then(hex_digit_value);
-                let low = bytes.get(index + 2).copied().and_then(hex_digit_value);
-                let (Some(high), Some(low)) = (high, low) else {
-                    return Err(());
-                };
-                decoded.push(high * 16 + low);
-                index += 3;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).map_err(|_| ())
-}
-
-const fn hex_digit_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 fn parse_catalog_canonical_u64(value: &str) -> Result<u64, ()> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(());
-    }
-    if value != "0" && value.starts_with('0') {
-        return Err(());
-    }
-    value.parse::<u64>().map_err(|_| ())
+    let parsed = value.parse::<u64>().map_err(|_| ())?;
+    (parsed.to_string() == value).then_some(parsed).ok_or(())
 }
 
 fn parse_canonical_session_id(value: &str) -> Result<SessionId, ()> {
@@ -4649,8 +4602,8 @@ fn has_content_type(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .is_some_and(|value| value.essence_str() == expected)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

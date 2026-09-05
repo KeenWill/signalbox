@@ -45,8 +45,8 @@ The adapter fails the pass on no structured value, several values, malformed
 JSON, schema mismatch, a domain-invalid item, more than 32 items, or a failed
 inventory admission. It assigns stable finding identities and admits the entire
 canonical identity-ordered inventory atomically through the complete-findings
-path; no proposal survives as untyped text or as a partial inventory. Free-form
-assistant text stays transcript evidence.
+path; no proposal survives as untyped text or as a partial inventory, and
+free-form assistant text stays transcript evidence.
 
 A new application-store operation replaces the sealed incomplete repair outcome
 once every blocked finding has taken a transition the finding rules admit after
