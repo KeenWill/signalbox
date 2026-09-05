@@ -25,13 +25,7 @@
 //! Paths that acquire the satellite outside a scheduler statement hold no
 //! scheduler row in the same transaction. Session creation inserts it. The
 //! lifecycle store's own park, closure, and ownership writes take the `session`
-//! row first. Repository-watch terminal goal commands lock the complete
-//! unreleased dispatch cohort in session-identity order before taking their
-//! triggering session's scheduler/lifecycle lock; other terminal goal
-//! projections take the same ordered cohort in the projection trigger.
-//! Blocker replacement and park release serialize on the stable obligation
-//! identity, then take the projected subjects in session-identity order before
-//! changing the obligation row.
+//! row first.
 
 use signalbox_domain::SessionId;
 

@@ -12099,20 +12099,6 @@ pub enum RepoWatchDispatchContextShape {
     Branch,
 }
 
-pub struct RepoWatchTemplateContextDeclaration { /* private */ }
-impl RepoWatchTemplateContextDeclaration {
-    pub fn try_new(
-        template: SessionTemplateName,
-        accepted: Vec<RepoWatchDispatchContextShape>,
-    ) -> Result<Self, RepoWatchTemplateContextDeclarationError>;
-    // accessors: template(), accepted(), accepts()
-}
-
-pub enum RepoWatchTemplateContextDeclarationError {
-    NoAcceptedContextShape { template: SessionTemplateName },
-}
-// implements Error.
-
 pub struct PullRequestContext { /* private */ }
 // sealed: DispatchSessionParameters::try_from_event().
 // accessors: repository(), number(), head_sha(), head_repository(), head_branch(),
@@ -12166,11 +12152,6 @@ pub enum RepoWatchRuleValidationError {
     NoActions,
     SubsecondCooldown,
     BranchEventWithPullRequestSingleton { scope: RepoWatchSingletonScope },
-    TemplateNotDeclared { template: SessionTemplateName },
-    TemplateRejectsContext {
-        template: SessionTemplateName,
-        shape: RepoWatchDispatchContextShape,
-    },
 }
 // implements Error.
 
@@ -12215,11 +12196,6 @@ impl RepoWatchRule {
         singleton_per: RepoWatchSingletonScope,
         cooldown: Duration,
     ) -> Result<Self, RepoWatchRuleValidationError>;
-    pub fn required_context_shapes(&self) -> Vec<RepoWatchDispatchContextShape>;
-    pub fn validate_template_contexts(
-        &self,
-        declarations: &[RepoWatchTemplateContextDeclaration],
-    ) -> Result<(), RepoWatchRuleValidationError>;
     pub fn content_digest(&self) -> RepoWatchRuleContentDigest;
     pub fn identity_field_digests(
         &self,
@@ -13056,7 +13032,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: user_content                               | 15                               |
 | domain: submit_input                               | 37                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
-| domain: repo_watch                                 | 51                               |
+| domain: repo_watch                                 | 49                               |
 | domain: turn_lifecycle                             | 11                               |
 | domain: turn_eligibility                           | 39                               |
 | domain: turn_attempt                               | 13                               |
@@ -13079,7 +13055,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **893 (+12 free fn)**            |
+| **signalbox-domain total**                         | **891 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 17 (+6 free fn) (incl. 1 trait)  |
 | application: blob_derivation                       | 9 (incl. 3 traits)               |
