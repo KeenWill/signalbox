@@ -1240,25 +1240,25 @@ against that aggregate budget and every model target that can still be required
 to carry the resulting region: the active turn's pinned target, the effective
 serving record of the session's currently installed defaults epoch, read under
 that pointer row at the position the
-[persistence lock protocol](persistence-protocol.md#lock-protocol) fixes, and
-the queued-origin target summary described next, read under the scheduler lock
-the transaction already holds. All three are checked because any of them can
-differ from the others, and a target that cannot transport the region strands
-the session wherever it appears. The installed epoch is checked as well as the
-pin because a turn pinned to an instruction-capable target may still be active
-with an empty admitted set when a replacement installs a target without the
-transport — which the replacement's own retained-region check permits, the
-retained region being empty — and the old turn could then admit a bundle
-validated only against its stale pin. The next input would be rejected against
-the now-current defaults, with no unload to recover. A queued origin is checked
-because it froze its own target when it was accepted and keeps it across later
-replacements: an origin accepted under an uncapable target while the admitted
-set was empty passed acceptance legitimately, and if a replacement then installs
-a capable target, the pin and the installed epoch both admit a bundle the queued
-turn still cannot transport when it activates. Checking all three at admission
-covers every such ordering without forbidding replacements while a turn is
-active, and without demanding transport capability of an origin accepted for a
-session that has admitted nothing.
+[persistence lock protocol](persistence-protocol.md) fixes, and the
+queued-origin target summary described next, read under the scheduler lock the
+transaction already holds. All three are checked because any of them can differ
+from the others, and a target that cannot transport the region strands the
+session wherever it appears. The installed epoch is checked as well as the pin
+because a turn pinned to an instruction-capable target may still be active with
+an empty admitted set when a replacement installs a target without the transport
+— which the replacement's own retained-region check permits, the retained region
+being empty — and the old turn could then admit a bundle validated only against
+its stale pin. The next input would be rejected against the now-current
+defaults, with no unload to recover. A queued origin is checked because it froze
+its own target when it was accepted and keeps it across later replacements: an
+origin accepted under an uncapable target while the admitted set was empty
+passed acceptance legitimately, and if a replacement then installs a capable
+target, the pin and the installed epoch both admit a bundle the queued turn
+still cannot transport when it activates. Checking all three at admission covers
+every such ordering without forbidding replacements while a turn is active, and
+without demanding transport capability of an origin accepted for a session that
+has admitted nothing.
 
 That check is over a summary, not the queue, because the queue has no practical
 item bound and admission holds the scheduler and admitted-set locks while it

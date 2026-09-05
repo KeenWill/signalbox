@@ -333,20 +333,20 @@ authority-qualified pairs whose shape
 naming a bundle identity together with the authorizing root the session reaches
 it through, not identities alone — and, after locking the admitted-set head at
 the position and in the mode fixed by the
-[persistence lock protocol](persistence-protocol.md#lock-protocol), snapshots
-the exact retained admitted-set head and every retained admission's
-rendered-bundle row. It inserts the turn-start instruction manifest carrying the
-eligibility hash, admitted-set hash, and those rows in projection order in this
-transaction. The replacement command takes that same scheduler lock and the
-admitted-set lock after it, so a replacement either precedes activation and
-enters the snapshot or follows activation and affects only a later turn. No
-present replacement or nonempty eligibility surface exists; nevertheless, the
-one canonical empty manifest is inserted in this same activation transaction. No
-post-activation insert is permitted: an interrupt or other terminalization may
-win immediately after activation, and every started or terminal turn must
-already own exactly one turn-start manifest. Later nonempty eligibility changes
-only the copied values and rendered rows, not this atomic boundary. A later turn
-therefore cannot render retained admissions that its initial manifest omitted.
+[persistence lock protocol](persistence-protocol.md), snapshots the exact
+retained admitted-set head and every retained admission's rendered-bundle row.
+It inserts the turn-start instruction manifest carrying the eligibility hash,
+admitted-set hash, and those rows in projection order in this transaction. The
+replacement command takes that same scheduler lock and the admitted-set lock
+after it, so a replacement either precedes activation and enters the snapshot or
+follows activation and affects only a later turn. No present replacement or
+nonempty eligibility surface exists; nevertheless, the one canonical empty
+manifest is inserted in this same activation transaction. No post-activation
+insert is permitted: an interrupt or other terminalization may win immediately
+after activation, and every started or terminal turn must already own exactly
+one turn-start manifest. Later nonempty eligibility changes only the copied
+values and rendered rows, not this atomic boundary. A later turn therefore
+cannot render retained admissions that its initial manifest omitted.
 
 Both authoritative repositories — activation and startup recovery — classify
 commit failures (`commit_failure_is_ambiguous`): SQLSTATE 08007/40003 or any
@@ -1134,8 +1134,8 @@ activation, startup recovery, model-call closure (completion, refusal, and known
 failure in `crates/domain/src/model_execution.rs` derive terminal snapshots),
 and the fail-closed reconstitution seams that rebuild a stored snapshot only
 from its complete resolved membership. The
-[persistence protocol](persistence-protocol.md#relational-representation) owns
-the header-plus-prefix-delta representation; a deferred constraint trigger
+[persistence protocol](persistence-protocol.md) owns the
+header-plus-prefix-delta representation; a deferred constraint trigger
 (`context_frontier_requires_complete_membership`) re-asserts complete contiguous
 resolved membership — exact declared count, positions `1..count` — at commit.
 Reconstitution rejects any stored snapshot whose resolved membership disagrees

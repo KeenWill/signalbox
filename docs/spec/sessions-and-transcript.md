@@ -324,10 +324,10 @@ validate the complete retained region under the same serialization it commits
 the successor epoch under, so an admission or activation occurs wholly before or
 after it and cannot invalidate the evidence it checked. Which rows that
 serialization takes, in what order, and in which mode belong to the
-[persistence lock protocol](persistence-protocol.md#lock-protocol), which owns
-that inventory for every transaction. Rejection is typed and leaves the current
-defaults and admitted set unchanged. No present replacement path performs this
-check because no present surface admits a bundle. The owning
+[persistence lock protocol](persistence-protocol.md), which owns that inventory
+for every transaction. Rejection is typed and leaves the current defaults and
+admitted set unchanged. No present replacement path performs this check because
+no present surface admits a bundle. The owning
 [model-selection validation](configuration-and-credentials.md#model-selection-validation)
 also performs the same retained-region check when each later origin is accepted,
 after resolving its alias against the then-current catalog. Replacement-time
@@ -411,10 +411,10 @@ and compare-and-sets the expected version:
 
 The expected-version check is enforced twice inside the one transaction
 (`crates/persistence/src/replace_session_defaults.rs`); the lock mechanics are
-owned by the [persistence lock protocol](persistence-protocol.md#lock-protocol).
-For an unseen command, the adapter locks the current-defaults pointer before
-domain preparation loads the authoritative session. When preparation yields the
-applied result, the adapter moves that locked pointer with a SQL compare-and-set
+owned by the [persistence lock protocol](persistence-protocol.md). For an unseen
+command, the adapter locks the current-defaults pointer before domain
+preparation loads the authoritative session. When preparation yields the applied
+result, the adapter moves that locked pointer with a SQL compare-and-set
 conditioned on the expected version. Zero affected rows re-derives the result
 against current state in the same transaction and records the typed rejection; a
 re-derivation that still reports applied — a CAS loss without a version change —

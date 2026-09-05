@@ -2,7 +2,7 @@
 //!
 //! The one-time backfill this file is named for was proved by staging a
 //! database at the migration before it, which the migration reset
-//! (docs/proposals/migration-reset.md) leaves no way to express; those three
+//! (docs/spec/persistence-protocol.md) leaves no way to express; those three
 //! tests went with the chain. What remains never depended on chain history.
 
 use crate::*;

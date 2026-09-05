@@ -8,9 +8,8 @@ the successor call's own mechanics by
 [availability successor calls](model-call-execution.md#availability-successor-calls);
 the phase algebra by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot);
-the storage protocol by
-[persistence protocol](persistence-protocol.md#lock-protocol); the entry
-vocabulary by
+the storage protocol by [persistence protocol](persistence-protocol.md); the
+entry vocabulary by
 [sessions and the transcript](sessions-and-transcript.md#when-entries-come-to-exist);
 the wire shapes by
 [process protocol](process-protocol.md#credential-pool-preparation-failure); and
@@ -71,11 +70,10 @@ chain.
 | **`terminal`** — a known failure that no successor is authorized to follow                                                                                  | The turn terminalizes `Failed` exactly as it would with no pool at all. The attempt ends `KnownFailure`, or `AfterCancellation(KnownFailure)` where a call was already in flight when a stop was requested and then failed on its own. A stop applied to a *parked wait* is not this row: it terminalizes `Cancelled`, as the exception below states. | Not applicable: terminal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | No continuation origin. Records: the terminal observation, and any exclusion its frozen action derives. Committing transaction: one observation commit, which prepares nothing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | The model-call known-failure closure. Entry `TurnFailed { turn }`.                                                                                                                                                                                           | `failed` with its observed `cause`; live event `turn_failed`; no `rejected.detail`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | The observed `TerminalEvidence`, whatever it was. Four **ordered gates** decide this row rather than `successor`, and the first that fails decides it — they are gates in sequence, not a partition, because ordinary inputs satisfy several at once and a discriminator built on disjointness could not represent them. In order: a stop was requested while the call was in flight and it then failed on its own, since an attempt already cancelled admits no successor; the cause is not one of the three that can carry non-acceptance proof; the frozen action for that cause is not `switch_now`; the adapter supplied no pre-stream proof, which a mid-stream error record never carries however its native token reads. A credential rejection, for instance, fails the second gate and would also fail the third, and reporting it by the second names the actionable reason. | Implemented — failures whose frozen trigger action is not `switch_now`, or that lack non-acceptance proof, retain the ordinary terminal path.                     |
 
 **This table states no lock protocol at all, and has no locks column.** Locking
-is owned entirely by
-[persistence protocol](persistence-protocol.md#lock-protocol), whose inventory
-is organised per transaction. Each row above names the transaction that commits
-that ending; it says nothing about which objects that transaction takes, in what
-order, or in which mode.
+is owned entirely by [persistence protocol](persistence-protocol.md), whose
+inventory is organised per transaction. Each row above names the transaction
+that commits that ending; it says nothing about which objects that transaction
+takes, in what order, or in which mode.
 
 `park` and `fail` have their semantics here, and both act through exactly one
 question: **does this exhaustion select a wait?** `fail` never selects one.
@@ -144,8 +142,8 @@ on exactly the wake the deadline exists to produce. It would also contradict the
 two contracts that own these records —
 [credential pools and selection](configuration-and-credentials.md#credential-pools-and-selection),
 where a reported reset time clears an `avoid_new_sessions` exclusion when it
-passes, and [persistence protocol](persistence-protocol.md#lock-protocol), which
-gives the insert-only turn-local fact to a chain exclusion alone.
+passes, and [persistence protocol](persistence-protocol.md), which gives the
+insert-only turn-local fact to a chain exclusion alone.
 
 Two exceptions to the row partition, and only these two. **Cancellation leaves
 this machine rather than ending inside it.** An accepted `stop_turn` against a
@@ -179,7 +177,7 @@ Each projection below is a column above, and names the page that owns it:
 - Turn phase, attempt disposition, and wake conditions —
   [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 - Continuation origins, durable record shapes, and lock order —
-  [persistence protocol](persistence-protocol.md#lock-protocol).
+  [persistence protocol](persistence-protocol.md).
 - Transcript producers and semantic entries —
   [sessions and the transcript](sessions-and-transcript.md#when-entries-come-to-exist).
 - Snapshot turn state, live events, and `rejected.detail` —

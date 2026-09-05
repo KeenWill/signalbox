@@ -2147,7 +2147,7 @@ The internal `delegation_wake` outbox event is a scheduler signal, not a
 session-follow update. Clients observe the durable result or message update that
 caused it, never the wake itself. Wake emission cardinality and transaction
 ownership belong to the
-[transactional-outbox persistence contract](persistence-protocol.md#transactional-outbox).
+[transactional-outbox persistence contract](persistence-protocol.md).
 
 Each typed delegation update has one recipient stream except a stopped or
 cancelled `child_lifecycle_disposition` caused by a parent cascade, which is

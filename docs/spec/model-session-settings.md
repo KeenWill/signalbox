@@ -213,8 +213,7 @@ preserving overrides on defaults replacement and origin-producing input, typed
 unsupported-setting results, and the two durable settings events above.
 Transcript snapshot completeness is owned by
 [process-protocol](process-protocol.md#transcript-snapshots), and the
-legacy-null cutover is owned by
-[persistence-protocol](persistence-protocol.md#relational-representation).
+legacy-null cutover is owned by [persistence-protocol](persistence-protocol.md).
 
 The capability projection never exposes a mapped fast serving identity. Client
 choices name only the durable direct selection and supported setting values.

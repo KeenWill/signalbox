@@ -374,9 +374,8 @@ forced Git transport configuration, and the independent
 [session-composition axes](spec/runner-protocol.md#session-composition) in
 [runner protocol and placement](spec/runner-protocol.md); the runner-recovery
 phase, the placement transcript payload, creation-record placement, and the
-runner event family in
-[persistence-protocol](spec/persistence-protocol.md#relational-representation);
-the closed runner execution object, creation-request placement, and template
+runner event family in [persistence-protocol](spec/persistence-protocol.md); the
+closed runner execution object, creation-request placement, and template
 creation carrying placement in
 [process-protocol](spec/process-protocol.md#client-requests); the relocation
 transcript boundary in

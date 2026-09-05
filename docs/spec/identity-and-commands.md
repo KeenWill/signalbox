@@ -244,8 +244,7 @@ committed domain effects. Equal replay returns the recorded result only after
 the current durable state still proves that correlation; otherwise the adapter
 fails closed rather than returning an effectless receipt. The exact relational
 representation, deferred triggers, migration evolution, and lifecycle-transition
-checks are owned by
-[persistence-protocol](persistence-protocol.md#relational-representation).
+checks are owned by [persistence-protocol](persistence-protocol.md).
 
 All registry and typed-record tables are append-only, enforced by
 `reject_immutable_record_change` triggers. Why: a claimed identifier's recorded
