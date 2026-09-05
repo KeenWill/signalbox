@@ -93,16 +93,14 @@ a family name resolves to, in
 
 The process socket is `$DEVENV_RUNTIME/signalbox/signalboxd.sock`, because the
 daemon accepts only a socket parent meeting the ownership and permission rules
-the
-[process protocol](docs/spec/process-protocol.md#transport-and-trust-boundary)
-states; the dev-instance launcher creates that directory with mode `0700` before
-starting the daemon. The devenv shell exports the path as
-`SIGNALBOX_SOCKET_PATH` and provides a `signalbox <verb>` wrapper that execs
-Cargo's resolved binary directly rather than through `cargo run`. Under an
-ambient `-C prefer-dynamic` (in `RUSTFLAGS` or inherited Cargo configuration)
-that executable needs Cargo's runtime library search path, which the direct
-`exec` does not set, and the command exits `127` naming the missing shared
-object. This is a known limitation.
+the [process protocol](docs/spec/process-protocol.md) states; the dev-instance
+launcher creates that directory with mode `0700` before starting the daemon. The
+devenv shell exports the path as `SIGNALBOX_SOCKET_PATH` and provides a
+`signalbox <verb>` wrapper that execs Cargo's resolved binary directly rather
+than through `cargo run`. Under an ambient `-C prefer-dynamic` (in `RUSTFLAGS`
+or inherited Cargo configuration) that executable needs Cargo's runtime library
+search path, which the direct `exec` does not set, and the command exits `127`
+naming the missing shared object. This is a known limitation.
 
 The daemon's default Anthropic key path is
 `$HOME/.config/signalbox/anthropic-api-key`, written into the seeded model
