@@ -46,8 +46,11 @@ proposal of the same command.
 The daemon composes one process-lifetime immutable registry from the implemented
 tool families in `apps/signalboxd/src/daemon_tools.rs`: basic, blob-read, web,
 code-host, workspace, conversation, plan, session-delegation, goal-declaration,
-local Git, and execution tools. Each family's crate or daemon module documents
-its tools.
+local Git, and execution tools. The workspace, conversation, local Git,
+execution, and mapped GitHub families are composed only under the complete
+mapped composition
+([configuration-and-credentials](configuration-and-credentials.md)). Each
+family's crate or daemon module documents its tools.
 
 Each approved request that reaches execution runs as one physical attempt
 through staged transactions. A prepare transaction mints the attempt and commits
@@ -235,11 +238,12 @@ The judge selection is an optional direct-selection mapping; without one, the
 judge uses the exact direct selection of the request-producing call. Every
 session-derived field in the judge prompt is separately delimited and quoted as
 untrusted evidence, and the prompt treats it as scope to compare with the
-request, never as instruction. Outside a session that repository watch
-dispatched, which [repo-watch](repo-watch.md) owns, an `EscalateToHuman` result
-stores the completed call but no decision and leaves the same request parked. A
-`KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
-retains the attended park while immediately admitting a user decision.
+request, never as instruction. Outside a turn judged under the commissioned
+generation's dispatch authority, which [repo-watch](repo-watch.md) owns, an
+`EscalateToHuman` result stores the completed call but no decision and leaves
+the same request parked. A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous`
+terminal judge call retains the attended park while immediately admitting a user
+decision.
 
 Deny-and-end composes the recorded denial with the applied-interrupt stop path,
 and the interrupt remains the proof-bearing authority for ending the turn. An
@@ -275,7 +279,9 @@ directory is absent binds the configured root and shares the one composition
 made at startup. One session holds exactly one such domain at a time, and a
 retained set a request still holds is never released. Every declaration a
 workspace-root-bound family advertises is a property of the family's code, not
-of the repository it binds.
+of the repository it binds. Local Git is the exception: it compiles the pinned
+repository's object format into its argument validators, and session composition
+refuses an object-format disagreement.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
@@ -381,7 +387,8 @@ receipt or outcome. Before the application accepts a durable-wait or
 durable-completion disposition from the delegation executor, persistence rereads
 the parked batch and the ended dispatch fence, or authenticates the returned
 correlation against the ended attempt; absent or cross-wired evidence fails
-closed.
+closed. A delegation effect commits in the same transaction as its terminal
+tool-attempt row.
 
 The provider bridge derives the provider-visible tool-call correlation from
 `ToolRequestId`, so provider-native identifier types and messages never cross
@@ -435,7 +442,9 @@ bot account supplies a verdict or a usage-limit response, and a verdict must
 carry a line whose whole content is the `Reviewed commit:` label followed by a
 7-to-40-character hexadecimal revision, with only emphasis or backtick markers
 around them; a verdict whose revision does not prefix the current head is stale
-and never counts as current convergence evidence. The authenticated job-log
+and never counts as current convergence evidence. The latest exact review
+request by an owner, member, or collaborator with no later reviewer response
+marks the review in flight and blocks convergence. The authenticated job-log
 endpoint is the sole redirect-shaped exchange: after one 302 the adapter
 validates the location, pins a wholly public destination set, and downloads
 credential-free. A read transport or server failure is an executor
