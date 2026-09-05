@@ -8,28 +8,8 @@ pub(super) const TRUNCATION_SUFFIX: &str = " … [truncated]";
 pub(super) fn canonical_json_string(
     mut value: serde_json::Value,
 ) -> Result<String, serde_json::Error> {
-    sort_json_object_keys(&mut value);
+    value.sort_all_objects();
     serde_json::to_string(&value)
-}
-
-fn sort_json_object_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            object.sort_keys();
-            for nested in object.values_mut() {
-                sort_json_object_keys(nested);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for nested in values {
-                sort_json_object_keys(nested);
-            }
-        }
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => {}
-    }
 }
 
 #[derive(serde::Serialize)]
