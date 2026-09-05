@@ -989,9 +989,9 @@ Locks per transaction, in acquisition order:
   row `FOR UPDATE` after the scheduler lock and before checking that no
   nonterminal judge remains. **Committed unimplemented functionality —
   instruction admission effect.** The instruction-admission effect that
-  [tool loop](tool-loop.md#not-built) adds to the result-commit transaction
-  takes the session's admitted-set head `FOR UPDATE`, because that transaction
-  appends an `InstructionAdmission`. It takes it at the position fixed in the
+  [tool loop](tool-loop.md#planned) adds to the result-commit transaction takes
+  the session's admitted-set head `FOR UPDATE`, because that transaction appends
+  an `InstructionAdmission`. It takes it at the position fixed in the
   `StartEligibleTurn` bullet above: immediately after the `session_scheduler`
   row and before any credential-pool object. That same transaction then takes
   the `session_current_defaults` pointer row `FOR SHARE`, at the pointer row's

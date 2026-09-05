@@ -18,7 +18,7 @@ continuation.
 Child creation gives `spawn_session` one placement-owned transaction that
 creates a delegated child and its initial task work.
 
-## Shape
+## Design
 
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
@@ -88,7 +88,7 @@ its proof-bearing completed call without a separator and admits those bytes as
 the delegation content. Duplicate observation is idempotent by spawning request
 and cannot attach a late result to another parent tool call.
 
-## Constraints on present code
+## Compatibility constraints
 
 The four implemented continuation effects and the successor manifest must
 eventually commit or roll back together, so the continuation transaction stays
@@ -110,7 +110,7 @@ The daemon-local error kind set stays closed; the instruction family maps into
 The spawn port rejects execution unconditionally today. That rejection stays
 until the creation transaction exists, and no other surface creates the child.
 
-## Acceptance
+## Acceptance criteria
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects

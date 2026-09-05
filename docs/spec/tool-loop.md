@@ -3,7 +3,7 @@
 The tool loop turns a model's tool proposals into approved, executed, and
 recorded results inside one turn, then hands the conversation back to the model.
 
-## Map
+## Overview
 
 The tool loop owns logical tool requests, approval policy and decisions,
 physical tool attempts, result admission, continuation within a turn, crash
@@ -69,7 +69,7 @@ continuation transaction projects the results and prepares the next model call.
 An approval wait is a stored active-turn phase that names the earliest undecided
 request and survives restart.
 
-## Decisions
+## Design decisions
 
 A turn is the logical conversational outcome; a model call and a turn attempt
 are physical executions that may repeat without changing that identity.
@@ -176,7 +176,7 @@ and may fix the detail to its own closed token vocabulary.
 visibility refusal from a malformed argument the model can correct by rewriting
 the call.
 
-## Contracts
+## Boundary contracts
 
 A tool executor receives checked request content and returns evidence. It writes
 no transcript, request, attempt, approval, turn, placement, grant, or lease
@@ -436,7 +436,7 @@ Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round
 trips under the scheduler lock.
 
-## Not built
+## Planned
 
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a fourth

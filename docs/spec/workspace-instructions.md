@@ -713,17 +713,17 @@ creating and executing the attempt, so a `bundle_id` outside the turn's
 effective eligibility view — the frozen snapshot as narrowed by any recovery
 revocation, not the snapshot alone — would otherwise reach judge preparation
 with no evidence to build from. This is therefore the family's declared
-[pre-approval admissibility check](tool-loop.md#not-built): the request resolves
+[pre-approval admissibility check](tool-loop.md#planned): the request resolves
 through the owning request-level transition before approval, carrying the typed
 `not_eligible` reason and creating no approval state, no judge call, and no
 metadata in the result. What that transition records and how the batch proceeds
-afterwards belong to the [tool loop](tool-loop.md#not-built) and are stated
-there, not here; this page owns only which condition makes the request
-inadmissible. In particular no tool attempt is created, so the typed reason for
-this one case lives on the request rather than on an attempt row — the exception
-to the durable-evidence rule stated below, and the reason it is an exception is
-that nothing executed. A judge is asked only about bundles the session is
-already authorized to admit, which is also what lets the evidence block below be
+afterwards belong to the [tool loop](tool-loop.md#planned) and are stated there,
+not here; this page owns only which condition makes the request inadmissible. In
+particular no tool attempt is created, so the typed reason for this one case
+lives on the request rather than on an attempt row — the exception to the
+durable-evidence rule stated below, and the reason it is an exception is that
+nothing executed. A judge is asked only about bundles the session is already
+authorized to admit, which is also what lets the evidence block below be
 unconditional rather than optional.
 
 Delegation is only meaningful if the judge can tell what it is approving, and
@@ -850,7 +850,7 @@ audit, and recovery read, independently of what a provider is shown. The two
 pre-approval reasons are the exception, because their transition creates no
 attempt: `not_eligible` and `invalid_arguments` resolved before approval store
 their reason on the request itself, under the owning
-[request-level transition](tool-loop.md#not-built), and replay, audit, and
+[request-level transition](tool-loop.md#planned), and replay, audit, and
 recovery read it there. Looking for an attempt in those two cases would find
 none, and creating one would recreate exactly the orphan that transition exists
 to avoid.
@@ -965,8 +965,8 @@ constraint, not a description of present behavior: no present tool supplies
 head or an `InstructionAdmission`.
 
 Each `instructions_read` request has a replay-stable tool-request identity. The
-owning [tool result-commit transaction](tool-loop.md#not-built) atomically
-commits its receipt-only result and, for a successful fresh read, appends one
+owning [tool result-commit transaction](tool-loop.md#planned) atomically commits
+its receipt-only result and, for a successful fresh read, appends one
 `InstructionAdmission` naming the prior admitted-set hash, bundle, rendered
 evidence, exact rendered wrapper bytes, and request identity. The immutable
 admission row is the version-one plaintext authority for later projections even
@@ -976,7 +976,7 @@ failed request appends neither admission nor a changed set.
 
 After a tool batch, preparation folds successful admissions in durable request
 order and ignores idempotent repeats. The owning continuation transaction in
-[tool-loop](tool-loop.md#not-built) creates exactly one successor manifest with
+[tool-loop](tool-loop.md#planned) creates exactly one successor manifest with
 the next model call. Thus several reads in one batch aggregate into one
 boundary, and a crash after tool-result commit but before continuation leaves
 admissions that the next preparation deterministically folds. Process memory and
