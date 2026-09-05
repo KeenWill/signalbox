@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Summarize committed cargo-public-api snapshots and their working-tree diff."""
 
-from __future__ import annotations
-
+import os
 import re
 import subprocess
 from collections import Counter, defaultdict
@@ -15,8 +14,7 @@ SNAPSHOTS = {
 }
 DECLARATION = re.compile(
     r'^pub (?:(?:async|const|unsafe)\s+|extern\s+"[^"]*"\s+)*'
-    r"(?P<kind>struct|enum|union|type|trait|fn)\s+"
-    r"(?P<name>[A-Za-z_][A-Za-z0-9_#:]*)(?:\b|<)"
+    r"(?P<kind>struct|enum|union|type|trait|fn|const)\s+"
 )
 MODULE = re.compile(r"^pub mod (?P<name>[A-Za-z_][A-Za-z0-9_#:]*)(?:\b|$)")
 
@@ -40,18 +38,28 @@ def git_text(revision: str, path: Path) -> str:
 
 
 def previous_text(path: Path, current: str) -> str:
+    if base := os.environ.get("DOMAIN_SPINE_BASE"):
+        return git_text(base, path) or current
     dirty = subprocess.run(
         ["git", "diff", "--quiet", "HEAD", "--", path.as_posix()], check=False
     )
-    if dirty.returncode == 1:
-        return git_text("HEAD", path)
-    history = subprocess.run(
-        ["git", "log", "--format=%H", "-2", "HEAD", "--", path.as_posix()],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-    return git_text(history[1], path) if len(history) == 2 else current
+    revision = "HEAD" if dirty.returncode == 1 else "HEAD^"
+    return git_text(revision, path) or current
+
+
+def item_name(line: str, start: int) -> str:
+    name: list[str] = []
+    generic_depth = 0
+    for char in line[start:]:
+        if char == "<":
+            generic_depth += 1
+        elif char == ">":
+            generic_depth -= 1
+        elif generic_depth == 0 and (char.isspace() or char in "(={"):
+            break
+        elif generic_depth == 0:
+            name.append(char)
+    return "".join(name)
 
 
 def parse(text: str) -> tuple[str, list[Item]]:
@@ -61,7 +69,7 @@ def parse(text: str) -> tuple[str, list[Item]]:
     items: list[Item] = []
     include_nested_functions = False
     for line in lines:
-        if line.startswith("impl "):
+        if line.startswith(("impl ", "impl<")):
             target = line.split(" where ", 1)[0]
             include_nested_functions = " for " not in target and any(
                 f"{module}::" in target for module in modules
@@ -69,7 +77,7 @@ def parse(text: str) -> tuple[str, list[Item]]:
         match = DECLARATION.match(line)
         if match is None:
             continue
-        name = match.group("name")
+        name = item_name(line, match.end())
         owners = [module for module in modules if name.startswith(f"{module}::")]
         module = max(owners, key=len, default=root)
         kind = match.group("kind")
@@ -85,6 +93,8 @@ def parse(text: str) -> tuple[str, list[Item]]:
             if kind in {"struct", "enum", "union", "type"}
             else "function"
             if kind == "fn"
+            else "constant"
+            if kind == "const"
             else kind
         )
         items.append(Item(module, category, name, line))
