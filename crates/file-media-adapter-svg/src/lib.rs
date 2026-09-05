@@ -3,6 +3,7 @@
 
 use std::{borrow::Cow, collections::HashSet, error::Error, num::NonZeroU64, str::FromStr};
 
+use cssparser::{Parser, ParserInput, Token};
 use iri_string::types::IriReferenceStr;
 use quick_xml::{
     NsReader, Reader,
@@ -24,7 +25,7 @@ use signalbox_file_media_runtime::{
 const MEDIA_TYPE: &str = "image/svg+xml";
 const PROVIDER_NAME: &str = "svg";
 const READER_NAME: &str = "quick-xml";
-const READER_REVISION: &str = "quick-xml-0-41-data-only-v1";
+const READER_REVISION: &str = "quick-xml-svgtypes-data-only-v1";
 const SVG_NAMESPACE: &[u8] = b"http://www.w3.org/2000/svg";
 const XLINK_NAMESPACE: &[u8] = b"http://www.w3.org/1999/xlink";
 const XML_EVENTS_NAMESPACE: &[u8] = b"http://www.w3.org/2001/xml-events";
@@ -1057,10 +1058,6 @@ fn is_name_character(character: char) -> bool {
 }
 
 fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
-    parse_dimension_with_sign(value, false)
-}
-
-fn parse_dimension_with_sign(value: &str, allow_negative: bool) -> Result<Option<f64>, ParseIssue> {
     let value = value.trim_matches(|character| matches!(character, ' ' | '\t' | '\n' | '\r'));
     if [
         "auto",
@@ -1075,362 +1072,51 @@ fn parse_dimension_with_sign(value: &str, allow_negative: bool) -> Result<Option
     {
         return Ok(None);
     }
-    if let Some(calculation) = parse_css_calculation(value) {
-        if calculation
-            .value
-            .is_some_and(|result| !result.is_finite() || (!allow_negative && result < 0.0))
-        {
+    if let Ok(length) = svgtypes::Length::from_str(value) {
+        if !length.number.is_finite() || length.number < 0.0 {
             return Err(ParseIssue::Malformed);
         }
-        return Ok(None);
+        return Ok(matches!(
+            length.unit,
+            svgtypes::LengthUnit::None | svgtypes::LengthUnit::Px
+        )
+        .then_some(length.number));
     }
-    let parse_number = if allow_negative {
-        parse_finite
-    } else {
-        parse_nonnegative_finite
-    };
-    if let Ok(parsed) = parse_number(value) {
-        return Ok(Some(parsed));
-    }
-    for unit in [
-        "dvmax", "dvmin", "lvmax", "lvmin", "svmax", "svmin", "rcap", "dvb", "dvh", "dvi", "dvw",
-        "lvb", "lvh", "lvi", "lvw", "rch", "rem", "rex", "ric", "rlh", "svb", "svh", "svi", "svw",
-        "cqmax", "cqmin", "vmax", "vmin", "cap", "cqb", "cqh", "cqi", "cqw", "ch", "cm", "em",
-        "ex", "ic", "in", "lh", "mm", "pc", "pt", "vb", "vh", "vi", "vw", "q", "%",
-    ] {
-        if let Some(number) = strip_ascii_case_suffix(value, unit) {
-            parse_number(number)?;
-            return Ok(None);
-        }
-    }
-    if let Some(number) = strip_ascii_case_suffix(value, "px") {
-        return parse_number(number).map(Some);
-    }
-    Err(ParseIssue::Malformed)
-}
-
-fn parse_css_calculation(value: &str) -> Option<CalculationValue> {
-    let mut parser = CalculationParser::new(value);
-    let calculation = parser.parse_function()?;
-    (calculation.kind == CalculationKind::Dimension && parser.at_end()).then_some(calculation)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CalculationKind {
-    Number,
-    Dimension,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct CalculationValue {
-    kind: CalculationKind,
-    value: Option<f64>,
-    unit: Option<String>,
-}
-
-struct CalculationParser<'a> {
-    input: &'a [u8],
-    position: usize,
-}
-
-impl<'a> CalculationParser<'a> {
-    const fn new(input: &'a str) -> Self {
-        Self {
-            input: input.as_bytes(),
-            position: 0,
-        }
-    }
-
-    fn at_end(&mut self) -> bool {
-        self.skip_whitespace();
-        self.position == self.input.len()
-    }
-
-    fn parse_function(&mut self) -> Option<CalculationValue> {
-        let name = self.parse_identifier()?;
-        if ![b"calc".as_slice(), b"min", b"max", b"clamp"]
-            .iter()
-            .any(|expected| name.eq_ignore_ascii_case(expected))
-            || !self.peek_is(b'(')
-        {
-            return None;
-        }
-        self.position += 1;
-        let first = self.parse_sum()?;
-        let mut arguments = vec![first.clone()];
-        while self.consume(b',') {
-            let argument = self.parse_sum()?;
-            if argument.kind != first.kind {
-                return None;
+    let mut input = ParserInput::new(value);
+    let mut parser = Parser::new(&mut input);
+    parser
+        .parse_entirely(|parser| {
+            let token = parser.next()?.clone();
+            match token {
+                Token::Dimension { value, .. }
+                | Token::Percentage {
+                    unit_value: value, ..
+                } if value.is_finite() && value >= 0.0 => Ok(None),
+                Token::Function(name)
+                    if ["calc", "min", "max", "clamp"]
+                        .iter()
+                        .any(|expected| name.eq_ignore_ascii_case(expected)) =>
+                {
+                    parser.parse_nested_block(|nested| {
+                        let mut saw_value = false;
+                        while !nested.is_exhausted() {
+                            nested
+                                .next_including_whitespace_and_comments()
+                                .map_err(cssparser::ParseError::from)?;
+                            saw_value = true;
+                        }
+                        if saw_value {
+                            Ok(())
+                        } else {
+                            Err(nested.new_custom_error(()))
+                        }
+                    })?;
+                    Ok(None)
+                }
+                token => Err(parser.new_unexpected_token_error::<()>(token)),
             }
-            arguments.push(argument);
-        }
-        let valid_arity = if name.eq_ignore_ascii_case(b"calc") {
-            arguments.len() == 1
-        } else if name.eq_ignore_ascii_case(b"min") || name.eq_ignore_ascii_case(b"max") {
-            !arguments.is_empty()
-        } else {
-            name.eq_ignore_ascii_case(b"clamp") && arguments.len() == 3
-        };
-        if !valid_arity || !self.consume(b')') {
-            return None;
-        }
-        let value = if name.eq_ignore_ascii_case(b"calc") {
-            first.value
-        } else if arguments
-            .iter()
-            .all(|argument| argument.value.is_some() && argument.unit == first.unit)
-        {
-            let values: Vec<f64> = arguments
-                .iter()
-                .filter_map(|argument| argument.value)
-                .collect();
-            if name.eq_ignore_ascii_case(b"min") {
-                values.into_iter().reduce(f64::min)
-            } else if name.eq_ignore_ascii_case(b"max") {
-                values.into_iter().reduce(f64::max)
-            } else {
-                Some(values[0].max(values[1].min(values[2])))
-            }
-        } else {
-            None
-        };
-        Some(CalculationValue {
-            kind: first.kind,
-            value,
-            unit: first.unit,
         })
-    }
-
-    fn parse_sum(&mut self) -> Option<CalculationValue> {
-        let mut left = self.parse_product()?;
-        loop {
-            let whitespace_start = self.position;
-            self.skip_whitespace();
-            if !self.peek_is(b'+') && !self.peek_is(b'-') {
-                return Some(left);
-            }
-            if self.position == whitespace_start {
-                return None;
-            }
-            let operator = self.input[self.position];
-            self.position += 1;
-            let whitespace_start = self.position;
-            self.skip_whitespace();
-            if self.position == whitespace_start {
-                return None;
-            }
-            let right = self.parse_product()?;
-            if right.kind != left.kind {
-                return None;
-            }
-            left.value = match (left.value, right.value, operator, left.unit == right.unit) {
-                (Some(left), Some(right), b'+', true) => Some(left + right),
-                (Some(left), Some(right), b'-', true) => Some(left - right),
-                _ => None,
-            };
-            if left.unit != right.unit {
-                left.unit = None;
-            }
-        }
-    }
-
-    fn parse_product(&mut self) -> Option<CalculationValue> {
-        let mut left = self.parse_value()?;
-        loop {
-            let whitespace_start = self.position;
-            self.skip_whitespace();
-            let Some(operator) = self.input.get(self.position).copied() else {
-                return Some(left);
-            };
-            if operator != b'*' && operator != b'/' {
-                self.position = whitespace_start;
-                return Some(left);
-            }
-            self.position += 1;
-            let right = self.parse_value()?;
-            if operator == b'/' && right.value == Some(0.0) {
-                return None;
-            }
-            let (kind, unit) = match (operator, left.kind, right.kind) {
-                (b'*', CalculationKind::Number, right_kind) => (right_kind, right.unit.clone()),
-                (b'*', left_kind, CalculationKind::Number)
-                | (b'/', left_kind, CalculationKind::Number) => (left_kind, left.unit.clone()),
-                _ => return None,
-            };
-            let value = match (operator, left.value, right.value) {
-                (b'*', Some(left), Some(right)) => Some(left * right),
-                (b'/', Some(left), Some(right)) => Some(left / right),
-                _ => None,
-            };
-            left = CalculationValue { kind, value, unit };
-        }
-    }
-
-    fn parse_value(&mut self) -> Option<CalculationValue> {
-        self.skip_whitespace();
-        if self.consume(b'(') {
-            let kind = self.parse_sum()?;
-            return self.consume(b')').then_some(kind);
-        }
-        let checkpoint = self.position;
-        if self
-            .input
-            .get(self.position)
-            .is_some_and(|byte| byte.is_ascii_alphabetic())
-        {
-            if let Some(kind) = self.parse_function() {
-                return Some(kind);
-            }
-            self.position = checkpoint;
-            return None;
-        }
-        self.parse_dimension_value()
-    }
-
-    fn parse_dimension_value(&mut self) -> Option<CalculationValue> {
-        self.skip_whitespace();
-        let start = self.position;
-        if self.peek_is(b'+') || self.peek_is(b'-') {
-            self.position += 1;
-        }
-        let integer_start = self.position;
-        while self
-            .input
-            .get(self.position)
-            .is_some_and(u8::is_ascii_digit)
-        {
-            self.position += 1;
-        }
-        let mut has_digits = self.position > integer_start;
-        if self.peek_is(b'.') {
-            self.position += 1;
-            let fraction_start = self.position;
-            while self
-                .input
-                .get(self.position)
-                .is_some_and(u8::is_ascii_digit)
-            {
-                self.position += 1;
-            }
-            has_digits |= self.position > fraction_start;
-        }
-        if !has_digits {
-            self.position = start;
-            return None;
-        }
-        if self.peek_is(b'e') || self.peek_is(b'E') {
-            let mut exponent_end = self.position + 1;
-            if self
-                .input
-                .get(exponent_end)
-                .is_some_and(|byte| matches!(byte, b'+' | b'-'))
-            {
-                exponent_end += 1;
-            }
-            let exponent_start = exponent_end;
-            while self.input.get(exponent_end).is_some_and(u8::is_ascii_digit) {
-                exponent_end += 1;
-            }
-            if exponent_end > exponent_start {
-                self.position = exponent_end;
-            }
-        }
-        let unit_start = self.position;
-        while self
-            .input
-            .get(self.position)
-            .is_some_and(u8::is_ascii_alphabetic)
-        {
-            self.position += 1;
-        }
-        if self.peek_is(b'%') {
-            self.position += 1;
-        }
-        let token_bytes = self.input.get(start..self.position)?;
-        let Ok(token) = core::str::from_utf8(token_bytes) else {
-            return None;
-        };
-        parse_dimension_with_sign(token, true).ok()?;
-        let kind = if self.position == unit_start {
-            CalculationKind::Number
-        } else {
-            CalculationKind::Dimension
-        };
-        let number = core::str::from_utf8(self.input.get(start..unit_start)?)
-            .ok()
-            .and_then(|number| parse_finite(number).ok());
-        let raw_unit = (kind == CalculationKind::Dimension)
-            .then(|| token[unit_start - start..].to_ascii_lowercase());
-        let (value, unit) = match (number, raw_unit.as_deref()) {
-            (Some(number), Some("px")) => (Some(number), Some(String::from("px"))),
-            (Some(number), Some("in")) => (Some(number * 96.0), Some(String::from("px"))),
-            (Some(number), Some("cm")) => (Some(number * 96.0 / 2.54), Some(String::from("px"))),
-            (Some(number), Some("mm")) => (Some(number * 96.0 / 25.4), Some(String::from("px"))),
-            (Some(number), Some("q")) => (Some(number * 96.0 / 101.6), Some(String::from("px"))),
-            (Some(number), Some("pt")) => (Some(number * 96.0 / 72.0), Some(String::from("px"))),
-            (Some(number), Some("pc")) => (Some(number * 16.0), Some(String::from("px"))),
-            (value, _) => (value, raw_unit),
-        };
-        Some(CalculationValue { kind, value, unit })
-    }
-
-    fn parse_identifier(&mut self) -> Option<&'a [u8]> {
-        self.skip_whitespace();
-        let start = self.position;
-        while self
-            .input
-            .get(self.position)
-            .is_some_and(u8::is_ascii_alphabetic)
-        {
-            self.position += 1;
-        }
-        (self.position > start).then_some(&self.input[start..self.position])
-    }
-
-    fn consume(&mut self, expected: u8) -> bool {
-        self.skip_whitespace();
-        if self.peek_is(expected) {
-            self.position += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn peek_is(&self, expected: u8) -> bool {
-        self.input.get(self.position) == Some(&expected)
-    }
-
-    fn skip_whitespace(&mut self) {
-        loop {
-            while self
-                .input
-                .get(self.position)
-                .is_some_and(u8::is_ascii_whitespace)
-            {
-                self.position += 1;
-            }
-            if self.input.get(self.position..self.position + 2) != Some(b"/*") {
-                return;
-            }
-            self.position += 2;
-            let comment_end = self.input[self.position..]
-                .windows(2)
-                .position(|window| window == b"*/");
-            let Some(comment_end) = comment_end else {
-                self.position = self.input.len();
-                return;
-            };
-            self.position += comment_end + 2;
-        }
-    }
-}
-
-fn strip_ascii_case_suffix<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
-    let split = value.len().checked_sub(suffix.len())?;
-    let (number, candidate) = value.split_at(split);
-    candidate.eq_ignore_ascii_case(suffix).then_some(number)
+        .map_err(|_| ParseIssue::Malformed)
 }
 
 fn is_xml_whitespace(value: &str) -> bool {
@@ -1439,95 +1125,15 @@ fn is_xml_whitespace(value: &str) -> bool {
         .all(|character| matches!(character, ' ' | '\t' | '\n' | '\r'))
 }
 
-fn parse_nonnegative_finite(value: &str) -> Result<f64, ParseIssue> {
-    let parsed = parse_finite(value)?;
-    if parsed >= 0.0 {
-        Ok(parsed)
-    } else {
-        Err(ParseIssue::Malformed)
-    }
-}
-
-fn parse_finite(value: &str) -> Result<f64, ParseIssue> {
-    if !valid_number_token(value) {
-        return Err(ParseIssue::Malformed);
-    }
-    let parsed = value.parse::<f64>().map_err(|_| ParseIssue::Malformed)?;
-    if parsed.is_finite() {
-        Ok(parsed)
-    } else {
-        Err(ParseIssue::Malformed)
-    }
-}
-
-fn valid_number_token(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut position = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
-    let integer_start = position;
-    while bytes.get(position).is_some_and(u8::is_ascii_digit) {
-        position += 1;
-    }
-    let integer_digits = position > integer_start;
-    let mut fraction_digits = false;
-    if bytes.get(position) == Some(&b'.') {
-        position += 1;
-        let fraction_start = position;
-        while bytes.get(position).is_some_and(u8::is_ascii_digit) {
-            position += 1;
-        }
-        fraction_digits = position > fraction_start;
-        if !fraction_digits {
-            return false;
-        }
-    }
-    if !integer_digits && !fraction_digits {
-        return false;
-    }
-    if matches!(bytes.get(position), Some(b'e' | b'E')) {
-        position += 1;
-        if matches!(bytes.get(position), Some(b'+' | b'-')) {
-            position += 1;
-        }
-        let exponent_start = position;
-        while bytes.get(position).is_some_and(u8::is_ascii_digit) {
-            position += 1;
-        }
-        if position == exponent_start {
-            return false;
-        }
-    }
-    position == bytes.len()
-}
-
 fn parse_view_box(value: &str) -> Result<[f64; 4], ParseIssue> {
-    let comma_groups: Vec<&str> = value.split(',').collect();
-    if comma_groups.iter().any(|group| group.trim().is_empty()) {
+    let values = svgtypes::NumberListParser::from(value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ParseIssue::Malformed)?;
+    let [x, y, width, height]: [f64; 4] = values.try_into().map_err(|_| ParseIssue::Malformed)?;
+    if width < 0.0 || height < 0.0 {
         return Err(ParseIssue::Malformed);
     }
-    let mut values = comma_groups
-        .into_iter()
-        .flat_map(str::split_ascii_whitespace)
-        .map(|part| {
-            if !valid_number_token(part) {
-                return Err(ParseIssue::Malformed);
-            }
-            part.parse::<f64>().map_err(|_| ParseIssue::Malformed)
-        });
-    let view_box = [
-        values.next().ok_or(ParseIssue::Malformed)??,
-        values.next().ok_or(ParseIssue::Malformed)??,
-        values.next().ok_or(ParseIssue::Malformed)??,
-        values.next().ok_or(ParseIssue::Malformed)??,
-    ];
-    if values.next().is_some()
-        || view_box.iter().any(|value| !value.is_finite())
-        || view_box[2] < 0.0
-        || view_box[3] < 0.0
-    {
-        Err(ParseIssue::Malformed)
-    } else {
-        Ok(view_box)
-    }
+    Ok([x, y, width, height])
 }
 
 fn append_text(output: &mut String, value: &str) -> Result<(), ParseIssue> {

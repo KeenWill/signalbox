@@ -12,11 +12,13 @@ name = "signalbox-file-media-svg-worker"
 path = "src/bin/signalbox-file-media-svg-worker.rs"
 
 [dependencies]
+cssparser = "0.37.0"
 iri-string = "0.7.14"
 quick-xml = "0.41.0"
 serde_json = "1.0.140"
 signalbox-file-media-processor-runtime = { path = "../file-media-processor-runtime" }
 signalbox-file-media-runtime = { path = "../file-media-runtime" }
+svgtypes = "0.16.1"
 tokio = { version = "1.53.0", default-features = false, features = [
     "macros",
     "rt",

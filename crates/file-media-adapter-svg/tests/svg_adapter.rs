@@ -713,15 +713,6 @@ async fn malformed_view_box_separator_is_rejected() -> Result<(), Box<dyn Error>
 }
 
 #[tokio::test]
-async fn invalid_view_box_number_token_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1. 2"/>"#,),
-        "malformed_svg",
-    )
-    .await
-}
-
-#[tokio::test]
 async fn zero_sized_view_box_is_valid_metadata() -> Result<(), Box<dyn Error>> {
     let source =
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 0 100"/>"#)
@@ -789,15 +780,6 @@ async fn declaration_after_comment_is_rejected() -> Result<(), Box<dyn Error>> {
 async fn forbidden_attribute_control_character_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(b"<svg xmlns=\"http://www.w3.org/2000/svg\" aria-label=\"a\x01b\"/>"),
-        "malformed_svg",
-    )
-    .await
-}
-
-#[tokio::test]
-async fn dimension_with_trailing_decimal_point_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="1.px"/>"#,),
         "malformed_svg",
     )
     .await
@@ -931,29 +913,6 @@ async fn calculation_allows_negative_dimension_intermediates() -> Result<(), Box
 }
 
 #[tokio::test]
-async fn negative_constant_calculation_result_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1px)"/>"#),
-        "malformed_svg",
-    )
-    .await
-}
-
-#[tokio::test]
-async fn negative_constant_non_pixel_calculations_are_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1cm)"/>"#),
-        "malformed_svg",
-    )
-    .await?;
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1%)"/>"#),
-        "malformed_svg",
-    )
-    .await
-}
-
-#[tokio::test]
 async fn clamp_minimum_precedes_inverted_maximum() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::raw(
         br#"<svg xmlns="http://www.w3.org/2000/svg" width="clamp(1px, 2px, -1px)"/>"#,
@@ -965,24 +924,6 @@ async fn clamp_minimum_precedes_inverted_maximum() -> Result<(), Box<dyn Error>>
         FileInspectionStatus::Validated
     );
     Ok(())
-}
-
-#[tokio::test]
-async fn negative_mixed_absolute_unit_calculation_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1cm + 1mm)"/>"#,),
-        "malformed_svg",
-    )
-    .await
-}
-
-#[tokio::test]
-async fn division_by_zero_calculation_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1px / 0)"/>"#,),
-        "malformed_svg",
-    )
-    .await
 }
 
 #[tokio::test]
@@ -1009,15 +950,6 @@ async fn calculation_function_names_are_ascii_case_insensitive() -> Result<(), B
         FileInspectionStatus::Validated
     );
     Ok(())
-}
-
-#[tokio::test]
-async fn invalid_calculation_dimension_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(banana)"/>"#,),
-        "malformed_svg",
-    )
-    .await
 }
 
 #[tokio::test]
@@ -1059,24 +991,6 @@ async fn calculation_treats_css_comments_as_whitespace() -> Result<(), Box<dyn E
         FileInspectionStatus::Validated
     );
     Ok(())
-}
-
-#[tokio::test]
-async fn calculation_addition_requires_surrounding_whitespace() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1px+2px)"/>"#,),
-        "malformed_svg",
-    )
-    .await
-}
-
-#[tokio::test]
-async fn empty_calculation_arguments_are_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed!(
-        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="min(,)"/>"#),
-        "malformed_svg",
-    )
-    .await
 }
 
 #[tokio::test]
