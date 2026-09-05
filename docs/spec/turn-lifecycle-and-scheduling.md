@@ -328,10 +328,10 @@ or partial snapshot (INV-040).
 session instruction eligibility is implemented, step 4 also copies the session's
 exact ordered eligibility entries under the same `session_scheduler` lock — the
 authority-qualified pairs whose shape
-[workspace instructions](workspace-instructions.md#eligibility) owns, each
-naming a bundle identity together with the authorizing root the session reaches
-it through, not identities alone — and, after locking the admitted-set head at
-the position and in the mode fixed by the
+[workspace instructions](workspace-instructions.md) owns, each naming a bundle
+identity together with the authorizing root the session reaches it through, not
+identities alone — and, after locking the admitted-set head at the position and
+in the mode fixed by the
 [persistence lock protocol](persistence-protocol.md#lock-protocol), snapshots
 the exact retained admitted-set head and every retained admission's
 rendered-bundle row. It inserts the turn-start instruction manifest carrying the
@@ -969,9 +969,8 @@ Command construction, user-global deduplication, and acceptance atomicity are
 [identity-and-commands](identity-and-commands.md) scope. The process protocol
 exposes the delivery algebra as the closed `start_when_idle`, `steer`, and
 `queue` intents, mapped respectively to `StartWhenNoActiveTurn`,
-`NextSafePoint`, and `AfterCurrentTurn`;
-[process-protocol](process-protocol.md#client-requests) owns the wire shapes.
-The occupied-slot delivery outcomes implemented here are:
+`NextSafePoint`, and `AfterCurrentTurn`; [process-protocol](process-protocol.md)
+owns the wire shapes. The occupied-slot delivery outcomes implemented here are:
 
 - `StartWhenNoActiveTurn` while a turn holds the slot records the typed
   rejection `ActiveTurnPresent`; an active-work mode against an idle slot
@@ -1001,15 +1000,14 @@ The occupied-slot delivery outcomes implemented here are:
 - `Interrupt` targeting the active turn atomically accepts a configured
   immediate-successor origin, constructs the exact `AppliedInterruptProof`, and
   applies the predecessor transition (INV-029, INV-037). The `stop_turn` request
-  in [process-protocol](process-protocol.md#client-requests) is the client
-  surface that submits this delivery; it adds no authority beyond the treatment
-  specified here. Before any terminal transition releases the slot, the same
-  transaction reclassifies every pending steering input against the interrupted
-  turn as an ordered queued successor origin. Call, attempt, and turn
-  terminalization follow
-  [model-call-execution](model-call-execution.md#terminal-outcomes). A matching
-  interrupt against `AwaitingRecoveryDecision` preserves the already terminal
-  ambiguous call and ended attempt, records the new proof on the turn's
+  in [process-protocol](process-protocol.md) is the client surface that submits
+  this delivery; it adds no authority beyond the treatment specified here.
+  Before any terminal transition releases the slot, the same transaction
+  reclassifies every pending steering input against the interrupted turn as an
+  ordered queued successor origin. Call, attempt, and turn terminalization
+  follow [model-call-execution](model-call-execution.md#terminal-outcomes). A
+  matching interrupt against `AwaitingRecoveryDecision` preserves the already
+  terminal ambiguous call and ended attempt, records the new proof on the turn's
   reconciliation marker, and terminalizes `ReconciliationRequired` with the
   wait's exact operation set. The `reconcile_turn` request in
   [process-protocol](process-protocol.md) is the operator surface that supplies
