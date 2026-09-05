@@ -60,13 +60,16 @@ action-head row of every member of the policy it may select after the session's
 scheduler row and the admitted-set head, in profile-reference byte order, FOR
 SHARE for a member it only reads and FOR UPDATE for a member whose exclusion
 state it writes, and takes a capacity or cursor row FOR UPDATE only after every
-action head. A pool-selected call pins an interned immutable pool-policy
-identity, so a fresh availability chain resolves the policy the call was
-authorized under rather than the current document. A chain-exclusion row holds a
-separately clearable state beside its insert-only turn-local fact. Exhaustion
-evidence carries contiguous per-member rows in policy order beside its failure
-header, each row carrying its closed exclusion kind and optional reset. The
-machine they serve is owned by
+action head, taking multiple capacity rows in profile-reference byte order
+before any cursor row. An admission that will insert a contended wait takes the
+capacity row of every bounded member the wait will name before it counts
+reservations and holds those locks through commit. A pool-selected call pins an
+interned immutable pool-policy identity, so a fresh availability chain resolves
+the policy the call was authorized under rather than the current document. A
+chain-exclusion row holds a separately clearable state beside its insert-only
+turn-local fact. Exhaustion evidence carries contiguous per-member rows in
+policy order beside its failure header, each row carrying its closed exclusion
+kind and optional reset. The machine they serve is owned by
 [credential-availability](../spec/credential-availability.md), and its design
 fixes their transitions.
 

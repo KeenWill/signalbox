@@ -267,12 +267,13 @@ derives acceptance order, queue order, lifecycle precedence, ancestry,
 ownership, or authority from a UUID; listing rows by identifier for display or
 paging is not such a derivation.
 
-A new migration's version prefix is greater than every existing one. Once a
-migration is recorded in any deployed database, or once its pull request merges
-to main, it is immutable: fix it with a new forward migration, never by editing,
-replacing, or renumbering the file. The one exception is a full collapse to a
-regenerated baseline, allowed only while there is exactly one deployment and no
-release.
+A new migration's version prefix is greater than every prefix on `main` and on
+the stack's own ancestor branches, and a sibling stack's reserved prefix block
+stays valid while it still exceeds `main`. Once a migration is recorded in any
+deployed database, or once its pull request merges to main, it is immutable: fix
+it with a new forward migration, never by editing, replacing, or renumbering the
+file. The one exception is a full collapse to a regenerated baseline, allowed
+only while there is exactly one deployment and no release.
 
 A durable row that does not decode produces a typed corruption error. The row is
 never normalized into a nearby valid value, never repaired or dropped on load,
@@ -520,7 +521,12 @@ frontier is the round boundary, a projected frontier contains every result of
 the round, and a recovery attempt belongs to a request the named call produced.
 An input-accepted record fails the dispatch unless its accepted input, queued
 origin, and lifecycle row correlate and an applied submit command or a goal-turn
-row authored it.
+row authored it. A session-created record fails the dispatch unless its creation
+cause, dispatch reference, spawning request, and initial ownership match the
+session and its first ownership journal entry. A settings event fails the
+dispatch unless a session change matches its applied replacement command and
+both defaults epochs, or a turn resolution matches its accepted origin and its
+frozen selection, defaults, overlay, and adjustments.
 
 An applied submit-input that creates a turn origin appends an input-accepted
 event; pending steering appends nothing until terminal reclassification mints
@@ -535,7 +541,11 @@ terminalizing transaction. A stop or supersede that makes a queued goal turn
 ineligible appends a retired turn-terminal event in the same transaction, and
 supersede appends that retirement before the replacement's input-accepted event.
 Adopting or releasing a session appends an ownership-changed event in the
-transaction that journals it.
+transaction that journals it. A claimed tool-decision command appends its
+injection-settled receipt in the decision transaction, not delivered when the
+request was already resolved. Completing a compaction appends the
+context-compacted event atomically with the completed call, summary, result
+frontier, and applied command.
 
 The transaction that terminalizes a session's last live turn settles the
 session's pending closure at commit through a deferred constraint trigger, which
