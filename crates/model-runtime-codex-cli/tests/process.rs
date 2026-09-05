@@ -2166,11 +2166,8 @@ async fn a_turn_failed_echo_after_a_stream_error_keeps_the_provider_error() {
 /// A stream-level `error` that the process never echoes as `turn.failed`
 /// proves nothing about acceptance.
 ///
-/// The substitution contract admits the Codex proof only on the exact,
-/// noncontradictory `turn.failed` closure. A truncated stream, or an exit after
-/// a lone `error` event, may still follow a request the provider accepted, so
-/// reporting the proof here would let credential-pool rotation reissue the turn
-/// under a second account and duplicate billed work.
+/// An exact `turn.failed` echo preserves definitive failure evidence without
+/// proving non-acceptance; a lone stream error carries no proof either.
 #[tokio::test]
 async fn a_stream_error_without_its_turn_failed_echo_proves_no_non_acceptance() {
     let result = execute_scenario(
