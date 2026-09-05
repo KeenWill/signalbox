@@ -84,21 +84,20 @@ an exclusive keyset `after`, and opens with `runner_status_start`, then returns
 row the page emitted. The projection carries a pending provisioning-only
 successor's enrollment-request identity and its authority state, because
 `promote_pending_runner` names that identity. The `operation_failure` variant
-carries the runner, the `operation_kind`, and the complete correlation arm that
-kind selects; the `workspace_leak` variant carries the runner, fact kind,
-locator, entry digest, and the leak fact's optional session and placement
+carries the runner, the `operation_kind`, the refused operation's complete
+correlation arm that kind selects, one closed daemon-actionable `category`, and
+the runner-authored `detail` object with its bounded `code`, `message`, and
+structured `payload`; the `workspace_leak` variant carries the runner, fact
+kind, locator, entry digest, and the leak fact's optional session and placement
 revision. Both variants are exclusive, failures order before leaks, and the
 traversal each one continues belongs to
-[persistence-protocol.md](../spec/persistence-protocol.md). Each failure names
-its runner, the refused operation's correlation, one closed daemon-actionable
-`category`, and the runner-authored `detail` object with its bounded `code`,
-`message`, and structured `payload`. The category set is exactly the closed
-daemon-actionable set the runner wire carries, member for member, so every
-retained failure is serializable. The daemon bounds the detail and retains the
-runner's text unchanged, following the `operation_failed` contract in
-[runner-protocol.md](../spec/runner-protocol.md). The detail is untrusted
-runner-authored text, so the status projection is a transformed view of that
-retained record: it applies the diagnostic-evidence redaction in
+[persistence-protocol.md](../spec/persistence-protocol.md). The category set is
+exactly the closed daemon-actionable set the runner wire carries, member for
+member, so every retained failure is serializable. The daemon bounds the detail
+and retains the runner's text unchanged, following the `operation_failed`
+contract in [runner-protocol.md](../spec/runner-protocol.md). The detail is
+untrusted runner-authored text, so the status projection is a transformed view
+of that retained record: it applies the diagnostic-evidence redaction in
 [process-protocol.md](../spec/process-protocol.md), removing host and credential
 paths, before exposing it. The event notifies a follower of each live runner
 transition above its snapshot cursor; the snapshot's runner projection carries

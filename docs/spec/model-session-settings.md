@@ -25,15 +25,15 @@ layer resolves at input acceptance, under the turn-binding rule on
 [sessions-and-transcript.md](sessions-and-transcript.md).
 
 A model's capability record lists the reasoning levels and service tiers it
-supports, and how it supports fast mode. Input acceptance needs the exact record
-for its target whenever the per-call overlay has a member other than inherit,
-including clear, or the stored settings were validated for a different model.
-Provider defaults carry no validation selection, so an all-inherit overlay over
-them needs none even when the selection changes. Fast mode is unsupported, a
-request control on the selected target, or a declared alternate serving target;
-a model that declares no fast-mode support is unsupported. A model change
-carries the inherited settings to the new model, adjusts those the new model
-does not support, and records each adjustment.
+supports, and how it supports fast mode: unsupported, a request control on the
+selected target, or a declared alternate serving target; a model that declares
+no fast-mode support is unsupported. Input acceptance needs the exact record for
+its target whenever the per-call overlay has a member other than inherit,
+including clear, or the stored settings were validated for a different model;
+provider defaults carry no validation selection, so an all-inherit overlay over
+them needs none even when the selection changes. A model change carries the
+inherited settings to the new model, adjusts those the new model does not
+support, and records each adjustment.
 
 Two durable events record settings outcomes: `SessionModelSettingsChanged` when
 a defaults replacement changes a setting or model, and
@@ -93,9 +93,9 @@ Override provenance is part of command equality. A copied value is not
 interchangeable with the same explicitly set value.
 
 Profile and global layers are resolved and copied when a session defaults epoch
-is installed, so an operator file edit cannot silently change an acknowledged
-session. A restart or a configuration edit never rewrites an existing epoch. A
-per-call override is resolved at input acceptance, and the complete result is
+is installed, and a restart or a configuration edit never rewrites an existing
+epoch, so an operator file edit cannot silently change an acknowledged session.
+A per-call override is resolved at input acceptance, and the complete result is
 frozen into the origin turn.
 
 Durable selection provenance retains the requested direct target even when fast
@@ -109,9 +109,9 @@ unsupported combination is also a preparation-time error.
 An incompatibility counts as model-change-induced, and is adjusted instead of
 rejected, only when the affected setting is inherited.
 
-Reasoning-level mappings are exhaustive per-adapter tables evaluated during
-preparation. Every adapter answers every level with a provider value or a typed
-refusal.
+Reasoning-level mappings are exhaustive per-adapter tables, evaluated during
+preparation, in which every adapter answers every level with a provider value or
+a typed refusal.
 
 ## Planned
 

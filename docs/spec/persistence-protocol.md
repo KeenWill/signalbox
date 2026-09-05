@@ -385,10 +385,10 @@ placement taking it between the scheduler and enrollment locks.
 
 Runner loss advances a durable loss epoch in one short transaction that locks
 only the current connection-loss head, never holding that global row while
-waiting for a session lock. Propagation then pages, under repeatable read,
-through the current placements whose baselines precede the authenticated loss,
-in session-identity order after a durable cursor. Each page is a fixed size the
-code pins.
+waiting for a session lock. Propagation then pages, under repeatable read and in
+fixed-size pages the code pins, through the current placements whose baselines
+precede the authenticated loss, in session-identity order after a durable
+cursor.
 
 The triggers that check a runner-recovery wait against its loss evidence lock
 the session's scheduler row first, so a concurrent advance cannot validate the
@@ -476,12 +476,11 @@ exact semantic entries; no transcript query supplies result content.
 
 Every pending message and background result receives one positive recipient-wide
 delivery sequence, unique and gap-free per recipient across both kinds, under
-the recipient session lock. A foreground result stays ordered by its awaiting
-request and consumes no sequence. An accepted background wait reserves one
-future position until its child result exists, and later message and wait
-admissions preserve every outstanding reservation. A foreground result counts as
-one tool result for outbox decoding and compaction evidence; a background result
-counts as neither.
+the recipient session lock. An accepted background wait reserves one future
+position until its child result exists, and later message and wait admissions
+preserve every outstanding reservation. A foreground result stays ordered by its
+awaiting request, consumes no sequence, and counts as one tool result for outbox
+decoding and compaction evidence; a background result counts as neither.
 
 Parent-and-descendants termination commits the command and every evaluated edge
 together, so a crash leaves either all prior state or the complete evaluation.
