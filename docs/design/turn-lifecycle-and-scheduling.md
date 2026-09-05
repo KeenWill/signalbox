@@ -107,9 +107,10 @@ loss projection, which marks the placement lost and moves an active turn at a
 runner boundary to the runner-recovery wait, remains the only producer of that
 state.
 
-The activation transaction remains the one atomic boundary for everything a turn
-start owns. Later eligibility work changes only the copied values and rendered
-rows, never that boundary.
+Only the path that prepares the turn's initial model call inside the activation
+transaction records the manifest there. The ordinary path records it after
+activation, and a turn that stops being active first has none. The freeze moves
+every manifest into the activation transaction.
 
 ## Acceptance criteria
 
@@ -141,4 +142,4 @@ A restart with retained runner work resolves every runner-owned attempt before
 the generic scan runs, and the generic scan ends no attempt a runner still owns.
 
 Every activated turn owns exactly one turn-start instruction manifest, written
-in its activation transaction and never after it.
+in its activation transaction rather than by a post-activation scan.
