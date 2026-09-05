@@ -541,12 +541,13 @@ progress before another dispatch. A failed census fetch, commission, template
 resolution, or sweep-state read appends a typed failure event and advances the
 count of consecutive failures of that kind; retries back off exponentially
 within configured bounds, the fifth consecutive failure parks the target for an
-operator, and a successful observation resets the count. After cool-off,
-repeated sweeps with an unchanged head, an unchanged unresolved-thread count,
-and no recorded model call park the target at once as `no_model_activity` with
-the operator need `inspect_inactive_session`. The sweep is a shallow daemon loop
-that creates no reusable program primitive, and it does no prioritization or
-scheduling beyond the configured list.
+operator, and a successful observation resets the count. A storage outage that
+also prevents the failure record leaves only a log, and the target retries at
+the next census. After cool-off, repeated sweeps with an unchanged head, an
+unchanged unresolved-thread count, and no recorded model call park the target at
+once as `no_model_activity` with the operator need `inspect_inactive_session`.
+The sweep is a shallow daemon loop that creates no reusable program primitive,
+and it does no prioritization or scheduling beyond the configured list.
 
 ## Boundary contracts
 
