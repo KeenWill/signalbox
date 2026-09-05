@@ -9,6 +9,7 @@ use std::{
     error::Error,
     fmt,
     hash::{Hash, Hasher},
+    str::FromStr,
 };
 
 use sha2::{Digest, Sha256};
@@ -173,7 +174,7 @@ pub struct ImportedJsonNumber(String);
 impl ImportedJsonNumber {
     /// Checks the complete RFC 8259 JSON number grammar.
     pub fn try_new(value: String) -> Result<Self, ImportedJsonNumberError> {
-        if is_json_number(&value) {
+        if serde_json::Number::from_str(&value).is_ok() {
             Ok(Self(value))
         } else {
             Err(ImportedJsonNumberError { value })
@@ -234,48 +235,6 @@ impl fmt::Display for ImportedJsonNumberError {
 }
 
 impl Error for ImportedJsonNumberError {}
-
-fn is_json_number(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    if bytes.get(index) == Some(&b'-') {
-        index += 1;
-    }
-    match bytes.get(index) {
-        Some(b'0') => index += 1,
-        Some(b'1'..=b'9') => {
-            index += 1;
-            while matches!(bytes.get(index), Some(b'0'..=b'9')) {
-                index += 1;
-            }
-        }
-        _ => return false,
-    }
-    if bytes.get(index) == Some(&b'.') {
-        index += 1;
-        let start = index;
-        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
-            index += 1;
-        }
-        if index == start {
-            return false;
-        }
-    }
-    if matches!(bytes.get(index), Some(b'e' | b'E')) {
-        index += 1;
-        if matches!(bytes.get(index), Some(b'+' | b'-')) {
-            index += 1;
-        }
-        let start = index;
-        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
-            index += 1;
-        }
-        if index == start {
-            return false;
-        }
-    }
-    index == bytes.len()
-}
 
 /// One ordered object member in the source-neutral structured algebra.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
