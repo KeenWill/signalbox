@@ -123,14 +123,12 @@ rejects an unknown field, wrong shape, different family, or different version
 rather than interpreting it as the local process protocol. No process-protocol
 frame is a browser DTO. The descriptor, historical-window, and lexical-search
 route shapes and semantics are owned by
-[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline)
-and its
-[lexical-search section](sessions-and-transcript.md#bounded-browser-lexical-search).
-The open-workspace live snapshot, follow route, and resynchronization semantics
-are owned by
-[its live-session section](sessions-and-transcript.md#bounded-browser-live-session-projection).
-The descriptor, content, and download routes beneath `/api/blobs/{digest}` are
-the same-origin surface owned by [blob storage](blob-storage.md).
+[Sessions and the transcript](sessions-and-transcript.md) and its
+[sessions and transcript](sessions-and-transcript.md). The open-workspace live
+snapshot, follow route, and resynchronization semantics are owned by
+[sessions and transcript](sessions-and-transcript.md). The descriptor, content,
+and download routes beneath `/api/blobs/{digest}` are the same-origin surface
+owned by [blob storage](blob-storage.md).
 
 `GET /api/attention` returns at most 32 session summaries from one read-only
 repeatable-read snapshot, ordered by session identity. A continuation names the
@@ -2591,21 +2589,20 @@ credential presence is never consulted (INV-008):
   an origin minted by any of them would otherwise freeze an incapable target and
   fail before provider spawn — precisely the restart-after-retargeting case this
   check exists to prevent. That is also what
-  [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
-  promises for every later origin. The subject of that check is the effective
-  serving record the frozen settings select, not the named direct model: when
-  the frozen overlay enables fast mode on a model whose `fast_mode` is
-  `alternate_target`, the check is applied to the `fast_target_id` serving
-  record that execution will pin, and to its adapter mapping. Each serving
-  target declares transport and capacity independently, so validating only the
-  direct target would admit an input that fails later, before provider spawn.
-  Where the frozen settings leave the effective record undetermined at
-  acceptance, every record the frozen selection may still pin must satisfy the
-  check. This check runs even when no defaults replacement occurred, so restart
-  or configuration retargeting cannot strand an admitted session. A direct
-  selection receives the same check against the serving record its own frozen
-  settings select. The typed rejection accepts no input, creates no turn, and
-  changes neither defaults nor admissions.
+  [sessions-and-transcript](sessions-and-transcript.md) promises for every later
+  origin. The subject of that check is the effective serving record the frozen
+  settings select, not the named direct model: when the frozen overlay enables
+  fast mode on a model whose `fast_mode` is `alternate_target`, the check is
+  applied to the `fast_target_id` serving record that execution will pin, and to
+  its adapter mapping. Each serving target declares transport and capacity
+  independently, so validating only the direct target would admit an input that
+  fails later, before provider spawn. Where the frozen settings leave the
+  effective record undetermined at acceptance, every record the frozen selection
+  may still pin must satisfy the check. This check runs even when no defaults
+  replacement occurred, so restart or configuration retargeting cannot strand an
+  admitted session. A direct selection receives the same check against the
+  serving record its own frozen settings select. The typed rejection accepts no
+  input, creates no turn, and changes neither defaults nor admissions.
 - **At execution.** When the attempt pins its target, the frozen selection is
   resolved against the `ModelTargetCatalog`. An unresolvable selection fails the
   turn as a known failure before any model call exists; a credential or send

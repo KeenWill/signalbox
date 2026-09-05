@@ -1089,19 +1089,18 @@ Locks per transaction, in acquisition order:
   `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
   through the non-deferrable session foreign key. **Committed unimplemented
   functionality — instruction-aware replacement.** The retained-region check
-  that
-  [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
-  adds to this command needs two further locks, and they precede the pointer row
-  rather than following it, because the established order everywhere else is
-  scheduler row before `session_current_defaults` pointer row. The complete
-  sequence is the `session_scheduler` row `FOR UPDATE`, then the session's
-  admitted-set head `FOR SHARE` — the replacement only reads the retained
-  region, and `FOR SHARE` already excludes the `FOR UPDATE` an admission takes —
-  then the `session_current_defaults` pointer row `FOR UPDATE` as above. All
-  three are held until the successor epoch commits, so an admission or an
-  activation falls wholly before or after the replacement and cannot invalidate
-  the evidence it checked. This is the same head-lock position the
-  `StartEligibleTurn` bullet fixes: immediately after the scheduler row.
+  that [sessions-and-transcript](sessions-and-transcript.md) adds to this
+  command needs two further locks, and they precede the pointer row rather than
+  following it, because the established order everywhere else is scheduler row
+  before `session_current_defaults` pointer row. The complete sequence is the
+  `session_scheduler` row `FOR UPDATE`, then the session's admitted-set head
+  `FOR SHARE` — the replacement only reads the retained region, and `FOR SHARE`
+  already excludes the `FOR UPDATE` an admission takes — then the
+  `session_current_defaults` pointer row `FOR UPDATE` as above. All three are
+  held until the successor epoch commits, so an admission or an activation falls
+  wholly before or after the replacement and cannot invalidate the evidence it
+  checked. This is the same head-lock position the `StartEligibleTurn` bullet
+  fixes: immediately after the scheduler row.
 
 - **ReplaceSessionMetadata**: the target session row is locked
   `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This
