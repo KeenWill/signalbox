@@ -221,7 +221,7 @@ exchange it covers.
 A turn binds its configuration when its origin is accepted. Replacing defaults
 later never rebinds it, whether the turn is queued, running, or finished. A
 delegated child copies the parent turn's frozen defaults epoch, never the
-parent's current defaults pointer.
+parent's current defaults pointer and never the turn's per-call overrides.
 
 The application's `CreateSession` request has no cause or ancestry input and
 fixes the interactive cause with no ancestry; the imported-frontier family
