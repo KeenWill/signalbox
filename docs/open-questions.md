@@ -777,8 +777,8 @@ the implemented session and external-link evidence.
 ### File and media interpretation
 
 The proposed common architecture is described for owner review in
-[file and media layer](proposals/file-and-media-layer.md). The following choices
-remain unresolved and bind no implementation:
+[file and media layer](spec/file-and-media.md). The following choices remain
+unresolved and bind no implementation:
 
 - **Isolation substrate.** Choose a dedicated local worker, the existing runner
   sandbox, or another mechanism that proves the proposed containment contract.
