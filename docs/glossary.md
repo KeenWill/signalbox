@@ -2,9 +2,9 @@
 
 This glossary is a terminology index into the living specification under
 [docs/spec](spec/README.md). Each term carries one working definition and a link
-to the spec page (or section) that owns its full semantics; terms whose designs
-are accepted but not yet distilled into any spec page are marked as deferred
-design and link to [open questions](open-questions.md).
+to the spec page (or section) that owns its full semantics; a term whose design
+is accepted but not built links to its design document under `docs/design/`, and
+a term that is still undecided links to [open questions](open-questions.md).
 
 ## Session
 
