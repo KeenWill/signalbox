@@ -6351,7 +6351,7 @@ mod tests {
             captured
                 .text()
                 .contains("terminal_outcome=\"tool_round_limit_reached\""),
-            "the service terminalization must expose the INV-071 label"
+            "the service terminalization must expose the  label"
         );
         let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
@@ -6909,7 +6909,7 @@ mod tests {
         );
         assert!(
             telemetry.contains("terminal_outcome=\"tool_round_limit_reached\""),
-            "the service terminalization must expose the INV-071 label"
+            "the service terminalization must expose the  label"
         );
         let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);

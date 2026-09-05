@@ -37,9 +37,9 @@ approvals, delegated sub-agent sessions, forking from any earlier point,
 artifacts with provenance, and live reconnect that never lies about what is
 final — while keeping the properties those products rarely guarantee: sessions
 and accepted work survive process restarts and client disconnects
-([recovery posture](architecture.md#recovery-posture), INV-007, INV-010), every
-external effect is honestly classified including ambiguity (INV-025), and
-provenance for who or what caused each change is reconstructible after the fact.
+([recovery posture](architecture.md#recovery-posture), , ), every external
+effect is honestly classified including ambiguity (), and provenance for who or
+what caused each change is reconstructible after the fact.
 
 ## Concept catalog
 
@@ -48,28 +48,28 @@ the [glossary](glossary.md). Concepts the [living spec](spec/README.md) already
 describes appear here only as destination responsibilities; concepts marked
 *(target)* have no implemented behavior and are detailed only here.
 
-| Concept                                       | Responsibility                                                                                                                                                                                                                                     |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Session**                                   | One durable, independently browsable conversation ([glossary](glossary.md#session)); the minimal long-lived aggregate boundary.                                                                                                                    |
-| **SessionCreationCause / TranscriptAncestry** | Two independent immutable creation facts — why the session exists and where its initial semantic context came from.                                                                                                                                |
-| **AcceptedInput**                             | One admitted submission made durable with its explicit delivery treatment and recoverable disposition; the implemented baseline admits only user-submitted user content ([glossary](glossary.md#accepted-input)).                                  |
-| **DurableCommandId**                          | The user-global idempotency identity for durably handled caller commands ([glossary](glossary.md#durable-command-identity)).                                                                                                                       |
-| **SemanticTranscriptEntry**                   | One immutable identified semantic-history fact, distinct from operational, streaming, and presentation state; target entry types below.                                                                                                            |
-| **Turn**                                      | One durable logical request for a conversational outcome under one frozen effective configuration ([glossary](glossary.md#turn)).                                                                                                                  |
-| **TurnAttempt**                               | One exclusive physical orchestration tenure advancing an active turn ([glossary](glossary.md#turn-attempt)).                                                                                                                                       |
-| **ModelCall**                                 | One durable authorization to attempt one provider interaction, carrying its exact pinned target and context frontier ([glossary](glossary.md#model-call)).                                                                                         |
-| **ContextFrontier / TranscriptFrontier**      | The immutable identified snapshot of the exact ordered semantic context consumed by one call or fixed at a turn start, and the distinct purpose-specific source boundary used by ancestry.                                                         |
-| **ToolRequest**                               | One logical request for a named tool operation with normalized arguments, policy state, and eventual logical outcome ([glossary](glossary.md#tool-request); target lifecycle below).                                                               |
-| **ToolAttempt**                               | One physical effort to execute one tool request at one placement, fenced by its dispatch generation ([glossary](glossary.md#tool-attempt)).                                                                                                        |
-| **ApprovalDecision** *(target record)*        | An immutable recorded human decision permitting or denying one exact tool request; the binding rule is fixed ([glossary](glossary.md#approval), INV-019), while the durable record shape, consumption, and expiry await the future tool decisions. |
-| **Tool-risk metadata** *(target)*             | Trusted, registry-owned classification of a tool operation — side-effect scope, reversibility, idempotency, data egress — supplied by the tool registry and never by model-provided arguments; awaiting the future tool-safety decisions.          |
-| **Effective configuration**                   | The complete immutable configuration governing one turn ([glossary](glossary.md#effective-configuration)); target contents below.                                                                                                                  |
-| **Resolved model plan** *(target)*            | A nonempty ordered set of exact provider/model candidates plus an explicit frozen fallback policy, generalizing today's single pinned target only if fallback is ever accepted.                                                                    |
-| **Streaming response snapshot** *(target)*    | An optional, noncanonical, replaceable checkpoint of partial provider output used only for reconnect continuity; never transcript truth.                                                                                                           |
-| **Artifact** *(target)*                       | An independently retrievable output with its own identity, content digest, and producer provenance, linked into sessions by reference.                                                                                                             |
-| **Goal** *(target)*                           | One durable persistent objective with explicit pursue, pause, resume, and revise transitions; identity and lifecycle require a future foundation decision.                                                                                         |
-| **UpdateSubscription** *(target)*             | One durable standing registration that converts later updates into explicitly delivered session input; identity, lifetime, delivery, and cancellation require a future foundation decision.                                                        |
-| **Actor**                                     | Typed provenance attribution recorded with commands and transitions — provenance, not a multi-user authorization model; the variant set is closed, never open-ended.                                                                               |
+| Concept                                       | Responsibility                                                                                                                                                                                                                              |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Session**                                   | One durable, independently browsable conversation ([glossary](glossary.md#session)); the minimal long-lived aggregate boundary.                                                                                                             |
+| **SessionCreationCause / TranscriptAncestry** | Two independent immutable creation facts — why the session exists and where its initial semantic context came from.                                                                                                                         |
+| **AcceptedInput**                             | One admitted submission made durable with its explicit delivery treatment and recoverable disposition; the implemented baseline admits only user-submitted user content ([glossary](glossary.md#accepted-input)).                           |
+| **DurableCommandId**                          | The user-global idempotency identity for durably handled caller commands ([glossary](glossary.md#durable-command-identity)).                                                                                                                |
+| **SemanticTranscriptEntry**                   | One immutable identified semantic-history fact, distinct from operational, streaming, and presentation state; target entry types below.                                                                                                     |
+| **Turn**                                      | One durable logical request for a conversational outcome under one frozen effective configuration ([glossary](glossary.md#turn)).                                                                                                           |
+| **TurnAttempt**                               | One exclusive physical orchestration tenure advancing an active turn ([glossary](glossary.md#turn-attempt)).                                                                                                                                |
+| **ModelCall**                                 | One durable authorization to attempt one provider interaction, carrying its exact pinned target and context frontier ([glossary](glossary.md#model-call)).                                                                                  |
+| **ContextFrontier / TranscriptFrontier**      | The immutable identified snapshot of the exact ordered semantic context consumed by one call or fixed at a turn start, and the distinct purpose-specific source boundary used by ancestry.                                                  |
+| **ToolRequest**                               | One logical request for a named tool operation with normalized arguments, policy state, and eventual logical outcome ([glossary](glossary.md#tool-request); target lifecycle below).                                                        |
+| **ToolAttempt**                               | One physical effort to execute one tool request at one placement, fenced by its dispatch generation ([glossary](glossary.md#tool-attempt)).                                                                                                 |
+| **ApprovalDecision** *(target record)*        | An immutable recorded human decision permitting or denying one exact tool request; the binding rule is fixed ([glossary](glossary.md#approval), ), while the durable record shape, consumption, and expiry await the future tool decisions. |
+| **Tool-risk metadata** *(target)*             | Trusted, registry-owned classification of a tool operation — side-effect scope, reversibility, idempotency, data egress — supplied by the tool registry and never by model-provided arguments; awaiting the future tool-safety decisions.   |
+| **Effective configuration**                   | The complete immutable configuration governing one turn ([glossary](glossary.md#effective-configuration)); target contents below.                                                                                                           |
+| **Resolved model plan** *(target)*            | A nonempty ordered set of exact provider/model candidates plus an explicit frozen fallback policy, generalizing today's single pinned target only if fallback is ever accepted.                                                             |
+| **Streaming response snapshot** *(target)*    | An optional, noncanonical, replaceable checkpoint of partial provider output used only for reconnect continuity; never transcript truth.                                                                                                    |
+| **Artifact** *(target)*                       | An independently retrievable output with its own identity, content digest, and producer provenance, linked into sessions by reference.                                                                                                      |
+| **Goal** *(target)*                           | One durable persistent objective with explicit pursue, pause, resume, and revise transitions; identity and lifecycle require a future foundation decision.                                                                                  |
+| **UpdateSubscription** *(target)*             | One durable standing registration that converts later updates into explicitly delivered session input; identity, lifetime, delivery, and cancellation require a future foundation decision.                                                 |
+| **Actor**                                     | Typed provenance attribution recorded with commands and transitions — provenance, not a multi-user authorization model; the variant set is closed, never open-ended.                                                                        |
 
 ### Target semantic-entry types
 
@@ -134,16 +134,15 @@ Dispatching -> Succeeded | KnownFailed | Ambiguous
 ```
 
 Accepted rules that already shape this design: a denied request can never create
-an authorized physical attempt (INV-027); terminal outcomes never reopen
-(INV-006); turn terminalization must close every authorized-but-undispatched
-request so nothing can dispatch it after the slot is released, and an interrupt
-that closes an approval wait terminally cancels the owned request. The request
-belongs to its turn, not to one attempt, so it survives approval pauses, client
-reconnects, daemon restarts, and replacement turn attempts. Changed arguments or
-a changed tool revision are a new request, never a mutation. Request-level
-`Ambiguous` derives from attempt evidence: physical ambiguity is recorded on the
-attempt (INV-025) and effect policy decides whether another attempt is ever
-permitted (INV-026).
+an authorized physical attempt (); terminal outcomes never reopen (); turn
+terminalization must close every authorized-but-undispatched request so nothing
+can dispatch it after the slot is released, and an interrupt that closes an
+approval wait terminally cancels the owned request. The request belongs to its
+turn, not to one attempt, so it survives approval pauses, client reconnects,
+daemon restarts, and replacement turn attempts. Changed arguments or a changed
+tool revision are a new request, never a mutation. Request-level `Ambiguous`
+derives from attempt evidence: physical ambiguity is recorded on the attempt ()
+and effect policy decides whether another attempt is ever permitted ().
 
 ### Physical tool attempts (target)
 
@@ -155,10 +154,9 @@ Prepared -> CancelledBeforeExecution
 Each attempt records its executor placement, dispatch identity, timing, output,
 and outcome classification. Dispatch and result acceptance are fenced by the
 attempt-plus-generation pair, so a stale attempt or superseded dispatch cannot
-advance current state (INV-011, INV-021). An external write whose
-acknowledgement is lost ends `Ambiguous` and is never blindly repeated (INV-025,
-INV-026); a second attempt for the same request exists only where effect policy
-proves repetition safe.
+advance current state (, ). An external write whose acknowledgement is lost ends
+`Ambiguous` and is never blindly repeated (, ); a second attempt for the same
+request exists only where effect policy proves repetition safe.
 
 ### Approval algebra (target)
 
@@ -166,14 +164,13 @@ An `ApprovalDecision` is an immutable fact, not mutable request state: it
 records approve or deny for one exact `ToolRequestId`, the normalized arguments
 presented to the user (a digest may index them, but structural equality remains
 the authority), the pinned tool revision, and the material execution constraints
-— the accepted binding rule (INV-019; [glossary](glossary.md#approval)).
-Consumption is transactional: `AwaitingApproval` plus a matching unexpired
-approval becomes `Ready` in the same transaction that closes the turn's approval
-wait and creates its continuing attempt. A stale, expired, or mismatched
-decision has no effect on current state and is retained as history. A model or
-automated-judge recommendation is a distinct actor and never masquerades as
-human approval (INV-020). Expiry, revocation, and scoped standing grants remain
-open.
+— the accepted binding rule (; [glossary](glossary.md#approval)). Consumption is
+transactional: `AwaitingApproval` plus a matching unexpired approval becomes
+`Ready` in the same transaction that closes the turn's approval wait and creates
+its continuing attempt. A stale, expired, or mismatched decision has no effect
+on current state and is retained as history. A model or automated-judge
+recommendation is a distinct actor and never masquerades as human approval ().
+Expiry, revocation, and scoped standing grants remain open.
 
 ### Cancellation of tool work (target)
 
@@ -213,10 +210,10 @@ session slot, and the startup recovery scan — is owned by
 model-call semantics, retry and continuation identity, and provider failure
 classification by [model-call-execution](spec/model-call-execution.md). Two
 consequences worth repeating only as orientation: retry intent is always
-expressed as a new `TurnAttempt` — a terminal state never reopens (INV-006) —
-and unresolved ambiguity holds the turn in its recovery-decision wait until
-evidence or an explicit user decision resolves it, rather than being coerced
-into failure or silently retried.
+expressed as a new `TurnAttempt` — a terminal state never reopens () — and
+unresolved ambiguity holds the turn in its recovery-decision wait until evidence
+or an explicit user decision resolves it, rather than being coerced into failure
+or silently retried.
 
 ## Execution isolation target
 
@@ -227,7 +224,7 @@ runners:
 - a dedicated restricted execution identity, never the user's account;
 - no ambient user credentials — no SSH agent, browser profile, credential-store
   socket, cloud metadata, or provider key is inherited; any credential a tool
-  needs is injected per attempt under the daemon-controlled boundary (INV-035;
+  needs is injected per attempt under the daemon-controlled boundary (;
   [configuration-and-credentials](spec/configuration-and-credentials.md));
 - explicit mounts — read-only workspace by default, allowlisted writable paths,
   symlink and mount escapes rejected;
@@ -250,8 +247,8 @@ treats stronger sandboxes as an extension point, not a baseline assumption.
 The target reconnect semantics: a client reconstructs authoritative durable
 state from a snapshot with an observation cursor, resumes strictly ordered
 durable-transition events after that cursor, and treats streamed drafts as
-replaceable transient content (INV-032). The publication mechanism inside the
-daemon is the transactional outbox; its implemented storage foundation and
+replaceable transient content (). The publication mechanism inside the daemon is
+the transactional outbox; its implemented storage foundation and
 same-transaction appends are owned by
 [persistence-protocol](spec/persistence-protocol.md). The local version-one
 publisher and client boundary are owned by
@@ -293,9 +290,9 @@ Delivery and queueing reuse the implemented treatments
 ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)): a
 session-sent message arrives under the same explicit delivery requests and
 durable queue order as user input, never through a parallel channel. The
-baseline `Interrupt` treatment remains user-only (INV-029); session-issued
-interruption requires a foundation decision extending that cancellation
-authority. The client-facing surface is a planned
+baseline `Interrupt` treatment remains user-only (); session-issued interruption
+requires a foundation decision extending that cancellation authority. The
+client-facing surface is a planned
 [session-management tool family](#the-tool-system-as-the-load-bearing-layer):
 list sessions and send a message. Receive-update callbacks additionally require
 a decision defining their standing subscription and delivery lifecycle.
@@ -326,11 +323,11 @@ frozen effective configuration does not change. Affecting an in-flight tool
 request would instead require an explicit policy-reevaluation and
 approval-invalidation decision. No configuration grants unlimited permission.
 Visibility and approval authority is owned by the future tool-policy and
-approval decisions, constrained by the accepted binding and honesty rules
-(INV-019, INV-020); per-session configurability lands through new configuration
-categories, extending the request, default, override, and effective-value
-algebras together. Independent-session linking remains blocked on the separate
-foundation decision identified above.
+approval decisions, constrained by the accepted binding and honesty rules (, );
+per-session configurability lands through new configuration categories,
+extending the request, default, override, and effective-value algebras together.
+Independent-session linking remains blocked on the separate foundation decision
+identified above.
 
 ### Goal mode as a platform feature (target)
 

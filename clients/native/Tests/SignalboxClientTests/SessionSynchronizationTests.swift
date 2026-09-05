@@ -113,7 +113,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  /// INV-033 / INV-044: an authoritative snapshot publishes the runner fact
+  ///  / : an authoritative snapshot publishes the runner fact
   /// from its cursor boundary together with the transcript records.
   func testAuthoritativeSnapshotPublishesRunnerProjection() throws {
     var transport = try SynchronizationFixture.transport()
@@ -148,7 +148,7 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(snapshot.runner, try SynchronizationFixture.runnerProjection())
   }
 
-  func testS24INV032ReplayDeduplicatesSnapshotCursor() throws {
+  func testS24ReplayDeduplicatesSnapshotCursor() throws {
     let snapshotCursor = SynchronizationFixture.initialCursor
     let laterCursor = SynchronizationFixture.laterCursor
     var transport = try SynchronizationFixture.transportAtReplay(cursor: snapshotCursor)
@@ -231,7 +231,7 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.diagnostics.last?.kind, .decoding)
   }
 
-  func testINV033MalformedKnownEventRecoversBeforeAdvancingCursor() throws {
+  func testMalformedKnownEventRecoversBeforeAdvancingCursor() throws {
     let eventCursor = SynchronizationFixture.unknownCursor
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
@@ -254,7 +254,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033MalformedKnownEventInReplayRecoversWithoutBuffering() throws {
+  func testMalformedKnownEventInReplayRecoversWithoutBuffering() throws {
     var transport = try SynchronizationFixture.transportAtReplay(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -275,7 +275,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033MalformedSnapshotStartEntersHelloRecovery() throws {
+  func testMalformedSnapshotStartEntersHelloRecovery() throws {
     var transport = try SynchronizationFixture.transport()
 
     _ = transport.send(.start)
@@ -297,7 +297,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033MalformedSideSnapshotStartEntersSideHistoryRecovery() throws {
+  func testMalformedSideSnapshotStartEntersSideHistoryRecovery() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -323,7 +323,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033MalformedNestedTurnFailsSnapshotClosed() throws {
+  func testMalformedNestedTurnFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -348,7 +348,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033UnadmittedNestedTurnFieldFailsSnapshotClosed() throws {
+  func testUnadmittedNestedTurnFieldFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -367,7 +367,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033MalformedNestedEntryFailsSnapshotClosed() throws {
+  func testMalformedNestedEntryFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -392,7 +392,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033MalformedNestedTextEntryFailsSnapshotClosed() throws {
+  func testMalformedNestedTextEntryFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -458,7 +458,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033UnadmittedCurrentModelCallFieldFailsSnapshotClosed() throws {
+  func testUnadmittedCurrentModelCallFieldFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -477,7 +477,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033UnadmittedTerminalModelCallFieldFailsSnapshotClosed() throws {
+  func testUnadmittedTerminalModelCallFieldFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -496,7 +496,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033FailedTurnWithCallWithoutAttemptFailsSnapshotClosed() throws {
+  func testFailedTurnWithCallWithoutAttemptFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -515,7 +515,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033ActiveRunningRequiresNullableModelCallMember() throws {
+  func testActiveRunningRequiresNullableModelCallMember() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -534,7 +534,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033FailedTurnRequiresNullableTerminalMembers() throws {
+  func testFailedTurnRequiresNullableTerminalMembers() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -553,7 +553,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033CancelledTurnRequiresNullableModelCallMember() throws {
+  func testCancelledTurnRequiresNullableModelCallMember() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -619,7 +619,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testINV033MalformedLiveEventEnvelopeReconnectsForFreshSnapshot() throws {
+  func testMalformedLiveEventEnvelopeReconnectsForFreshSnapshot() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -881,7 +881,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  /// INV-033 / INV-044: a side snapshot carries its cursor-bound runner fact
+  ///  / : a side snapshot carries its cursor-bound runner fact
   /// into the merge offered to the native projection layer.
   func testSideSnapshotMergeCarriesRunnerProjection() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
@@ -1726,7 +1726,7 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.diagnostics.last?.kind, .staleCompletion)
   }
 
-  func testINV033MalformedKnownSnapshotFrameFailsClosedIntoRecovery() throws {
+  func testMalformedKnownSnapshotFrameFailsClosedIntoRecovery() throws {
     var transport = try SynchronizationFixture.transportInHistory(cursor: 10)
 
     let effects = transport.send(

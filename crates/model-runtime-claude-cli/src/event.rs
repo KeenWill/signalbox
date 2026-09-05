@@ -219,7 +219,7 @@ impl<C: Clone> EventDecoder<C> {
                 // does on a `result` event, and a value arriving before any
                 // init is not a repeated identity at all. Anything this
                 // predicate cannot vouch for stays provider-controlled content
-                // and seeds the dropped lookbehind (INV-035), because a
+                // and seeds the dropped lookbehind (), because a
                 // credential prefix discarded here would let its continuation
                 // escape the shape redactor in a later field.
                 match (

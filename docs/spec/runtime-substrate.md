@@ -27,16 +27,15 @@ HTTP, TLS, and serde dependencies, while the CLI adapters own only focused
 subprocess, temporary-file, signal, and serde dependencies. Test helpers ship in
 no built library artifact. `crates/domain`, `crates/application`, and
 `crates/persistence` declare no dependency on any runtime crate, and no runtime
-type appears in a domain or application signature (INV-002, INV-005); the
-approved runtime consumers are the adapter crates, the
-`crates/model-provider-runtime` bridge — whose `RuntimeModelCallProvider`
-implements the application's `ModelCallProvider` port over any
-`ModelRuntime<ModelCallId>`, depending on both crates so the dependency arrow
-points from the bridge into application, never from application into the runtime
-— and the daemon composition root (see Open edges). The Cargo manifest is the
-enforcement mechanism: an undeclared dependency fails the workspace build. Why:
-manifest-visible boundaries make a boundary violation a reviewable diff instead
-of a silent import.
+type appears in a domain or application signature (, ); the approved runtime
+consumers are the adapter crates, the `crates/model-provider-runtime` bridge —
+whose `RuntimeModelCallProvider` implements the application's
+`ModelCallProvider` port over any `ModelRuntime<ModelCallId>`, depending on both
+crates so the dependency arrow points from the bridge into application, never
+from application into the runtime — and the daemon composition root (see Open
+edges). The Cargo manifest is the enforcement mechanism: an undeclared
+dependency fails the workspace build. Why: manifest-visible boundaries make a
+boundary violation a reviewable diff instead of a silent import.
 
 Caller identity crosses the boundary as an opaque correlation parameter `C`
 threaded through `ModelOperation<C>`, every `Observation<C>`, and the final
@@ -99,9 +98,9 @@ adapter-produced fact surfaced through the `ProviderModelReported` observation
 and the `reported_model` field of terminal evidence. Adapters send exactly the
 resolved target as the provider model parameter, never the requested selection,
 and surface a provider-reported identity as soon as observed without fabricating
-a match or mismatch; comparison is the caller's classification work (INV-014),
-under the provider-target identity rule of
-[model-call-execution](model-call-execution.md#provider-target-identity).
+a match or mismatch; comparison is the caller's classification work (), under
+the provider-target identity rule of
+[model-call-execution](model-call-execution.md).
 
 Neither HTTP adapter ever requests server-side model fallback, so a provider
 marker announcing that another model continued the turn is evidence that the
@@ -116,8 +115,7 @@ different model substituted, and a signal the provider states explicitly should
 not reach that rule as a generic unknown-block failure. The marker itself
 crosses the boundary only through that reported identity — this layer has no
 substitution variant of its own — so what the caller can conclude from it is
-bounded by
-[model-call-execution](model-call-execution.md#provider-target-identity).
+bounded by [model-call-execution](model-call-execution.md).
 
 ## Two-stage execution
 
@@ -137,13 +135,13 @@ boundary is [model-call-execution](model-call-execution.md) scope:
   exceptions.
 
 Nothing in this layer retries, falls back, or repeats its adapter-owned unit of
-irrevocable dispatch after the provider could have accepted it (INV-025,
-INV-026). That unit is one HTTPS request for a direct adapter and one process
-spawn for a subprocess adapter. A subprocess adapter cannot observe or govern
-the wrapped provider client's internal HTTP attempts; those are
-provider-internal in the same sense as server-side attempts behind one direct
-request. Why: a hidden second adapter dispatch would corrupt the
-acceptance-boundary evidence that failure classification consumes.
+irrevocable dispatch after the provider could have accepted it (, ). That unit
+is one HTTPS request for a direct adapter and one process spawn for a subprocess
+adapter. A subprocess adapter cannot observe or govern the wrapped provider
+client's internal HTTP attempts; those are provider-internal in the same sense
+as server-side attempts behind one direct request. Why: a hidden second adapter
+dispatch would corrupt the acceptance-boundary evidence that failure
+classification consumes.
 
 `CancellationSignal` wraps any `Future<Output = ()> + Send`. In both stages the
 pending work future is polled before the signal, so a result already available
@@ -155,8 +153,8 @@ stopped.
 
 ## Observations
 
-Observations are transient progress facts, never canonical transcript history
-(INV-032; the authoritative commit is
+Observations are transient progress facts, never canonical transcript history (;
+the authoritative commit is
 [sessions-and-transcript](sessions-and-transcript.md) scope). The facts:
 `SendCommenced` (the request is about to reach the transport; from here the
 provider may have accepted it), `ExchangeEstablished` (a correlated response
@@ -176,7 +174,7 @@ and still retains the exact observation on the existing evidence path. A
 cross-wired delta reaches no presentation sink. Presentation delivery neither
 alters nor replaces the terminal report, and sink loss cannot change terminal
 classification. The HTTP adapters perform credential redaction before emitting
-the delta (INV-035); the bridge and daemon do not attempt a second redaction.
+the delta (); the bridge and daemon do not attempt a second redaction.
 
 ## Terminal evidence
 
@@ -540,7 +538,7 @@ assistant role, model identity, final usage, and a finish reason were all
 observed. Chunks must agree on identity: a chunk without a completion id, with a
 conflicting completion id, or with a conflicting reported model — including on a
 mid-stream error record — is a terminal protocol violation, so a spliced stream
-never completes under the first identity (INV-014). Refusal fragments and
+never completes under the first identity (). Refusal fragments and
 `content_filter` finishes become refusal evidence (then downgraded as above); a
 `stop` finish maps to end-turn only when the request declared no stop sequences,
 and `length` stays unrecognized. Why: the adapter treats each shared token as
@@ -1099,7 +1097,7 @@ stream-protocol boundary loss exactly as it is on a `result` event, and a value
 carried before any `init` has correlated a session is not a repeated identity at
 all, so it stays provider content and seeds the lookbehind. Dropping it on an
 unchecked claim would let a credential prefix spelled there escape the shape
-redactor through a later field (INV-035). Assistant `text`, `thinking`,
+redactor through a later field (). Assistant `text`, `thinking`,
 `redacted_thinking`, and `tool_use` blocks become typed observations and
 assistant parts. A tool proposal must name the private MCP namespace, match a
 declared schema name, carry a unique nonempty id and object arguments, and
@@ -1111,12 +1109,12 @@ later assistant event must repeat that same value. That resolved model is
 retained only for this comparison and reaches no record, so it seeds a redaction
 lookbehind of its own — a credential prefix ending it would otherwise escape the
 shape redactor through a text block continuing it, which under ambient delivery
-no exact-value redaction downstream can catch (INV-035). Every assistant
-envelope repeats and discards the field beside its own content, so each one
-re-seeds that lookbehind ahead of its content blocks rather than only the first:
-content that spends the lookbehind in one event must not leave the next event's
-text unguarded. A repeat re-seeds only once the previous registration has been
-spent; while it is still live it already governs. Each discarded source holds an
+no exact-value redaction downstream can catch (). Every assistant envelope
+repeats and discards the field beside its own content, so each one re-seeds that
+lookbehind ahead of its content blocks rather than only the first: content that
+spends the lookbehind in one event must not leave the next event's text
+unguarded. A repeat re-seeds only once the previous registration has been spent;
+while it is still live it already governs. Each discarded source holds an
 independent lookbehind: the emitted identifier's adjacency to its record, the
 chronological dropped provider text, and this discarded field are judged
 separately, so bytes from one never sit between another's credential marker and
@@ -1237,7 +1235,7 @@ in the test process or CLI child environment.
 
 ## Credential-access boundary
 
-The in-process boundary implements the credential access-port rules (INV-035);
+The in-process boundary implements the credential access-port rules ();
 channels, delivery, and rotation policy are
 [configuration-and-credentials](configuration-and-credentials.md) scope.
 
@@ -1400,9 +1398,8 @@ stating *what happened* is owned by whichever page owns the behavior that raises
 it: for provider and model-call failures — carried by the model-call bridge,
 reusing this page's `ProviderErrorKind` vocabulary verbatim for definitive
 provider errors — the owning page is
-[model-call-execution](model-call-execution.md#operator-diagnostics), and the
-turn-liveness causes are owned by
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+[model-call-execution](model-call-execution.md), and the turn-liveness causes
+are owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Concurrent staleness is not a class: a guarded write that matches zero rows is
 consumed inside adapters by reload-and-rederive

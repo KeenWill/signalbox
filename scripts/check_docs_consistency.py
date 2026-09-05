@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from functools import lru_cache
 from html.parser import HTMLParser
@@ -13,6 +14,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
+
+import postgres_integration_suites
 
 ROOT = Path(__file__).resolve().parent.parent
 MARKDOWN = MarkdownIt("commonmark", {"html": True})
@@ -37,6 +40,7 @@ class Violation:
 class Link:
     destination: str
     line: int
+    is_image: bool = False
 
 
 class AnchorParser(HTMLParser):
@@ -107,7 +111,7 @@ def parsed_document(text: str) -> tuple[list[Link], set[str]]:
     tokens = MARKDOWN.parse(text)
     links: list[Link] = []
     anchors: set[str] = set()
-    slug_counts: dict[str, int] = {}
+    used_slugs: set[str] = set()
     for index, token in enumerate(tokens):
         line = (token.map[0] + 1) if token.map else 1
         if token.type == "inline":
@@ -119,7 +123,7 @@ def parsed_document(text: str) -> tuple[list[Link], set[str]]:
                 elif child.type == "image":
                     destination = child.attrGet("src")
                     if destination is not None:
-                        links.append(Link(destination, line))
+                        links.append(Link(destination, line, is_image=True))
                 elif child.type == "html_inline":
                     parser = AnchorParser()
                     parser.feed(child.content)
@@ -132,9 +136,13 @@ def parsed_document(text: str) -> tuple[list[Link], set[str]]:
             inline = tokens[index + 1]
             if inline.type == "inline":
                 base = github_slug(visible_inline_text(inline))
-                occurrence = slug_counts.get(base, 0)
-                slug_counts[base] = occurrence + 1
-                anchors.add(base if occurrence == 0 else f"{base}-{occurrence}")
+                slug = base
+                suffix = 0
+                while slug in used_slugs:
+                    suffix += 1
+                    slug = f"{base}-{suffix}"
+                used_slugs.add(slug)
+                anchors.add(slug)
     return links, anchors
 
 
@@ -229,10 +237,99 @@ def check_machine_owner_links(root: Path) -> list[Violation]:
         if not source.exists():
             continue
         links, _ = parsed_document(source.read_text(encoding="utf-8"))
-        if any((resolved := resolve_relative_target(source, link.destination)) is not None and resolved[0] == owner for link in links):
+        if any(
+            not link.is_image
+            and (
+                resolved := resolve_relative_target(source, link.destination)
+            )
+            is not None
+            and resolved[0] == owner
+            for link in links
+        ):
             continue
         violations.append(Violation(name, 1, "machine-owner-link", "page projects the credential-availability machine but carries no resolving link to its owning specification"))
     return violations
+
+
+def cargo_package_names(root: Path) -> set[str]:
+    """Return package names declared by tracked Cargo manifests."""
+    names: set[str] = set()
+    for manifest in (path for path in tracked_files(root) if path.name == "Cargo.toml"):
+        try:
+            declared = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        package = declared.get("package")
+        name = package.get("name") if isinstance(package, dict) else None
+        if isinstance(name, str):
+            names.add(name)
+    return names
+
+
+def check_suite_manifest(root: Path) -> list[Violation]:
+    """Hold the PostgreSQL suite manifest, workflow, and docs in agreement."""
+    manifest = root / postgres_integration_suites.MANIFEST
+    workflow = root / postgres_integration_suites.WORKFLOW
+    label = postgres_integration_suites.MANIFEST.as_posix()
+    if not manifest.is_file():
+        if not workflow.is_file():
+            return []
+        return [
+            Violation(
+                postgres_integration_suites.WORKFLOW.as_posix(),
+                1,
+                "suite-manifest",
+                f"the Rust workflow exists without {label}",
+            )
+        ]
+
+    text = manifest.read_text(encoding="utf-8")
+    suites = postgres_integration_suites.parse_suites(text)
+    failures: list[Violation] = []
+    packages = cargo_package_names(root)
+    for suite in suites:
+        if suite.package not in packages:
+            failures.append(
+                Violation(
+                    label,
+                    postgres_integration_suites.manifest_line(text, suite.name),
+                    "suite-manifest",
+                    f"suite `{suite.name}` names package `{suite.package}`, "
+                    "which is not a package in this workspace",
+                )
+            )
+    if workflow.is_file():
+        failures.extend(
+            Violation(
+                postgres_integration_suites.WORKFLOW.as_posix(),
+                1,
+                "suite-manifest",
+                message,
+            )
+            for message in postgres_integration_suites.workflow_disagreements(
+                root, suites
+            )
+        )
+    else:
+        failures.append(
+            Violation(
+                label,
+                1,
+                "suite-manifest",
+                f"{label} exists without {postgres_integration_suites.WORKFLOW}",
+            )
+        )
+    for source in markdown_sources(root):
+        source_label = repository_path(root, source)
+        failures.extend(
+            Violation(source_label, line, "suite-manifest", message)
+            for line, message in postgres_integration_suites.documentation_disagreements(
+                source_label,
+                source.read_text(encoding="utf-8"),
+                suites,
+            )
+        )
+    return failures
 
 
 def run_checks(root: Path = ROOT) -> list[Violation]:
@@ -240,13 +337,14 @@ def run_checks(root: Path = ROOT) -> list[Violation]:
     heading_anchors.cache_clear()
     failures = check_relative_links(root)
     failures.extend(check_machine_owner_links(root))
+    failures.extend(check_suite_manifest(root))
     return sorted(set(failures))
 
 
 def main() -> int:
     try:
         failures = run_checks()
-    except TrackedFilesError as error:
+    except (TrackedFilesError, postgres_integration_suites.ManifestError) as error:
         print(f"docs-consistency check FAILED: {error}")
         return 1
     if failures:

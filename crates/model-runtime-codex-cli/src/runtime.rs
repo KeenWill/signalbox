@@ -326,6 +326,7 @@ pub struct CodexCliRuntime {
     event_limit: usize,
     stderr_limit: usize,
     model_capabilities: ModelCapabilityCatalog,
+    model_context_window_overrides: HashMap<String, u32>,
 }
 
 /// Opaque one-shot capability for one Codex CLI spawn.
@@ -350,6 +351,7 @@ pub struct CodexCliPreparedRequest<C> {
     event_limit: usize,
     stderr_limit: usize,
     controls: CodexControls,
+    model_context_window_override: Option<u32>,
     credential_home: Option<PathBuf>,
 }
 
@@ -388,6 +390,8 @@ pub enum CodexCliConstructionError {
     UnreadableCredentialHome,
     /// A configured credential home contains no provisioned entries.
     EmptyCredentialHome,
+    /// A model context-window override has an invalid target or value.
+    InvalidModelContextWindowOverride,
 }
 
 impl std::fmt::Display for CodexCliConstructionError {
@@ -425,6 +429,9 @@ impl std::fmt::Display for CodexCliConstructionError {
                 formatter.write_str("Codex credential home cannot be enumerated")
             }
             Self::EmptyCredentialHome => formatter.write_str("Codex credential home is empty"),
+            Self::InvalidModelContextWindowOverride => formatter.write_str(
+                "Codex model context-window overrides require exact targets and positive values",
+            ),
         }
     }
 }
@@ -477,6 +484,15 @@ impl CodexCliRuntime {
         if config.event_limit == 0 || config.stderr_limit == 0 {
             return Err(CodexCliConstructionError::InvalidOutputLimit);
         }
+        if config
+            .model_context_window_overrides
+            .iter()
+            .any(|(target, value)| {
+                target.is_empty() || target.trim() != target || target.contains('\0') || *value == 0
+            })
+        {
+            return Err(CodexCliConstructionError::InvalidModelContextWindowOverride);
+        }
         for home in config.credential_homes.values() {
             if !home.is_absolute() {
                 return Err(CodexCliConstructionError::RelativeCredentialHome);
@@ -505,6 +521,7 @@ impl CodexCliRuntime {
             event_limit: config.event_limit,
             stderr_limit: config.stderr_limit,
             model_capabilities: config.model_capabilities,
+            model_context_window_overrides: config.model_context_window_overrides,
         })
     }
 
@@ -657,6 +674,10 @@ impl CodexCliRuntime {
             }
         };
         let prompt = std::mem::take(&mut translated.prompt);
+        let model_context_window_override = self
+            .model_context_window_overrides
+            .get(operation.resolved_target.as_str())
+            .copied();
         PreparationOutcome::Prepared(CodexCliPreparedRequest {
             executable: self.executable.clone(),
             working_directory: self.working_directory.clone(),
@@ -673,6 +694,7 @@ impl CodexCliRuntime {
             event_limit: self.event_limit,
             stderr_limit: self.stderr_limit,
             controls,
+            model_context_window_override,
             credential_home,
         })
     }
@@ -813,6 +835,11 @@ async fn execute_process<C: Clone + Send + Sync>(
         command
             .arg("--config")
             .arg(format!("service_tier=\"{tier}\""));
+    }
+    if let Some(context_window) = prepared.model_context_window_override {
+        command
+            .arg("--config")
+            .arg(format!("model_context_window={context_window}"));
     }
     command
         .arg("--config")

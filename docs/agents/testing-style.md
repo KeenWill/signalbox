@@ -286,13 +286,13 @@ split, not an unroll:
 
 ```rust
 // Bad: one loop runs two behaviors under one test name.
-fn s01_inv008_inv012_recorded_applied_and_rejected_results_pass_through() {
+fn s01_recorded_applied_and_rejected_results_pass_through() {
     for (command, recorded) in [(applied_cmd, applied), (rejected_cmd, rejected)] { /* … */ }
 }
 
 // Good: one behavior per test, each named for its behavior.
-fn s01_inv008_inv012_recorded_applied_result_passes_through() { /* … */ }
-fn s01_inv008_inv012_recorded_rejected_result_passes_through() { /* … */ }
+fn s01_recorded_applied_result_passes_through() { /* … */ }
+fn s01_recorded_rejected_result_passes_through() { /* … */ }
 ```
 
 ## Fixture and helper placement

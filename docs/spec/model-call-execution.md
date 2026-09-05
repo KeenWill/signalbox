@@ -1,1160 +1,433 @@
 # Model-call execution
 
-This page describes the implemented model-call orchestration chain: rendering a
-context frontier into provider messages, the staged prepare / authorize-send /
-commit-observation effects, assistant content, intra-turn tool rounds and final
-turn completion, provider failure classification into physical dispositions, and
-the retry prohibition. What a credential-pool selection attempt can end as, and
-every projection of each ending, is owned by
-[credential availability](credential-availability.md); this page owns each
-ending's terminal evidence and cause and the successor call's own mechanics.
-Tool requests, approvals, attempts, and continuation are owned by
-[tool-loop](tool-loop.md). Turn and attempt lifecycle law lives in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
-entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
-storage protocol and the outbox in
+Model-call execution carries one turn attempt's request to a model provider as
+one durable, at-most-once physical call and records what came back.
+
+## Overview
+
+The subsystem is the model-call chain: rendering a context frontier into
+provider messages; the staged prepare, authorize-send, and commit-observation
+transactions; the tool rounds between calls; classification of the provider's
+answer into a physical disposition; and the prohibition on retrying a call.
+[credential-availability](credential-availability.md) owns what a
+credential-pool selection can end as; this page owns the evidence and cause a
+terminal call records and the mechanics of a successor call. Tool requests,
+approvals, and attempts belong to [tool-loop](tool-loop.md); turn and attempt
+lifecycle to [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
+semantic entries and frontiers to
+[sessions-and-transcript](sessions-and-transcript.md); storage and the outbox to
 [persistence-protocol](persistence-protocol.md); the typed model-runtime layer
-in [runtime-substrate](runtime-substrate.md); daemon startup, scheduling, and
-shutdown composition in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); and model
-configuration and credentials in
+and its adapters to [runtime-substrate](runtime-substrate.md); model
+configuration and credentials to
 [configuration-and-credentials](configuration-and-credentials.md).
 
-Multipart attachment rendering is proposed and not implemented. The
-runner-placement rendering and executable session-tool snapshot paragraphs below
-are proposed and not implemented.
-
-## Call records and lifecycle
-
 A model call is one durable daemon authorization to attempt a provider
-interaction (INV-014). Ordinary and dedicated compaction calls reserve their
-`ModelCallId` from one append-only global call-identity registry, so the same
-physical identity cannot name both call kinds (INV-001). Its record
-(`crates/domain/src/model_call.rs`) fixes at creation: `ModelCallId`, owning
-turn and attempt, the exact frozen model selection, the turn-pinned resolved
-target, and the exact ordered context frontier it consumes (INV-015).
-Nonterminal states are `Prepared`, `InFlight`, and `CancellationRequested`;
-terminal history is a separate `EndedModelCall` carrying one of five physical
-dispositions — `Completed`, `KnownFailed`, `Refused`, `Cancelled`, `Ambiguous` —
-and exposes no transition back (INV-006).
+interaction. Its record, `CurrentModelCall` in
+`crates/domain/src/model_call.rs`, fixes at creation which turn and attempt own
+it, the frozen model selection, the provider target pinned for the turn, and the
+exact ordered context frontier it consumes. A live call is prepared, in flight,
+or cancellation-requested. When it ends, a separate ended record carries one of
+five physical dispositions, the provider's reported token usage, and a
+usage-provenance discriminator.
 
-The predecessor matrix:
+`ModelCallExecution` in `crates/domain/src/model_execution.rs` is the aggregate:
+one active accepted-input turn in its running phase plus the one call owned by
+its current turn attempt. Reconstitution rebuilds it from stored rows and checks
+every fact against the others before any transition is authorized.
 
-- `Prepared -> InFlight` is the only send authorization.
-- `Prepared` classifies terminally only as `KnownFailed`; ending an unsent call
-  as `Cancelled` requires the exact applied-interrupt proof for the call's own
-  turn (INV-029). An unsent call cannot complete, refuse, or become ambiguous.
-- `InFlight` and `CancellationRequested` accept every disposition.
-- Terminal state never reopens. Why: terminal physical history is the record of
-  what was externally done, and rewriting it would let later facts silently
-  change that record.
+Rendering first applies the compaction projection to the call's exact frontier:
+when summaries exist, the latest summary comes first, every entry after its
+through-boundary follows, and the summary is omitted from its later physical
+position. The projected order becomes provider-neutral messages, and the runtime
+bridge maps those to provider wire messages. The selected summary renders as one
+user-role message, a fixed prior-conversation-summary preface followed by the
+summary text; its provider-neutral message keeps the producing call and the
+summarized range. Attachments render as the bounded textual stubs
+[blob-storage](blob-storage.md) defines.
 
-The same terminal transition stores four token-usage fields — input, output,
-cache-creation input, and cache-read input — on the `model_call` row. Each field
-is independently nullable: null means that axis was not supplied, while a
-present zero remains zero. Every call also carries the closed
-`usage_provenance_kind` discriminator, exactly `reported` or `estimated`. The
-prepared checkpoint also pins `usage_input_includes_cache_tokens`, which
-preserves whether input is inclusive of separately reported cache axes even if a
-later daemon configuration routes the target through another adapter. Calls
-prepared before that pin's migration retain null as an unknown historical
-meaning, so a read never derives cost from possibly cache-inclusive input.
-Current execution paths produce only `reported`; `estimated` is reserved for a
-later explicit estimator and no present writer selects it. Calls closed from
-`ProvenUnsent`, `CancellationConfirmed`, capability failure, or restart recovery
-have all four fields unreported because no provider usage evidence exists.
-Historical rows retain any reported axes exactly; the absent semantic pin, not
-rewriting those axes, prevents an invented dollar derivation. The terminal-row
-immutability rule makes this evidence write-once; no later path normalizes or
-corrects it.
+Context compaction produces its summary through a dedicated physical model call
+with its own durable prepared, in-flight, and terminal lifecycle, separate from
+ordinary calls. A headroom guard runs at two points. Before activating a queued
+turn it may spend one automatic compaction. When that compaction fails, or the
+request still exceeds the window after it, one transaction fails the queued turn
+with no ordinary call prepared. Inside the tool-result continuation transaction
+an exceeded bound commits the tool results, prepares no continuation call, and
+fails the turn with a headroom record. The guard adds the newest reported input
+for the pinned target, a byte allowance for model-visible content that input
+does not cover, and the configured output reservation, and compares the sum with
+the configured context window. The compaction call's own input budget is its
+context window less the output ceiling and the required prompt; when even the
+first safe prefix cannot fit that budget, no call is prepared and one
+transaction fails the turn as a compaction wall. Automatic compaction targets
+the first safe boundary at or beyond half the rendered bytes and falls back to
+the latest safe boundary that fits.
 
-Storage enforces the matrix durably
-(`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
-`model_call_changes_are_guarded` trigger rejects any insert whose state is not
-`Prepared`, any mutation of the eleven authorization-fact columns, any
-non-monotonic transition, any rewrite of a terminal row, any unsent-terminal
-disposition other than `KnownFailed`/`Cancelled`, and any delete;
-`model_call_pinned_target_fk` forces every call row's resolved target to equal
-the turn's pinned target. Why: the schema backstops the aggregate against any
-buggy or racing writer, not just the audited one. Migration
-`202607290301_model_call_token_usage.sql` adds the terminal-only usage-field
-constraints and rejects reported usage on every direct `Prepared -> Terminal`
-transition, because that transition proves no send was authorized. Migration
-`202608020014_model_call_usage_provenance.sql` adds the non-null closed
-provenance column with `reported` as the existing-row and current-writer value.
-It rejects an unknown spelling and prevents provenance rewrites except when a
-nonterminal call and its usage become terminal in the same update. The same
-migration leaves the input semantic null on existing rows, establishes
-cache-exclusive as the default for later inserts, and rejects every rewrite
-after insertion.
+`ModelCallExecutionService::execute` in
+`crates/application/src/model_execution.rs` runs one linear invocation over five
+composed roles: prepare, capability, authorize-send, provider, and
+commit-observation, plus an id generator and a per-attempt dispatch gate. The
+prepare transaction commits the prepared call with its pinned non-secret
+credential reference, the turn-target pin, and a transition outbox event. When
+the frozen selection resolves to no target, that transaction creates no call and
+fails the attempt and turn as target unavailable. Capability preparation and
+provider interaction run outside any transaction and share one call-scoped
+cancellation signal that resolves when an authoritative reload finds the call
+cancellation-requested or terminal, or finds a logical-terminal proof for the
+delegated child turn that owns the call; a retained provider result observed
+after that proof is discarded, not committed. The authorize-send transaction
+moves the call to in flight. The commit-observation transaction reloads
+authority and commits the call disposition, the attempt and turn transitions,
+semantic entries, the terminal frontier, and the outbox rows.
+`FatalExecutionSupervisor` in `apps/signalboxd` wraps execution and stops the
+process when a failure leaves nothing trustworthy to classify live; startup
+recovery in `crates/persistence/src/startup.rs` then classifies every retained
+call from durable evidence.
 
-The provider target is pinned as a turn-level fact before any call exists: the
-turn's frozen selection resolves through an immutable configured
-`ModelTargetCatalog` to one exact `ResolvedProviderTarget`, and every call in
-the turn must use it (the pin FK above is the durable form of "must").
-Resolution failure pins nothing, creates no call, and atomically fails the
-attempt and turn. Why: pinning before the first `ModelCallId` prevents a mutable
-alias or deployment change from entering a turn as recovery.
-
-## Aggregate and reconstitution
-
-`ModelCallExecution` (`crates/domain/src/model_execution.rs`) is the
-purpose-specific aggregate: one active accepted-input turn in its `Running`
-phase plus the one call owned by its current turn attempt. Earlier rounds remain
-durable transcript/request/result history. Reconstitution is fail-closed: it
-rejects a non-running phase, session or snapshot mismatches, frontier entries
-that do not exactly back ordered membership, missing or unreferenced origin
-content, a call whose turn/attempt/frontier/selection/target contradict the
-checked turn facts, more than one call, and any attempt/call state pair outside
-`(Prepared, none)`, `(Prepared, Prepared)`, `(Running, Prepared)`,
-`(Running, InFlight)`, or the proof-bearing
-`(StopRequested, CancellationRequested)` pair. A tool continuation may use
-`(Prepared, Prepared)` when no request was physically authorized, or
-`(Running, Prepared)` after execution began; either continuation must prove that
-the exact stored call frontier includes the current tool round's complete result
-evidence. The stopped pair must reconstruct the exact applied-interrupt proof
-retained by the attempt before it can authorize cancellation observation or
-restart recovery. Why: acting on a partially consistent projection could
-authorize a second provider effect against stale authority, so every invalid
-shape refuses rather than repairs. Sealed constructors prevent forging call
-records or terminal history outside the aggregate (INV-002).
-
-Reconstituting a checkpointed `Prepared` call also reloads the call's exact
-stored snapshot, not only the turn's starting snapshot. When steering extended
-that frontier, the complete acceptance tail must reconstruct every consumed
-input in acceptance order; the corresponding suffix must contain exactly one
-`SteeringAcceptedInput` entry per receipt, correlated to the input, source turn,
-and current call, and every referenced input's checked content must be present.
-The call becomes resumable only when that extended snapshot is a strict
-prefix-preserving extension of the starting snapshot and its complete ordered
-membership equals those checked semantic entries. Why: checkpointing cannot
-erase steering that the durable call was prepared to observe.
-
-Scheduling projection reconstitution independently reloads every consumed
-input's stored session, lifecycle, acceptance position, source turn, and
-consuming call. Each fact must have exactly one matching
-`SteeringAcceptedInput`; the call must belong to that source turn and lifecycle,
-and its snapshot must equal the turn's starting snapshot plus the complete
-acceptance-ordered steering suffix. Terminal response-frontier validation uses
-that checked call snapshot as its prefix. Why: every adapter reaching the domain
-seam must reject cross-wired steering history, even when its storage schema has
-already performed the same correlation.
-
-## Frontier rendering
-
-`PreparedModelOperation::render` (`crates/application/src/model_execution.rs`)
-first applies the context-compaction projection to the exact complete frontier.
-If summaries exist, the latest summary is first and every entry after its exact
-through-boundary follows; the selected summary is omitted from its later
-physical position. Otherwise the complete order is unchanged. Malformed range or
-append provenance fails closed. The resulting order becomes provider-neutral
-messages:
-
-- `OriginAcceptedInput` renders as a user-role message with its checked accepted
-  input parts in order; text remains exact text and each attachment becomes the
-  exact bounded textual stub owned by [blob storage](blob-storage.md);
-- `SteeringAcceptedInput` renders the referenced accepted input through that
-  same ordered part projection;
-- `ModelIdentityChanged` renders as the structured provider-neutral identity
-  change retaining the exact selected-model UUID and bound session-defaults
-  epoch; the provider bridge later projects it as an injected user-role message
-  with the fixed `Signalbox session event: your model identity is now` prefix
-  (INV-046);
-- `ContextSummary` renders as a distinct user-role prior-conversation summary,
-  retaining the producing compaction call and exact summarized range in the
-  provider-neutral value;
-- `RunnerPlacementChanged` resolves its complete same-session successor
-  placement record and renders as a structured provider-neutral placement change
-  retaining the positive placement revision and selected sandbox profile. The
-  provider bridge projects one of two exact injected user-role messages. For
-  `workspace-restricted` it emits
-  `Signalbox session event: runner placement changed to revision {revision} with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable.`
-  For `ambient` it emits
-  `Signalbox session event: runner placement changed to revision {revision} with profile ambient; the prior placement can no longer execute. The successor working directory is now active. Relocation did not delete prior files, and they may remain reachable at their previous paths through the invoking user's filesystem; check before recreating or overwriting them.`
-  The braces are replaced by the canonical decimal revision. Missing, stale,
-  cross-session, or non-successor placement authority fails rendering instead of
-  inventing text. The same profile-specific text renders every relocation,
-  including a working-directory move on the same runner and a later
-  user-directed move of a healthy session
-  ([runner protocol and placement](runner-protocol.md#planned)). What is
-  unavailable is authority to execute through the retired placement; the old
-  path is no longer the active working directory or writable root. Physical
-  files are not reported lost: a restricted successor exposes only its own
-  namespace, while an ambient successor may still expose an old path,
-  particularly after a same-runner move. Why: reporting deletion or
-  inaccessibility the relocation did not enforce can cause the model to recreate
-  or overwrite work that still exists;
-- `AssistantText` renders as an assistant message retaining its producing-call
-  provenance;
-- imported `Text` with an attested value renders with its imported user or
-  assistant speaker and exact decoded text, retaining the imported-entry
-  reference rather than a native accepted-input or producing-call identity; a
-  text block with typed value absence is skipped;
-- imported `SourceEvent`, `SourceMessageBlock`, `MessageContentAbsent`,
-  `ToolCall`, `ToolResult`, `Thinking`, `RedactedThinking`, and `Document`
-  entries are skipped by the conservative renderer while remaining in the exact
-  context frontier;
-- `TurnFailed`, `TurnCompleted`, and `TurnCancelled` markers are skipped — they
-  delimit history and carry no model-visible content;
-- `AssistantToolUse` and its proposal-ordered result entries render as paired
-  assistant tool calls and user tool results after resolving their referenced
-  request, attempt, and decision records through [tool-loop](tool-loop.md).
-
-The renderer admits the delegation semantic variants with these mappings:
-
-- `DelegatedTask` renders as a structured provider-neutral delegated-task
-  message retaining the child, parent session and turn, and exact spawning
-  request. The provider bridge emits one injected user-role message with exact
-  prefix `Signalbox delegated task:\n` followed by the checked task bytes. The
-  transport role does not create an accepted input or `Actor::User`; the
-  structured value retains model/tool-authored spawn provenance;
-- `DelegationMessage` renders as a structured provider-neutral session event
-  retaining the relationship, message, sender, recipient, and recipient-wide
-  delivery sequence. The provider bridge emits one injected user-role message
-  with exact prefix
-  `Signalbox delegation message from session {sender_session_id}:\n` followed by
-  the immutable message content, replacing the braces with the canonical UUID.
-  The transport role does not reclassify the sender as the user;
-- a foreground `DelegationResult` resolves its exact `await_session` request and
-  renders through the ordinary paired tool-result path. A returned result uses
-  the delivered bytes; another outcome uses the compact closed
-  outcome/reason/provenance JSON defined by the delegation process contract: one
-  object whose members appear in the exact order `outcome`, `reason`,
-  `provenance`, encoded without insignificant whitespace. A background result
-  instead renders as a structured provider-neutral session event retaining its
-  awaiting request and recipient-wide delivery sequence. Its injected user-role
-  form is
-  `Signalbox background child result from session {child_session_id}:\n{content}`
-  for returned content, or
-  `Signalbox background child outcome from session {child_session_id}: {compact_json}`
-  for another outcome. Braces are replaced by the canonical child UUID, exact
-  returned bytes, or that same exact compact JSON respectively. These transport
-  messages are neither accepted input nor child transcript access.
-
-The prepared model operation carries one immutable `ExecutableToolSnapshot`, not
-the unfiltered process registry. Preparation includes every daemon-only tool;
-includes a combined-locus tool whenever its daemon executor is available; and
-includes a runner-only tool only when the session placement can bind that exact
-declaration to current execution authority. A pinned placement uses its frozen
-tool inventory and current matching registration. An ordinary unpinned request
-includes a runner-only definition only when a currently live registration
-satisfies its selector, sandbox, workspace, repository, and credential
-availability.
-
-The snapshot is a function of the session's actual composition, not of the
-compiled registry. A declaration whose arguments, paths, or working directory
-are defined relative to a session repository is included only for a session that
-has a repository worktree. A declaration whose session capability itself
-requires a credential profile is included only for a session that was granted
-one. When a remote declaration's credential requirement comes from a repository
-entry instead, preparation compares that entry's advertised optional profile to
-the session's optional selection: absence equals absence and means anonymous
-access, while a present name must equal the exact grant. For a declaration that
-operates on the session's repository worktree, that entry is the exact
-repository key recorded by the workspace manifest; no other matching key can
-satisfy it. For `git_clone`, which introduces a repository into a writable root
-rather than operating on an existing worktree, any advertised entry with the
-matching optional profile satisfies preparation. No absent/present pair matches,
-and absence never selects a credential. A session composed without a workspace
-therefore advertises exactly the tools that can execute in it and no placement
-combination is rejected merely for being workspace-free
-([runner protocol and placement](runner-protocol.md) owns the composition axes,
-and [tool-loop](tool-loop.md#registry-placement-and-effect-metadata) owns which
-declarations carry a workspace requirement). Why: advertising a tool that cannot
-be admitted at lease claim spends a model round to learn what preparation had
-already determined, and accurate advertisement is cheaper than a late refusal.
-An exact-identity selector binds that runner and registration revision for a
-possible first dispatch, so its loss produces `RunnerLostBeforePin`. A
-capability-class selector freezes the class and required availability, not a
-runner identity; the eventual first dispatch may select only a then-current
-satisfying registration. If none remains, the proposal closes known-failed as
-`ToolUnavailableBeforePin` without creating an attempt or placement, because no
-runner execution was authorized. `RunnerAbandoned` exposes daemon-executable
-tools only. `RunnerLost` and `RunnerLostBeforePin` cannot prepare a new model
-operation while the turn awaits user recovery. An operation prepared before loss
-retains its frozen snapshot and physical-call disposition, but a runner-only
-proposal from it cannot authorize against the lost locus. A combined-locus
-definition remains executable through its daemon locus when runner availability
-disappears; an already frozen runner selection never silently falls back after
-the provider returns.
-
-Each snapshot entry binds the exact model definition, permission/effect policy,
-and selected executable locus used to validate and authorize a returned
-proposal. The runtime bridge maps only these entries to provider tool
-definitions and accepts `ToolCall` completion parts only with a matching
-`ToolUse` finish reason. A tool absent from the snapshot is an unknown proposal
-for that operation even if another session or a later registration can execute
-it. Provider-native tool types remain inside the bridge.
-
-Every message keeps its source-qualified semantic-entry reference and its
-content-authority provenance. Why: inherited entries need not come from a native
-turn in the current session, so role and provenance derive from the entry
-itself, never from turn grouping; imported record is never flattened into native
-execution evidence (INV-038). The runtime bridge then maps these to provider
-wire messages; provider types never cross the application boundary (INV-002;
-layering rules in [runtime-substrate](runtime-substrate.md)).
-
-Why imported non-text is skipped: source administrative events and content
-absence are not conversational messages; emitting an imported tool call or
-result through the native tool-message vocabulary would imply Signalbox-owned
-tool identities and execution evidence that do not exist; exposing imported
-thinking would reveal source-private reasoning; and the provider-neutral request
-has no admitted media projection. Skipping affects only model visibility. It
-does not remove, rewrite, summarize, or reorder the semantic entries or their
-addressable imported frontier.
-
-## Compaction calls and triggers
-
-Summary production uses a dedicated physical model call with its own durable
-`Prepared`, `InFlight`, and terminal lifecycle. The record pins the session's
-current direct selection, resolved provider target, complete source frontier,
-non-secret credential reference, terminal disposition, and the provider's
-independently optional input, output, cache-creation-input, and cache-read-input
-token fields. Only a completed call may produce a `ContextSummary` and
-compaction result. Its completion content folds into the summary under the same
-content rule the bridge applies to ordinary assistant content
-([provider observation classification](#provider-observation-classification)):
-text parts concatenate in order and an empty thinking block is dropped, while
-thinking with actual text, redacted thinking, and tool calls fail the summary
-closed. The compaction request configures no thinking display, so the empty
-thinking block is a default-path shape rather than an exceptional one. The
-compaction prompt is a required bounded deployment value in the model-catalog
-configuration, not a source-code literal; the ordinary session system prompt is
-not substituted for it.
-
-Authorization, failure, and completion take the same per-session row lock used
-by guarded session mutation. Each transition first rereads its exact call and
-command lifecycle: an equal `InFlight`, failed terminal disposition, or complete
-summary/result is a successful replay, while a different terminal fact fails
-closed. The daemon retries database and ambiguous-commit outcomes at this seam;
-it does not start provider interaction until authorization is resolved. The
-automatic preparation path retries transient database failures while loading its
-selected transcript range, retaining the live `Prepared` call as provably unsent
-rather than consuming that queued turn's sole automatic attempt. Before that
-claim, it reads the projected model-visible inventory and renders each entry in
-the same compact JSON shape the summary model receives. It selects the first
-closed tool-exchange boundary at or beyond half the rendered range only while
-that exact JSON prefix, the configured compaction prompt, and the configured
-output reservation fit the selected model's context window. If an open tool
-exchange would cross the budget, selection falls back to the latest preceding
-safe boundary; no provider call is prepared when even the first safe prefix
-cannot fit. A successor likewise prepares no provider call when the only fitting
-boundary is its existing summary and the suffix through the next safe boundary
-would exceed the input-byte budget even if that summary were empty. Preparation
-records the selected exact position. When no safe prefix can fit, the same
-transaction that closes the call-free failed turn appends a typed
-`context_compaction_input_does_not_fit` recovery cause. Goal disposition reads
-that cause and parks without automatic resumption, because an unchanged
-successor cannot make progress. A second rendering after the claim prevents a
-concurrent frontier change from sending a range outside the same bound: an
-oversized mismatch terminalizes the still-unsent dedicated call and records the
-same cause. An integrity failure terminalizes without that cause. After a
-successful provider result, the daemon retains the summary and its usage in
-memory until the exact completion is durably applied or replayed.
-
-The explicit `compact_session` request names a session and an optional semantic
-transcript position. Absence selects the latest safe terminal or pre-call
-boundary. The command records no projection preference: once its summary result
-commits, later model inputs in that session follow the projection rule. Command
-replay returns the same compaction identity, call, exact through position,
-summary entry, and result frontier.
-
-Preparation also rejects a freshly minted summary-entry, result-frontier, or
-compaction identity that already names a durable record, so the daemon remints
-and retries before any provider interaction exactly as it does for a colliding
-call identity; the rejected claim rolls back, leaving the user-global command
-reusable. A uniqueness violation observed later, while applying the completion,
-is a decided fact rather than a retryable database failure: the completion fails
-closed and its in-flight call is left to startup recovery, because the prepared
-identities are pinned by then and every identical retry fails the same way.
-
-Every catalog model selection declares required positive `max_output_tokens` and
-`context_window_tokens`; configuration is invalid when the output ceiling
-exceeds the context ceiling. Both are operator-declared per selection and never
-inferred from provider or model names. Adapters with a provider setting surface,
-including Anthropic, send the configured output ceiling in the provider request.
-Codex CLI instead renders the ceiling as model-visible advisory context because
-the CLI exposes no provider-side control. The daemon still reserves that full
-operator-selected ceiling before each continuation, so a Codex deployment keeps
-the value aligned with its intended reply budget rather than the model's larger
-capability ceiling. Before activating a queued turn, the daemon reads the newest
-provider-reported input for the same resolved target from either a terminal
-ordinary call since the latest compaction or the latest completed dedicated
-compaction call itself. The terminal disposition does not erase usage from an
-ordinary provider round that may have been accepted: ambiguous and failed calls
-therefore protect a resumed session from re-sending a request whose reported
-size already exhausted headroom. If the reported input, interpreted with the
-stored cache-inclusion semantics and counted only when the next request still
-carries it, plus output only when completion retained it in the model-visible
-transcript, a conservative UTF-8 byte allowance for model-visible entries that
-input does not cover, and the next configured output reservation exceeds the
-context window, the daemon performs one bounded automatic compaction before
-activation. An ordinary call's reported input is the transcript prefix its
-successor resends. A dedicated compaction call's reported input measures the
-source text its summary replaced, which no later request carries, so that
-baseline is the retained summary output plus the allowance over everything the
-compaction did not summarize. The allowance measures the prospective request's
-model-visible projection, from which every summarized entry is absent whatever
-its physical frontier position; the queued turn is an uncommitted activation
-preview, so that preview supplies both the projected membership and the content
-of the entries it has minted but not committed. The allowance otherwise counts
-durable content and excludes ordinary assistant content or the dedicated summary
-when reported output already accounts for it. A typed same-turn
-headroom-exhaustion record preserves its exact projected tool-result byte count
-even when a successor turn's prospective frontier omits those result entries.
-The allowance adds other unreported successor content and counts any proved
-result entry present in that frontier exactly once. Historical dedicated calls
-prepared before that semantics became durable retain an unknown value; the guard
-treats unknown as cache-exclusive so it may overcount but cannot omit reported
-cache axes. A definitive request-size failure on a frontier preserved by the
-prospective call also forces one automatic compaction when no later
-provider-accepted ordinary call or completed compaction on that lineage
-supersedes it, even when the failure reported no usage. A queued turn spends at
-most one automatic attempt. If the attempt fails, still cannot make the
-prospective request fit, or durable evidence says it was already spent, the
-scheduler atomically activates and fails the turn without preparing or
-dispatching an ordinary call. Goal disposition can then apply its bounded
-resumption policy to a fresh turn, except when the durable no-fitting-input
-cause requires the operator instead, rather than either blocking the queue or
-sending the known-oversized request. After a nominal completion, the daemon
-retains adapter-reported usage and the completed observation even when reported
-output exceeds `max_output_tokens` or the reported input-plus-output lower bound
-exceeds `context_window_tokens`; it emits a closed operator cause for the
-overage rather than discarding assistant material after the provider has already
-accepted and served the request. Missing usage fields remain missing and are
-never invented. Adapters need no separate counting operation.
-
-The same guard runs inside the atomic tool-result continuation transaction
-against the exact completed tool-producing call. It combines reported usage, the
-UTF-8 byte length of newly projected result and denial content as a conservative
-token allowance, and the next configured output reservation. That allowance
-covers every result the round projects for a request the producing call issued,
-including the child result a returning foreground delegation delivers as its
-awaiting request's result. When that bound exceeds the context window, the
-daemon commits the tool results but prepares no continuation call. It ends the
-turn `Failed` with an append-only context-headroom record naming the producing
-call, reported usage semantics, projected-content allowance, and configured
-limits. Automatic goal resumption does not charge that daemon-owned boundary
-against the session's attempt budget; the successor queued-turn activation
-performs the existing bounded automatic compaction before calling the provider
-again. Missing usage does not trigger the boundary, and inconsistent
-producing-call evidence fails closed.
-
-The explicit trigger uses the same compaction transaction and provider-call
-lifecycle. An explicit command first resolves its user-global replay state; an
-equal applied command returns its original receipt even when the current
-deployment no longer resolves the original selection or compaction credential.
-Configuration and credential resolution occur only for an unseen command.
-
-Provider interaction remains outside database transactions, and the summary
-range loader selects only the exact source-qualified range fixed by the Prepared
-call rather than materializing the complete physical transcript. Restart treats
-a completed summary boundary as ordinary validated frontier evidence. Startup
-atomically terminalizes a standalone Prepared compaction call as `KnownFailed`
-and an InFlight call as `Ambiguous`, marks its exactly correlated pending
-command failed, and produces no summary or result frontier. Any missing,
-duplicate, or mismatched command/call correlation fails closed.
-
-## Staged execution
-
-`ModelCallExecutionService::execute` runs one linear invocation over five
-composed roles (prepare, capability, authorize-send, provider,
-commit-observation) plus an id generator and a dispatch gate. No database
-transaction is ever open across credential I/O or provider work.
-
-The two off-transaction provider roles share one call-scoped
-`CancellationSignal`. It resolves when an authoritative reload finds the exact
-call `CancellationRequested` or terminal: direct cancellation of a prepared call
-therefore releases blocked capability preparation, while issued-call
-cancellation reaches provider invocation. Capability preparation reports this
-signal as `Cancelled`, and the application returns `NoWork`; it never converts
-authoritative cancellation into the guarded known-failure closure for a call
-that may already be terminal (INV-037).
-
-The same poll treats an exact delegation logical-terminal proof as authoritative
-cancellation even though the retained model-call row may still say `Prepared` or
-`InFlight`. Capability work then returns `NoWork`; invocation cancellation
-reaches the provider. If a provider response wins physically but its observation
-transaction reloads after the parent cascade committed, the transaction discards
-that response and the application returns `NoWork`. It never derives a second
-turn outcome, overwrites the delivered child result, or substitutes provider
-provenance for the parent command.
-
-1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
-   either: reports no runnable work; creates and commits the exact `Prepared`
-   call with its pinned non-secret credential reference
-   ([configuration-and-credentials](configuration-and-credentials.md)), the
-   turn-target pin, and a `ModelCallTransition` (`Prepared`) outbox event. If
-   pending steering exists, the same transaction first consumes every eligible
-   input in ascending acceptance position, appends its correlated semantic
-   entry, and derives the exact extended frontier supplied to the call. It then
-   stops the invocation (`Checkpointed`); reloads an already-committed
-   `Prepared` call read-only and returns its request material (`Ready`); closes
-   target-resolution failure as an atomic no-call attempt-and-turn failure. A
-   new `Prepared` call is never advanced to `InFlight` in its creating
-   transaction. Why: committing durable call identity before any external step
-   means a crash can never produce a provider effect with nothing durable to
-   classify.
-2. **Capability preparation (no transaction).** The provider adapter resolves
-   its credential internally from the call's durably pinned reference (reloading
-   a `Prepared` call without one fails closed) and builds an opaque, one-shot,
-   call-bound send capability; application and domain code only move the value
-   and cannot inspect, persist, or log it (INV-035;
-   [configuration-and-credentials](configuration-and-credentials.md)). Why: a
-   nonserializable one-shot value makes credential escape and capability reuse
-   structurally impossible rather than a review convention. Preparation races
-   the shared cancellation signal above. A trustworthy ordinary failure here
-   commits the accepted `Prepared -> KnownFailed` closure with attempt and turn
-   failure in a separate guarded transaction. A deterministic adapter defect is
-   not provider evidence, but before raising its fatal operator signal the
-   application commits the same guarded unsent known-failure closure as an
-   infrastructure preparation failure. Only failure or ambiguity of that closure
-   leaves `Prepared` for startup to validate and retry; a successfully recorded
-   defect cannot terminate every later incarnation on the same call.
-3. **Attachment preparation (no transaction).** Before send authorization, the
-   application checked-sums the catalogued lengths of every distinct attachment
-   represented across the complete rendered request. A sum above
-   `blob_storage.max_blob_bytes` returns
-   `AttachmentPreparationFailure::TooLarge { maximum_bytes }` and closes the
-   unsent call, attempt, and turn as known failure before store I/O or
-   authorization. Otherwise it streams and verifies at least one recorded
-   replica for each digest. It retains no blob bytes and holds no database
-   transaction during store I/O. No matching recorded replica returns
-   `AttachmentPreparationFailure::Missing`; every readable candidate failing
-   verification returns `AttachmentPreparationFailure::Corrupt`. Either guarded
-   failure transaction closes the still-unsent call, attempt, and turn as known
-   failure without provider cause. When no candidate verifies and at least one
-   remains temporarily unavailable, `AttachmentPreparationFailure::Unavailable`
-   is a sanitized operator failure: it releases all store and preparation
-   resources, leaves the call `Prepared`, commits no turn outcome, and permits a
-   later execution pass to retry the same unsent call. It is an expected
-   nonfatal deferred execution result and is never routed to
-   `FatalExecutionSupervisor`. Authoritative cancellation aborts store I/O,
-   returns `NoWork`, and never substitutes an attachment failure for the
-   cancellation closure. Reusing a successful check through the bounded
-   turn-scoped verification inventory is committed unimplemented functionality
-   until a blob-store adapter supplies the immutable-generation token required
-   by [blob storage](blob-storage.md); current later ranges therefore reverify.
-4. **Authorize-send transaction.** After acquiring the process-shared
-   per-attempt dispatch gate, a distinct transaction reloads authority and
-   commits `Prepared -> InFlight`. A `Prepared` owning attempt moves
-   `Prepared -> Running`, whether it is the turn's initial attempt or a
-   denial-only tool continuation. A tool-continuation attempt that already
-   entered `Running` while executing its batch remains there. The same
-   transaction appends a `ModelCallTransition` (`InFlight`) outbox event — every
-   durable physical transition, not just the terminal one, is externally
-   observable atomically with its commit. The gate permit is retained into the
-   send and released at the runtime's first report that provider acceptance is
-   possible (`SendCommenced`); if no acceptance report ever arrives, it is
-   released when the provider interaction returns, and the
-   ambiguous-authorization reread paths drop it before returning. Why: holding
-   the gate across the authorize commit and send start serializes
-   execution-service passes for that attempt across the acceptance-capable
-   boundary; it does not serialize interrupt application.
-5. **Provider interaction (no transaction).** The provider port is invoked at
-   most once per invocation, and exactly once only after the `InFlight` commit
-   is known. It consumes the capability exactly once and returns one
-   provider-neutral terminal observation bound to the sealed issued correlation
-   (session, turn, attempt, call, target, frontier). Its runtime
-   `CancellationSignal` is the shared durable signal defined above.
-6. **Commit-observation transaction.** A fresh transaction reloads and
-   revalidates complete authority — it never trusts the pre-send projection —
-   checks the observation's correlation against fresh state, and atomically
-   commits the call disposition, attempt and turn transitions, semantic entries,
-   terminal frontier, and outbox rows. If the frozen credential-pool policy
-   derives any durable effect from that observation — a profile quarantine, a
-   pending session displacement, a membership exclusion, or the chain exclusion
-   that removes the failed member from this turn's availability-successor chain
-   — the transaction reloads the immutable policy identity pinned by that
-   `Prepared` call rather than the session's current credential-history head. It
-   commits every derived record with the observation's exact correlation, in the
-   same all-or-nothing transaction as the terminal evidence and the successor or
-   wait disposition; no side may commit alone. The chain exclusion is included
-   for the same reason as the rest: without it a crash between the observation
-   and a later release could readmit the profile whose failure parked the turn.
-
-Failure keeps its stage: `ModelCallExecutionError` names which of prepare,
-render, capability, attachment preparation, preparation-failure commit,
-preparation-failure reread, authorization, authorization reread, authorization
-reconciliation, provider, or observation commit failed.
-
-### Identity minting and commit ambiguity
-
-The application owns all candidate identity minting (UUIDv7); persistence uses
-or discards candidates but never mints its own. Fixed-count call, entry, and
-frontier candidates are minted immediately before each port call. Inventories
-knowable only under an authoritative lock use application-owned generator
-closures: initial preparation draws one steering semantic-entry candidate and
-one fallback reclassified-successor candidate per pending input, while terminal
-closure and startup recovery draw one reclassified-successor candidate per
-pending input. Persistence invokes those closures inside the transaction but
-never owns minting. Why: the locked pending count moves into the transaction
-without moving identity authority into persistence. A proven daemon-minted
-identity collision (unique-violation rollback on the call, entry, frontier, or
-reclassified-turn key) is the only same-invocation transaction retry, with fresh
-candidates and no repeated credential or provider work. Why: a proven
-unique-violation rollback is the one failure that guarantees the transaction had
-no effect, so retrying it cannot duplicate anything.
-
-Commit ambiguity has an explicit detection rule (`commit_failure_is_ambiguous`,
-`crates/persistence/src/lib.rs`): a database error with SQLSTATE 08007 or 40003,
-or any non-database error while awaiting `COMMIT`, is ambiguous; a
-server-rejected commit is a plain non-ambiguous failure. The identity
-constraints are immediate, so their unique violations surface during statement
-execution. `ModelCallRepositoryError::from_database` checks those named
-constraint violations before generic database or commit-ambiguity
-classification, preserving identity collision as the only retryable failure.
-
-Ambiguous commits are never resolved by replay:
-
-- An ambiguous prepare-stage commit fails the invocation; authoritative state
-  must be reread before any later action.
-- An ambiguous authorize-send commit triggers a read-only reread: if the call is
-  still `Prepared`, the capability and permit are discarded and the error
-  returned; if `InFlight` committed, the unconsumed capability is proof of
-  non-send, and the service commits a `KnownFailed` observation for the issued
-  call without ever sending; if an interrupt concurrently committed
-  `CancellationRequested`, the same unconsumed capability proves no send, the
-  stop remains authoritative, and the service commits the correlated `Cancelled`
-  observation instead; if the interrupt already terminalized the unsent call as
-  `Cancelled`, the complete proof-bearing closure is authoritative and the
-  service returns `NoWork`.
-- A failed terminal-observation commit retains the unchanged observation in
-  memory. A later pass rereads durable state first: `Pending` recommits the
-  identical observation; `AlreadyCommitted` (same disposition and content)
-  discards it. Any drift in correlation or content is rejected.
-
-### One call, one physical interaction
-
-Per durable authorization, at most one physical interaction may reach the
-provider-acceptance boundary. Storage backstops single-call-ness independently
-of the aggregate: `model_call_attempt_once UNIQUE (turn_attempt_id)` admits at
-most one call row per attempt against any buggy or racing writer. There is no
-automatic retry after a known failure and no automatic retry of an ambiguous
-outcome (INV-025, INV-026); a known failure fails the attempt and turn unless
-its pool authorizes an availability successor against a *different* eligible
-profile ([availability successor calls](#availability-successor-calls)) — the
-`terminal` and `successor` endings of
-[the credential-availability machine](credential-availability.md), which states
-the four ordered gates that decide between them; a failure ends `terminal` at
-the first gate it fails — and ambiguity parks the turn for recovery. That
-exception is substitution, never repetition: no path re-issues a call against
-the profile that failed. A later scheduler pass never treats an issued
-unclassified call as fresh authorization. Why: a lost acknowledgement cannot
-prove the provider did not act, so repetition risks undisclosed duplicate
-provider effects and spend; recording ambiguity is preferred to an invented
-exactly-once claim.
-
-### Availability successor calls
-
-The rule above governs repetition: one durable authorization never reaches the
-provider twice. It does not govern substitution of the credential that failed. A
-`KnownFailed` call whose cause is one of the three availability causes —
-`provider_quota_exhausted`, `provider_rate_limited`, or `provider_overloaded` —
-and whose pool configures `switch_now` for that cause may be followed by a
-*successor call*: a distinct model call, on a successor turn attempt, against
-the next admitted member of the same credential pool
-([configuration-and-credentials](configuration-and-credentials.md#credential-pools-and-selection)).
-This substitution is the `successor` ending of
-[the credential-availability machine](credential-availability.md), which owns
-every other projection of it; this section owns the call's own mechanics.
-
-The predecessor stays terminal and stays `KnownFailed`; nothing reclassifies it,
-and its pinned target, pinned credential reference, and reported usage remain
-exactly what it recorded. The successor pins the same resolved target and a
-different credential reference, so no call changes identity mid-flight
-(INV-018). Because the successor belongs to its own attempt,
-`model_call_attempt_once UNIQUE (turn_attempt_id)` still admits exactly one call
-row per attempt; the attempt chain is the one intra-turn tool rounds already
-create.
-
-An observation that admits this path ends the predecessor attempt as
-`KnownFailure` but does not terminalize the turn. Under the session-scheduler
-lock, its atomic observation transaction applies the frozen `switch_now` action
-and either prepares the successor attempt or enters the pool's exhausted or
-contended disposition; the successor's member is admitted and its call created
-at that attempt's later preparation. That transaction appends no `TurnFailed`,
-creates no terminal frontier, and does not reclassify pending steering while a
-successor or wait retains the active turn. A concurrently accepted stop is
-serialized by that same lock: when its applied-interrupt proof already exists,
-the known failure follows the ordinary stop-requested terminal path and no
-successor is created; when the observation wins first, the later stop targets
-the newly active successor. One commit can therefore never both terminalize the
-turn and authorize a successor. A later preparation that finds the pool
-exhausted ends that call-free successor attempt as a pre-call exhaustion: its
-terminal cause is pool exhaustion and it records no provider cause.
-
-Three causes qualify and no others. Refusal never qualifies: it is provider
-judgment about the request, so another account would refuse the same content and
-substituting one would only be seeking a different answer. Ambiguity never
-qualifies (INV-025): a lost acknowledgement cannot prove the provider did not
-act, so a successor could duplicate both an effect and its spend. Credential
-resolution failure and `provider_credential_rejected` never qualify: both are
-deployment misconfiguration, and moving to another account hides the account
-that is broken. For each admitted availability cause, the adapter supplies
-distinct typed evidence that the request was not accepted; classification as
-quota exhaustion, rate limiting, or overload alone is insufficient. Every other
-known failure keeps the behavior above, failing its attempt and turn.
-
-The chain is bounded by the pool. A member that produced a qualifying failure is
-excluded from the current availability-successor chain, so at most one call per
-member exists per chain and the longest possible chain is the pool's member
-count. A successful call ends that chain before any tool-round continuation is
-prepared. A parked wait does **not** end it: the wait is part of the chain that
-entered it, and releasing the wait resumes that same chain and recomputes
-admission. The release contract forces this: the wait-release origin carries the
-predecessor call and its non-acceptance proof exactly where this chain had
-already observed a qualifying failure, so a successor prepared at release is
-that failure's authorized successor, and the `wait-transition fail (after call)`
-ending exists for the release that finds the pool exhausted instead. A release
-that began a fresh chain could carry neither. The chain bound survives this
-because a qualifying failure excludes its member for the rest of the turn, not
-merely for the chain, so no wait can readmit one. Every durable membership
-exclusion and profile quarantine is retained as well.
-
-A member that produced a qualifying failure stays excluded for the rest of the
-turn, not merely for the chain that observed it. A release therefore never
-re-admits a profile whose own failure parked the turn, so this turn issues at
-most one availability-successor call per pool member however many times it parks
-and resumes. That bound is on availability-successor calls, not on the turn's
-provider calls in total: a tool loop still creates its own continuation attempts
-and calls, which this rule neither counts nor limits.
-
-Why the exclusion outlives its chain: a one-member pool configured `switch_now`
-with `park` would otherwise park on a reset-bearing failure, wake at the
-deadline, drop the sole member's exclusion, call the same profile again, and
-repeat without bound — an automatic same-profile retry loop, which INV-014 and
-INV-018 forbid and which
-[model fallback and provenance](../open-questions.md#model-fallback-and-provenance)
-records as an open same-profile retry question. Nothing readmits such a member
-within the same turn. A reset passing releases the wait without readmitting the
-member that failed, and an operator clear of the exact predecessor correlation
-does not readmit it either: a clear is administrative repair that takes effect
-from the next turn, not a retry command. Making it readmit here would turn
-`clear_credential_exclusion` into that same-profile retry, and repeated clears
-would defeat this bound. When no member remains, the turn takes the exhaustion
-path below rather than calling a failed member again.
-
-When no member remains admissible, which ending the attempt reaches is decided
-by whether the exhaustion selects a wait — which `fail` never does and `park`
-does only when some member's every active exclusion is one a wake can clear —
-together with whether this **availability chain** has already issued a call, the
-chain and not the turn, since a later tool round opens a fresh chain against a
-turn that has already issued calls. Every such ending, and every projection of
-each, is defined by
-[the credential-availability machine](credential-availability.md).
-
-This page owns the terminal evidence and cause of each ending named by
-[the credential-availability machine](credential-availability.md). An attempt
-whose observation closed a qualifying provider failure carries that last
-observed cause and its `ProviderError` evidence. A call-free attempt that
-reached an exhausted pool, whether a fresh chain or a deferred successor whose
-preparation found exhaustion, instead carries the distinct
-`credential_pool_exhausted` preparation cause together with the frozen policy's
-durable member-exclusion evidence; it never fabricates provider evidence and
-never borrows a stale provider cause, because no provider request was issued for
-it to have observed. A parked turn carries no terminal evidence at all: it has
-not terminalized, and is not one of this page's terminal outcomes.
-
-**Implemented behavior — typed pool exhaustion.** A sealed
-`CredentialPoolExhaustedModelCallTurn` carries the pool identity separately from
-the ordinary failed-turn projection. The guarded transition requires an active
-turn whose current attempt has no model call, ends that attempt `KnownFailure`,
-terminalizes the turn `Failed`, and appends the ordinary `TurnFailed { turn }`
-marker. Post-failure exhaustion instead preserves the last member's terminal
-provider evidence while returning a distinct pool-exhausted application outcome.
-Both forms are durable and cannot be reconstructed as a single account failure.
-
-**Committed unimplemented functionality — process-level exclusion evidence.**
-The richer process event at [process protocol](process-protocol.md#planned)
-remains absent. When implemented, it carries the complete nonempty evidence list
-in policy-member order, including exclusion generation or predecessor
-correlation and optional reset, without changing the typed domain cause above.
-
-Every pool-selected `Prepared` call pins the selecting immutable pool-policy
-identity as an insert-only authorization fact beside its credential reference,
-and every observation-derived trigger action reloads this call-pinned revision,
-so an explicit session credential update that commits while the provider
-interaction is in flight cannot change the action applied to its result. The
-reconstitution check that the pinned policy contains the pinned profile with the
-expected target adapter and delivery kind is committed unimplemented
-functionality: the durable policy carries no adapter or delivery-kind fields.
-
-Each successor durably records the predecessor call it follows and the cause
-that authorized it, so a chain is recorded as evidence rather than as two calls
-that happen to share a turn. A goal-mode turn whose pool exhaustion selects no
-wait blocks with the ordinary `execution_failure` reason
-([goal-mode](goal-mode.md)); one that selects a wait remains the current goal
-turn and appends nothing, because no terminal disposition exists yet. The
-discriminator is wait selection and not the configured value, so a `park` pool
-whose members this turn's own chain exclusions have all removed blocks like any
-other failure rather than staying current forever.
-
-## Provider observation classification
-
-Classification is an adapter contract consuming the full-request-send boundary
-([runtime-substrate](runtime-substrate.md)); the daemon never reinterprets SDK
-errors by retryability or exception type. The runtime bridge
-(`crates/model-provider-runtime/src/lib.rs`) maps the runtime's typed terminal
-evidence ([runtime-substrate](runtime-substrate.md) owns how evidence is
-derived) to exactly one disposition:
-
-| Terminal evidence                                                            | Disposition   |
-| ---------------------------------------------------------------------------- | ------------- |
-| `Completed` (supported ordered assistant content)                            | `Completed`   |
-| `Refused`                                                                    | `Refused`     |
-| `ProviderError` (any kind, incl. rate limit, credential rejection, overload) | `KnownFailed` |
-| `ProvenUnsent(CancelledBeforeSend)`                                          | `Cancelled`   |
-| other `ProvenUnsent` (proof of no acceptance)                                | `KnownFailed` |
-| `CancellationConfirmed`                                                      | `Cancelled`   |
-| `BoundaryLoss` (loss after possible acceptance, incl. timeouts)              | `Ambiguous`   |
-
-The bridge maps `Refused` evidence only after every provider-reported identity
-passes the provider-target identity rule below. A different-lineage identity
-fails the adapter stage closed as `ProviderTargetSubstituted` before terminal
-evidence is mapped, including when that evidence is `Refused`. Once identity
-validation passes, that refusal evidence arises only from an authenticated
-complete exchange by the runtime layer's contract
-([runtime-substrate](runtime-substrate.md)), not a condition rechecked here.
-Empty text blocks are dropped without creating invalid entries, and so are
-thinking blocks whose text is empty — the Claude 5-family omitted-display shape,
-which carries only a provider replay signature that no durable representation
-could replay. The provider documents the resulting tool continuation as graceful
-degradation, disabling thinking for that request rather than rejecting it.
-Tool-call parts with a `ToolUse` finish become the normalized proposals owned by
-[tool-loop](tool-loop.md); thinking with actual text or redacted-thinking still
-fails the adapter stage closed because no durable semantic representation
-exists. Scripted providers declare their exact terminal observation; nothing is
-inferred from timing or injected I/O errors.
-
-For `Completed`, `Refused`, `ProviderError`, and `BoundaryLoss`, the bridge also
-copies the runtime terminal evidence's final absorbed `TokenUsage` fields into
-the correlated observation verbatim. This is reported evidence. Classification
-does not derive usage from the disposition, content, context, or provider
-family. The observation commit stores those fields atomically with the terminal
-disposition. A commit-ambiguity reread returns `AlreadyCommitted` only when the
-durable disposition, closure, and every independently nullable usage field equal
-the retained observation; different or newly absent usage is conflicting
-evidence, not an equal replay.
-
-### Provider-target identity
-
+The runtime bridge in `crates/model-provider-runtime` maps the runtime's typed
+terminal evidence to exactly one disposition: completed text and tool-call
+content to `Completed`, refusal to `Refused`, a provider error or other proof of
+non-acceptance to `KnownFailed`, cancellation before send or confirmed
+cancellation to `Cancelled`, and loss after possible acceptance to `Ambiguous`.
 The requested selection, the pinned resolved target, and the provider-reported
-identity stay three separate facts ([runtime-substrate](runtime-substrate.md));
-the bridge is the one place that relates the third to the second, for every
-identity the exchange reported — early observations and terminal evidence alike,
-since the rule is timing-sensitive. Exactly one of three relations holds
-(INV-014):
-
-- **Exact.** The reported identity equals the configured exact spelling.
-- **Alias concretion.** The reported identity is the configured spelling
-  followed by `-` and a *dated snapshot qualifier* (`YYYYMMDD` or `YYYY-MM-DD`).
-  This is the same logical target named in its canonical concrete form, not a
-  mismatch: the daemon configures one family and the provider echoes which
-  pinned snapshot of that family served the request. Classification proceeds
-  normally and the concrete identity is recorded as sanitized evidence of what
-  actually served.
-- **Different lineage.** Anything else — another family, a delivery or speed
-  variant, or a family-name extension that is not a full date — is a
-  *substitution*: the provider served a model the daemon never authorized. This
-  is a distinct outcome, never collapsed into the alias case and never into an
-  ordinary provider failure. It fails the adapter stage closed, because the
-  durable substitution provenance it would have to record does not exist (see
-  Open edges).
-
-The relation is derived from the configured target's own family, never from a
-table of known provider identifiers, so a newly published model needs no code
-change. Requiring a full date shape — rather than any trailing segment — is what
-keeps a *version* extension of the same family name from being read as a
-snapshot: against a configured `claude-opus-4`, `claude-opus-4-5` extends the
-family by one digit and stays a different lineage, while
-`claude-haiku-4-5-20251001` against a configured `claude-haiku-4-5` is the same
-lineage made concrete.
-
-A provider that documents its own substitution signal feeds that rule rather
-than bypassing it: the Anthropic adapter recognizes the server-side `fallback`
-content block, reports the model it names as continuing the turn through the
-ordinary reported-identity fact, and refuses to treat the response as completion
-material at all ([runtime-substrate](runtime-substrate.md)). Two guarantees
-follow, and only two. The response can never complete as the resolved target's
-output, whatever the block names. And when the block names another lineage — the
-case a real server-side fallback produces, including the sticky follow-up turns
-that carry no block but do report the substituting identity — the relation above
-classifies it as a substitution. A block that names the configured target itself
-is a provider self-contradiction: it still cannot complete, but it classifies as
-ambiguity rather than substitution, because the substitution classification is
-carried by the identity and no durable marker-only evidence exists to carry it
-(see Open edges).
-
-### Operator diagnostics
-
-Every classified outcome and every fail-closed bridge defect carries a stable,
-sanitized cause code alongside the shared
-[operator failure class](runtime-substrate.md#operator-failure-taxonomy): the
-class states the failure's severity, the cause code states what happened. The
-codes are fixed tokens — provider response text, request or response bodies,
-credential material, and user content can never reach one (INV-035) — and the
-runtime's own exhaustive `ProviderErrorKind` classification is carried verbatim
-rather than restated, so the adapter taxonomy and the operator vocabulary cannot
-drift apart. A provider-reported identity retained for diagnostics is
-credential-redacted by the adapter and length-bounded by the bridge before it
-can reach a log line. The bridge emits the cause code for each fail-closed
-defect, each non-completing classification, each accepted alias concretion, and
-each trustworthy capability-preparation failure — the pre-send outcome the
-application commits as `KnownFailed`, whose closed
-`UnsupportedOperation`/`CredentialUnavailable`/`CredentialUnusable` vocabulary
-maps to tokens without its adapter-rendered detail text. A substitution
-additionally carries the bounded identity that actually served, so an operator
-can name the model the provider used. The runtime crates themselves remain
-logging-free ([runtime-substrate](runtime-substrate.md)).
-
-**Committed unimplemented functionality.** No present session surface carries a
-structured-output contract. For program-driven turns under the
-[program substrate](program-substrate.md), the accepted input records the
-program's declared output schema, that schema flows through turn preparation
-into the prepared model operation, and the runtime boundary enforces it — the
-turn's outcome payload validates against the declared schema or the turn reports
-its failure, never an unvalidated approximation. The
-[model-runtime substrate](runtime-substrate.md) already admits an optional
-per-call structured-output contract; the session path between them is
-constrained: nothing may assume a prepared model operation carries no output
-contract, and the prepared-operation shape must stay extensible to the recorded
-schema without reinterpreting existing calls.
-
-## Terminal outcomes
+identity are three separate facts, and the bridge is the one place that relates
+the third to the second. Exactly one of three relations holds: exact, alias
+concretion (the configured spelling followed by a dated snapshot qualifier), or
+different lineage.
 
 `apply_terminal_observation` derives one of seven outcomes from fresh state, and
-persistence commits it atomically with its outbox rows
-([persistence-protocol](persistence-protocol.md)):
+persistence commits the outcome atomically with its outbox rows. Ambiguity parks
+the turn in the durable awaiting-recovery phase, carrying that one call as its
+wait set and retaining the session slot. When such an unacknowledged ambiguity
+also carries an applied-interrupt proof, the turn instead terminalizes as
+reconciliation required, with the wait set, an interrupt-requires-reconciliation
+marker, and a reconciliation outbox record, and releases the slot.
 
-- **Completed without tools.** The call ends `Completed`; the attempt ends
-  `TurnCompleted`; ordered assistant text is followed by `TurnCompleted`, and
-  the turn terminalizes through the existing final-response all-or-nothing
-  boundary.
-- **Completed with tools.** The call ends `Completed`; ordered assistant text
-  and logical tool-use entries plus their request records commit atomically, the
-  attempt ends as a tool-round yield, and the turn stays active. Approval,
-  execution, result projection, and preparation of the next call follow
-  [tool-loop](tool-loop.md). A physical call completion is therefore never
-  treated alone as proof that the logical turn completed.
-- **KnownFailed.** The call ends `KnownFailed`; definitive provider-error
-  evidence additionally retains only its closed `ProviderErrorKind`
-  classification as the optional provider-failure cause — never provider prose.
-  An unstopped attempt ends `KnownFailure`. Unless the same atomic observation
-  admits the availability-successor path above, the turn fails with a
-  `TurnFailed` entry and terminal frontier; an admitted successor instead keeps
-  the turn active without either. A stop-requested attempt ends
-  `AfterCancellation(KnownFailure)` and still fails, and cannot admit a
-  successor; the physical result has not proven cancellation.
-- **Cancelled.** Without the exact applied-interrupt proof, a physical
-  cancellation is an unstopped known failure. With the exact proof — carried
-  directly by the atomic interrupt transition before any call exists or for an
-  unsent `Prepared` call, or retained by `StopRequested` for an issued call —
-  the attempt ends `AfterCancellation(Cancelled)`, one `TurnCancelled` marker
-  extends the starting or call frontier, and the turn ends `Cancelled { cause }`
-  rather than failed or ambiguous.
-- **Refused.** The call ends `Refused`; the attempt ends `TurnRefused`; the turn
-  terminalizes `Refused` atomically with an equal-content terminal frontier. No
-  refusal-content entry exists yet (INV-018; open edge).
-- **Ambiguous.** The call ends terminally `Ambiguous`; an unstopped attempt ends
-  `Ambiguous` (live) or `Lost` (startup), and the turn enters the durable
-  `awaiting_model_call_recovery` phase carrying the exact wait set (that one
-  call) while retaining the session slot. No semantic entry or frontier is
-  created.
-- **ReconciliationRequired.** When that same unacknowledged ambiguity has an
-  applied-interrupt proof, the attempt instead ends
-  `AfterCancellation(Ambiguous)` (live) or `AfterCancellation(Lost)` (startup).
-  The turn terminalizes with the exact model-call wait set and
-  `InterruptRequiresReconciliation` marker, an equal-content terminal frontier,
-  and a typed reconciliation outbox record, releasing the slot. The same result
-  applies when an interrupt is accepted after an unstopped ambiguity already
-  entered `AwaitingRecoveryDecision`: the terminal call remains unchanged, and
-  its ended attempt remains the original `WithoutStop(Ambiguous|Lost)` evidence.
-  The exact later interrupt proof is carried by the turn's reconciliation marker
-  and correlated accepted successor instead of rewriting that evidence.
-  Independently, the turn-liveness runtime can spend one durably claimed
-  automatic recovery attempt on an unstopped wait. After revalidating that the
-  exact call and ended attempt still own it, the aggregate uses
-  `AutomaticRecovery { attempt }` as its typed reason and commits the same
-  equal-content frontier and reconciliation outbox record. This treatment does
-  not claim a provider result; the call remains terminal `Ambiguous`.
+A `KnownFailed` call whose cause is one of the three availability causes (quota
+exhausted, rate limited, or overloaded) and whose pool configures `switch_now`
+for that cause may be followed by a successor call: a distinct call on a
+successor turn attempt against the next admitted member of the same pool.
+`AvailabilitySuccessorModelCallTurn` is the aggregate transition that authorizes
+it.
 
-Completion and refusal races against `StopRequested` end through their typed
-`AfterCancellation` dispositions while retaining their ordinary turn outcomes.
+Usage evidence is a projection of terminal physical model calls that never
+materializes the transcript; `UsageReader` in `crates/application/src/usage.rs`
+is the read port. Each projected row carries the call's target, a bounded
+non-secret credential-profile label, its usage provenance and input semantics,
+and its token axes; the projection is append-only. Two read forms exist: an
+aggregate report grouped by compatibility key, and a newest-first detail page
+with a keyset cursor.
 
-Every terminal turn outcome, including proof-bearing reconciliation, atomically
-reclassifies each pending steering input into a fresh queued successor turn at
-its original acceptance position (`NoSafePointBeforeTerminal`), inheriting the
-source turn's effective configuration; see
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) (INV-016).
+## Design decisions
 
-## Serialization and locking
+A terminal call record never reopens, because it records what was externally
+done, and rewriting it would let later facts silently change that record. The
+migration enforces the transition matrix, the immutability of terminal rows and
+authorization facts, and the target pin, because the schema backstops the
+aggregate against any buggy or racing writer, not just the audited one. The
+provider target is pinned as a turn fact before the first call exists and every
+call in the turn uses it, so a mutable alias or deployment change cannot enter a
+turn as recovery.
 
-Every model-call transaction — prepare, capability-failure closure,
-authorize-send, observation commit, both rereads, and startup recovery — issues
-the per-session `session_scheduler` row lock (`FOR UPDATE`,
-`crates/persistence/src/lock_inventory.rs`) as its first statement. The lock
-statement bundles a session-existence probe (startup's variant also reads the
-active turn) into the same SELECT, so lock-before-read is guaranteed at
-statement granularity, not within the statement. Why: one lock statement issued
-first in every transaction makes per-session serialization total and lock-order
-cycles on one session impossible. A model-call transaction that both appends an
-outbox event and locks shared credential-pool action heads first takes one
-global transaction-scoped ordering guard. Ordinary initial-call preparation,
-tool-result continuation, and terminal observation then finish credential action
-locking before taking the global outbox sequence allocator immediately ahead of
-their writes. Counted activation takes the same guard before its atomic
-activation append; that append necessarily allocates before the newly active
-turn can select a credential, but the guard excludes every reverse-order
-model-call writer until commit. Tool-result continuation first materializes its
-transaction-local result entries and reconstructs their exact frontier under the
-per-session lock. It then takes the guard before projecting the results outbox
-event and carries that proof into same-transaction call preparation. Why: long
-frontier reads do not serialize unrelated model-call writers, while the guard
-still prevents a credential/allocator cycle without making unrelated outbox
-writers wait through credential selection and validation. Prospective
-preparation derives the exact initial-call checkpoint before counted activation;
-the guarded commit revalidates the unchanged activation candidate and carries
-that preparation into the atomic activation-and-call write instead of
-reconstructing the session while holding the guard. Prospective preparation
-takes neither guard nor allocator lock because it rolls back without appending
-or consuming actions. The in-process per-attempt dispatch gate is the only other
-ordering primitive; the execution service is its sole consumer. Interrupt
-application does not acquire it: once `InFlight` commits, the call is issued
-work, so a later interrupt durably requests cancellation and the runtime signal
-races any provider progress without claiming that acceptance was prevented.
+A call prepared before the input-semantics pin existed keeps a null pin and its
+reported axes exactly; the null, not a rewrite of the axes, keeps a read from
+deriving cost from possibly cache-inclusive input. Every writer records usage
+provenance as `reported`; `estimated` exists in the closed vocabulary for a
+later explicit estimator.
 
-## Crash, restart, and supervision
+Reconstitution refuses every invalid shape rather than repairing it, because
+acting on a partially consistent projection could authorize a second provider
+effect against stale authority. Reconstituting a checkpointed prepared call
+reloads the call's own stored snapshot, including the steering it consumed,
+because checkpointing cannot erase steering that the durable call was prepared
+to observe. Every adapter reaching the domain seam rejects cross-wired steering
+history itself, even when its storage schema already performed the same
+correlation.
 
-signalboxd (`apps/signalboxd/src/lib.rs`, `main.rs`) wraps execution in
-`FatalExecutionSupervisor`. A failure with retained execution evidence after its
-one same-incarnation reconciliation pass, a failure whose durable commit outcome
-is ambiguous, an execution unwind, or cancellation raises a fatal signal; the
-scheduler stops (in-flight work bounded by a shutdown grace window) and the
-process exits nonzero so the next incarnation's startup scan regains authority.
-Why: startup recovery is the one audited path that classifies an issued call
-from durable evidence, so a live process that cannot construct a trustworthy
-result must stop rather than improvise. A returned infrastructure failure that
-proves both a non-ambiguous commit outcome and the absence of retained execution
-evidence instead remains an ordinary per-session scheduler failure: goal-aware
-disposition durably blocks its selected turn and arms the bounded
-automatic-resumption policy while unrelated sessions continue. An eligibility
-pass raises the same signal whenever a durable stage it owns reports
-`Infrastructure { commit_ambiguous: true }` from the guarded counted activation
-commit, since only that next scan can decide what committed. After recovering
-any active call, the scheduled pass prepares bounded automatic compaction before
-activating queued work when durable terminal-call usage proves the configured
-headroom is exhausted. The connection runtime raises the same signal through its
-recovery handle for an explicit compaction command reporting that class, and
-still answers the client `commit_ambiguous`: a connection handler holds no
-prepared record to terminalize, replay of the command finds it pending, and a
-fresh command finds the nonterminal call, so the restart is the only remedy and
-no other path would raise the signal. Attachment unavailability is not a stage
-failure under this paragraph: it carries no ambiguous durable effect, returns
-the nonfatal deferred result above, and leaves the scheduler running. A
-deterministic capability-preparation defect first attempts the guarded unsent
-known-failure closure above and raises the fatal signal only after that closure
-commits or fails; therefore a successful closure leaves no `Prepared` call for
-restart to repeat.
+The renderer skips every imported entry other than attested text: source events
+and content absence are not conversational, imported tool identities do not
+exist here, thinking is source-private, and media has no admitted projection.
 
-Startup recovery (`crates/persistence/src/startup.rs`), inside the same
-per-session locked transaction as the general scan (INV-034):
+A required bounded deployment prompt is the dedicated compaction call's system
+prompt; the session system prompt is never substituted for it. A uniqueness
+violation observed while applying a compaction completion is a decided fact, not
+a retryable database failure: the completion fails closed and its in-flight call
+is left to startup recovery, because the identities are pinned by then and an
+identical retry would fail the same way. The output ceiling and the context
+window are operator-declared per catalog selection and never inferred from
+provider or model names. The daemon reserves the full configured output ceiling
+before each continuation even for an adapter that can only render the ceiling as
+advisory context, so such a deployment keeps its intended reply budget rather
+than the model's larger capability ceiling.
 
-- an evidence-free turn ends its abandoned attempt `Lost`, fails the turn, and
-  reclassifies all pending steering instead of deferring startup;
-- a durable `Prepared` call proves no send authorization existed. Reconstitution
-  validates the call's exact stored frontier; when preparation consumed
-  steering, that is the complete extended snapshot and checked steering suffix
-  described above, not the turn's unextended starting snapshot. Startup leaves
-  the call, attempt, and turn unchanged, and the ordinary scheduler later
-  retries preparation of that same unsent call;
-- a durable unstopped `InFlight` call with no surviving evidence ends
-  `Ambiguous`, the abandoned attempt ends `Lost`, and the turn parks in
-  `awaiting_model_call_recovery`, where the independent bounded reconciliation
-  runtime takes responsibility after startup;
-- a durable `CancellationRequested` call reconstructs its applied interrupt,
-  ends the attempt `AfterCancellation(Lost)`, and terminalizes
-  `ReconciliationRequired` with that call as the exact ambiguity set.
+The headroom guard reads the newest reported input from any terminal ordinary
+call since the last compaction, whatever its disposition. Why: a failed or
+ambiguous round may still have been accepted, and its reported size keeps a
+resumed session from resending a request that already exhausted headroom. An
+ordinary call's reported input is the next request's baseline because its
+successor resends that prefix; a compaction call's reported input measures
+source text no later request carries, so its baseline is the retained summary
+output plus the allowance for what it did not summarize. After a nominal
+completion the daemon retains the reported usage and the completed observation
+even when reported output, or input plus output, exceeds a configured ceiling,
+and emits an operator cause instead, because the provider has already accepted
+and served the request.
 
-Recovery is configuration-independent: `require_live_execution_for_restart`
-passes no configured catalog and rebuilds target authority from the stored
-call's own selection and target facts, so a deployment-configuration change can
-never block or alter classification of an issued call. Recovery never itself
-resumes an attempt, redispatches a call, or assumes a request was or was not
-sent. A retained `Prepared` call is driven only by a later ordinary scheduler
-pass, while issued calls still follow the terminal recovery classifications
-above.
+A new prepared call commits in its own transaction and never advances to in
+flight in that transaction, so a crash can never produce a provider effect with
+nothing durable to classify. The adapter resolves its credential from the call's
+pinned reference and returns an opaque one-shot send capability that application
+and domain code can only move, so credential escape and capability reuse are
+structurally impossible rather than a review convention. A deterministic adapter
+defect commits the guarded unsent known-failure closure before raising its fatal
+operator signal, so a successfully recorded defect cannot terminate every later
+incarnation on the same call. Only failure or ambiguity of that closure leaves
+the call prepared for startup to validate and retry. The per-attempt dispatch
+gate is held from the authorize-send commit until the runtime first reports that
+provider acceptance is possible, which serializes execution passes for that
+attempt across the acceptance boundary without serializing interrupt
+application.
 
-## Composition and harness
+The chain exclusion that removes the failed member commits in the observation
+transaction itself, because a crash between the observation and a later release
+could readmit the profile whose failure parked the turn. Identities knowable
+only under the lock are minted through application-owned generator closures that
+persistence invokes inside the transaction, so the locked pending count moves
+into the transaction without moving identity authority into persistence. A
+proven daemon-minted identity collision is the only failure retried within one
+invocation, with fresh candidates and no repeated credential or provider work,
+because a unique-violation rollback is the one failure that guarantees the
+transaction had no effect.
 
-Production composition wires `PostgresModelCallRepository` (all four transaction
-roles), the in-process gate, and `RuntimeModelCallProvider` over the
-configuration-selected Anthropic HTTP, OpenAI HTTP, Claude CLI, or Codex CLI
-runtime, with the domain target catalog, runtime model catalog, and exact
-adapter routes built from one versioned static configuration file. Direct HTTP
-runtimes reread their credential files; each CLI runtime uses its ambient login,
-which is the only delivery the present composition supplies for one. Selecting a
-CLI credential from the profile's own delivery is committed unimplemented
-functionality owned by
-[configuration-and-credentials](configuration-and-credentials.md). The
-`signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives
-one session through the real scheduler and PostgreSQL path with either a
-deterministic scripted reply or an explicit `--anthropic` smoke mode, then
-prints the semantic transcript; it is not the client protocol.
+Ambiguity parks the turn instead of retrying or substituting, because a lost
+acknowledgement cannot prove the provider did not act, and an invented
+exactly-once claim could duplicate both an effect and its spend. Refusal never
+admits a successor: it is provider judgment about the request, so another
+account would refuse the same content and substituting one would only seek a
+different answer. Credential resolution failure and credential rejection never
+admit a successor: both are deployment misconfiguration, and moving to another
+account hides the account that is broken.
 
-## Open edges
+A successful call ends its availability chain, and a later tool round starts a
+fresh one, so a round that exhausts the pool before calling carries no earlier
+round's failure. A successor prepared when a parked wait releases carries the
+predecessor call and its non-acceptance proof in its origin, so it is that
+failure's authorized successor rather than the start of a fresh chain. Releasing
+a wait never readmits the member whose failure parked the turn, because
+otherwise a one-member `switch_now` pool configured to park would wake at its
+deadline, drop the sole exclusion, and call the same profile again without
+bound. Goal disposition keys on whether the observation selected a wait, not on
+the pool's configured action, so a park pool whose members are all excluded
+blocks like any other failure rather than staying current forever;
+[goal-mode](goal-mode.md) owns the disposition.
 
-- Durable provider-target evidence (`ProviderTargetEvidence`,
-  mismatch-selects-`KnownFailed`, and post-completion invalidation) is
-  unimplemented. Three consequences: an accepted alias concretion records the
-  concrete served identity only as operator diagnostics, not as a durable
-  per-call provenance row; a substitution fails closed with an operator error,
-  so a substituted call is classified `Ambiguous` by restart rather than
-  `KnownFailed` live; and substitution is carried entirely by the reported
-  identity, so a provider fallback marker naming the configured target itself
-  classifies as ambiguity. Carrying the marker as typed evidence in its own
-  right would add a provider-neutral runtime-vocabulary variant that both
-  adapters would have to construct and redact, and is routed through the
-  provider provenance schema in
-  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
-- Unstopped ambiguity recovery is a parked state only: no user decision,
-  `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
-  implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
-  but no later reconciliation workflow is implemented.
-- Availability-successor chains are visible only after the fact: no client
-  surface renders that a successor is being selected. That transient visibility
-  surface remains routed through
-  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
-- Streaming deltas are collected but never delivered as transient drafts, and
-  the early-observation pause/commit/resume path is unimplemented.
-- The aggregate admits at most one call per turn attempt; the tool loop creates
-  continuation attempts and calls in the same logical turn.
-- A refused turn commits no refusal-content semantic entry; the variant remains
-  an open edge in [sessions-and-transcript](sessions-and-transcript.md).
-- Imported source-event, absence, and non-text entries remain model-invisible
-  under the conservative projection. Richer rendering remains routed through the
-  open [model-input projection](../open-questions.md#model-input-projection),
-  whose implementation would update this projection and the frontier extension
-  owners in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md)
-  and [sessions-and-transcript](sessions-and-transcript.md);
-  [conversation-import](conversation-import.md) continues to own only normalized
-  imported source content.
-- Same-incarnation retained-evidence reconciliation gets exactly one production
-  pass (`reconcile_retained_once`) before fatal escalation; repeated
-  same-incarnation drains are exercised only by tests.
-- The daemon/session system prompt remains sourced only from the calling turn's
-  frozen defaults epoch: preparation loads that optional bounded prompt and the
-  bridge sets `ModelOperation::system` from it exactly or to `None`
-  ([sessions-and-transcript](sessions-and-transcript.md)). **Committed
-  unimplemented functionality — workspace-instruction region.** When
-  implemented, `PreparedModelOperation` carries a separate optional typed
-  `WorkspaceInstructionRegion` unchanged into
-  `ModelOperation::workspace_instructions`. Preparation rebuilds it from the
-  exact manifest-backed admitted bytes, inserts it once after system policy and
-  before conversation history, and authenticates its manifest before provider
-  spawn. It is never concatenated into `system`, converted to a user or tool
-  message, or sourced from an adapter loader. The region's exact bytes and
-  subordinate authority are owned by
-  [workspace instructions](workspace-instructions.md); richer composition of
-  other system-prompt sources remains deferred under
-  [configuration categories](../open-questions.md#configuration-categories).
+The identity relation is derived from the configured target's own family, never
+from a table of known provider identifiers, so a newly published model needs no
+code change. Alias concretion requires a full date shape, compact or hyphenated
+and never checked for calendar validity, rather than any trailing segment, so a
+version extension of the same family name is not read as a snapshot. An accepted
+alias concretion records the identity that served only as operator diagnostics,
+not as a durable per-call provenance row. A reported identity reaches operator
+diagnostics only after the adapter's credential redaction and a
+character-boundary truncation to the configured diagnostic bound;
+[runtime-substrate](runtime-substrate.md) owns the redaction. A substitution
+fails the adapter stage closed with an operator error, because the durable
+substitution provenance it would have to record does not exist; a substituted
+call is therefore classified `Ambiguous` by restart rather than `KnownFailed`
+live. The runtime's exhaustive provider-error classification is carried verbatim
+into the operator cause codes rather than restated, so the adapter taxonomy and
+the operator vocabulary cannot drift apart.
+
+Every model-call transaction issues the session-scheduler row lock as its first
+statement, so per-session serialization is total and lock-order cycles on one
+session are impossible; [persistence-protocol](persistence-protocol.md) owns the
+lock order. Tool-result continuation reconstructs its result frontier under the
+per-session lock and takes the global ordering guard only before projecting its
+outbox event, so long frontier reads do not serialize unrelated model-call
+writers while the guard still prevents a credential/allocator cycle.
+
+A failure with retained execution evidence after its one reconciliation pass, an
+ambiguous commit outcome, an unwind, or cancellation raises the fatal signal and
+the process exits nonzero. Why: startup recovery is the one audited path that
+classifies an issued call from durable evidence, and a live process that cannot
+construct a trustworthy result must stop rather than improvise. Repeated
+same-incarnation reconciliation drains are exercised only by tests.
+
+An aggregate usage read consumes a bounded count of newest matching calls and
+returns a bounded count of groups, recording truncation when either bound is
+hit, because bounding before grouping prevents an unscoped lifetime query from
+imposing work proportional to retained history. Usage result shapes hold their
+bounds and internal consistency by construction rather than by adapter
+discipline, and the PostgreSQL adapter fails closed on a projection row that
+would require an unconstructable result. Oldest-first traversal is not exposed,
+because a statement timestamp precedes its commit and a late commit can appear
+behind an already emitted cursor. Dollar cost is not stored in the projection;
+[configuration-and-credentials](configuration-and-credentials.md) owns its
+read-time derivation.
+
+## Boundary contracts
+
+A model call is one recorded attempt. The daemon sends each attempt to the
+provider at most once. A retry is a new recorded attempt; no code retries a call
+without recording the retry in the database. Before anything has been sent to
+the provider, the daemon may prepare an unsent call again. After a known failure
+the daemon may start a new attempt with a different credential. It never sends
+again with the credential that failed in that chain. A call whose outcome is
+unknown is never retried automatically; the turn parks for recovery. A CLI
+harness may retry inside itself. Those retries are provider-internal; the daemon
+neither observes nor records them and adds no retries of its own. A migration
+constraint enforces one call per attempt. A `switch_now` failure with proven
+non-acceptance writes a durable chain exclusion for the failed member, and
+successor selection and preparation skip excluded members; that selection, not a
+constraint, enforces no-reuse. The one-shot send capability, the per-attempt
+dispatch gate, the authorize-send commit, and startup parking of an issued call
+enforce at-most-once sending. Only the rule that no code retries a call without
+recording the retry is unenforced.
+
+The terminal transition stores the input, output, cache-creation, and cache-read
+token axes independently; a null axis means the provider did not supply it, and
+a present zero stays zero. The prepared checkpoint pins whether reported input
+includes the separately reported cache axes, so a later configuration that
+routes the target through another adapter cannot change how a stored call's
+input is read.
+
+Canonical credential references stay exact and gain no length bound from the
+usage read projection. Aggregate reads group only calls that agree on call kind,
+target, credential profile, provenance, input semantics, and the presence state
+of every token axis; that grouping is the compatibility boundary for cost
+derivation. A detail cursor provides deterministic keyset traversal of rows
+already visible ahead of it, not a cross-page snapshot.
+
+A tool continuation must prove that the exact stored call frontier includes the
+current tool round's complete result evidence. A checkpointed call becomes
+resumable only when its extended snapshot is a strict prefix-preserving
+extension of the turn's starting snapshot and its membership equals the checked
+semantic entries.
+
+Every rendered message keeps its source-qualified semantic-entry reference and
+content-authority provenance; role and provenance derive from the entry itself,
+never from turn grouping. Skipping an entry changes only what the model sees; it
+does not remove, rewrite, summarize, or reorder the semantic entries or their
+addressable imported frontier. Delegation messages render through an injected
+user transport role that creates no accepted input, no user actor, and no child
+transcript access; the structured value retains its model- or tool-authored
+spawn provenance. A model-identity change projects as an injected user-role
+message naming the newly selected identity and the frozen defaults epoch. The
+session system prompt is sourced only from the calling turn's frozen defaults
+epoch, and the bridge sets the operation's system prompt from it exactly or
+leaves it empty; [sessions-and-transcript](sessions-and-transcript.md) owns the
+freeze.
+
+Missing usage fields stay missing and are never invented; classification does
+not derive usage from the disposition, content, context, or provider family, and
+adapters need no separate counting operation. Historical compaction calls with
+unknown cache-inclusion semantics are treated as cache-exclusive, so the guard
+may overcount but never omits reported cache axes. A definitive request-size
+failure on a frontier the prospective call preserves forces one automatic
+compaction when no later accepted call or completed compaction supersedes it,
+even without reported usage. Missing usage does not trigger the tool-result
+headroom boundary, and inconsistent producing-call evidence fails closed.
+
+A trustworthy ordinary capability failure commits the prepared-to-known-failed
+closure with attempt and turn failure in a separate guarded transaction. Every
+durable physical call transition, not only the terminal one, appends its
+transition outbox event in the transaction that commits it;
+[persistence-protocol](persistence-protocol.md) owns the outbox rule. The
+provider port is invoked at most once per invocation, and exactly once only
+after the in-flight commit is known. Credential-pool effects derived from an
+observation reload the immutable policy identity pinned by that prepared call,
+not the session's current credential-history head. Every derived record commits
+with the observation's exact correlation in the same all-or-nothing transaction
+as the terminal evidence and the disposition it selects. The application owns
+all candidate identity minting, and persistence uses or discards candidates but
+never mints its own. An ambiguous commit is never resolved by replay; the next
+pass rereads authoritative state before any later action.
+
+A physical call completion is never treated alone as proof that the logical turn
+completed. A `KnownFailed` call retains only the closed provider-error
+classification as its optional cause, never provider prose. A known failure ends
+the attempt and fails the turn with a `TurnFailed` entry and a terminal frontier
+unless the same observation admits an availability successor. An admitting
+observation ends the predecessor attempt as a known failure but appends no
+`TurnFailed`, creates no terminal frontier, and reclassifies no pending steering
+while a successor or wait keeps the turn active;
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) owns
+reclassification at terminal outcomes. A concurrently accepted stop is
+serialized by the session-scheduler lock, so one commit can never both
+terminalize the turn and authorize a successor. The successor pins the same
+resolved target and a different credential reference, so no call changes
+identity mid-flight. For each admitted availability cause the adapter must
+supply distinct typed evidence that the request was not accepted; classification
+as quota, rate limit, or overload alone is insufficient. Without the exact
+applied-interrupt proof a physical cancellation is an unstopped known failure,
+and a stop-requested attempt whose call ends known-failed still fails and cannot
+admit a successor, because the physical result has not proven cancellation.
+
+`Completed` admits only text and tool-call parts: empty text and empty thinking
+blocks are dropped, while thinking with text and redacted thinking fail the
+adapter stage closed as unsupported material, because no durable semantic
+representation exists for either. Tool content and a tool-use finish must agree;
+either one without the other is a known failure. The dedicated compaction call
+rejects every tool and suppressed-tool part and accepts a summary only from a
+completion that ended by end turn or stop sequence, because its completion must
+be whole summary text. Classification is an adapter contract consuming the
+full-request-send boundary; the daemon never reinterprets SDK errors by
+retryability or exception type. The identity relation applies to every identity
+the exchange reported, early observations and terminal evidence alike, because
+it is timing-sensitive. Different lineage is a substitution: the provider served
+a model the daemon never authorized, and it is never collapsed into the alias
+case or into an ordinary provider failure. When the Anthropic adapter sees the
+server-side fallback block, the response can never complete as the resolved
+target's output, whatever the block names; a block naming the configured target
+itself classifies as ambiguity rather than substitution, because no durable
+marker-only evidence exists to carry a substitution. Every classified outcome
+and every fail-closed bridge defect carries a stable sanitized cause code
+alongside the shared operator failure class defined in
+[runtime-substrate](runtime-substrate.md).
+
+A model-call transaction that both appends an outbox event and locks shared
+credential-pool action heads first takes one global transaction-scoped ordering
+guard.
+
+A returned infrastructure failure that proves both a non-ambiguous commit
+outcome and the absence of retained evidence stays an ordinary per-session
+scheduler failure while other sessions continue. Attachment unavailability
+during preparation is not a stage failure: it carries no ambiguous durable
+effect, returns a nonfatal deferred result, and leaves the scheduler running;
+[blob-storage](blob-storage.md) owns the preparation order and failure classes.
+A later scheduler pass never treats an issued unclassified call as fresh
+authorization. At startup, a durable prepared ordinary call proves no send
+authorization existed: recovery leaves the call, attempt, and turn unchanged,
+and the ordinary scheduler later retries preparation of that same unsent call. A
+durable unstopped in-flight call with no surviving evidence ends `Ambiguous`,
+its abandoned attempt ends lost, and the turn parks in the awaiting-recovery
+phase. A durable cancellation-requested call reconstructs its applied interrupt,
+ends the attempt after-cancellation lost, and terminalizes the turn as
+reconciliation required with that call as the ambiguity set. A dedicated
+compaction call owns no turn: at startup a prepared one ends `KnownFailed`, an
+in-flight one ends `Ambiguous`, its pending compaction command fails, and no
+summary is written. Recovery never itself resumes an attempt, redispatches a
+call, or assumes a request was or was not sent.
+
+The model-runtime layer imports and redefines no domain identifier type, and a
+runtime-generated identity is never authoritative correlation; the correlation
+the sealed issued call carries is.
+
+## Planned
+
+- Multipart attachment rendering ([design](../design/model-call-execution.md)).
+- Runner-placement rendering and the executable session-tool snapshot
+  ([design](../design/model-call-execution.md)).
+- Reuse of a successful attachment verification within a turn
+  ([design](../design/model-call-execution.md)).
+- The process-level exclusion-evidence event
+  ([design](../design/model-call-execution.md)).
+- The reconstitution check that the pinned policy contains the pinned profile
+  with the expected adapter and delivery kind
+  ([design](../design/model-call-execution.md)).
+- A structured-output contract on the session path
+  ([design](../design/model-call-execution.md)).
+- Durable provider-target evidence, pending the per-call provenance schema
+  decision ([design](../design/model-call-execution.md)).
+- Unstopped ambiguity recovery ([design](../design/model-call-execution.md)).
+- The workspace-instruction region of the prepared model operation
+  ([design](../design/model-call-execution.md)).

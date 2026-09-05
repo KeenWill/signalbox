@@ -1171,7 +1171,7 @@ mod tests {
             ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch
         );
 
-        // S34 / INV-046: a stored install diverging from the command's
+        // S34 / : a stored install diverging from the command's
         // replacement only in its optional system prompt is the same
         // fail-closed defaults mismatch.
         let prompt_diverged = AppliedFacts {

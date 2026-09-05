@@ -199,7 +199,7 @@ Signalbox's evidence-shaped contract (exit-0-without-a-terminal-marker is
 BoundaryLoss, not success). Open design tensions the track's spec-diff must
 resolve, not decide here: (1) a subprocess is one physical request the adapter
 cannot prove is retry-free internally, so the spec-diff has to reconcile that
-boundary with the one-physical-request invariants (INV-025/026); (2) for the
+boundary with the one-physical-request invariants (/026); (2) for the
 wrapped-CLI tracks below, auth rides the CLI's ambient subscription login, so
 the spec-diff has to reconcile that with the credential-reference boundary and
 per-request value durability the `ModelRuntime` contract pins (recovered calls,
@@ -235,22 +235,22 @@ an intended external-control surface, and the runtime trait seam keeps a future
 direct adapter a drop-in replacement behind the same two-method contract.
 
 On open tension (1) above, the owner set the dispatch-boundary direction — it
-governs any subprocess adapter, both wrap tracks included: INV-025/026 are
-reconciled by re-anchoring the invariant's subject to the adapter's unit of
-irrevocable dispatch — one HTTPS request for the direct adapters, one process
-spawn for a subprocess adapter. At that boundary the invariants hold at full
-strength: at most one spawn per prepared call, never a respawn on ambiguity,
-process death without a terminal marker is BoundaryLoss evidence, and the
-platform owns every retry decision. The CLI's internal requests are
-provider-internal — the same epistemic position the direct adapters already hold
-toward a provider's server side. Accepted costs, stated: evidence granularity
-coarsens to the handed inputs plus the emitted event stream; the CLI's internal
-retries burn subscription capacity the platform cannot itemize (mitigated by
-capturing emitted rate-limit events); and a platform retry after BoundaryLoss
-can duplicate provider-side effects, which is cost-only for chat calls.
-Cancellation prefers the CLI's protocol-level interrupt with process kill as the
-fallback, and the evidence distinguishes the two. The formal invariant-text
-amendment lands with the pickup spec-diff, not now.
+governs any subprocess adapter, both wrap tracks included: /026 are reconciled
+by re-anchoring the invariant's subject to the adapter's unit of irrevocable
+dispatch — one HTTPS request for the direct adapters, one process spawn for a
+subprocess adapter. At that boundary the invariants hold at full strength: at
+most one spawn per prepared call, never a respawn on ambiguity, process death
+without a terminal marker is BoundaryLoss evidence, and the platform owns every
+retry decision. The CLI's internal requests are provider-internal — the same
+epistemic position the direct adapters already hold toward a provider's server
+side. Accepted costs, stated: evidence granularity coarsens to the handed inputs
+plus the emitted event stream; the CLI's internal retries burn subscription
+capacity the platform cannot itemize (mitigated by capturing emitted rate-limit
+events); and a platform retry after BoundaryLoss can duplicate provider-side
+effects, which is cost-only for chat calls. Cancellation prefers the CLI's
+protocol-level interrupt with process kill as the fallback, and the evidence
+distinguishes the two. The formal invariant-text amendment lands with the pickup
+spec-diff, not now.
 
 On statelessness: stateless-exact integration is the aim — each prepared call
 spawns a fresh invocation with the full context rendered in, so every existing
@@ -484,10 +484,9 @@ item.
 
 The owner commissioned the pickup on 2026-07-25. The bottom specification diff
 governs the implementation:
-[sessions-and-transcript](../spec/sessions-and-transcript.md#session-metadata-and-list-projection)
-owns the metadata and listing contract,
-[process-protocol](../spec/process-protocol.md) owns the additive wire surface,
-and
+[sessions-and-transcript](../spec/sessions-and-transcript.md) owns the metadata
+and listing contract, [process-protocol](../spec/process-protocol.md) owns the
+additive wire surface, and
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention)
 owns deferred visibility and filter design.
 
@@ -696,9 +695,9 @@ excluded, or fails closed to confirmation. A runner never widens its own
 approval surface, and the no-permission-downgrade-on-re-registration point above
 stands. Credential doctrine for the first slice: a tool declaring credential
 access is Daemon-only, and signalboxd hands no credentials over the runner
-protocol — INV-035 read as placement law. Runners may hold their own ambient
-machine or environment credentials, which sit outside this model;
-credential-scoped runner classes are a recorded deferred extension.
+protocol — read as placement law. Runners may hold their own ambient machine or
+environment credentials, which sit outside this model; credential-scoped runner
+classes are a recorded deferred extension.
 
 Runner identity and session placement, kernel only (the design pass owns the
 rest): runner identity is logical — enrollment-based, not hardware-fingerprinted

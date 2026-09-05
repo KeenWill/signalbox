@@ -95,6 +95,43 @@ class DocsConsistencyTests(unittest.TestCase):
         messages = [failure.message for failure in run_checks(self.root)]
         self.assertEqual(sum("does not exist" in message for message in messages), 2)
 
+    def test_image_does_not_satisfy_machine_owner_citation(self) -> None:
+        self.write_and_track(
+            "docs/spec/credential-availability.md", "# Credential availability\n"
+        )
+        self.write_and_track(
+            "docs/spec/runtime-substrate.md",
+            "# Runtime substrate\n\n![Diagram](credential-availability.md)\n",
+        )
+        self.assertIn("machine-owner-link", self.categories())
+
+    def test_heading_slug_collision_uses_global_slug_set(self) -> None:
+        self.write_and_track(
+            "docs/spec/collisions.md",
+            "# Collisions\n\n## Foo\n\n## Foo\n\n## Foo-1\n\n",
+        )
+        self.write_and_track(
+            "docs/collision-link.md", "[Third](spec/collisions.md#foo-1-1)\n"
+        )
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_manifest_without_workflow_fails(self) -> None:
+        self.write_and_track(
+            "Cargo.toml", '[package]\nname = "fixture"\nversion = "0.0.0"\n'
+        )
+        self.write_and_track(
+            ".github/postgres-integration-suites.toml",
+            '[[suite]]\nname = "fixture"\npackage = "fixture"\nshards = 1\n',
+        )
+        failures = run_checks(self.root)
+        self.assertTrue(
+            any(
+                failure.category == "suite-manifest"
+                and "exists without" in failure.message
+                for failure in failures
+            )
+        )
+
     def test_external_and_root_relative_urls_are_outside_scope(self) -> None:
         self.write_and_track(
             "docs/external.md",

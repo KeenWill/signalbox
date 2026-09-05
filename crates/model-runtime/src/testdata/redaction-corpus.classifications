@@ -8,62 +8,62 @@
 008 | REDACTED | cli_redaction.rs::credential_key: the covered-name policy recognizes this credential assignment.
 009 | ACCEPTED-UNCOVERED | cli_redaction.rs::credential_key: Authentication headers are outside the covered header-name policy.
 010 | REDACTED | cli_redaction.rs::credential_key: the covered-name policy recognizes this credential assignment.
-011 | REDACTED | runtime-substrate.md INV-035: credential-bearing token assignments are scrubbed.
-012 | REDACTED | runtime-substrate.md INV-035: credential-bearing JSON members are scrubbed.
-013 | REDACTED | runtime-substrate.md INV-035: credential-bearing identifier assignments are scrubbed.
+011 | REDACTED | runtime-substrate.md : credential-bearing token assignments are scrubbed.
+012 | REDACTED | runtime-substrate.md : credential-bearing JSON members are scrubbed.
+013 | REDACTED | runtime-substrate.md : credential-bearing identifier assignments are scrubbed.
 014 | REDACTED | cli_redaction.rs::credential_key: the covered-name policy recognizes this credential assignment.
 015 | ACCEPTED-UNCOVERED | cli_redaction.rs::credential_key: TOTP seed names are outside the covered credential-name policy.
 016 | REDACTED | cli_redaction.rs::credential_key: the covered-name policy recognizes this credential assignment.
 017 | REDACTED | cli_redaction.rs::credential_key: the covered-name policy recognizes this credential assignment.
-018 | REDACTED | runtime-substrate.md INV-035: credential-bearing password assignments are scrubbed.
+018 | REDACTED | runtime-substrate.md : credential-bearing password assignments are scrubbed.
 019 | ACCEPTED-UNCOVERED | cli_redaction.rs::credential_key: bare JWT member names are outside the covered credential-name policy.
 020 | REDACTED | cli_redaction.rs::credential_key: the covered-name policy recognizes this credential assignment.
 021 | REDACTED | cli_redaction.rs::credential_key: the covered-name policy recognizes this credential assignment.
 022 | REDACTED | cli_redaction.rs::credential_key: the covered-name policy recognizes this credential assignment.
 023 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: dotted TLS-key names split before a covered credential identifier.
-024 | REDACTED | runtime-substrate.md INV-035: identity/session-token JSON members are scrubbed.
-025 | REDACTED | runtime-substrate.md INV-035: cookie header shapes consume their whole line value.
-026 | REDACTED | runtime-substrate.md INV-035: credential-bearing API-key header shapes are scrubbed.
-027 | REDACTED | runtime-substrate.md INV-035: authorization header shapes consume their whole line value.
-028 | REDACTED | runtime-substrate.md INV-035: credential-bearing secret assignments are scrubbed.
+024 | REDACTED | runtime-substrate.md : identity/session-token JSON members are scrubbed.
+025 | REDACTED | runtime-substrate.md : cookie header shapes consume their whole line value.
+026 | REDACTED | runtime-substrate.md : credential-bearing API-key header shapes are scrubbed.
+027 | REDACTED | runtime-substrate.md : authorization header shapes consume their whole line value.
+028 | REDACTED | runtime-substrate.md : credential-bearing secret assignments are scrubbed.
 029 | REDACTED | cli_redaction.rs::redact_space_separated_flags: credential-bearing long options consume their following value.
 030 | REDACTED | cli_redaction.rs::redact_space_separated_flags: credential-bearing long options consume their following value.
-031 | REDACTED | runtime-substrate.md INV-035: hyphenated credential assignments are scrubbed.
+031 | REDACTED | runtime-substrate.md : hyphenated credential assignments are scrubbed.
 032 | ACCEPTED-UNCOVERED | cli_redaction.rs::redact_space_separated_flags: attached short-option values lack a recognized credential-bearing flag.
 033 | REDACTED | cli_redaction.rs::redact_url_userinfo_passwords: scheme URL userinfo passwords are consumed through the at-sign.
 034 | ACCEPTED-UNCOVERED | cli_redaction.rs::redact_prefixed_token: an unlabelled incomplete Basic shape is outside the covered token prefixes.
-035 | REDACTED | runtime-substrate.md INV-035: credential-bearing authorization token shapes are scrubbed.
+035 | REDACTED | runtime-substrate.md : credential-bearing authorization token shapes are scrubbed.
 036 | REDACTED | cli_redaction.rs::redact_curl_userinfo_passwords: curl userinfo passwords are consumed through the at-sign.
-037 | REDACTED | runtime-substrate.md INV-035: spaced credential assignments are scrubbed.
-038 | ACCEPTED-UNCOVERED | runtime-substrate.md INV-035: structurally separated YAML name/value fields are outside text-shaped adjacency.
-039 | REDACTED | runtime-substrate.md INV-035: credential-bearing identifier assignments are scrubbed.
-040 | REDACTED | runtime-substrate.md INV-035: quoted credential assignments are scrubbed.
-041 | REDACTED | runtime-substrate.md INV-035: credential-bearing identifier assignments are scrubbed inside prose.
-042 | REDACTED | runtime-substrate.md INV-035: credential-bearing identifier assignments are scrubbed inside prose.
-043 | ACCEPTED-UNCOVERED | runtime-substrate.md INV-035: structurally separated netrc name/value words are outside text-shaped adjacency.
+037 | REDACTED | runtime-substrate.md : spaced credential assignments are scrubbed.
+038 | ACCEPTED-UNCOVERED | runtime-substrate.md : structurally separated YAML name/value fields are outside text-shaped adjacency.
+039 | REDACTED | runtime-substrate.md : credential-bearing identifier assignments are scrubbed.
+040 | REDACTED | runtime-substrate.md : quoted credential assignments are scrubbed.
+041 | REDACTED | runtime-substrate.md : credential-bearing identifier assignments are scrubbed inside prose.
+042 | REDACTED | runtime-substrate.md : credential-bearing identifier assignments are scrubbed inside prose.
+043 | ACCEPTED-UNCOVERED | runtime-substrate.md : structurally separated netrc name/value words are outside text-shaped adjacency.
 044 | REDACTED | cli_redaction.rs::redact_url_userinfo_passwords: scheme URL userinfo passwords are consumed through the at-sign.
-045 | ACCEPTED-UNCOVERED | runtime-substrate.md INV-035: structurally separated array name/value fields are outside text-shaped adjacency.
-046 | ACCEPTED-UNCOVERED | runtime-substrate.md INV-035: a prose label and next-line value are outside text-shaped adjacency.
+045 | ACCEPTED-UNCOVERED | runtime-substrate.md : structurally separated array name/value fields are outside text-shaped adjacency.
+046 | ACCEPTED-UNCOVERED | runtime-substrate.md : a prose label and next-line value are outside text-shaped adjacency.
 047 | ACCEPTED-UNCOVERED | cli_redaction.rs::ValueTermination::Line: a header's next-line value is outside its same-line value.
 048 | REDACTED | cli_redaction.rs::redact_url_userinfo_passwords: scheme URL userinfo passwords are consumed through the at-sign.
 049 | REDACTED | cli_redaction.rs::redact_space_separated_flags: credential-bearing long options consume their following value.
 050 | ACCEPTED-UNCOVERED | cli_redaction.rs::redact_space_separated_flags: short-option values lack a recognized credential-bearing flag.
-051 | REDACTED | runtime-substrate.md INV-035: credential-bearing form assignments are scrubbed.
-052 | ACCEPTED-UNCOVERED | runtime-substrate.md INV-035: structurally separated CSV name/value columns are outside text-shaped adjacency.
-053 | ACCEPTED-UNCOVERED | runtime-substrate.md INV-035: structurally separated SQL name/value positions are outside text-shaped adjacency.
-054 | ACCEPTED-UNCOVERED | runtime-substrate.md INV-035: XML element syntax is outside the text-shaped scanner.
-055 | REDACTED | runtime-substrate.md INV-035: credential-bearing repr-style members are scrubbed.
-056 | REDACTED | runtime-substrate.md INV-035: credential-bearing debug-style members are scrubbed.
-057 | REDACTED | runtime-substrate.md INV-035: credential-bearing HTTP header shapes are scrubbed.
-058 | REDACTED | runtime-substrate.md INV-035: authorization token shapes on a folded line are scrubbed.
+051 | REDACTED | runtime-substrate.md : credential-bearing form assignments are scrubbed.
+052 | ACCEPTED-UNCOVERED | runtime-substrate.md : structurally separated CSV name/value columns are outside text-shaped adjacency.
+053 | ACCEPTED-UNCOVERED | runtime-substrate.md : structurally separated SQL name/value positions are outside text-shaped adjacency.
+054 | ACCEPTED-UNCOVERED | runtime-substrate.md : XML element syntax is outside the text-shaped scanner.
+055 | REDACTED | runtime-substrate.md : credential-bearing repr-style members are scrubbed.
+056 | REDACTED | runtime-substrate.md : credential-bearing debug-style members are scrubbed.
+057 | REDACTED | runtime-substrate.md : credential-bearing HTTP header shapes are scrubbed.
+058 | REDACTED | runtime-substrate.md : authorization token shapes on a folded line are scrubbed.
 059 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: dotted property names split before the credential-bearing prefix.
-060 | REDACTED | runtime-substrate.md INV-035: a credential-bearing trailing identifier is scrubbed.
+060 | REDACTED | runtime-substrate.md : a credential-bearing trailing identifier is scrubbed.
 061 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: zero-width separators split the credential-bearing identifier.
 062 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: soft-hyphen separators split the credential-bearing identifier.
 063 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: non-breaking hyphens split the credential-bearing identifier.
 064 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: bidi-control separators split the credential-bearing identifier.
 065 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: middle-dot separators split the credential-bearing identifier.
-066 | REDACTED | runtime-substrate.md INV-035: a credential-bearing trailing identifier is scrubbed.
+066 | REDACTED | runtime-substrate.md : a credential-bearing trailing identifier is scrubbed.
 067 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: bracketed name syntax splits the credential-bearing identifier.
 068 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: slash-separated names split the credential-bearing identifier.
 069 | ACCEPTED-UNCOVERED | cli_redaction.rs::trailing_identifier: zero-width separators split the credential-bearing identifier.
@@ -74,32 +74,32 @@
 074 | REDACTED | cli_redaction.rs::redact_identifier_assignment: fallback claiming redacts malformed quoted credential keys.
 075 | REDACTED | cli_redaction.rs::redact_identifier_assignment: fallback claiming redacts malformed quoted credential keys.
 076 | REDACTED | cli_redaction.rs::redact_identifier_assignment: fallback claiming redacts malformed quoted credential keys.
-077 | REDACTED | runtime-substrate.md INV-035: later credential-bearing JSON members are scrubbed.
-078 | REDACTED | runtime-substrate.md INV-035: escaped nested credential-shaped JSON text is scrubbed.
-079 | REDACTED | runtime-substrate.md INV-035: embedded credential-member text is scrubbed.
-080 | REDACTED | runtime-substrate.md INV-035: duplicate credential-bearing JSON members are scrubbed.
-081 | REDACTED | runtime-substrate.md INV-035: duplicate credential-bearing JSON members are scrubbed.
-082 | REDACTED | runtime-substrate.md INV-035: credential-bearing members after malformed prose are scrubbed.
-083 | REDACTED | runtime-substrate.md INV-035: embedded credential-member text is scrubbed.
-084 | REDACTED | runtime-substrate.md INV-035: embedded credential-member text is scrubbed.
+077 | REDACTED | runtime-substrate.md : later credential-bearing JSON members are scrubbed.
+078 | REDACTED | runtime-substrate.md : escaped nested credential-shaped JSON text is scrubbed.
+079 | REDACTED | runtime-substrate.md : embedded credential-member text is scrubbed.
+080 | REDACTED | runtime-substrate.md : duplicate credential-bearing JSON members are scrubbed.
+081 | REDACTED | runtime-substrate.md : duplicate credential-bearing JSON members are scrubbed.
+082 | REDACTED | runtime-substrate.md : credential-bearing members after malformed prose are scrubbed.
+083 | REDACTED | runtime-substrate.md : embedded credential-member text is scrubbed.
+084 | REDACTED | runtime-substrate.md : embedded credential-member text is scrubbed.
 085 | REDACTED | cli_redaction.rs::credential_key: the covered-name policy recognizes this credential assignment.
-086 | REDACTED | runtime-substrate.md INV-035: escaped credential-bearing JSON names are scrubbed.
-087 | REDACTED | runtime-substrate.md INV-035: escaped credential-bearing assignment names are scrubbed.
-088 | REDACTED | runtime-substrate.md INV-035: escaped credential-bearing assignment names are scrubbed.
+086 | REDACTED | runtime-substrate.md : escaped credential-bearing JSON names are scrubbed.
+087 | REDACTED | runtime-substrate.md : escaped credential-bearing assignment names are scrubbed.
+088 | REDACTED | runtime-substrate.md : escaped credential-bearing assignment names are scrubbed.
 089 | ACCEPTED-UNCOVERED | cli_redaction.rs::redact_prefixed_token: non-canonical case is outside the covered token prefixes.
 090 | ACCEPTED-UNCOVERED | cli_redaction.rs::redact_prefixed_token: non-canonical case is outside the covered token prefixes.
-091 | REDACTED | runtime-substrate.md INV-035: credential token shapes are scrubbed.
-092 | REDACTED | runtime-substrate.md INV-035: credential token shapes are scrubbed.
-093 | REDACTED | runtime-substrate.md INV-035: credential assignments after multibyte delimiters are scrubbed.
-094 | REDACTED | runtime-substrate.md INV-035: exhausted escape decoding fails closed.
-095 | REDACTED | runtime-substrate.md INV-035: balanced credential containers and later assignments are scrubbed.
-096 | REDACTED | runtime-substrate.md INV-035: closed credential containers do not hide later assignments.
-097 | REDACTED | runtime-substrate.md INV-035: closed credential containers do not hide later assignments.
-098 | REDACTED | runtime-substrate.md INV-035: closed credential containers do not hide later assignments.
-099 | REDACTED | runtime-substrate.md INV-035: balanced credential arrays and later members are scrubbed.
-100 | REDACTED | runtime-substrate.md INV-035: matching triple quotes do not hide later assignments.
-101 | REDACTED | runtime-substrate.md INV-035: matching quoted values do not hide later assignments.
-102 | REDACTED | runtime-substrate.md INV-035: matching PEM end markers do not hide later assignments.
+091 | REDACTED | runtime-substrate.md : credential token shapes are scrubbed.
+092 | REDACTED | runtime-substrate.md : credential token shapes are scrubbed.
+093 | REDACTED | runtime-substrate.md : credential assignments after multibyte delimiters are scrubbed.
+094 | REDACTED | runtime-substrate.md : exhausted escape decoding fails closed.
+095 | REDACTED | runtime-substrate.md : balanced credential containers and later assignments are scrubbed.
+096 | REDACTED | runtime-substrate.md : closed credential containers do not hide later assignments.
+097 | REDACTED | runtime-substrate.md : closed credential containers do not hide later assignments.
+098 | REDACTED | runtime-substrate.md : closed credential containers do not hide later assignments.
+099 | REDACTED | runtime-substrate.md : balanced credential arrays and later members are scrubbed.
+100 | REDACTED | runtime-substrate.md : matching triple quotes do not hide later assignments.
+101 | REDACTED | runtime-substrate.md : matching quoted values do not hide later assignments.
+102 | REDACTED | runtime-substrate.md : matching PEM end markers do not hide later assignments.
 103 | REDACTED | cli_redaction.rs::escaped_candidate_origin_is_opaque: escaped held candidates remain fail-closed across deltas.
 104 | REDACTED | cli_redaction.rs::escaped_candidate_origin_is_opaque: escaped held candidates remain fail-closed across deltas.
 105 | REDACTED | cli_redaction.rs::escaped_candidate_origin_is_opaque: escaped held candidates remain fail-closed across deltas.
@@ -111,37 +111,37 @@
 111 | REDACTED | cli_redaction.rs::escaped_candidate_origin_is_opaque: escaped held candidates remain fail-closed across deltas.
 112 | REDACTED | cli_redaction.rs::escaped_candidate_origin_is_opaque: escaped held candidates remain fail-closed across deltas.
 113 | REDACTED | cli_redaction.rs::escaped_candidate_origin_is_opaque: escaped held candidates remain fail-closed across deltas.
-114 | REDACTED | runtime-substrate.md INV-035: split credential markers are held and scrubbed.
-115 | REDACTED | runtime-substrate.md INV-035: empty deltas do not release a held credential marker.
-116 | REDACTED | runtime-substrate.md INV-035: split credential-bearing JSON members are held and scrubbed.
-117 | REDACTED | runtime-substrate.md INV-035: malformed credential-bearing JSON members are held and scrubbed.
-118 | REDACTED | runtime-substrate.md INV-035: split PEM armor and body are held and scrubbed.
-119 | REDACTED | runtime-substrate.md INV-035: split credential assignment values are scrubbed.
-120 | REDACTED | runtime-substrate.md INV-035: split authorization values are scrubbed.
+114 | REDACTED | runtime-substrate.md : split credential markers are held and scrubbed.
+115 | REDACTED | runtime-substrate.md : empty deltas do not release a held credential marker.
+116 | REDACTED | runtime-substrate.md : split credential-bearing JSON members are held and scrubbed.
+117 | REDACTED | runtime-substrate.md : malformed credential-bearing JSON members are held and scrubbed.
+118 | REDACTED | runtime-substrate.md : split PEM armor and body are held and scrubbed.
+119 | REDACTED | runtime-substrate.md : split credential assignment values are scrubbed.
+120 | REDACTED | runtime-substrate.md : split authorization values are scrubbed.
 121 | REDACTED | cli_redaction.rs::RedactingSink::flush_boundary: forced boundaries retain fail-closed continuation context.
 122 | REDACTED | cli_redaction.rs::RedactingSink::flush_boundary: forced boundaries retain fail-closed continuation context.
 123 | REDACTED | cli_redaction.rs::RedactingSink::flush_boundary: forced boundaries retain fail-closed continuation context.
 124 | REDACTED | cli_redaction.rs::RedactingSink::flush_boundary: forced boundaries retain fail-closed continuation context.
 125 | REDACTED | cli_redaction.rs::RedactingSink::finish: unresolved credential context survives finish and usage barriers.
 126 | REDACTED | cli_redaction.rs::RedactingSink::finish: fail-closed suppression is absorbing.
-127 | REDACTED | runtime-substrate.md INV-035: emitted provider-id lookbehind governs later terminal text.
-128 | REDACTED | runtime-substrate.md INV-035: escaped emitted provider-id lookbehind governs later terminal text.
-129 | REDACTED | runtime-substrate.md INV-035: escaped dropped lookbehind governs later terminal text.
-130 | REDACTED | runtime-substrate.md INV-035: dropped lookbehind governs later terminal text.
-131 | REDACTED | runtime-substrate.md INV-035: structural close in a later delta cannot release a credential member.
-132 | REDACTED | runtime-substrate.md INV-035: structural close in a later delta cannot release a token member.
-133 | REDACTED | runtime-substrate.md INV-035: a quoted key opened at the delta end stays held.
-134 | REDACTED | runtime-substrate.md INV-035: a single-quoted key opened at the delta end stays held.
-135 | REDACTED | runtime-substrate.md INV-035: a bare credential name split before its separator stays held.
-136 | REDACTED | runtime-substrate.md INV-035: a header credential name split before its separator stays held.
-137 | REDACTED | runtime-substrate.md INV-035: a malformed-prefix quoted key split at its opener stays held.
-138 | REDACTED | runtime-substrate.md INV-035: an escaped nested credential member split before its value stays held.
-139 | REDACTED | runtime-substrate.md INV-035: a quoted key at a JSON-ineligible position stays held.
-140 | REDACTED | runtime-substrate.md INV-035: structural close in a later delta cannot release a duplicate member.
-141 | REDACTED | runtime-substrate.md INV-035: a later duplicate member cannot release an earlier credential.
-142 | REDACTED | runtime-substrate.md INV-035: a malformed-prefix member split before its tail stays held.
+127 | REDACTED | runtime-substrate.md : emitted provider-id lookbehind governs later terminal text.
+128 | REDACTED | runtime-substrate.md : escaped emitted provider-id lookbehind governs later terminal text.
+129 | REDACTED | runtime-substrate.md : escaped dropped lookbehind governs later terminal text.
+130 | REDACTED | runtime-substrate.md : dropped lookbehind governs later terminal text.
+131 | REDACTED | runtime-substrate.md : structural close in a later delta cannot release a credential member.
+132 | REDACTED | runtime-substrate.md : structural close in a later delta cannot release a token member.
+133 | REDACTED | runtime-substrate.md : a quoted key opened at the delta end stays held.
+134 | REDACTED | runtime-substrate.md : a single-quoted key opened at the delta end stays held.
+135 | REDACTED | runtime-substrate.md : a bare credential name split before its separator stays held.
+136 | REDACTED | runtime-substrate.md : a header credential name split before its separator stays held.
+137 | REDACTED | runtime-substrate.md : a malformed-prefix quoted key split at its opener stays held.
+138 | REDACTED | runtime-substrate.md : an escaped nested credential member split before its value stays held.
+139 | REDACTED | runtime-substrate.md : a quoted key at a JSON-ineligible position stays held.
+140 | REDACTED | runtime-substrate.md : structural close in a later delta cannot release a duplicate member.
+141 | REDACTED | runtime-substrate.md : a later duplicate member cannot release an earlier credential.
+142 | REDACTED | runtime-substrate.md : a malformed-prefix member split before its tail stays held.
 143 | REDACTED | cli_redaction.rs::resolve_scanned_pending: a dirty joined prefix fails closed before its value can detach.
-144 | REDACTED | runtime-substrate.md INV-035: a truncated-log credential member split before its value stays held.
-145 | REDACTED | runtime-substrate.md INV-035: an escaped credential name split inside its escape stays held.
-146 | REDACTED | runtime-substrate.md INV-035: structural close after a balanced container cannot release a member.
-147 | REDACTED | runtime-substrate.md INV-035: structural close after a balanced array cannot release a member.
+144 | REDACTED | runtime-substrate.md : a truncated-log credential member split before its value stays held.
+145 | REDACTED | runtime-substrate.md : an escaped credential name split inside its escape stays held.
+146 | REDACTED | runtime-substrate.md : structural close after a balanced container cannot release a member.
+147 | REDACTED | runtime-substrate.md : structural close after a balanced array cannot release a member.

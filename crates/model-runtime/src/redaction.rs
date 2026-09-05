@@ -2382,7 +2382,7 @@ mod tests {
         // Pinned exactly rather than by credential absence and a count. Those
         // two hold just as well when redaction replaces the *whole* value, so
         // a regression that scrubbed `model-` and `-v1` away with the
-        // credential would satisfy them while losing the safe bytes INV-035
+        // credential would satisfy them while losing the safe bytes
         // preserves. Comparing the forwarded facts states both halves at once:
         // the credential is gone, the surrounding bytes and the non-credential
         // `http_status` are untouched, and each variant is still itself.
