@@ -46,13 +46,14 @@ model call, tool attempt, or durable wait outstanding is reached by none of them
 and would hold its slot forever. A turn-liveness watchdog
 (`crates/persistence/src/turn_liveness.rs`) observes such turns on a separate
 timer and fails one whose evidence has not changed across repeated observations.
-The same timer runs a second inventory over turns that hold a live operation
-past every deadline, and a third that retries reconciliation of ambiguous
-operations.
+Two more checks run on their own timers at the same interval: one inventories
+turns that hold a live operation past every deadline, and one retries
+reconciliation of ambiguous operations.
 
 At startup, before it admits any request, the daemon runs one transaction per
-session with an active turn and classifies the abandoned tenure from its durable
-evidence (`crates/persistence/src/startup.rs`). The watchdog and the scheduler's
+session with an active turn or a nonterminal standalone compaction call and
+classifies the abandoned tenure from its durable evidence
+(`crates/persistence/src/startup.rs`). The watchdog and the scheduler's
 pass-expiry handoff end turns through that same transition.
 
 An input submitted while a turn holds the slot is rejected, recorded as pending
@@ -260,8 +261,9 @@ fails. A turn holding a prepared call proves no send authorization existed, so
 startup validates its frontier and leaves call, attempt, and turn for the
 scheduler to retry. A turn holding an unstopped in-flight call ends the call
 ambiguous and the attempt lost, and stays active in the model-call recovery wait
-with no failure entry, frontier, or outbox record. A stop-requested attempt with
-a cancellation-requested call ends both and terminalizes reconciliation-required
+with no failure entry or frontier; the transaction appends the call's terminal
+transition event and no turn event. A stop-requested attempt with a
+cancellation-requested call ends both and terminalizes reconciliation-required
 with that call as its exact ambiguity set. A turn already parked in the
 model-call recovery wait is not reclassified; the transaction rolls back and
 reports the session as awaiting a recovery decision. An approval wait remains
@@ -413,7 +415,8 @@ requests, follow streams close, the dispatcher stops starting transactions, the
 scheduler stops admitting passes, and liveness stops scanning. Finite handlers,
 the current dispatcher transaction, in-flight scheduler passes, and an in-flight
 liveness read share a grace window of the configured longest model exchange plus
-a fixed cleanup margin. After its in-flight operation reaches a durable
+a fixed cleanup margin. An admitted pass stops spending its occupancy bound and
+drains under that window. After its in-flight operation reaches a durable
 boundary, a pass checkpoints the active turn and returns without issuing
 another, and a successor resumes from that boundary.
 

@@ -41,17 +41,20 @@ is staged behind that call. The command claims its identity and provisioning
 authorization immediately, and the terminal transaction that installs the
 successor placement and extends the next context frontier commits only after any
 authorized in-flight daemon-local call for the session reaches its observation
-boundary, so the call's entries append before the placement boundary. A call
-that ends known-failed, refused, cancelled, or ambiguous reaches an observation
-boundary too, so staging never waits indefinitely. A response that would
-introduce unfinished tool work stays outside replacement recovery until its
-recovery transition is defined. Abandonment requires no active turn; with a turn
-active it records that the turn needs existing control, and the user empties the
-slot through the stop, approval, or reconciliation flow first. A queued turn
-remains queued and cannot activate while its placement is lost. Both commands
-are administrative recovery: they neither widen the interrupt delivery nor
-create a standalone cancellation path, and no case turns ambiguous effect
-evidence into known failure.
+boundary, so the call's entries append before the placement boundary. That
+transaction also moves the active turn out of the runner-recovery wait: to
+running with a fresh attempt when the loss interrupted no tool attempt, and
+otherwise to the phase the retained tool attempt justifies. A call that ends
+known-failed, refused, cancelled, or ambiguous reaches an observation boundary
+too, so staging never waits indefinitely. A response that would introduce
+unfinished tool work stays outside replacement recovery until its recovery
+transition is defined. Abandonment requires no active turn; with a turn active
+it records that the turn needs existing control, and the user empties the slot
+through the stop, approval, or reconciliation flow first. A queued turn remains
+queued and cannot activate while its placement is lost. Both commands are
+administrative recovery: they neither widen the interrupt delivery nor create a
+standalone cancellation path, and no case turns ambiguous effect evidence into
+known failure.
 
 Recovery-only startup binds the runner socket in recovery-only mode after
 migrations, reconciles retained runner inventory, evidence, and nonterminal
