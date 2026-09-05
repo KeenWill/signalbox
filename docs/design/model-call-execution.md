@@ -147,8 +147,9 @@ no present code concatenates any other source into it.
 
 ## Acceptance criteria
 
-A turn with an image attachment reaches the provider as a native content part,
-and the transcript entries are unchanged.
+A turn with an image attachment renders as a typed provider-neutral content
+part, and the transcript entries are unchanged. Native delivery becomes a
+criterion when the open rendering decision adopts it.
 
 A relocated session's next call carries exactly one placement-change message
 with the profile-specific text, and a session composed without a workspace

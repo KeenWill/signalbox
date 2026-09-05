@@ -200,8 +200,9 @@ use ordinary HTTP bodies rather than JSON wrapping.
 
 The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes read
 the usage projection [model-call-execution](model-call-execution.md) owns; their
-filters, bounds, cursors, and cost labels are the web contract under
-`crates/web-contract`.
+response shapes, bounds, and cost labels are the web contract under
+`crates/web-contract`, and the daemon's web HTTP layer parses their filters and
+cursors.
 
 `deterministic_test_router` supplies a database-free page plus bounded read,
 mutation, and two-item stream routes. It composes the same bootstrap, mutation

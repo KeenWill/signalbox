@@ -67,8 +67,9 @@ call to its replacement is committed design, not built; see
 
 A typed value recorded when trusted mismatch evidence is first learned after the
 outcome-authoritative call completed but before its turn terminalized, stopping
-further semantic effects without rewriting the call. Committed design, not
-built; see [model-call-execution design](design/model-call-execution.md).
+further semantic effects without rewriting the call. Pending the undecided
+per-call provenance schema; see
+[model-call-execution design](design/model-call-execution.md).
 
 ## Tool request
 
