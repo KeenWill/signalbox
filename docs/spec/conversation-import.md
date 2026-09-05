@@ -365,14 +365,14 @@ Every import refusal is `invalid_request` with typed, content-silent evidence.
 State refusals name `conversation_import_already_in_progress` or
 `conversation_import_not_in_progress`. Size refusals name the configured limit,
 declared size, and actual size when append or commit knows it; a
-declaration/assembly mismatch names both counts. Converter refusals use the
-closed class and ordinal inventory in the
-[process protocol's conversation-import refusal mapping](process-protocol.md).
-Errors and logs contain classes and ordinals only, never source content,
-source-derived identifiers, paths, or parser excerpts. Database failure is
-`commit_ambiguous`, so the operator may retry the exact format and source bytes.
-Assembly allocation exhaustion or blob-store unavailability is `unavailable`;
-blob integrity failure is `internal`.
+declaration/assembly mismatch names both counts. Converter refusals carry a
+class from the closed set the wire vocabulary in `crates/process-protocol`
+defines and, when one applies, the offending record ordinal. Errors and logs
+contain classes and ordinals only, never source content, source-derived
+identifiers, paths, or parser excerpts. Database failure is `commit_ambiguous`,
+so the operator may retry the exact format and source bytes. Assembly allocation
+exhaustion or blob-store unavailability is `unavailable`; blob integrity failure
+is `internal`.
 
 A new exact snapshot returns
 `conversation_import_inserted { imported_conversation_id }`; exact reingestion

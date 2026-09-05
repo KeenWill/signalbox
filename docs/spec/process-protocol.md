@@ -15,10 +15,10 @@ The transport is one Unix domain stream socket. The daemon reads the socket path
 from `SIGNALBOX_SOCKET_PATH`, and the terminal client reads the same variable
 unless given an explicit path. Each frame is one UTF-8 JSON object followed by a
 newline, at most 8 MiB including the newline; an empty line is a malformed
-frame. Every frame carries the version, a request identity, and exactly one
-request or message object tagged by its `type` string; a field the variant does
-not admit is rejected. Identifiers are canonical UUID strings; request
-identities, versions, indices, counts, and cursors are canonical decimal strings
+frame. Every frame carries the version as a JSON integer, a request identity,
+and exactly one request or message object tagged by its `type` string; a field
+the variant does not admit is rejected. Identifiers are canonical UUID strings;
+request identities, indices, counts, and cursors are canonical decimal strings
 that preserve the full unsigned 64-bit range.
 
 A client sends requests and receives receipts, reads, or errors. A mutation
@@ -32,14 +32,16 @@ directory path. A model selection names a configured selection directly or by
 alias. Session metadata is one object replaced whole; its title, tags, and
 attribute keys are nonempty and contain no U+0000.
 
-Conversation imports and blob uploads move bytes in chunks through a begin,
-append, commit sequence under one process-wide bulk-ingest permit. A chunked
-operation has a five-minute inactivity deadline that resets after each accepted
-append and a non-resetting twenty-four-hour deadline from when its begin takes
-the permit; the first bounds a stalled client and the second bounds one making
-indefinite minimal progress. Blob storage is owned by
-[blob-storage.md](blob-storage.md) and the import pipeline by
-[conversation-import.md](conversation-import.md).
+A conversation import whose source fits one frame is one single-shot request; a
+larger source, and every blob upload, moves bytes in chunks through a begin,
+append, commit sequence. Either path holds the one process-wide bulk-ingest
+permit. A chunked operation has a five-minute inactivity deadline that resets
+after each accepted append and a non-resetting twenty-four-hour deadline from
+when its begin takes the permit; the first bounds a stalled client and the
+second bounds one making indefinite minimal progress. A single-shot import has
+the twenty-four-hour deadline from when it takes the permit and no inactivity
+deadline. Blob storage is owned by [blob-storage.md](blob-storage.md) and the
+import pipeline by [conversation-import.md](conversation-import.md).
 
 A client observes a session by following it. A follow connection receives a
 transcript snapshot and then the session's durable events above the snapshot's
@@ -58,11 +60,13 @@ cascade rules are owned by
 
 Durable events reach followers through the dispatcher. It reads the
 transactional outbox owned by [persistence-protocol.md](persistence-protocol.md)
-one sequence at a time and offers each event to two process-local fan-outs: one
-durable-only and one composite that also admits deltas. A database-scoped
-advisory guard and a generation fence in `crates/persistence/src/hub_fence.rs`
-enforce one active daemon process per database, and therefore one dispatcher and
-its fan-outs.
+one sequence at a time and offers each session event that has a wire projection
+to two process-local fan-outs: one durable-only and one composite that also
+admits deltas; a sessionless receipt or an event kind with no projection
+advances the cursor and reaches no follower. A database-scoped advisory guard
+and a generation fence in `crates/persistence/src/hub_fence.rs` enforce one
+active daemon process per database, and therefore one dispatcher and its
+fan-outs.
 
 ## Decisions
 
@@ -110,9 +114,10 @@ generation fence is unsupported.
 
 ## Contracts
 
-Errors, logs, and evidence contain classes, counts, and identifiers the daemon
-generated. They never contain source bytes, file paths, provider payloads, SQL,
-or user content.
+Errors, logs, and diagnostic evidence contain classes, counts, and identifiers
+the daemon generated. They never contain source bytes, file paths, provider
+payloads, SQL, or user content. Retained source content, such as an imported
+transcript entry, is not diagnostic evidence.
 
 The transport is local-machine and single-user; the protocol has no
 authentication, no authorization exchange, and no remote transport.
@@ -189,9 +194,9 @@ read. The client accepts a placement receipt only when the session and placement
 echo its request and the version is exactly one greater than the version it
 expected.
 
-A commission binds every supplied template name by copy and reports the
-template's canonical lowercase 64-hex digest, so a name is never mutable
-authority. The alias catalog read reports current deployment configuration, not
+A commission binds every supplied template name by copy, so a name is never
+mutable authority; its receipt names only the created session and its dispatch
+record. The alias catalog read reports current deployment configuration, not
 durable session state; an existing session keeps its frozen selection when the
 catalog changes.
 
@@ -199,10 +204,11 @@ A metadata request that violates shape, cardinality, or byte bounds is a
 malformed frame, refused before application construction; `invalid_request` is
 reserved for the fail-closed mapping case.
 
-Every read is one repeatable-read, read-only transaction over the authoritative
-tables, with no materialized view, cache, or analytical artifact, and it takes
-no lock any writer waits on; this holds for a transcript snapshot, the
-conversation list, and the review-orchestration projection alike. A transcript
+Every database-backed read is one repeatable-read, read-only transaction over
+the authoritative tables, with no materialized view, cache, or analytical
+artifact, and it takes no lock any writer waits on; this holds for a transcript
+snapshot, the conversation list, and the review-orchestration projection alike.
+A read answered from deployment configuration opens no transaction. A transcript
 snapshot observes the outbox cursor, the session's semantic frontier, and every
 turn in acceptance order together. The conversation list orders by conversation
 identity value, a native session before an imported conversation of equal value.

@@ -142,11 +142,13 @@ project belong to
 
 ## Constraints on present code
 
-Version 1 rejects every request and message variant above; the closed request
-and message inventories in `crates/process-protocol` stay closed until the
-daemon and client implement a surface together.
-
-`spawn_session` is rejected without mutation.
+`spawn_session` and `session_spawned` are admitted version-1 variants: the
+daemon decodes `spawn_session` and rejects it without mutation, and no daemon
+path produces `session_spawned`. `runner_state_transition` is an admitted
+version-1 event variant that the daemon projects when the outbox carries a
+runner state transition. Every other request and message above is outside the
+closed inventories in `crates/process-protocol` until the daemon and client
+implement its surface together.
 
 No response code is reserved for an authorization failure, because client
 identity, authentication, authorization, and revocation are undecided.
