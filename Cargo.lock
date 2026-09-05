@@ -4427,6 +4427,7 @@ name = "signalbox-model-runtime-claude-cli"
 version = "0.0.0"
 dependencies = [
  "rustix 1.1.4",
+ "semver",
  "serde",
  "serde_json",
  "signalbox-model-runtime",
@@ -4441,6 +4442,7 @@ version = "0.0.0"
 dependencies = [
  "rustix 1.1.4",
  "schemars 1.2.2",
+ "semver",
  "serde",
  "serde_json",
  "signalbox-model-runtime",
