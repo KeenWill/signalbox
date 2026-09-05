@@ -31,6 +31,9 @@ from reconcile import (
     positive_number,
     prior_threads_dispositioned_before,
     process_pull_request,
+    review_comment_signature,
+    review_signature,
+    review_thread_signature,
     save_state,
 )
 
@@ -200,8 +203,20 @@ class ConvergencePredicateTests(unittest.TestCase):
         client = GitHubGraphQL(
             "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
         )
+
+        def thread(index: int, resolved: bool) -> dict[str, object]:
+            return {
+                "id": f"thread-{index}",
+                "isResolved": resolved,
+                "comments": {
+                    "totalCount": 0,
+                    "nodes": [],
+                    "pageInfo": empty_page_info(),
+                },
+            }
+
         first_page = [
-            {"id": f"thread-{index}", "isResolved": index != 0}
+            thread(index, index != 0)
             for index in range(100)
         ]
         client.execute = mock.Mock(
@@ -218,17 +233,21 @@ class ConvergencePredicateTests(unittest.TestCase):
                                 "endCursor": "cursor",
                             },
                         },
+                        "comments": {
+                            "nodes": [],
+                            "pageInfo": empty_page_info(),
+                        },
+                        "reviews": {
+                            "nodes": [],
+                            "pageInfo": empty_page_info(),
+                        },
                     }
                 },
                 {
-                    "node": {
-                        "baseRefOid": "base",
-                        "headRefOid": "head",
+                    "item0": {
                         "reviewThreads": {
                             "totalCount": 101,
-                            "nodes": [
-                                {"id": "thread-100", "isResolved": True}
-                            ],
+                            "nodes": [thread(100, True)],
                             "pageInfo": empty_page_info(),
                         },
                     }
@@ -241,10 +260,94 @@ class ConvergencePredicateTests(unittest.TestCase):
             "head_oid": "head",
             "checked_head_oid": "head",
             "base_commits_not_in_head": 0,
+            "author_login": None,
             "review_threads": [
                 {"id": f"thread-{index}", "isResolved": True}
                 for index in range(101)
             ],
+            "_review_thread_evidence": review_thread_signature(
+                normalize_review_threads(
+                    [thread(index, True) for index in range(101)], None
+                )
+            ),
+            "_review_comment_evidence": review_comment_signature([]),
+            "_review_evidence": review_signature([]),
+        }
+
+        client._revalidate_review_threads([pull_request])
+
+        self.assertIsNone(pull_request["checked_head_oid"])
+        self.assertIsNone(pull_request["base_commits_not_in_head"])
+
+    def test_review_revalidation_detects_edited_disposition(self) -> None:
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
+        reviewer_comment = {
+            "author": {"login": "reviewer"},
+            "authorAssociation": "NONE",
+            "body": "This code races.",
+            "createdAt": "2026-09-05T10:00:00Z",
+            "lastEditedAt": None,
+            "pullRequestReview": {"id": "review-1"},
+        }
+        fixed_reply = {
+            "author": {"login": "owner"},
+            "authorAssociation": "OWNER",
+            "body": "Fixed in commit abcdef123.",
+            "createdAt": "2026-09-05T10:05:00Z",
+            "lastEditedAt": None,
+            "pullRequestReview": None,
+        }
+        edited_reply = {**fixed_reply, "body": "ack"}
+
+        def raw_thread(reply: dict[str, object]) -> dict[str, object]:
+            return {
+                "id": "thread-1",
+                "isResolved": True,
+                "comments": {
+                    "totalCount": 2,
+                    "nodes": [reviewer_comment, reply],
+                    "pageInfo": empty_page_info(),
+                },
+            }
+
+        client.execute = mock.Mock(
+            return_value={
+                "node": {
+                    "baseRefOid": "base",
+                    "headRefOid": "head",
+                    "reviewThreads": {
+                        "totalCount": 1,
+                        "nodes": [raw_thread(edited_reply)],
+                        "pageInfo": empty_page_info(),
+                    },
+                    "comments": {
+                        "nodes": [],
+                        "pageInfo": empty_page_info(),
+                    },
+                    "reviews": {
+                        "nodes": [],
+                        "pageInfo": empty_page_info(),
+                    },
+                }
+            }
+        )
+        pull_request = {
+            "node_id": "pull-request",
+            "base_oid": "base",
+            "head_oid": "head",
+            "checked_head_oid": "head",
+            "base_commits_not_in_head": 0,
+            "author_login": "owner",
+            "review_threads": normalize_review_threads(
+                [raw_thread(fixed_reply)], "owner"
+            ),
+            "_review_thread_evidence": review_thread_signature(
+                normalize_review_threads([raw_thread(fixed_reply)], "owner")
+            ),
+            "_review_comment_evidence": review_comment_signature([]),
+            "_review_evidence": review_signature([]),
         }
 
         client._revalidate_review_threads([pull_request])
@@ -1088,6 +1191,41 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         exempt.assert_not_called()
         self.assertEqual(pull_request["review_wave_ids"], ["review-1"])
+        self.assertEqual(pull_request["review_wave_base_oid"], "base-old")
+
+    def test_body_only_codex_finding_is_not_quiet_review_evidence(self) -> None:
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
+        head = "a" * 40
+        pull_request = {
+            "head_oid": head,
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "review_threads": [],
+            "_review_comments": [
+                {
+                    "authorAssociation": "OWNER",
+                    "body": f"@codex review\nExact head {head}",
+                    "createdAt": "2026-08-16T10:00:00Z",
+                }
+            ],
+            "_reviews": [
+                {
+                    "id": "review-node",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "state": "COMMENTED",
+                    "body": "P1: this review contains a body-only finding",
+                    "submittedAt": "2026-08-16T10:01:00Z",
+                    "commit": {"oid": head},
+                    "comments": {"totalCount": 0},
+                }
+            ],
+        }
+
+        client._finalize_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
     def test_description_edit_after_review_invalidates_fresh_evidence(self) -> None:
         client = GitHubGraphQL(

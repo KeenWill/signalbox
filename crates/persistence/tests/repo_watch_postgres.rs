@@ -316,6 +316,51 @@ fn next_generation_value(generation: RepoWatchCursorGeneration) -> u64 {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn forward_migration_removes_retired_convergence_schema() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let relations = [
+        "convergence_sweep_event",
+        "convergence_sweep_target",
+        "convergence_sweep_parked_target",
+        "repo_watch_convergence_cutoff",
+        "repo_watch_convergence_cutoff_goal",
+        "repo_watch_pull_request_convergence",
+        "repo_watch_pull_request_convergence_assessment",
+        "repo_watch_pull_request_convergence_identity",
+        "repo_watch_current_pull_request_convergence",
+        "repo_watch_stale_review_clearance",
+        "repo_watch_stale_review_clearance_claim",
+        "repo_watch_stale_review_clearance_recovery_cursor",
+        "repo_watch_stale_review_clearance_result",
+        "repo_watch_pending_stale_review_clearance",
+    ];
+    let remaining_relations = sqlx::query_scalar::<_, String>(
+        "SELECT candidate FROM unnest($1::text[]) AS candidate \
+             WHERE to_regclass(candidate) IS NOT NULL",
+    )
+    .bind(relations.as_slice())
+    .fetch_all(&pool)
+    .await?;
+    let functions = [
+        "convergence_sweep_retry_budget()",
+        "repo_watch_convergence_check_names_are_valid(text[])",
+        "repo_watch_convergence_threads_are_valid(text[])",
+    ];
+    let remaining_functions = sqlx::query_scalar::<_, String>(
+        "SELECT candidate FROM unnest($1::text[]) AS candidate \
+             WHERE to_regprocedure(candidate) IS NOT NULL",
+    )
+    .bind(functions.as_slice())
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(remaining_relations, Vec::<String>::new());
+    assert_eq!(remaining_functions, Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn cursor_commits_advance_one_generation_at_a_time() -> Result<(), Box<dyn Error>> {
     let fixture = committed_fixture().await?;
 
