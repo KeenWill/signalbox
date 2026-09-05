@@ -110,21 +110,25 @@ An owned session that waits for an operator is parked, or blocked on a goal that
 no automatic resumption will lift; a pending tool-approval decision is the
 separate waiting state. An ambiguous model call whose automatic reconciliation
 budget is exhausted is a further operator wait until the operator reconciles the
-turn; an ambiguous external-effect tool attempt whose budget is exhausted parks
-until the deferred tool-recovery surface exists. A turn awaiting runner recovery
-is an operator wait too, and only replacement or abandonment leaves the lost
-state. A module that parks something wrapping a session drives the session
-itself to parked. Attention states shown to operators are derived from durable
-facts by one classifier, and a read that encounters a state it does not
-recognize returns an error rather than a guess.
+turn; an ambiguous external-effect tool attempt whose budget is exhausted stays
+an exhausted recovery wait with operator action required until the deferred
+tool-recovery surface exists. A turn awaiting runner recovery is an operator
+wait too, and only replacement or abandonment leaves the lost state. A module
+that parks something wrapping a session drives the session itself to parked.
+Attention states shown to operators are derived from durable facts by one
+classifier, and a read that encounters a state it does not recognize returns an
+error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
-daemon core; no module implements any of them. A dispatched
-[repo-watch](repo-watch.md) session is the exception: the module holds a start
-lease over the wait for that session's first model call, and an expired lease
-ends the session through an ordinary goal stop rather than a lifecycle deadline.
-Lifecycle behavior or an event kind a module needs and core does not provide is
-added to core, and modules never reconstruct events by joining core tables.
+daemon core; no module implements any of them except the core-integrated
+[convergence](convergence-reconciliation.md) sweep, which owns its dispatch
+failure budget and parks the session as a module when that budget is exhausted.
+A dispatched [repo-watch](repo-watch.md) session is the other exception: the
+module holds a start lease over the wait for that session's first model call,
+and an expired lease ends the session through an ordinary goal stop rather than
+a lifecycle deadline. Lifecycle behavior or an event kind a module needs and
+core does not provide is added to core, and modules never reconstruct events by
+joining core tables.
 
 The attention classifier that
 [sessions and the transcript](sessions-and-transcript.md) owns is a projection
