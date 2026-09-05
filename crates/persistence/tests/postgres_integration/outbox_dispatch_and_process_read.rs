@@ -684,6 +684,7 @@ async fn s24_inv032_outbox_consumers_advance_independent_typed_prefixes()
     assert_eq!(second.sequence(), 2);
     assert_eq!(second.session(), Some(SessionId::from_uuid(second_session)));
     repo_watch.acknowledge(second.sequence()).await?;
+    repo_watch.acknowledge(first.sequence()).await?;
     assert_eq!(repo_watch.read_next().await?, None);
 
     let cursors: Vec<(String, Decimal)> = sqlx::query_as(
