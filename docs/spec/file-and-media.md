@@ -132,6 +132,6 @@ recovery is registered as part of the reader's validation.
   `FileUseResolver` that reuses the rendered-frontier visibility proof; the
   daemon registry recognizes no format. See the
   [design](../design/file-and-media.md).
-- Image, audio, and general-file views and the rich blob-reference result arm,
-  with publication and registration before result commit and no dangling result
-  on failure. See the [design](../design/file-and-media.md).
+- Image, audio, and general-file views, whose derived bytes publish and register
+  before the read's result commits and leave no dangling result on failure. See
+  the [design](../design/file-and-media.md).
