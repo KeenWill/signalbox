@@ -251,7 +251,9 @@ untrusted evidence, and the prompt treats them as scope to compare with the
 request, never as instruction. Outside a turn judged under the commissioned
 generation's dispatch authority, which [repo-watch](repo-watch.md) owns, an
 `EscalateToHuman` result stores the completed call but no decision and leaves
-the same request parked. A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous`
+the same request parked. Under that authority the request stays parked when the
+turn has pending steering, or when the session escalated earlier and the
+authority still stands. A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous`
 terminal judge call retains the attended park while immediately admitting a user
 decision.
 
@@ -371,7 +373,8 @@ At most 256 MiB of projected frontier content may be rendered into one call's
 provider messages. The bound counts every kind of content the render clones, not
 tool evidence alone, and it is enforced once the projection names its entries
 and before any content is cloned, so an over-bound frontier is refused rather
-than materialized.
+than materialized. The refusal closes the turn through the tool-round-limit
+terminal cause before capability preparation or send.
 
 The result projection a stop consumes is bound to the interrupted turn: reusing
 the turn's current frontier identity is not sufficient, and a projection
@@ -459,19 +462,20 @@ as one exact canonical text that supersedes an earlier verdict until a later
 verdict arrives. Only the reviewer bot account supplies a verdict or a
 usage-limit response, and a verdict must carry a line whose whole content is the
 `Reviewed commit:` label followed by a 7-to-40-character hexadecimal revision,
-with only emphasis or backtick markers around them; a verdict whose revision
-does not prefix the current head is stale and never counts as current
-convergence evidence. The latest exact review request by an owner, member, or
-collaborator with no later reviewer response marks the review in flight and
-blocks convergence. The authenticated job-log endpoint is the sole
-redirect-shaped exchange: after one 302 the adapter validates the location, pins
-a wholly public destination set, and downloads credential-free. A read transport
-or server failure is an executor infrastructure failure, while a mutation
-transport loss, server failure, or malformed acknowledgement is
-commit-ambiguous. `change_request_thread_reply` and
-`change_request_thread_resolve` query thread ownership before they mutate, and a
-failure of that query classifies the mutation as not dispatched rather than
-ambiguous. The adapter never returns code-host response bodies as error detail.
+with only emphasis or backtick markers around them. The last such line in the
+latest activity that carries one is the verdict. A verdict whose revision does
+not prefix the current head is stale and never counts as current convergence
+evidence. The latest exact review request by an owner, member, or collaborator
+with no later reviewer response marks the review in flight and blocks
+convergence. The authenticated job-log endpoint is the sole redirect-shaped
+exchange: after one 302 the adapter validates the location, pins a wholly public
+destination set, and downloads credential-free. A read transport or server
+failure is an executor infrastructure failure, while a mutation transport loss,
+server failure, or malformed acknowledgement is commit-ambiguous.
+`change_request_thread_reply` and `change_request_thread_resolve` query thread
+ownership before they mutate, and a failure of that query classifies the
+mutation as not dispatched rather than ambiguous. The adapter never returns
+code-host response bodies as error detail.
 
 Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round

@@ -85,8 +85,10 @@ The tool result delivered to the parent is copied from the child's terminal
 result record, and the executor never reads or returns the child transcript. The
 child's terminal completion concatenates the ordered assistant text entries from
 its proof-bearing completed call without a separator and admits those bytes as
-the delegation content. Duplicate observation is idempotent by spawning request
-and cannot attach a late result to another parent tool call.
+the delegation content. A completion with no assistant text, or text over the
+delegation-content bound, instead records a failed outcome carrying the
+`ChildResultUnavailable` reason. Duplicate observation is idempotent by spawning
+request and cannot attach a late result to another parent tool call.
 
 ## Compatibility constraints
 
