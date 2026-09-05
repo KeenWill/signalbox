@@ -411,7 +411,7 @@ impl CreateSession {
         &self.placement
     }
 
-    /// Installs the §7 lifecycle members: the start gate, the ownership, and
+    /// Installs the lifecycle members: the start gate, the ownership, and
     /// the finish condition an owned session owes.
     pub fn with_lifecycle(
         mut self,

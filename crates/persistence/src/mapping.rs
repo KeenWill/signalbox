@@ -1608,7 +1608,7 @@ pub(crate) fn session_closure_outcome_from_str(value: &str) -> Option<SessionClo
     }
 }
 
-/// Encodes the §6 actor classification of one lifecycle transition.
+/// Encodes the actor classification of one lifecycle transition.
 pub(crate) const fn lifecycle_actor_to_str(value: LifecycleActor) -> &'static str {
     match value {
         LifecycleActor::Core { .. } => "core",
