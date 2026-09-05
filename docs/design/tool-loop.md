@@ -23,19 +23,18 @@ creates a delegated child and its initial task work.
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
 ordinary prepared-attempt `KnownFailed` route for the same condition; the two
-never both run, and the declared check is the earlier. The instruction family
-declares two: arguments that do not decode to its schema, and a bundle outside
-the effective eligibility view, both specified by
-[workspace-instructions](../spec/workspace-instructions.md).
+never both run. The instruction family declares two: arguments that do not
+decode to its schema, and a bundle outside the effective eligibility view, both
+specified by [workspace-instructions](../spec/workspace-instructions.md).
 
 An inadmissible request resolves before approval through a request-level
-transition that mints no attempt. It records a fourth durable logical
-resolution, `closed_inadmissible`, carrying the family's typed reason on the
-request itself, and creates no approval state, no judge call, no attempt row,
-and no executor work. The reason lives on the request because nothing executed:
-there is no attempt history to explain. The transition is request-level because
-a tool attempt names its issuing turn attempt, and a batch parked on an
-undecided approval has no current turn attempt to name.
+transition. It records a fourth durable logical resolution,
+`closed_inadmissible`, carrying the family's typed reason on the request itself,
+and creates no approval state, no judge call, no attempt row, and no executor
+work. The reason lives on the request because nothing executed: there is no
+attempt history to explain. The transition is request-level because a tool
+attempt names its issuing turn attempt, and a batch parked on an undecided
+approval has no current turn attempt to name.
 
 A request resolved this way is not undecided, so the batch is not parked behind
 it and proposal order continues at the next request. It is resolved for the

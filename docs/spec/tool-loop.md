@@ -21,18 +21,18 @@ the daemon locus; runner placement and dispatch belong to
 
 One turn spans the complete propose, decide, execute, result, continue loop, and
 a model call is one physical round inside that turn. All requests produced by
-one call are one batch, and every later rule quantifies over a batch.
+one call are one batch, and the rules on this page apply per batch.
 
-For each proposal the producing call, name, normalized arguments, ordinal, and
-resolved approval posture form one immutable `ToolRequest` record. Arguments
-that decode are stored as compact JSON with lexically ordered object keys;
-arguments that do not decode are stored as the exact bounded text the provider
-adapter emitted. Every request has an approval state separate from its execution
-state. A daemon tool mapping may declare an approval posture, automatic,
-delegated to a judge, or human, and the selected posture is frozen into every
-resulting request. The dangerous-tool blanket is a field of the session's
-immutable configuration defaults, disabled or approve-all, and is the frozen
-input every automatic approval reads.
+Each proposal becomes one immutable `ToolRequest` record fixing its producing
+call, name, normalized arguments, ordinal, and resolved approval posture.
+Arguments that decode are stored as compact JSON with lexically ordered object
+keys; arguments that do not decode are stored as the exact bounded text the
+provider adapter emitted. Every request has an approval state separate from its
+execution state. A daemon tool mapping may declare an approval posture:
+automatic, delegated to a judge, or human. The selected posture is frozen into
+every resulting request. The dangerous-tool blanket, disabled or approve-all, is
+a field of the session's immutable configuration defaults and the frozen input
+every automatic approval reads.
 
 A user resolves an approval wait with the `DecideToolRequest` command, which
 approves or denies one exact request. Denial ordinarily continues the turn: the
@@ -71,13 +71,13 @@ survives restart.
 ## Decisions
 
 A turn is the logical conversational outcome; a model call and a turn attempt
-are physical tenures that may repeat without changing that identity.
+are physical executions that may repeat without changing that identity.
 
 Malformed arguments are retained as bounded text instead of being rejected, so
 identity-safe evidence of the proposal survives without being treated as JSON.
 
 An `AlwaysConfirm` permission exists so that no session blanket can silently
-approve the tool, so a configured automatic posture never satisfies it.
+approve the tool; a configured automatic posture therefore never satisfies it.
 
 A configured delegated posture does satisfy `AlwaysConfirm`, because a judge is
 not a blanket but a distinct decider that can still deny or escalate.
@@ -86,7 +86,7 @@ Every decision records its source, so unattended operation is inspectable
 without presenting policy as human consent.
 
 A denial reason is bounded and free of control characters, so a client can
-render it without copying unbounded or terminal-control content.
+render it directly.
 
 Delegation can narrow authority but never widen it.
 
@@ -104,7 +104,7 @@ later proposal.
 
 Override retirement counts approvals by any authority, because an override left
 standing after another authority approved the same command would pre-approve a
-repeat the session already let through, and it counts only approvals after the
+repeat the session already let through. It counts only approvals after the
 denial, because the same command is routinely approved earlier in a session.
 
 The order of a denial and a later approval is structural, because none of these
@@ -136,7 +136,7 @@ flight could otherwise upgrade permission, introduce an unavailable runner tool,
 widen its selector, or move the locus.
 
 Because the attempt schema requires a closed effect class, preparation records
-`EffectFree` as a non-dispatching sentinel for an undeclared name; the preflight
+`EffectFree` as a non-dispatching sentinel for an undeclared name. The preflight
 transaction closes that attempt before authorization, and the sentinel is not a
 claim that an unknown tool is safe to run.
 
@@ -151,7 +151,7 @@ know it.
 Bounds are on durable content, never on wall-clock time, so one model-controlled
 chain cannot hold the progressing slot indefinitely or exhaust daemon memory.
 
-Pending approval has no timeout and may wait indefinitely.
+Pending approval has no timeout.
 
 Only proof-bearing interruption terminalizes a tool recovery wait; resolving
 evidence and accepted-risk continuation are undecided in
@@ -236,8 +236,7 @@ interrupt alone against an approval wait is not a denial and does not bypass the
 decision command.
 
 Recorded overrides are frozen into each prepared model call in the same
-transaction as the blanket posture, so consumption has blanket-frozen semantics
-with no mid-call races. Two things retire an override: the consuming
+transaction as the blanket posture. Two things retire an override: the consuming
 `UserOverride` approval that names it, and an approval of the identical command
 by any other authority after the denial. Across turns, later means the
 acceptance position of the input that opened each turn; inside a turn, attempts
@@ -292,7 +291,7 @@ If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the gate and applies the attempt's
 effect-class crash-loss transition. A committed classification carrying an
 infrastructure or identity-collision failure fails or parks the affected turn
-without failing unrelated session execution, while a fail-closed corruption or
+without failing unrelated session execution. A fail-closed corruption or
 caller-or-hub bug remains an error after classification closes the attempt, so
 the fatal execution supervisor still stops scheduling;
 [runtime-substrate](runtime-substrate.md) owns the failure classes. If
@@ -321,7 +320,7 @@ Once every request in the batch is resolved, one continuation transaction
 appends exactly one result entry per request in proposal order, consumes every
 pending steering input in ascending acceptance position and appends its entry
 after the results, derives the exact prefix-preserving frontier extension, and
-creates the next round's `Prepared` model call against that frontier; these
+creates the next round's `Prepared` model call against that frontier. These
 effects commit or roll back together. When at least one request entered
 execution, the continuation turn attempt already entered `Running` during
 authorization and owns the new call without moving backward. The number of tool
@@ -392,11 +391,11 @@ durable evidence.
 A `web_fetch` request's canonical origin must satisfy the deployment-owned
 web-fetch catalog policy in
 [configuration-and-credentials](configuration-and-credentials.md) before
-dispatch, and that admission gates execution. Failure before request dispatch
-returns a fixed sanitized known failure; timeout, transport, or body loss after
-dispatch begins is commit-ambiguous. For both web tools the shipped human
-posture supersedes the declaration's confirm default and the session blanket, so
-a request parks before it reaches its transport or credential boundary
+dispatch. Failure before request dispatch returns a fixed sanitized known
+failure; timeout, transport, or body loss after dispatch begins is
+commit-ambiguous. For both web tools the shipped human posture supersedes the
+declaration's confirm default and the session blanket, so a request parks before
+it reaches its transport or credential boundary
 ([web-egress-threat-model](web-egress-threat-model.md)).
 
 The blob tools authorize only digests present in attachment stubs in the
