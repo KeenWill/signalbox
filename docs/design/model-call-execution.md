@@ -71,10 +71,10 @@ exclusion generation or predecessor correlation and an optional reset. The typed
 domain cause does not change. The wire shape is owned by
 [process-protocol](../spec/process-protocol.md).
 
-The durable pool policy gains, per member, the target adapter and delivery kind.
-Reconstitution of a pool-selected call verifies that the pinned policy contains
-the pinned profile with the expected adapter and delivery kind, and fails closed
-otherwise.
+The durable pool policy gains, per member, the target adapter and delivery kind
+that the present policy does not record. Reconstitution of a pool-selected call
+verifies that the pinned policy contains the pinned profile with the expected
+adapter and delivery kind, and fails closed otherwise.
 
 The accepted input of a program-driven turn records the program's declared
 output schema. Preparation carries that schema into the prepared model
@@ -90,11 +90,12 @@ depend on it are pending that decision. Each call's provider-reported identity
 is recorded as a provider-target evidence row. The domain types in
 `crates/domain/src/provider_evidence.rs` exist; the persistence and aggregate
 wiring do not. An accepted alias concretion becomes a durable per-call
-provenance row. A mismatch selects `KnownFailed` live instead of failing the
-adapter stage closed. A mismatch discovered after completion invalidates the
-completed call, unique by invalidated call. The provider fallback marker becomes
-typed provider-neutral evidence that both HTTP adapters construct and redact, so
-a marker naming the configured target carries the substitution on its own.
+provenance row under that decision. A mismatch selects `KnownFailed` live
+instead of failing the adapter stage closed. A mismatch discovered after
+completion invalidates the completed call, unique by invalidated call. The
+provider fallback marker becomes typed provider-neutral evidence that both HTTP
+adapters construct and redact, so a marker naming the configured target carries
+the substitution on its own.
 
 From the awaiting-recovery phase, a user decision resolves an unstopped
 ambiguity. Accepting the duplicate risk records `DuplicateRiskAccepted` as the
@@ -123,21 +124,22 @@ text-only.
 The runtime operation's tool list stays a function of preparation, and the
 bridge accepts tool-call parts only for tools in that list.
 
-Later attachment ranges in a turn reverify today, and nothing caches a
-verification without an immutable-generation token.
+Later attachment ranges in a turn reverify until the turn-scoped inventory above
+lands, and nothing caches a verification without an immutable-generation token.
 
 The typed domain cause of pre-call exhaustion and the sealed pool-exhausted turn
 transition do not change when the process event lands.
 
-The durable pool policy carries no adapter or delivery-kind fields, and nothing
-assumes it does.
+The durable pool policy carries no adapter or delivery-kind fields until those
+fields land, and nothing assumes it does.
 
 Nothing assumes a prepared model operation carries no output contract, and the
 prepared-operation shape stays extensible to the recorded schema without
 reinterpreting existing calls.
 
 Substitution is carried entirely by the reported identity; an alias concretion
-is diagnostics only; a substituted call is `Ambiguous` by restart.
+is operator diagnostics while the provenance schema stays undecided; a
+substituted call is `Ambiguous` by restart.
 
 The parked awaiting-recovery phase and the configured automatic reconciliation
 attempt budget are the only present recovery behaviors. The terminal ambiguous
