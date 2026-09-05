@@ -32,10 +32,25 @@ from reconcile import (
     prior_threads_dispositioned_before,
     process_pull_request,
     review_comment_signature,
+    review_request_signature,
     review_signature,
     review_thread_signature,
     save_state,
 )
+
+
+def trusted_review_request(
+    head_oid: str,
+    *,
+    comment_id: str = "request",
+    created_at: str = "2026-08-16T10:00:00Z",
+) -> dict[str, object]:
+    return {
+        "id": comment_id,
+        "authorAssociation": "OWNER",
+        "body": f"@codex review\nExact head {head_oid}",
+        "createdAt": created_at,
+    }
 
 
 class ConvergencePredicateTests(unittest.TestCase):
@@ -1002,6 +1017,7 @@ class GitHubGraphQLTests(unittest.TestCase):
 
     def test_persisted_review_survives_same_head_check_rerun(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        request = trusted_review_request("head")
         pull_request = {
             "_persisted_record": {
                 "authenticated_review_head": "head",
@@ -1011,6 +1027,9 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "CheckRun:required build"
                 ],
                 "check_inventory": ["CheckRun:required build"],
+                "authenticated_review_request": review_request_signature(
+                    request
+                ),
             },
             "head_oid": "head",
             "body": "description",
@@ -1021,6 +1040,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             # longer finds a qualifying request for review-a.
             "observed_codex_reviews": {},
             "live_codex_review_oids": {"review-a": "head"},
+            "_live_review_request_comments": {"request": request},
             "checks": [
                 {
                     "__typename": "CheckRun",
@@ -1042,6 +1062,59 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(
             pull_request["authenticated_review_ids"]["head"], "review-a"
         )
+
+    def test_persisted_review_is_invalidated_when_request_is_deleted_or_edited(
+        self,
+    ) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        request = trusted_review_request("head")
+        inventory = ["CheckRun:required build"]
+        for live_requests in (
+            {},
+            {
+                "request": {
+                    **request,
+                    "body": "@codex review\nExact head another-head",
+                    "lastEditedAt": "2026-08-16T10:04:00Z",
+                }
+            },
+        ):
+            with self.subTest(live_requests=live_requests):
+                pull_request = {
+                    "_persisted_record": {
+                        "authenticated_review_head": "head",
+                        "authenticated_review_id": "review-a",
+                        "authenticated_review_body": "description",
+                        "authenticated_review_check_inventory": inventory,
+                        "authenticated_review_request": (
+                            review_request_signature(request)
+                        ),
+                        "check_inventory": inventory,
+                    },
+                    "head_oid": "head",
+                    "body": "description",
+                    "authenticated_quiet_review_oids": [],
+                    "authenticated_review_ids": {},
+                    "observed_codex_reviews": {},
+                    "live_codex_review_oids": {"review-a": "head"},
+                    "_live_review_request_comments": live_requests,
+                    "checks": [
+                        {
+                            "__typename": "CheckRun",
+                            "name": "required build",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                        }
+                    ],
+                    "check_rollup_state": "SUCCESS",
+                    "quiet_review_head_oids": [],
+                }
+
+                client._restore_persisted_review_evidence([pull_request])
+
+                self.assertEqual(
+                    pull_request["authenticated_quiet_review_oids"], []
+                )
 
     def test_persisted_review_is_invalidated_by_new_check_identity(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
@@ -1114,6 +1187,7 @@ class GitHubGraphQLTests(unittest.TestCase):
     def test_persisted_review_can_authenticate_an_exempt_head_delta(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         inventory = ["CheckRun:required build"]
+        request = trusted_review_request("reviewed-head")
         pull_request = {
             "_persisted_record": {
                 "authenticated_review_head": "reviewed-head",
@@ -1121,6 +1195,9 @@ class GitHubGraphQLTests(unittest.TestCase):
                 "authenticated_review_body": "description",
                 "authenticated_review_check_inventory": inventory,
                 "check_inventory": inventory,
+                "authenticated_review_request": review_request_signature(
+                    request
+                ),
             },
             "head_oid": "advanced-head",
             "body": "description",
@@ -1128,6 +1205,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             "authenticated_review_ids": {},
             "observed_codex_reviews": {},
             "live_codex_review_oids": {"review-a": "reviewed-head"},
+            "_live_review_request_comments": {"request": request},
             "checks": [
                 {
                     "__typename": "CheckRun",
@@ -1151,6 +1229,7 @@ class GitHubGraphQLTests(unittest.TestCase):
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         head = "a" * 40
         inventory = ["CheckRun:required build"]
+        request = trusted_review_request(head)
         pull_request = {
             "_persisted_record": {
                 "authenticated_review_head": head,
@@ -1158,6 +1237,9 @@ class GitHubGraphQLTests(unittest.TestCase):
                 "authenticated_review_body": "description",
                 "authenticated_review_check_inventory": inventory,
                 "check_inventory": inventory,
+                "authenticated_review_request": review_request_signature(
+                    request
+                ),
             },
             "head_oid": head,
             "body": "description",
@@ -1173,13 +1255,7 @@ class GitHubGraphQLTests(unittest.TestCase):
                 }
             ],
             "review_threads": [],
-            "_review_comments": [
-                {
-                    "authorAssociation": "OWNER",
-                    "body": f"@codex review\nExact head {head}",
-                    "createdAt": "2026-08-16T10:00:00Z",
-                }
-            ],
+            "_review_comments": [request],
             "_reviews": [
                 {
                     "id": "review-a",
@@ -1361,6 +1437,42 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["review_wave_ids"], ["review-1"])
         self.assertEqual(pull_request["review_wave_base_oid"], "base-old")
 
+    def test_persisted_authenticated_reviews_remain_in_wave_census(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        prior_review_ids = [f"review-{number}" for number in range(1, 5)]
+        pull_request = {
+            "_persisted_record": {
+                "head_oid": "head",
+                "known_codex_review_ids": prior_review_ids,
+                "review_wave_ids": prior_review_ids,
+                "review_wave_base_oid": "base",
+            },
+            "_codex_reviews": [
+                {
+                    "id": "review-5",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "submittedAt": "2026-08-16T10:05:00Z",
+                }
+            ],
+            "base_oid": "base",
+            "head_oid": "head",
+            "review_threads": [
+                {
+                    "dispositionKind": "escalated",
+                    "isDispositioned": True,
+                    "isEscalated": True,
+                    "reviewIds": ["review-5"],
+                }
+            ],
+        }
+
+        client._validate_review_waves([pull_request])
+
+        self.assertEqual(
+            pull_request["review_wave_ids"], [*prior_review_ids, "review-5"]
+        )
+        self.assertTrue(pull_request["review_threads"][0]["isDispositioned"])
+
     def test_body_only_codex_finding_is_not_quiet_review_evidence(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         head = "a" * 40
@@ -1371,6 +1483,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             "review_threads": [],
             "_review_comments": [
                 {
+                    "id": "request",
                     "authorAssociation": "OWNER",
                     "body": f"@codex review\nExact head {head}",
                     "createdAt": "2026-08-16T10:00:00Z",
@@ -1412,6 +1525,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             ],
             "_review_comments": [
                 {
+                    "id": "request",
                     "authorAssociation": "OWNER",
                     "body": f"@codex review\nExact head {head}",
                     "createdAt": "2026-08-16T10:00:00Z",
@@ -1479,6 +1593,78 @@ class GitHubGraphQLTests(unittest.TestCase):
             pull_request["authenticated_review_ids"], {head: "summary"}
         )
 
+    def test_persisted_completed_summary_can_authenticate_exempt_delta(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        reviewed_head = "a" * 40
+        current_head = "b" * 40
+        request = trusted_review_request(reviewed_head)
+        inventory = ["CheckRun:required build"]
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": reviewed_head,
+                "authenticated_review_id": "summary",
+                "authenticated_review_body": "description",
+                "authenticated_review_check_inventory": inventory,
+                "authenticated_review_request": review_request_signature(
+                    request
+                ),
+                "check_inventory": inventory,
+            },
+            "head_oid": current_head,
+            "base_oid": "base",
+            "body": "description",
+            "check_rollup_state": "SUCCESS",
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required build",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-08-16T10:03:00Z",
+                }
+            ],
+            "review_threads": [],
+            "_review_comments": [
+                request,
+                {
+                    "id": "summary",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "body": (
+                        "<!-- codex-pull-request-review-summary -->\n"
+                        "| 📝 **Code Review** | ✅ **Completed** "
+                        '<relative-time datetime="2026-08-16T10:02:00Z">'
+                        "now</relative-time> | `aaaaaaaaaa` | User request |"
+                    ),
+                    "createdAt": "2026-08-16T10:01:00Z",
+                    "lastEditedAt": "2026-08-16T10:02:00Z",
+                },
+            ],
+            "_thumbs_up_reactions": [
+                {
+                    "user": {"login": "chatgpt-codex-connector[bot]"},
+                    "createdAt": "2026-08-16T10:02:01Z",
+                }
+            ],
+            "_reviews": [],
+        }
+
+        client._finalize_review_evidence([pull_request])
+        self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
+        self.assertEqual(
+            pull_request["live_codex_review_oids"],
+            {"summary": reviewed_head},
+        )
+        client._restore_persisted_review_evidence([pull_request])
+        with mock.patch.object(
+            client, "_review_exempt_change", return_value=True
+        ) as review_exempt_change:
+            client._load_review_exempt_status([pull_request])
+
+        review_exempt_change.assert_called_once_with(
+            reviewed_head, current_head, "base"
+        )
+        self.assertTrue(pull_request["review_exempt_since_quiet_review"])
+
     def test_description_edit_after_review_invalidates_fresh_evidence(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         head = "a" * 40
@@ -1490,6 +1676,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             "review_threads": [],
             "_review_comments": [
                 {
+                    "id": "request",
                     "authorAssociation": "OWNER",
                     "body": f"@codex review\nExact head {head}",
                     "createdAt": "2026-08-16T10:00:00Z",
@@ -1634,6 +1821,18 @@ class GitHubGraphQLTests(unittest.TestCase):
         changed_file = {
             "filename": "tool.py",
             "patch": "@@ -1,2 +1,2 @@\n # explanation\n-old = 1\n+new = 2",
+        }
+
+        self.assertFalse(comment_only_patch(changed_file))
+
+    def test_python_inline_comment_does_not_hide_executable_change(self) -> None:
+        changed_file = {
+            "filename": "tool.py",
+            "patch": (
+                "@@ -1 +1 @@\n"
+                "-value = 1  # old explanation\n"
+                "+value = 2  # new explanation"
+            ),
         }
 
         self.assertFalse(comment_only_patch(changed_file))
@@ -1843,6 +2042,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             "review_threads": [],
             "_review_comments": [
                 {
+                    "id": "request",
                     "authorAssociation": "OWNER",
                     "body": f"@codex review\nExact head {head}",
                     "createdAt": "2026-08-16T10:00:00Z",
@@ -1998,6 +2198,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             ],
             "_review_comments": [
                 {
+                    "id": "request",
                     "authorAssociation": "OWNER",
                     "body": f"@codex review\nExact head {head}",
                     "createdAt": "2026-08-16T10:00:00Z",
@@ -2652,21 +2853,12 @@ class GitHubGraphQLTests(unittest.TestCase):
     def test_wave_eight_escalation_is_eligible_at_hard_stop(self) -> None:
         self._assert_escalation_boundary(wave=8, total_waves=8, eligible=True)
 
-    def test_bot_suffix_reviews_count_toward_escalation_wave(self) -> None:
-        self._assert_escalation_boundary(
-            wave=5,
-            total_waves=5,
-            eligible=True,
-            reviewer_login="chatgpt-codex-connector[bot]",
-        )
-
     def _assert_escalation_boundary(
         self,
         *,
         wave: int,
         total_waves: int,
         eligible: bool,
-        reviewer_login: str = "chatgpt-codex-connector",
     ) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         pull_request = {
@@ -2679,16 +2871,11 @@ class GitHubGraphQLTests(unittest.TestCase):
                 }
             ]
         }
-        reviews = [
-            {
-                "id": f"review-{number}",
-                "author": {"login": reviewer_login},
-                "submittedAt": f"2026-08-16T10:{number:02d}:00Z",
-            }
-            for number in range(1, total_waves + 1)
+        review_ids = [
+            f"review-{number}" for number in range(1, total_waves + 1)
         ]
 
-        client._validate_escalation_dispositions(pull_request, reviews)
+        client._validate_escalation_dispositions(pull_request, review_ids)
 
         thread = pull_request["review_threads"][0]
         self.assertEqual(thread["isDispositioned"], eligible)
@@ -2768,6 +2955,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             "comments": {
                 "nodes": [
                     {
+                        "id": "request",
                         "author": {"login": "owner"},
                         "authorAssociation": "OWNER",
                         "body": "@codex review\nExact head head-authenticated",

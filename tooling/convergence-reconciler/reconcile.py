@@ -506,6 +506,15 @@ query($id: ID!, $after: String!) {
         for pull_request in pull_requests:
             comments = pull_request.pop("_review_comments")
             reviews = pull_request.pop("_reviews")
+            persisted_head = pull_request.get("_persisted_record", {}).get(
+                "authenticated_review_head"
+            )
+            candidate_heads = [pull_request["head_oid"]]
+            if (
+                isinstance(persisted_head, str)
+                and persisted_head not in candidate_heads
+            ):
+                candidate_heads.append(persisted_head)
             pull_request["_review_comment_evidence"] = review_comment_signature(
                 comments
             )
@@ -518,6 +527,12 @@ query($id: ID!, $after: String!) {
             live_codex_review_oids: dict[str, str] = {}
             live_codex_reviews: dict[str, dict[str, Any]] = {}
             authenticated_review_ids: dict[str, str] = {}
+            authenticated_review_requests: dict[str, dict[str, Any]] = {}
+            live_review_request_comments = {
+                comment["id"]: comment
+                for comment in comments
+                if isinstance(comment.get("id"), str)
+            }
             for review in reviews:
                 commit = review.get("commit")
                 reviewed_oid = commit.get("oid") if isinstance(commit, dict) else None
@@ -532,12 +547,14 @@ query($id: ID!, $after: String!) {
                     )
                 ):
                     continue
-                request_times = [
-                    effective_at
+                qualifying_requests = [
+                    (effective_at, signature)
                     for comment in comments
                     for effective_at in [comment_effective_at(comment)]
+                    for signature in [review_request_signature(comment)]
                     if is_codex_review_request(comment, reviewed_oid)
                     and effective_at is not None
+                    and signature is not None
                     and effective_at <= submitted_at
                     and checks_green_before_request(
                         pull_request["checks"],
@@ -555,7 +572,7 @@ query($id: ID!, $after: String!) {
                 )
                 if is_live_codex_review:
                     live_codex_reviews[review_id] = review
-                if is_live_codex_review and request_times:
+                if is_live_codex_review and qualifying_requests:
                     observed_codex_reviews[review_id] = reviewed_oid
                 review_threads = [
                     thread
@@ -587,64 +604,81 @@ query($id: ID!, $after: String!) {
                     # the live review still has its authenticated quiet shape.
                     live_codex_review_oids[review_id] = reviewed_oid
                 if (
-                    request_times
+                    qualifying_requests
                     and is_live_codex_review
                     and review_is_quiet
                 ):
                     quiet_oids.append(reviewed_oid)
                     if isinstance(review_id, str):
                         authenticated_review_ids[reviewed_oid] = review_id
+                        authenticated_review_requests[reviewed_oid] = max(
+                            qualifying_requests, key=lambda item: item[0]
+                        )[1]
 
             for comment in comments:
-                summary = completed_codex_review_summary(
-                    comment, pull_request["head_oid"]
-                )
-                if summary is None:
-                    continue
-                reviewed_oid, completed_at = summary
-                request_times = [
-                    effective_at
-                    for request in comments
-                    for effective_at in [comment_effective_at(request)]
-                    if is_codex_review_request(request, reviewed_oid)
-                    and effective_at is not None
-                    and timestamp_not_after(effective_at, completed_at)
-                    and checks_green_before_request(
-                        pull_request["checks"],
-                        pull_request["check_rollup_state"],
-                        effective_at,
+                for candidate_head in candidate_heads:
+                    summary = completed_codex_review_summary(
+                        comment, candidate_head
                     )
-                    and prior_threads_dispositioned_before(
-                        pull_request.get("review_threads", []), effective_at
+                    if summary is None:
+                        continue
+                    reviewed_oid, completed_at = summary
+                    qualifying_requests = [
+                        (effective_at, signature)
+                        for request in comments
+                        for effective_at in [comment_effective_at(request)]
+                        for signature in [review_request_signature(request)]
+                        if is_codex_review_request(request, reviewed_oid)
+                        and effective_at is not None
+                        and signature is not None
+                        and timestamp_not_after(effective_at, completed_at)
+                        and checks_green_before_request(
+                            pull_request["checks"],
+                            pull_request["check_rollup_state"],
+                            effective_at,
+                        )
+                        and prior_threads_dispositioned_before(
+                            pull_request.get("review_threads", []), effective_at
+                        )
+                    ]
+                    has_completion_reaction = any(
+                        is_codex_reviewer_login(author_login(reaction))
+                        and isinstance(reaction.get("createdAt"), str)
+                        and timestamp_not_after(completed_at, reaction["createdAt"])
+                        for reaction in pull_request.get("_thumbs_up_reactions", [])
                     )
-                ]
-                has_completion_reaction = any(
-                    is_codex_reviewer_login(author_login(reaction))
-                    and isinstance(reaction.get("createdAt"), str)
-                    and timestamp_not_after(completed_at, reaction["createdAt"])
-                    for reaction in pull_request.get("_thumbs_up_reactions", [])
-                )
-                summary_id = comment.get("id")
-                summary_is_live = (
-                    isinstance(summary_id, str)
-                    and has_completion_reaction
-                    and (
-                        not isinstance(pull_request.get("body_last_edited_at"), str)
-                        or timestamp_not_after(
-                            pull_request["body_last_edited_at"], completed_at
+                    summary_id = comment.get("id")
+                    summary_is_live = (
+                        isinstance(summary_id, str)
+                        and has_completion_reaction
+                        and (
+                            not isinstance(
+                                pull_request.get("body_last_edited_at"), str
+                            )
+                            or timestamp_not_after(
+                                pull_request["body_last_edited_at"], completed_at
+                            )
                         )
                     )
-                )
-                if summary_is_live:
-                    live_codex_review_oids[summary_id] = reviewed_oid
-                if summary_is_live and request_times:
-                    quiet_oids.append(reviewed_oid)
-                    authenticated_review_ids[reviewed_oid] = summary_id
+                    if summary_is_live:
+                        live_codex_review_oids[summary_id] = reviewed_oid
+                    if summary_is_live and qualifying_requests:
+                        quiet_oids.append(reviewed_oid)
+                        authenticated_review_ids[reviewed_oid] = summary_id
+                        authenticated_review_requests[reviewed_oid] = max(
+                            qualifying_requests, key=lambda item: item[0]
+                        )[1]
             pull_request["authenticated_quiet_review_oids"] = quiet_oids
             pull_request["authenticated_review_ids"] = authenticated_review_ids
+            pull_request["authenticated_review_requests"] = (
+                authenticated_review_requests
+            )
             pull_request["observed_codex_reviews"] = observed_codex_reviews
             pull_request["live_codex_review_oids"] = live_codex_review_oids
             pull_request["_live_codex_reviews"] = live_codex_reviews
+            pull_request["_live_review_request_comments"] = (
+                live_review_request_comments
+            )
             pull_request["_codex_reviews"] = [
                 review
                 for review in reviews
@@ -663,8 +697,12 @@ query($id: ID!, $after: String!) {
             record = pull_request["_persisted_record"]
             persisted_head = record.get("authenticated_review_head")
             persisted_review_id = record.get("authenticated_review_id")
+            persisted_request = record.get("authenticated_review_request")
             live_codex_review_oids = pull_request.pop("live_codex_review_oids", {})
             live_codex_reviews = pull_request.pop("_live_codex_reviews", {})
+            live_request_comments = pull_request.pop(
+                "_live_review_request_comments", {}
+            )
             gating_checks = [
                 check
                 for check in pull_request.get("checks", [])
@@ -685,6 +723,18 @@ query($id: ID!, $after: String!) {
                 == current_check_inventory
                 and record.get("check_inventory") == current_check_inventory
             )
+            request_id = (
+                persisted_request.get("id")
+                if isinstance(persisted_request, dict)
+                else None
+            )
+            live_request = live_request_comments.get(request_id)
+            request_still_valid = (
+                isinstance(persisted_head, str)
+                and isinstance(live_request, dict)
+                and review_request_signature(live_request) == persisted_request
+                and is_codex_review_request(live_request, persisted_head)
+            )
             # A rerun of gating checks on the same, unchanged head advances
             # those checks' completion timestamps, so the fresh recomputation
             # in `_finalize_review_evidence` can stop finding a qualifying
@@ -700,6 +750,7 @@ query($id: ID!, $after: String!) {
                 == persisted_head
                 and checks_currently_green
                 and inventory_unchanged_since_authentication
+                and request_still_valid
             )
             if (
                 review_still_valid
@@ -783,33 +834,25 @@ query($id: ID!, $after: String!) {
                     for review_id in new_ids
                     if review_id not in wave_ids
                 )
-            pull_request["known_codex_review_ids"] = current_ids
+            pull_request["known_codex_review_ids"] = [
+                *known_ids,
+                *(
+                    review_id
+                    for review_id in current_ids
+                    if review_id not in known_ids
+                ),
+            ]
             pull_request["review_wave_ids"] = wave_ids
             pull_request["review_wave_base_oid"] = review_wave_base_oid
-            wave_reviews = [
-                review for review in reviews if review["id"] in wave_ids
-            ]
-            self._validate_escalation_dispositions(pull_request, wave_reviews)
+            self._validate_escalation_dispositions(pull_request, wave_ids)
 
     def _validate_escalation_dispositions(
-        self, pull_request: dict[str, Any], reviews: Sequence[dict[str, Any]]
+        self, pull_request: dict[str, Any], review_ids: Sequence[str]
     ) -> None:
-        codex_reviews = sorted(
-            (
-                review
-                for review in reviews
-                if is_codex_reviewer_login(author_login(review))
-                and review.get("state") != "DISMISSED"
-                and isinstance(review.get("submittedAt"), str)
-            ),
-            key=lambda review: review["submittedAt"],
-        )
         wave_by_review_id = {
-            review["id"]: wave
-            for wave, review in enumerate(codex_reviews, start=1)
-            if isinstance(review.get("id"), str)
+            review_id: wave for wave, review_id in enumerate(review_ids, start=1)
         }
-        total_waves = len(codex_reviews)
+        total_waves = len(review_ids)
         for thread in pull_request.get("review_threads", []):
             if thread.get("dispositionKind") != "escalated":
                 continue
@@ -1491,6 +1534,20 @@ def review_comment_signature(
     )
 
 
+def review_request_signature(comment: dict[str, Any]) -> dict[str, Any] | None:
+    comment_id = comment.get("id")
+    if not isinstance(comment_id, str):
+        return None
+    return {
+        "id": comment_id,
+        "author": author_login(comment),
+        "author_association": comment.get("authorAssociation"),
+        "body": comment.get("body"),
+        "created_at": comment.get("createdAt"),
+        "last_edited_at": comment.get("lastEditedAt"),
+    }
+
+
 def review_reaction_signature(
     reactions: Sequence[dict[str, Any]],
 ) -> tuple[tuple[Any, ...], ...]:
@@ -1685,7 +1742,10 @@ def comment_only_patch(file: dict[str, Any]) -> bool:
         try:
             tokens = tokenize.generate_tokens(io.StringIO("".join(source)).readline)
             comment_rows = {
-                token.start[0] for token in tokens if token.type == tokenize.COMMENT
+                token.start[0]
+                for token in tokens
+                if token.type == tokenize.COMMENT
+                and not token.line[: token.start[1]].strip()
             }
         except (IndentationError, SyntaxError, tokenize.TokenError):
             return False, True
@@ -2306,6 +2366,25 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
             value = record.get(field)
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"unsupported or malformed state file: {path}")
+        authenticated_request = record.get("authenticated_review_request")
+        if authenticated_request is not None and (
+            not isinstance(authenticated_request, dict)
+            or set(authenticated_request)
+            != {
+                "id",
+                "author",
+                "author_association",
+                "body",
+                "created_at",
+                "last_edited_at",
+            }
+            or not isinstance(authenticated_request.get("id"), str)
+            or not all(
+                value is None or isinstance(value, str)
+                for value in authenticated_request.values()
+            )
+        ):
+            raise ValueError(f"unsupported or malformed state file: {path}")
         resolution_times = record.get("resolved_thread_observed_at")
         if resolution_times is not None and (
             not isinstance(resolution_times, dict)
@@ -2489,6 +2568,11 @@ def process_pull_request(
         )
         if isinstance(review_id, str):
             record["authenticated_review_id"] = review_id
+        review_request = pull_request.get(
+            "authenticated_review_requests", {}
+        ).get(pull_request["head_oid"])
+        if isinstance(review_request, dict):
+            record["authenticated_review_request"] = review_request
     resolution_times = record.setdefault("resolved_thread_observed_at", {})
     observed_at = utc_timestamp(now)
     current_thread_ids = {
