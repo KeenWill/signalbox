@@ -1,17 +1,17 @@
 # Review workflows
 
-The review-workflow context records why review work exists, which exact
-repository revision it concerns, which session carried each pass, and how
-findings and external code-host objects relate to that evidence.
+The review-workflow context records why review work exists, which repository
+revision it concerns, which session carried each pass, and how findings and
+external code-host objects relate to that evidence.
 
 ## Map
 
 The context sits above sessions. Session execution belongs to
 [sessions and the transcript](sessions-and-transcript.md), turn evidence to
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
-execution to [tool loop](tool-loop.md), and the relational mechanics shared with
-the rest of the daemon to [persistence protocol](persistence-protocol.md). The
-domain types live in `crates/domain/src/review_workflow.rs`.
+execution to [tool loop](tool-loop.md), and the shared relational mechanics to
+[persistence protocol](persistence-protocol.md). The domain types live in
+`crates/domain/src/review_workflow.rs`.
 
 Its records are targets, runs, passes, findings, and external links. A target is
 one immutable snapshot of a reviewed revision; a refreshed change request is
@@ -31,7 +31,7 @@ References nest. A run reference binds a run to its target, a pass reference
 binds a pass to its run and target, and a finding reference (`ReviewFindingRef`)
 binds a finding to its producing pass and so to its run and target.
 
-Above these primitives, the application orchestration boundary in
+Above these primitives, the orchestration service in
 `crates/application/src/review_orchestration.rs` runs one attempt: import
 external context, fan out one read-only-review pass per concern, judge the
 complete finding set, repair the accepted findings, and publish the survivors.
@@ -69,11 +69,11 @@ parent and child or appear together in one parent chain, because refresh history
 is not stack topology.
 
 Policy is immutable run input rather than process configuration: it carries an
-ordinal version and minimum judge and publication confidences. Why: stored
-policy makes the reason for an unattended judgment or publication
-reconstructible without depending on the executing binary's defaults. An unknown
-policy version fails closed until a later contract revision adds its exact
-tuple, and supporting that version changes only later runs.
+ordinal version and minimum judge and publication confidences. Why: the reason
+for an unattended judgment or publication is then reconstructible without the
+executing binary's defaults. An unknown policy version fails closed until a
+later contract revision adds its exact tuple, and supporting that version
+changes only later runs.
 
 A pass is recorded only after its orchestration input has been durably accepted
 and its origin turn exists, and activation binds to that exact turn; an optional
@@ -123,8 +123,8 @@ binds the pass's reservation, latest ordinal, and state as a no-change result,
 so that pass is spent as durable evidence. Observations describe the external
 object's reported state and never rewrite finding status.
 
-Recording the attempt before any pass starts makes an equal retry resume the
-recorded values and makes a distinct reuse a conflict.
+The attempt is recorded before any pass starts, so an equal retry resumes the
+recorded values and a distinct reuse is a conflict.
 
 The daemon constructs an attempt only when the start selection exactly matches
 the resolved review library; an absent library, changed version, changed stage
@@ -138,7 +138,8 @@ independently checked bindings, the session's copied template provenance and the
 attempt's own digest, rather than through a caller-supplied claim.
 
 Concern work carries no repair or publication handle and no other member's
-uncommitted output. Why: a concurrent member holds the least authority it needs.
+uncommitted output. Why: a concurrent member holds no more authority than it
+needs.
 
 When one fan-out member fails, blocks, or is cancelled, the successful members'
 findings remain valid evidence but no judgment, repair, or publication work is
