@@ -60,10 +60,10 @@ the request crossed or may have crossed the acceptance boundary and no
 definitive response exists; it carries a typed loss cause, the partial facts
 observed before the loss, and whether a tool call had opened in the material the
 adapter decoded. A provider error may also carry an adapter-owned proof that the
-provider never accepted the request.
-[credential-availability](credential-availability.md) decides what that proof
-leads to; this page owns the evidence that carries it. Refusal evidence reaches
-callers only from the Codex CLI and Claude Code CLI adapters.
+provider never accepted the request; this page owns that evidence, and
+[credential-availability](credential-availability.md) decides what the proof
+leads to. Refusal evidence reaches callers only from the Codex CLI and Claude
+Code CLI adapters.
 
 `SseFraming` is the provider-agnostic incremental parser both HTTP adapters
 build on, from transport byte chunks to event-stream records.
@@ -290,14 +290,14 @@ never inferred from the error kind, status retryability or provider prose. An
 adapter admits it only when it decoded its own documented error envelope, the
 native token belongs to the closed set that adapter names for the proof, the
 HTTP status agrees with that token, and the envelope arrived as an error
-response decoded before any stream began; a newly mapped availability token
-carries no proof until that set names it. A status-derived fallback, an absent
+response decoded before any stream began. A status-derived fallback, an absent
 or undecodable body, or an unmapped token carries no proof and keeps its
-status-classified kind. An SSE error record never carries the proof, so an
-availability failure that arrives mid-stream carries none. The Codex CLI
-adapter, which has no error envelope, admits the proof only when its event
-stream closes with a `turn.failed` event; a stream-level error that no matching
-`turn.failed` event closes carries none.
+status-classified kind; a newly mapped availability token carries none until
+that set names it, and an SSE error record never carries it, so an availability
+failure that arrives mid-stream carries none. The Codex CLI adapter, which has
+no error envelope, admits the proof only when its event stream closes with a
+`turn.failed` event; a stream-level error that no matching `turn.failed` event
+closes carries none.
 
 The Anthropic proof set is `rate_limit_error`, `overloaded_error`, and
 `api_error` at HTTP 500. The OpenAI proof set is `rate_limit_exceeded`,
@@ -336,11 +336,11 @@ Under the OpenAI adapter streamed chunks must agree on identity: a missing or
 conflicting completion id, or a conflicting reported model, is a terminal
 protocol violation, and a conflict stays one on a mid-stream error record. An
 error record that reports no completion id is definitive provider-error
-evidence. Under the Claude Code CLI the first assistant event may name the
-provider-resolved model and every later assistant event must repeat that value.
-Claude events stay bound to the initialized exchange: a result carrying a
-different session id, or an assistant event carrying a different first message
-id, is a protocol violation.
+evidence. Claude Code CLI events stay bound to the initialized exchange: the
+first assistant event may name the provider-resolved model and every later
+assistant event must repeat that value, and a result carrying a different
+session id, or an assistant event carrying a different first message id, is a
+protocol violation.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
@@ -382,13 +382,13 @@ provider the database stack uses, verify certificate and hostname against
 platform trust roots, require TLS 1.2 or newer, and carry no custom-root or
 verification-bypass surface. Redirect following is disabled, so a redirect
 surfaces as unexpected-status boundary loss rather than a hidden second POST.
-The configured whole-exchange timeout covers connection establishment through
-the complete buffered body or streamed terminal record, and callers may
-configure a shorter connect timeout; a connect timeout is proven unsent, while a
-whole-exchange timeout after send is boundary loss. The whole-exchange timeout
-is a required deployment bound supplied to both HTTP adapters and to both
-subprocess adapters, and a `none` setting leaves the exchange unbounded. Success
-is HTTP 200 only; another 2xx is not terminal success.
+The whole-exchange timeout is a required deployment bound supplied to both HTTP
+adapters and to both subprocess adapters; it covers connection establishment
+through the complete buffered body or streamed terminal record, and a `none`
+setting leaves the exchange unbounded. Callers may configure a shorter connect
+timeout; a connect timeout is proven unsent, while a whole-exchange timeout
+after send is boundary loss. Success is HTTP 200 only; another 2xx is not
+terminal success.
 
 The HTTP adapters bound all provider-controlled response input before it can
 accumulate into parsed or retained output, and complete records inside the byte
@@ -399,7 +399,7 @@ stream protocol violation. The CLI adapters bound each event and the retained
 stderr evidence, not the decoded total across an exchange. Before serde sees a
 buffered success body or a JSON stream record, a shared allocation-free scanner
 rejects JSON nested beyond a fixed depth, unknown fields and raw material
-included. Unknown fields stay tolerated for additive provider evolution under
+included; unknown fields stay tolerated for additive provider evolution under
 the same byte and nesting limits as known ones. The Anthropic and Codex CLI
 decoders also tolerate an unknown event name and discard its bounded payload
 without typed parsing, while the OpenAI decoder parses every record's payload
@@ -493,7 +493,7 @@ Each CLI adapter's build derives its supported-version constant from the exact
 version in its pin manifest, so the manifest is the sole source. The daemon
 composition probes only the Codex CLI executable, and refuses startup before
 socket admission when its bounded probe cannot prove the installed executable
-reports that version. Nothing probes the Claude Code executable before an
+reports that version; nothing probes the Claude Code executable before an
 exchange begins. Before spending anything, the Codex smoke asserts that the
 reported version equals the supported version and compares the CLI's complete
 feature list, including stage and default, with an exact classified inventory.

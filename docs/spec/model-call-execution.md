@@ -47,20 +47,20 @@ summarized range. Attachments render as the bounded textual stubs
 
 Context compaction produces its summary through a dedicated physical model call
 with its own durable prepared, in-flight, and terminal lifecycle, separate from
-ordinary calls. A headroom guard runs at two points. Before activating a queued
-turn it may spend one automatic compaction. When that compaction fails, or the
-request still exceeds the window after it, one transaction fails the queued turn
-with no ordinary call prepared. Inside the tool-result continuation transaction
-an exceeded bound commits the tool results, prepares no continuation call, and
-fails the turn with a headroom record. The guard adds the newest reported input
-for the pinned target, a byte allowance for model-visible content that input
-does not cover, and the configured output reservation, and compares the sum with
-the configured context window. The compaction call's own input budget is its
-context window less the output ceiling and the required prompt; when even the
-first safe prefix cannot fit that budget, no call is prepared and one
-transaction fails the turn as a compaction wall. Automatic compaction targets
-the first safe boundary at or beyond half the rendered bytes and falls back to
-the latest safe boundary that fits.
+ordinary calls. The compaction call's own input budget is its context window
+less the output ceiling and the required prompt; when even the first safe prefix
+cannot fit that budget, no call is prepared and one transaction fails the turn
+as a compaction wall. Automatic compaction targets the first safe boundary at or
+beyond half the rendered bytes and falls back to the latest safe boundary that
+fits. At two points a headroom guard adds the newest reported input for the
+pinned target, a byte allowance for model-visible content that input does not
+cover, and the configured output reservation, and compares the sum with the
+configured context window. Before activating a queued turn it may spend one
+automatic compaction; when that compaction fails, or the request still exceeds
+the window after it, one transaction fails the queued turn with no ordinary call
+prepared. Inside the tool-result continuation transaction an exceeded bound
+commits the tool results, prepares no continuation call, and fails the turn with
+a headroom record.
 
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
