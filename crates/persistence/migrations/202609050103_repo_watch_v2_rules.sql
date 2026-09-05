@@ -29,6 +29,7 @@ CREATE TABLE gh_event (
     event_kind text NOT NULL,
     target_kind text NOT NULL,
     pull_request_number numeric(20,0),
+    normalized_payload bytea NOT NULL,
     recorded_at timestamptz NOT NULL,
     retain_until timestamptz NOT NULL,
     FOREIGN KEY (repository) REFERENCES repository_state(repository) ON DELETE CASCADE,
@@ -46,31 +47,53 @@ CREATE TABLE gh_event (
     CHECK (retain_until > recorded_at)
 );
 
--- growth: one mutable row per configured rule.
--- retention: delete when the rule leaves configuration.
-CREATE TABLE rule (
-    rule_id text PRIMARY KEY,
-    active_revision numeric(20,0) NOT NULL,
-    content_digest bytea NOT NULL,
-    updated_at timestamptz NOT NULL,
-    CHECK (octet_length(rule_id) BETWEEN 1 AND 128),
-    CHECK (active_revision BETWEEN 1 AND 9223372036854775807),
-    CHECK (octet_length(content_digest) = 32)
-);
-
 -- growth: one row per configured rule revision.
 -- retention: delete an inactive revision once no retained dispatch names it.
 CREATE TABLE rule_revision (
+    repository text NOT NULL,
     rule_id text NOT NULL,
     revision numeric(20,0) NOT NULL,
     content_digest bytea NOT NULL,
     activated_at timestamptz NOT NULL,
     retired_at timestamptz,
-    PRIMARY KEY (rule_id, revision),
-    FOREIGN KEY (rule_id) REFERENCES rule(rule_id) ON DELETE CASCADE,
+    PRIMARY KEY (repository, rule_id, revision),
+    CHECK (octet_length(rule_id) BETWEEN 1 AND 128),
     CHECK (revision BETWEEN 1 AND 9223372036854775807),
     CHECK (octet_length(content_digest) = 32),
     CHECK (retired_at IS NULL OR retired_at >= activated_at)
+);
+
+-- growth: one row per identity-relevant field of a configured rule revision.
+-- retention: delete with the inactive revision once no retained dispatch names it.
+CREATE TABLE rule_field_fingerprint (
+    repository text NOT NULL,
+    rule_id text NOT NULL,
+    revision numeric(20,0) NOT NULL,
+    field_ordinal smallint NOT NULL,
+    field_name text NOT NULL,
+    field_digest bytea NOT NULL,
+    PRIMARY KEY (repository, rule_id, revision, field_ordinal),
+    FOREIGN KEY (repository, rule_id, revision)
+        REFERENCES rule_revision(repository, rule_id, revision) ON DELETE CASCADE,
+    CHECK (field_ordinal >= 0),
+    CHECK (octet_length(field_name) BETWEEN 1 AND 128),
+    CHECK (octet_length(field_digest) = 32)
+);
+
+-- growth: one mutable row per configured rule in a watched repository.
+-- retention: delete when the rule leaves configuration; revision history remains.
+CREATE TABLE rule (
+    repository text NOT NULL,
+    rule_id text NOT NULL,
+    active_revision numeric(20,0) NOT NULL,
+    content_digest bytea NOT NULL,
+    updated_at timestamptz NOT NULL,
+    PRIMARY KEY (repository, rule_id),
+    FOREIGN KEY (repository, rule_id, active_revision)
+        REFERENCES rule_revision(repository, rule_id, revision),
+    CHECK (octet_length(rule_id) BETWEEN 1 AND 128),
+    CHECK (active_revision BETWEEN 1 AND 9223372036854775807),
+    CHECK (octet_length(content_digest) = 32)
 );
 
 RESET search_path;

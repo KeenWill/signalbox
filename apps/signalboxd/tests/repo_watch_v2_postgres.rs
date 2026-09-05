@@ -6,9 +6,11 @@
 
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
+use rust_decimal::Decimal;
 use signalbox_module_repo_watch_v2::{
-    EventAdmission, PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryState,
-    RuleAdmission, WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules,
+    EventAdmission, EventCandidate, FrontierEventAdmission, PullRequestLifecycle, PullRequestState,
+    RepoWatchStore, RepositoryState, RuleAdmission, WebhookAdmission, WebhookDelivery,
+    WebhookDisposition, matching_rules,
 };
 use signalbox_ownership_seam::{
     BranchName, CommitSha, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
@@ -140,10 +142,6 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         NonZeroU64::new(2).expect("two is positive"),
         PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
     );
-    store.upsert_frontier(&repository, frontier).await?;
-    assert!(store.release_frontier(&repository, &stream).await?);
-    assert!(!store.release_frontier(&repository, &stream).await?);
-
     let rule = RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(String::from("branch-ci"))?,
         RepoWatchRuleVersion::V1,
@@ -159,14 +157,52 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         RepoWatchSingletonScope::Repository,
         Duration::ZERO,
     )?;
-    assert_eq!(
-        store.record_rule(&rule, observed_at).await?,
-        RuleAdmission::Inserted
+    let (first, concurrent) = tokio::join!(
+        store.record_rule(&repository, &rule, observed_at),
+        store.record_rule(&repository, &rule, observed_at)
     );
+    assert!(matches!(
+        (first?, concurrent?),
+        (RuleAdmission::Inserted, RuleAdmission::Replayed)
+            | (RuleAdmission::Replayed, RuleAdmission::Inserted)
+    ));
     assert_eq!(
-        store.record_rule(&rule, observed_at).await?,
+        store.record_rule(&repository, &rule, observed_at).await?,
         RuleAdmission::Replayed
     );
+    let fingerprint_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mod_repo_watch.rule_field_fingerprint
+          WHERE repository = $1 AND rule_id = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rule.id().as_str())
+    .fetch_one(&core_pool)
+    .await?;
+    assert_eq!(
+        usize::try_from(fingerprint_count)?,
+        rule.identity_field_digests().len()
+    );
+    let other_repository = RepositorySlug::try_new(String::from("other/repository"))?;
+    assert_eq!(
+        store
+            .record_rule(&other_repository, &rule, observed_at)
+            .await?,
+        RuleAdmission::Inserted
+    );
+    assert!(
+        store
+            .deactivate_rule(&other_repository, rule.id().as_str(), observed_at)
+            .await?
+    );
+    let retained_revisions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mod_repo_watch.rule_revision
+          WHERE repository = $1 AND rule_id = $2",
+    )
+    .bind(other_repository.as_str())
+    .bind(rule.id().as_str())
+    .fetch_one(&core_pool)
+    .await?;
+    assert_eq!(retained_revisions, 1);
 
     let event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(14)),
@@ -180,16 +216,96 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let retain_until = observed_at + Duration::from_secs(120);
     assert_eq!(
         store
-            .append_event(&event, identity, observed_at, retain_until)
+            .commit_frontier_candidate(
+                &repository,
+                &[frontier],
+                &[EventCandidate {
+                    event: &event,
+                    content_identity: identity,
+                    recorded_at: observed_at,
+                    retain_until,
+                }],
+            )
             .await?,
-        EventAdmission::Inserted
+        FrontierEventAdmission::Committed(Box::new([EventAdmission::Inserted]))
     );
     assert_eq!(
         store
-            .append_event(&event, identity, observed_at, retain_until)
+            .commit_frontier_candidate(
+                &repository,
+                &[frontier],
+                &[EventCandidate {
+                    event: &event,
+                    content_identity: identity,
+                    recorded_at: observed_at + Duration::from_secs(1),
+                    retain_until: retain_until + Duration::from_secs(1),
+                }],
+            )
             .await?,
-        EventAdmission::Replayed
+        FrontierEventAdmission::Committed(Box::new([EventAdmission::Replayed]))
     );
+    let payload: Vec<u8> = sqlx::query_scalar(
+        "SELECT normalized_payload FROM mod_repo_watch.gh_event WHERE event_id = $1",
+    )
+    .bind(event.id().into_uuid())
+    .fetch_one(&core_pool)
+    .await?;
+    let payload = String::from_utf8(payload)?;
+    assert!(payload.contains("branch_workflow_run_completed"));
+    assert!(payload.contains("\"workflow\":\"ci\""));
+
+    let next_frontier = RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+        stream,
+        NonZeroU64::new(3).expect("three is positive"),
+        PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+    );
+    let preceding_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(15)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("build"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &repository,
+                &[next_frontier],
+                &[
+                    EventCandidate {
+                        event: &preceding_event,
+                        content_identity: RepoWatchEventContentIdentityV1::from_bytes([17; 32]),
+                        recorded_at: observed_at,
+                        retain_until,
+                    },
+                    EventCandidate {
+                        event: &event,
+                        content_identity: RepoWatchEventContentIdentityV1::from_bytes([16; 32]),
+                        recorded_at: observed_at,
+                        retain_until,
+                    },
+                ],
+            )
+            .await?,
+        FrontierEventAdmission::ConflictingReuse
+    );
+    let preceding_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM mod_repo_watch.gh_event WHERE event_id = $1")
+            .bind(preceding_event.id().into_uuid())
+            .fetch_one(&core_pool)
+            .await?;
+    assert_eq!(preceding_count, 0);
+    let frontier_sequence: Decimal = sqlx::query_scalar(
+        "SELECT sequence FROM mod_repo_watch.frontier
+          WHERE repository = $1 AND stream_identity = $2",
+    )
+    .bind(repository.as_str())
+    .bind(stream.as_slice())
+    .fetch_one(&core_pool)
+    .await?;
+    assert_eq!(frontier_sequence, Decimal::from(2_u64));
+    assert!(store.release_frontier(&repository, &stream).await?);
+    assert!(!store.release_frontier(&repository, &stream).await?);
 
     let mut replay = delivery();
     replay.received_at += Duration::from_secs(1);
