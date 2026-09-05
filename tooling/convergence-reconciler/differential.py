@@ -119,7 +119,12 @@ def reference_evaluation(recording):
     client._load_base_ancestry([pr])
     client._finalize_check_inventory([pr])
     client.revalidate_for_decision(pr)
-    return reference.evaluate_convergence(pr)
+    result = reference.evaluate_convergence(pr)
+    # The repository-watch contract additionally requires at least one gating check.
+    if not any(not reference.is_non_gating_check(check) for check in pr["checks"]):
+        result["converged"] = False
+        result["reasons"].append("gating-checks-missing")
+    return result
 
 
 def fixtures():

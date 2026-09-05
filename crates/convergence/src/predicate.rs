@@ -15,6 +15,7 @@ pub enum Reason {
     DescriptionExceeds350Words,
     ChecksNotForCurrentHead,
     CheckRollupMissing,
+    GatingChecksMissing,
     CheckNotGreen { name: String, state: String },
     BaseConflict,
     Mergeability { state: String },
@@ -37,6 +38,7 @@ impl Reason {
             Self::DescriptionExceeds350Words => "description-exceeds-350-words".into(),
             Self::ChecksNotForCurrentHead => "checks-not-for-current-head".into(),
             Self::CheckRollupMissing => "check-rollup-missing".into(),
+            Self::GatingChecksMissing => "gating-checks-missing".into(),
             Self::CheckNotGreen { name, state } => format!("check-not-green:{name}:{state}"),
             Self::BaseConflict => "base-conflict".into(),
             Self::Mergeability { state } => format!("mergeability-{state}"),
@@ -193,6 +195,13 @@ pub fn evaluate_facts(facts: &Facts, policy: &ConvergencePolicy) -> Verdict {
     }
     if facts.check_rollup_state.is_none() {
         reasons.push(Reason::CheckRollupMissing);
+    }
+    if !facts
+        .checks
+        .iter()
+        .any(|check| !policy.is_non_gating(check_name(check)))
+    {
+        reasons.push(Reason::GatingChecksMissing);
     }
     for check in &facts.checks {
         if !policy.is_non_gating(check_name(check)) && !check_green(check) {

@@ -23,6 +23,18 @@
       "review-changes-requested"
     ]
   },
+  "mutations/check-green-to-red.json": {
+    "converged": false,
+    "reasons": [
+      "check-not-green:required build:FAILURE"
+    ]
+  },
+  "mutations/check-red-to-green.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
   "mutations/check-red.json": {
     "converged": false,
     "reasons": [
@@ -102,6 +114,15 @@
       "quiet-review-not-completed-for-current-head"
     ]
   },
+  "mutations/final-identity-baseRefOid.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "mutations/final-identity-body.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
+  "mutations/final-identity-headRefOid.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
   "mutations/finding-edited-after-disposition.json": {
     "converged": false,
     "reasons": [
@@ -129,6 +150,12 @@
       "check-inventory-unsettled"
     ]
   },
+  "mutations/live-exempt-comparison.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled"
+    ]
+  },
   "mutations/material-base-forward.json": {
     "converged": false,
     "reasons": [
@@ -146,7 +173,22 @@
     "converged": false,
     "reasons": [
       "checks-not-for-current-head",
-      "base-ancestry-unknown"
+      "base-ancestry-unknown",
+      "gating-checks-missing"
+    ]
+  },
+  "mutations/no-gating-checks.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "gating-checks-missing"
+    ]
+  },
+  "mutations/only-exempt-checks.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "gating-checks-missing"
     ]
   },
   "mutations/persisted-body-finding.json": {
@@ -197,6 +239,10 @@
       "quiet-review-not-completed-for-current-head"
     ]
   },
+  "mutations/resolution-observed.json": {
+    "converged": true,
+    "reasons": []
+  },
   "mutations/review-before-body-edit.json": {
     "converged": false,
     "reasons": [
@@ -227,7 +273,8 @@
     "reasons": [
       "check-inventory-unsettled",
       "quiet-review-not-completed-for-current-head",
-      "check-rollup-missing"
+      "check-rollup-missing",
+      "gating-checks-missing"
     ]
   },
   "mutations/settled.json": {

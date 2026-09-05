@@ -1,0 +1,38 @@
+{
+  "source": "settled.json",
+  "edge": "zero gating checks cannot authorize convergence",
+  "mutations": [
+    {
+      "path": "/observations/0/1/response/data/repository/object/statusCheckRollup/contexts/nodes",
+      "value": [
+        {
+          "__typename": "CheckRun",
+          "name": "tool live smokes (report only)",
+          "status": "COMPLETED",
+          "conclusion": "FAILURE",
+          "completedAt": "2026-09-05T10:00:00Z"
+        }
+      ]
+    },
+    {
+      "path": "/observations/0/1/response/data/repository/object/statusCheckRollup/contexts/totalCount",
+      "value": 1
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup/contexts/nodes",
+      "value": [
+        {
+          "__typename": "CheckRun",
+          "name": "tool live smokes (report only)",
+          "status": "COMPLETED",
+          "conclusion": "FAILURE",
+          "completedAt": "2026-09-05T10:00:00Z"
+        }
+      ]
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup/contexts/totalCount",
+      "value": 1
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "source": "settled.json",
+  "edge": "zero gating checks cannot authorize convergence",
+  "mutations": [
+    {
+      "path": "/observations/0/1/response/data/repository/object/statusCheckRollup/contexts/nodes",
+      "value": []
+    },
+    {
+      "path": "/observations/0/1/response/data/repository/object/statusCheckRollup/contexts/totalCount",
+      "value": 0
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup/contexts/nodes",
+      "value": []
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup/contexts/totalCount",
+      "value": 0
+    }
+  ]
+}
