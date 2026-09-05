@@ -44,7 +44,9 @@ and returned as a replay outcome, not as a registry error.
 `Actor` in `crates/domain` records, from a closed set, what issued a command:
 the user, daemon core, the model output of one turn, the startup recovery scan,
 or the execution of one tool request. Only submit-input and metadata-replacement
-commands carry an actor in their durable payload. Actor answers who issued one
+commands carry an actor in their durable payload. Repository watch and
+commissioned dispatch stamp a module issuer principal on the registry row and
+compose their initial input under the user actor. Actor answers who issued one
 command; a session's creation cause, owned by
 [sessions-and-transcript](sessions-and-transcript.md), answers why the session
 exists, and neither fact substitutes for the other.
@@ -84,11 +86,12 @@ formatted error.
 
 Every command handler inspects the registry for the command identifier before it
 validates anything against current state. Replaying the same command with the
-same payload returns the recorded result. Replaying it with a different payload
-or kind is a conflict and changes nothing. A single-transaction command commits
-its registry row, payload record, result, and every effect together, and a
-failed transaction leaves no claim behind. A rejection claims the identifier the
-same way an applied command does.
+same payload returns the recorded result once the command has settled; while it
+is pending the handler reports busy. Replaying it with a different payload or
+kind is a conflict and changes nothing. A single-transaction command commits its
+registry row, payload record, result, and every effect together, and a failed
+transaction leaves no claim behind. A rejection claims the identifier the same
+way an applied command does.
 
 Recording who or what caused an action is provenance only. It grants no
 lifecycle, authorization, or approval authority. No automated path can attribute
@@ -185,11 +188,13 @@ what errors and logs may contain is in [process-protocol](process-protocol.md).
   [design](../design/identity-and-commands.md).
 - Writers and generators for `WorkspaceId`, `GitRemoteMintId`, and
   `GitRemoteWithdrawalId`: [design](../design/identity-and-commands.md).
-- Imported-creation storage version 4, the optional runner-placement payload:
-  [design](../design/identity-and-commands.md).
-- Create-session storage version 5, the optional session runner placement:
-  [design](../design/identity-and-commands.md).
+- The optional runner placement in the imported-creation and create-session
+  payloads: [design](../design/identity-and-commands.md).
+- Imported-creation storage version 4 and create-session storage version 5,
+  reserved and unwritten: [design](../design/identity-and-commands.md).
 - A program arm of `Actor` and a program admissibility path for submit-input:
+  [design](../design/identity-and-commands.md).
+- A non-user actor for module-composed initial inputs:
   [design](../design/identity-and-commands.md).
 - An actor field on replace-session-defaults records:
   [design](../design/identity-and-commands.md).
