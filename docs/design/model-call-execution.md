@@ -13,9 +13,10 @@ emits a process-level event carrying the complete exclusion evidence of a
 pre-call pool exhaustion. It checks at reconstitution that the pinned pool
 policy contains the pinned profile with the expected adapter and delivery kind.
 It carries a program-declared structured-output contract through preparation
-into runtime enforcement. It records durable provider-target evidence. It lets a
-user resolve an unstopped ambiguity. It carries the workspace-instruction region
-into the model operation as its own typed part.
+into runtime enforcement. It records durable provider-target evidence, pending
+the per-call provenance schema decision. It lets a user resolve an unstopped
+ambiguity. It carries the workspace-instruction region into the model operation
+as its own typed part.
 
 ## Design
 
