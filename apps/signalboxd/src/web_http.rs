@@ -4612,8 +4612,8 @@ fn has_content_type(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .is_some_and(|value| value.essence_str() == expected)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
