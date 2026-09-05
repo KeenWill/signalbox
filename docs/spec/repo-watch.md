@@ -65,17 +65,16 @@ tagged actions and independently selects a singleton scope from pull request
 
 Dispatch context (`DispatchSessionParameters`) is a tagged union of pull-request
 context and branch context, each embedding the triggering event. A fresh
-dispatch carries no delivery member; a dispatch that settles an occupied-refusal
-obligation adds one naming the obligation, the count of matches it collapsed,
-the boundary event identities, and the target's current state. One event and
-rule match admits the rule's complete ordered action list as one singleton
-batch. Each dispatch record links the triggering event, rule identity and
-version, singleton key, action ordinal, session-template provenance, and the new
-session. A durable delivery intent records the reserved submit-command,
+dispatch delivers its originating event and carries no delivery member; a
+dispatch that settles an occupied-refusal obligation delivers the target's
+collapsed current state and adds a delivery member naming the obligation, the
+count of matches it collapsed, the boundary event identities, and that state.
+One event and rule match admits the rule's complete ordered action list as one
+singleton batch. Each dispatch record links the triggering event, rule identity
+and version, singleton key, action ordinal, session-template provenance, and the
+new session. A durable delivery intent records the reserved submit-command,
 accepted-input, turn, and cancellation candidates beside the applied link, so
-equal recovery reuses the committed batch. A batch delivers its originating
-event when admission dispatched that event, and the target's collapsed current
-state when admission settled an obligation. An obligation records exactly one
+equal recovery reuses the committed batch. An obligation records exactly one
 blocker: the occupying repository-watch dispatch or an external commissioned
 session. Every park and release of an obligation appends a journal row naming
 the count at the transition and, for a release, its operator or the causing
@@ -239,27 +238,27 @@ later GitHub dismissal emits no event.
 Rules are versioned TOML structures, not a string DSL, and expressiveness grows
 only by adding versioned fields. Changing a rule revision does not select a
 different matcher grammar; the revision distinguishes successive semantics under
-one stable rule identity. Rule validation derives the required context shapes
-from the event kinds that can satisfy every supplied field, including the
-payload qualifiers, not from the kind list alone. Patterns compile with a
-linear-time regex engine, so backreferences and look-around are not admitted and
-no backtracking engine is present. Exactly one action variant ships,
-`dispatch_session` with a template, and no unused variant is reserved. When a
-fact matches, every configured action produces one dispatch action in list order
-whose parameters are the exact tagged context for that event; a match that
-joined an outstanding obligation eventually emits one action using the latest
-joined event plus the delivery member, never one action per joined event. The
-embedded event is the complete triggering durable fact, not reconstructed API
-state, and the matched count and boundary identities summarize collapse without
-replaying intermediate facts into the session. Rule validation rejects any
-attainable event shape an action's declared template does not accept, and
-configuration completes that validation before polling starts, so dispatch
-cannot discover a shape mismatch at runtime. Branch events cannot satisfy
-pull-request or stack scope and make such a rule invalid rather than silently
-changing its key. Stack scope keys by repository and the base-branch chaining
-component: a parent's head repository must equal the child's base repository and
-its head branch the child's base branch, and the component identity is its
-lowest-numbered root, or its lowest-numbered member for a rootless cycle.
+one stable rule identity. Patterns compile with a linear-time regex engine, so
+backreferences and look-around are not admitted and no backtracking engine is
+present. Rule validation derives the required context shapes from the event
+kinds that can satisfy every supplied field, including the payload qualifiers,
+not from the kind list alone, and rejects any attainable event shape an action's
+declared template does not accept; configuration completes that validation
+before polling starts, so dispatch cannot discover a shape mismatch at runtime.
+Branch events cannot satisfy pull-request or stack scope and make such a rule
+invalid rather than silently changing its key. Stack scope keys by repository
+and the base-branch chaining component: a parent's head repository must equal
+the child's base repository and its head branch the child's base branch, and the
+component identity is its lowest-numbered root, or its lowest-numbered member
+for a rootless cycle. Exactly one action variant ships, `dispatch_session` with
+a template, and no unused variant is reserved. When a fact matches, every
+configured action produces one dispatch action in list order whose parameters
+are the exact tagged context for that event; a match that joined an outstanding
+obligation eventually emits one action using the latest joined event plus the
+delivery member, never one action per joined event. The embedded event is the
+complete triggering durable fact, not reconstructed API state, and the matched
+count and boundary identities summarize collapse without replaying intermediate
+facts into the session.
 
 The goal statement is synthesized from the dispatching rule, the resolved
 template, and the typed parameters, and states only the rule, the template, and,
@@ -446,14 +445,14 @@ ambiguous. Reconciliation and evaluation serialize per repository, so an
 already-loaded event cannot create a dispatch after deactivation commits, though
 a committed evaluation may replay. Changing a rule's semantics while keeping the
 same rule identity and revision fails in the Configuration phase. A higher
-revision under the same rule identity is a replacement: reconciliation appends
-deactivation of the old revision and activation of the new one after the current
-event tail. A deactivated identity-and-revision pair cannot be configured again,
-a revision below the highest ever recorded for that identity in that repository
-is refused, and rule identity is per repository, so the same identity first
-configured in a newly watched repository starts its own lineage. A fresh rule
-identity remains an admitted replacement path, but a revision bump is the
-ordinary way to preserve stable identity and history.
+revision under the same rule identity is a replacement and the ordinary way to
+preserve stable identity and history: reconciliation appends deactivation of the
+old revision and activation of the new one after the current event tail; a fresh
+rule identity remains an admitted replacement path. A deactivated
+identity-and-revision pair cannot be configured again, a revision below the
+highest ever recorded for that identity in that repository is refused, and rule
+identity is per repository, so the same identity first configured in a newly
+watched repository starts its own lineage.
 
 Everything the listener does before a delivery is durably admitted is identical
 in both webhook modes. The body's canonical repository must equal the repository
@@ -466,7 +465,9 @@ different digest returns conflict and cannot replace the first body. Every new
 admission and equal replay publishes a coalescing in-memory wake after commit,
 and the listener returns success only while that repository's drain task can
 receive it. The repository task drains pending deliveries at startup, when
-woken, and before and after every full poll that owes no retry. The drain
+woken, and before and after every full poll that owes no retry, and schedules a
+new drain attempt after five seconds, doubling to a five-minute ceiling on
+consecutive failures and returning to five seconds on success. The drain
 deadline spans provider and database work; expiry cancels the attempt, leaves
 deliveries pending, invalidates partial freshness, emits a closed timeout cause,
 and enters projection backoff. A deadline reached by the pre-poll drain stops
@@ -485,9 +486,7 @@ target-specific processing fails is deferred for the rest of that drain rather
 than failing it, and the attempt still reports the first such failure;
 credential, transport, provider-throttle, and provider-outage failures stop the
 current page, because they prove later targeted requests cannot make independent
-progress. The repository task schedules a new drain attempt after five seconds,
-doubling to a five-minute ceiling on consecutive failures and returning to five
-seconds on success. A failing pre-poll drain is reported and not propagated, so
+progress. A failing pre-poll drain is reported and not propagated, so
 acceleration never cancels the reconciliation sweep.
 
 A signature-valid delivery outside the mapped set, including ordinary issue
