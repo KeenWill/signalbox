@@ -408,22 +408,6 @@ async fn commissioned_dispatch_claims(
     .await?)
 }
 
-pub(crate) async fn insert_fresh_prepared(
-    connection: &mut PgConnection,
-    prepared: PreparedCreateSession,
-    credential_pin: &crate::SessionCredentialPin,
-    principal: CommandPrincipal,
-) -> Result<(), CreateSessionRepositoryError> {
-    let command_id = prepared.command().command_id();
-    if !claim_create_session_command(connection, command_id, principal).await? {
-        return Err(CreateSessionCorruption::Inconsistent(
-            "fresh repository-watch command identity collided",
-        )
-        .into());
-    }
-    insert_prepared(connection, prepared, credential_pin).await
-}
-
 /// Claims one create-session command identity, reporting whether this
 /// transaction won it.
 ///

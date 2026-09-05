@@ -106,30 +106,6 @@ impl PostgresEligibilitySweep {
                  )
                  GROUP BY queued.session_id
                 UNION
-                SELECT lease.session_id
-                  FROM repo_watch_dispatch_start_lease AS lease
-                 WHERE lease.expires_at > clock_timestamp()
-                   AND NOT EXISTS (
-                       SELECT 1 FROM model_call AS call
-                        WHERE call.session_id = lease.session_id
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1
-                         FROM repo_watch_dispatch_start_lease_expiration AS expired
-                        WHERE expired.dispatch_id = lease.dispatch_id
-                          AND expired.action_ordinal = lease.action_ordinal
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1
-                         FROM repo_watch_dispatch_start_lease_quarantine AS quarantined
-                        WHERE quarantined.dispatch_id = lease.dispatch_id
-                          AND quarantined.action_ordinal = lease.action_ordinal
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM repo_watch_dispatch_release AS released
-                        WHERE released.dispatch_id = lease.dispatch_id
-                   )
-                UNION
                 SELECT current_event.session_id
                   FROM (
                         SELECT DISTINCT ON (event.session_id)
@@ -243,16 +219,7 @@ impl PostgresEligibilitySweep {
                           FROM session_lifecycle AS lifecycle
                          WHERE lifecycle.session_id = candidates.session_id
                     ), true) AS owned,
-                    EXISTS (
-                        SELECT 1
-                          FROM repo_watch_dispatch_start_lease AS lease
-                         WHERE lease.session_id = candidates.session_id
-                           AND lease.expires_at > clock_timestamp()
-                           AND NOT EXISTS (SELECT 1 FROM model_call AS call WHERE call.session_id = lease.session_id)
-                           AND NOT EXISTS (SELECT 1 FROM repo_watch_dispatch_start_lease_expiration AS expired WHERE expired.dispatch_id = lease.dispatch_id AND expired.action_ordinal = lease.action_ordinal)
-                           AND NOT EXISTS (SELECT 1 FROM repo_watch_dispatch_start_lease_quarantine AS quarantined WHERE quarantined.dispatch_id = lease.dispatch_id AND quarantined.action_ordinal = lease.action_ordinal)
-                           AND NOT EXISTS (SELECT 1 FROM repo_watch_dispatch_release AS released WHERE released.dispatch_id = lease.dispatch_id)
-                    ) AS dispatch_start
+                    false AS dispatch_start
                FROM candidates
                CROSS JOIN bounded
               WHERE bounded.scan_through IS NOT NULL

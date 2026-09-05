@@ -128,16 +128,6 @@ path = "tests/review_workflow_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
-name = "repo_watch_postgres"
-path = "tests/repo_watch_postgres.rs"
-required-features = ["postgres-integration"]
-
-[[test]]
-name = "repo_watch_dispatch_postgres"
-path = "tests/repo_watch_dispatch_postgres.rs"
-required-features = ["postgres-integration"]
-
-[[test]]
 name = "session_metadata_postgres"
 path = "tests/session_metadata_postgres.rs"
 required-features = ["postgres-integration"]

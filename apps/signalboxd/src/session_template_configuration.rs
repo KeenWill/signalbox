@@ -12,9 +12,8 @@ use std::{
 use rustix::fs::{Mode, OFlags, open};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    RepoWatchResolvedTemplate, RepoWatchTemplateResolver, ReviewConcernSpec,
-    ReviewOrchestrationAttempt, ReviewOrchestrationAttemptError, ReviewOrchestrationAttemptId,
-    ReviewStageTemplateDigests, ReviewTemplateDigest,
+    ReviewConcernSpec, ReviewOrchestrationAttempt, ReviewOrchestrationAttemptError,
+    ReviewOrchestrationAttemptId, ReviewStageTemplateDigests, ReviewTemplateDigest,
 };
 use signalbox_domain::{
     DangerousToolAutoApproval, DirectModelSelection, ModelAlias, ModelSelectionRequest,
@@ -244,20 +243,6 @@ impl SessionTemplateConfiguration {
         self.review_library
             .as_ref()
             .map(|library| &library.selection)
-    }
-}
-
-impl RepoWatchTemplateResolver for SessionTemplateConfiguration {
-    fn resolve_repo_watch_template(
-        &self,
-        name: &SessionTemplateName,
-    ) -> Option<RepoWatchResolvedTemplate> {
-        self.resolve(name).map(|template| {
-            RepoWatchResolvedTemplate::new(
-                template.provenance().clone(),
-                template.defaults().clone(),
-            )
-        })
     }
 }
 

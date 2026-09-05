@@ -321,10 +321,6 @@ impl StartEligibleTurnRepository {
             transaction.rollback().await?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
-        if dispatch_start_lease_is_expired(&mut transaction, session).await? {
-            transaction.rollback().await?;
-            return Ok(CommitActivationPreviewOutcome::Stale);
-        }
         let Some(current) = prepare_preview(&mut transaction, session, preview.identities).await?
         else {
             transaction.rollback().await?;
@@ -373,17 +369,6 @@ impl StartEligibleTurnRepository {
             || session_refuses_new_work(&mut transaction, session)
                 .await
                 .map_err(CommitActivationPreviewError::Activation)?
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(StartEligibleTurnRepositoryError::from)
-                .map_err(CommitActivationPreviewError::Activation)?;
-            return Ok(CommitActivationPreviewOutcome::Stale);
-        }
-        if dispatch_start_lease_is_expired(&mut transaction, session)
-            .await
-            .map_err(CommitActivationPreviewError::Activation)?
         {
             transaction
                 .rollback()
@@ -955,17 +940,6 @@ async fn prepare_delegated_wake_preview(
     })
 }
 
-async fn dispatch_start_lease_is_expired(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<bool, StartEligibleTurnRepositoryError> {
-    sqlx::query_scalar(crate::lock_inventory::EXPIRED_DISPATCH_START_LEASE)
-        .bind(session_id_to_uuid(session))
-        .fetch_one(connection)
-        .await
-        .map_err(Into::into)
-}
-
 /// Whether the locked session is suspended in place.
 /// A held start gate keeps queued input from activating until `release_start`,
 /// including across a module park and resume.
@@ -1039,12 +1013,6 @@ async fn handle_in_transaction(
     if session_refuses_new_work(connection, requested_session).await?
         || session_start_gate_is_held(connection, requested_session).await?
     {
-        return Ok(TransactionDecision::Rollback(
-            StartEligibleTurnOutcome::NoEligibleTurn,
-        ));
-    }
-
-    if dispatch_start_lease_is_expired(connection, requested_session).await? {
         return Ok(TransactionDecision::Rollback(
             StartEligibleTurnOutcome::NoEligibleTurn,
         ));

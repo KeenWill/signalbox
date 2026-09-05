@@ -4423,6 +4423,7 @@ impl FileCredentialAccess {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_bounded(
         path: PathBuf,
         reference: CredentialReference,
