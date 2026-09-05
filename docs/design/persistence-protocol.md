@@ -106,9 +106,10 @@ would forget evidence operators must inspect; the operation transition is never
 delayed until after acknowledgement, because the runner would keep resending a
 failure the daemon had already acted on.
 
-Every new table follows the spec page: typed records with kind-scoped storage
-versions, append-only facts under triggers, events appended in the committing
-transaction, and the row locks the inventory names issued from that file.
+Every new table follows the spec page: kind-scoped storage versions on
+durable-command and outbox records, append-only facts under triggers, events
+appended in the committing transaction, and the row locks the inventory names
+issued from that file.
 
 ## Acceptance criteria
 

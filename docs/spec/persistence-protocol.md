@@ -219,9 +219,11 @@ A guarded transition that changes no durable state appends no event, so where
 the transition has a producer, state without its event, or an event without its
 state, is unrepresentable.
 
-The command-settled record authenticates its header without the session column,
-because that column is null for a receipt with no session and a null key member
-would disable the check.
+A claimed session-lifecycle command appends its command-settled receipt in the
+transaction that records its applied or rejected result. The command-settled
+record authenticates its header without the session column, because that column
+is null for a receipt with no session and a null key member would disable the
+check.
 
 A later runner fact adds a state and its columns to the one
 runner-state-transition record kind rather than a second event kind, so an
@@ -482,8 +484,10 @@ hide live descendants.
 
 Every result and message commit appends exactly one distinct recipient-scoped
 delegation wake in the same transaction, even when the recipient is already
-active. The wake is best effort after restart and never stands in for the
-client-visible update.
+active. A foreground wait registered after its child result committed appends
+another result wake keyed by the awaiting request in the wait transaction. The
+wake is best effort after restart and never stands in for the client-visible
+update.
 
 Both outbox header tables share one allocator and one delivery prefix, so their
 committed events form one gap-free global sequence. Extension is version-gated:
@@ -514,19 +518,24 @@ timestamp, stop stickiness, superseder, and actor. A tool-batch transition fails
 the dispatch unless its round, frontier, and attempt correlate: a proposed
 frontier is the round boundary, a projected frontier contains every result of
 the round, and a recovery attempt belongs to a request the named call produced.
+An input-accepted record fails the dispatch unless its accepted input, queued
+origin, and lifecycle row correlate and an applied submit command or a goal-turn
+row authored it.
 
 An applied submit-input that creates a turn origin appends an input-accepted
 event; pending steering appends nothing until terminal reclassification mints
-its successor turn and appends the correlated event. Every turn origin appends
-its resolved-settings event before its input-accepted event. Turn activation
+its successor turn and appends the correlated event. Every turn origin produced
+from an accepted input appends its resolved-settings event before its
+input-accepted event; a delegated-task origin appends neither. Turn activation
 appends the turn's activation event in the activating transaction. Binding an
 already-accepted turn to a goal generation appends nothing. Every durable goal
-event appends a goal-changed event in the transaction that stores it. A stop or
-supersede that makes a queued goal turn ineligible appends a retired
-turn-terminal event in the same transaction, and supersede appends that
-retirement before the replacement's input-accepted event. Adopting or releasing
-a session appends an ownership-changed event in the transaction that journals
-it.
+event appends a goal-changed event in the transaction that stores it. Every turn
+that reaches a terminal state appends its typed turn-terminal event in the
+terminalizing transaction. A stop or supersede that makes a queued goal turn
+ineligible appends a retired turn-terminal event in the same transaction, and
+supersede appends that retirement before the replacement's input-accepted event.
+Adopting or releasing a session appends an ownership-changed event in the
+transaction that journals it.
 
 The transaction that terminalizes a session's last live turn settles the
 session's pending closure at commit through a deferred constraint trigger, which
