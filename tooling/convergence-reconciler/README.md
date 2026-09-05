@@ -81,12 +81,10 @@ failed informational contexts do not re-enter through GitHub's aggregate state.
 A mismatched commit OID blocks convergence even when every returned check is
 successful.
 
-Check names ending with the case-insensitive suffix `(report only)` are
-non-gating. The case-insensitive names `codecov/project`, `codecov/patch`, and
-`Comment the coverage report` are also non-gating, matching the repository's
-declared informational coverage posture. Provider compatibility smoke
-aggregates remain gating. Non-gating results are still included in the computed
-state passed to operator commands.
+Only the tool-smoke contexts `Tool live smokes (report only)` and
+`Web search live smoke (report only)` are non-gating. Provider compatibility
+smoke aggregates remain gating. Non-gating results are still included in the
+computed state passed to operator commands.
 
 `CONFLICTING` and `UNKNOWN` mergeability both block convergence. Draft pull
 requests also remain unconverged.

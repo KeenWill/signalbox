@@ -51,6 +51,9 @@ expression, each with its own (weaker) gate. The provider smokes merge-gate the
 pull requests they apply to — each `required` aggregate is a binding check —
 while the tool-eval and tool-smoke jobs are report-only:
 
+The convergence reconciler exempts only the two tool-smoke contexts whose check
+names carry `(report only)`. Provider smoke aggregates remain gating.
+
 | Jobs                                                                                                           | Pool                             | Gate on proposed code                                                                                                                                                                                |
 | -------------------------------------------------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `anthropic-smoke.yml`, `claude-smoke.yml`, `codex-smoke.yml`, `openai-smoke.yml` — `gate`, `smoke`, `required` | `signalbox`                      | `smoke` skips fork pull requests (same-repo check only), so bot-authored same-repo pull requests still run here; `gate` checks out the head for path inspection without executing it                 |

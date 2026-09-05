@@ -1284,11 +1284,10 @@ The declarations and compact result objects are:
   A returned node id, head revision, or stack or inventory continuation is
   admitted by the same predicate its argument counterpart uses, so those
   identities and continuations can be passed back as arguments. Every returned
-  URL is one absolute credential-free HTTPS location. Typed construction rejects
-  aggregate convergence evidence whose overlapping bounded lists would exceed
-  the shared encoded-result limit. No result has more than 100 collection
-  members or more than 512 KiB of encoded JSON. Every bounded slog list reports
-  whether it is truncated and the matching continuation cursor.
+  URL is one absolute credential-free HTTPS location. No result has more than
+  100 collection members or more than 512 KiB of encoded JSON. Every bounded
+  slog list reports whether it is truncated and the matching continuation
+  cursor.
 
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses
