@@ -13,6 +13,55 @@ import domain_spine_digest as digest
 
 
 class DomainSpineDigestTests(unittest.TestCase):
+    def test_associated_type_is_delta_item_not_top_level_type(self) -> None:
+        baseline = "pub mod sample\npub trait sample::Source\n"
+        current = baseline + "pub type sample::Source::Output\n"
+        expected = """\
+sample
+  (root): types=0 traits=1 functions=0
+    added: associated type Source::Output
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
+    def test_inherent_implementation_bound_change_is_delta_identity(self) -> None:
+        shared = "pub mod sample\npub struct sample::Service<Handler>\n"
+        baseline = shared + (
+            "impl<Handler> sample::Service<Handler> where Handler: sample::OldBound\n"
+        )
+        current = shared + (
+            "impl<Handler> sample::Service<Handler> where Handler: sample::NewBound\n"
+        )
+        expected = """\
+sample
+  (root): types=1 traits=0 functions=0
+    added: implementation Service (inherent)
+    removed: implementation Service (inherent)
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
     def test_enum_variants_and_public_fields_are_delta_members_not_types(self) -> None:
         baseline = "pub mod sample\n"
         current = """\
