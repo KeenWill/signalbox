@@ -701,7 +701,7 @@ impl RerunFailedJobsResult {
     }
 }
 
-/// Closed typed result vocabulary for all sixteen code-host tools.
+/// Closed typed result vocabulary for all fourteen code-host tools.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CodeHostResult {
     /// Change-request summary.

@@ -582,11 +582,11 @@ impl ToolArgumentValidator for CodeHostArgumentValidator {
     }
 }
 
-/// All sixteen compiled code-host declarations and their matching executor.
+/// All fourteen compiled code-host declarations and their matching executor.
 ///
 /// Effect postures are explicit per declaration: summary, files, patch,
-/// checks, threads, job-log, stack, thread-inventory, and
-/// review-gate reads are `Auto`; comment, reply, resolve, and rerun mutations
+/// checks, threads, job-log, stack, and thread-inventory reads are `Auto`;
+/// comment, reply, resolve, and rerun mutations
 /// are `Confirm`. Every operation is `ExternalEffect` because even an
 /// authenticated read is visible to the remote code host.
 #[derive(Clone, Debug)]
@@ -679,7 +679,7 @@ impl fmt::Display for CodeHostToolsConstructionError {
 
 impl Error for CodeHostToolsConstructionError {}
 
-/// Credential-resolving executor for all sixteen code-host declarations.
+/// Credential-resolving executor for all fourteen code-host declarations.
 #[derive(Clone, Debug)]
 pub struct CodeHostExecutor<Credentials, Transport> {
     credentials: Credentials,
@@ -1067,7 +1067,7 @@ mod tests {
         );
     }
 
-    /// The sixteen declarations encode the read/mutation approval split and make
+    /// The fourteen declarations encode the read/mutation approval split and make
     /// every remote observation explicit as an external effect.
     #[test]
     fn code_host_definitions_carry_exact_policy() {

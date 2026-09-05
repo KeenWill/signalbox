@@ -453,20 +453,8 @@ counterpart, so it can be passed back as an argument. Every returned URL is one
 absolute credential-free HTTPS location. No code-host result has more than 100
 collection members or more than 512 KiB of encoded JSON. Every bounded
 review-log list reports whether it is truncated together with its continuation
-cursor, and a verdict never treats a partial evidence page as complete. The
-reviewer verdict is parsed from review bodies and issue comments merged in
-code-host timestamp order, and a usage-limit response is recognized separately
-as one exact canonical text that supersedes an earlier verdict until a later
-verdict arrives. Only the reviewer bot account supplies a verdict or a
-usage-limit response, and a verdict must carry a line whose whole content is the
-`Reviewed commit:` label followed by a 7-to-40-character hexadecimal revision,
-with only emphasis or backtick markers around them. The last such line in the
-latest activity that carries one is the verdict. A verdict whose revision does
-not prefix the current head is stale and never counts as current convergence
-evidence. The latest exact review request by an owner, member, or collaborator
-with no later reviewer response marks the review in flight and blocks
-convergence. The authenticated job-log endpoint is the sole redirect-shaped
-exchange: after one 302 the adapter validates the location, pins a wholly public
+cursor. The authenticated job-log endpoint is the sole redirect-shaped exchange:
+after one 302 the adapter validates the location, pins a wholly public
 destination set, and downloads credential-free. A read transport or server
 failure is an executor infrastructure failure, while a mutation transport loss,
 server failure, or malformed acknowledgement is commit-ambiguous.
