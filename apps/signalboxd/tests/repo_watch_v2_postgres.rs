@@ -173,12 +173,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         RuleAdmission::Replayed
     );
     let fingerprint_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM mod_repo_watch.rule_field_fingerprint
+        "SELECT count(*) FROM rule_field_fingerprint
           WHERE repository = $1 AND rule_id = $2",
     )
     .bind(repository.as_str())
     .bind(rule.id().as_str())
-    .fetch_one(&core_pool)
+    .fetch_one(&module_pool)
     .await?;
     assert_eq!(
         usize::try_from(fingerprint_count)?,
@@ -197,12 +197,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?
     );
     let retained_revisions: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM mod_repo_watch.rule_revision
+        "SELECT count(*) FROM rule_revision
           WHERE repository = $1 AND rule_id = $2",
     )
     .bind(other_repository.as_str())
     .bind(rule.id().as_str())
-    .fetch_one(&core_pool)
+    .fetch_one(&module_pool)
     .await?;
     assert_eq!(retained_revisions, 1);
 
@@ -277,12 +277,11 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         FrontierEventAdmission::Stale
     );
-    let payload: Vec<u8> = sqlx::query_scalar(
-        "SELECT normalized_payload FROM mod_repo_watch.gh_event WHERE event_id = $1",
-    )
-    .bind(event.id().into_uuid())
-    .fetch_one(&core_pool)
-    .await?;
+    let payload: Vec<u8> =
+        sqlx::query_scalar("SELECT normalized_payload FROM gh_event WHERE event_id = $1")
+            .bind(event.id().into_uuid())
+            .fetch_one(&module_pool)
+            .await?;
     let payload = String::from_utf8(payload)?;
     assert!(payload.contains("branch_workflow_run_completed"));
     assert!(payload.contains("\"workflow\":\"ci\""));
@@ -323,18 +322,18 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         FrontierEventAdmission::ConflictingReuse
     );
     let preceding_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM mod_repo_watch.gh_event WHERE event_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE event_id = $1")
             .bind(preceding_event.id().into_uuid())
-            .fetch_one(&core_pool)
+            .fetch_one(&module_pool)
             .await?;
     assert_eq!(preceding_count, 0);
     let frontier_sequence: Decimal = sqlx::query_scalar(
-        "SELECT sequence FROM mod_repo_watch.frontier
+        "SELECT sequence FROM frontier
           WHERE repository = $1 AND stream_identity = $2",
     )
     .bind(repository.as_str())
     .bind(stream.as_slice())
-    .fetch_one(&core_pool)
+    .fetch_one(&module_pool)
     .await?;
     assert_eq!(frontier_sequence, Decimal::from(2_u64));
     let stale_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
