@@ -4166,6 +4166,7 @@ dependencies = [
  "divan",
  "expect-test",
  "gungraun",
+ "hex",
  "regex",
  "rpds",
  "serde",
@@ -4506,6 +4507,7 @@ dependencies = [
 name = "signalbox-runner-wire"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "sha2 0.11.0",
