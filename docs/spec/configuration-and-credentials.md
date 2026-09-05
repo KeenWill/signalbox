@@ -55,21 +55,30 @@ only the runner resolves.
 The model catalog declares what the four adapters can serve. Each `[[models]]`
 entry binds an immutable direct-selection key to one exact provider target, a
 model family, a provider-native spelling, token ceilings, and optional flat USD
-rates; aliases name a selection. `provider_model` is nonempty and unpadded, and
-one spelling routes to exactly one adapter across the document.
+rates; aliases name a selection. A model whose `fast_mode` is `alternate_target`
+names a `fast_target_id` that resolves to a non-client-selectable
+`[[serving_targets]]` entry carrying its own target, model family, provider
+spelling, and token ceilings. `provider_model` is nonempty and unpadded, and one
+spelling routes to exactly one adapter across the document.
 `context_window_tokens` is the usable ceiling after any provider or adapter
 reservation, not the raw advertised window, and is not smaller than
-`max_output_tokens`. The daemon provides exactly the `anthropic`, `openai`,
-`claude_cli`, and `codex_cli` adapters; no adapter pins a profile name, and a
-pool may hold several profiles for one adapter. The required `[numeric_bounds]`
-table holds the central numeric-bound inventory and the loader supplies no
-default for any member, while other tables carry their own configured limits.
-`codex_cli_version_probe_bound` bounds a credential-free startup probe of the
-configured Codex executable, and a missing, malformed, zero, unsuccessful, or
-mismatched probe fails configuration before the socket opens. One valid document
-yields correlated immutable in-memory catalogs: the domain `ModelTargetCatalog`
-for execution-time target resolution and the `RuntimeModelCatalog` for the
-provider bridge.
+`max_output_tokens`. `[model_settings]` is the deployment global default and
+each `[[model_settings_profiles]]` entry is a named profile a model's optional
+`settings_profile` selects; a selected profile outranks the global default, and
+both sit below the session and per-call layers of
+[model session settings](model-session-settings.md). The daemon provides exactly
+the `anthropic`, `openai`, `claude_cli`, and `codex_cli` adapters; no adapter
+pins a profile name, and a pool may hold several profiles for one adapter. An
+adapter mapping that names `claude_cli` requires a `[claude_cli]` table carrying
+that adapter's `executable`, `mcp_bridge_executable`, and `working_directory`.
+The required `[numeric_bounds]` table holds the central numeric-bound inventory
+and the loader supplies no default for any member, while other tables carry
+their own configured limits. `codex_cli_version_probe_bound` bounds a
+credential-free startup probe of the configured Codex executable, and a missing,
+malformed, zero, unsuccessful, or mismatched probe fails configuration before
+the socket opens. One valid document yields correlated immutable in-memory
+catalogs: the domain `ModelTargetCatalog` for execution-time target resolution
+and the `RuntimeModelCatalog` for the provider bridge.
 
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
 binds one configured workspace root. Each session's workspace root is derived
@@ -87,7 +96,10 @@ The optional `[tool_approval_postures]` table decides, per exact composed tool
 name, whether a request is approved by policy, judged by the approval judge, or
 parked for a person. The optional `[approval_judge]` table decides which
 configured direct selection judges delegated requests, and when it is absent the
-judge reuses the request-producing call's selection.
+judge reuses the request-producing call's selection. The optional
+`[workspace_instructions]` table is either absent or present at version one, and
+its bounded `registered_roots` array names the instruction directories
+registered outside a session's workspace.
 
 A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable

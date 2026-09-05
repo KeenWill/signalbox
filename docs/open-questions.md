@@ -320,11 +320,12 @@ per-turn provenance. The following extensions remain undecided:
   tie-break a later contract must define before `least_used` is admitted, and
   whether a free probe exists that does not consume the quota it reports. Blocks
   capacity-aware selection, not availability failover. (S22)
-- **Zero-cost liveness probes.** Quarantine semantics are decided and owned by
-  [credential pools and selection](spec/configuration-and-credentials.md#boundary-contracts):
-  durable, profile-scoped, cleared by an operator command or by a probe that
-  calls no model. What remains open is whether any adapter can offer such a
-  probe. Absent one, an operator command is the only clearing path. Blocks
+- **Zero-cost liveness probes.** Operator clear and probe recovery belong to the
+  planned credential-exclusion lifecycle in
+  [the configuration and credentials design](design/configuration-and-credentials.md),
+  and no present command or adapter probe clears a quarantine. What remains open
+  is whether any adapter can offer a probe that calls no model. Absent one, an
+  operator command is the only clearing path that design admits. Blocks
   automatic recovery from a rejected credential, not recovery itself. (S22)
 - **Access-token-only Codex CLI conformance evidence.** The committed `oauth`
   delivery contract is owned by
