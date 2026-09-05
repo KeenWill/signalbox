@@ -31,10 +31,14 @@ acknowledged, so a lost runner leaves no release outstanding.
 
 Runner operation-failure evidence is stored in the transaction that resolves the
 correlated operation as refused, and the daemon acknowledges the failure to the
-runner only after that commit. Equal retransmission rereads the equal record;
+runner only after that commit. The record is append-only and keyed by the
+refused operation's correlation identity, so success and refusal are exclusive
+after the operation head retires. Equal retransmission rereads the equal record;
 unequal reuse is a correlation error.
 
-Imported-create command records at storage version 4 carry runner placement.
+Imported-create command records at storage version 4 carry the complete
+placement request, and replay compares it with the created session's
+revision-one placement.
 
 The instruction admitted set is one durable table with one repository operation
 that writes it. Its row locks join `crates/persistence/src/lock_inventory.rs`,
@@ -49,15 +53,16 @@ rows with locks recorded in the same inventory. A transaction takes the
 action-head row of every member of the policy it may select after the session's
 scheduler row and the admitted-set head, in profile-reference byte order, FOR
 SHARE for a member it only reads and FOR UPDATE for a member whose exclusion
-state it writes, and takes a capacity or cursor row only after every action
-head. A pool-selected call pins an interned immutable pool-policy identity, so a
-fresh availability chain resolves the policy the call was authorized under
-rather than the current document. A chain-exclusion row holds a separately
-clearable state beside its insert-only turn-local fact. Exhaustion evidence
-carries contiguous per-member rows in policy order beside its failure header,
-each row carrying its closed exclusion kind and optional reset. The machine they
-serve is owned by [credential-availability](../spec/credential-availability.md),
-and its design fixes their transitions.
+state it writes, and takes a capacity or cursor row FOR UPDATE only after every
+action head. A pool-selected call pins an interned immutable pool-policy
+identity, so a fresh availability chain resolves the policy the call was
+authorized under rather than the current document. A chain-exclusion row holds a
+separately clearable state beside its insert-only turn-local fact. Exhaustion
+evidence carries contiguous per-member rows in policy order beside its failure
+header, each row carrying its closed exclusion kind and optional reset. The
+machine they serve is owned by
+[credential-availability](../spec/credential-availability.md), and its design
+fixes their transitions.
 
 A session-state-changed event is appended, through the outbox append, in the
 transaction that commits a nonterminal session state change; the transition to

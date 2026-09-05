@@ -438,9 +438,11 @@ that predates the advance rejects the record as unsupported.
 
 Dispatch locks the delivery singleton FOR UPDATE, reads exactly the next
 sequence and its typed record, and advances the singleton only when the
-synchronous consumer accepts, in the same transaction. A consumer retry or exit
-before the commit request leaves the prefix unchanged for redelivery, and a lost
-commit response is resolved by the next locked cursor read.
+synchronous consumer accepts, in the same transaction. An absent header for a
+sequence the allocator has already allocated fails the dispatch instead of
+reporting an idle queue. A consumer retry or exit before the commit request
+leaves the prefix unchanged for redelivery, and a lost commit response is
+resolved by the next locked cursor read.
 
 Dispatch validates each record against durable state: an activation against the
 turn's attempt, a call transition against monotonic call state, and a terminal
