@@ -1111,6 +1111,88 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
+    def test_persisted_review_can_authenticate_an_exempt_head_delta(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        inventory = ["CheckRun:required build"]
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": "reviewed-head",
+                "authenticated_review_id": "review-a",
+                "authenticated_review_body": "description",
+                "authenticated_review_check_inventory": inventory,
+                "check_inventory": inventory,
+            },
+            "head_oid": "advanced-head",
+            "body": "description",
+            "authenticated_quiet_review_oids": [],
+            "authenticated_review_ids": {},
+            "observed_codex_reviews": {},
+            "live_codex_review_oids": {"review-a": "reviewed-head"},
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required build",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+            "check_rollup_state": "SUCCESS",
+            "quiet_review_head_oids": [],
+        }
+
+        client._restore_persisted_review_evidence([pull_request])
+
+        self.assertEqual(
+            pull_request["authenticated_quiet_review_oids"], ["reviewed-head"]
+        )
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+
+    def test_check_rerun_keeps_live_review_in_wave_census(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        head = "a" * 40
+        pull_request = {
+            "head_oid": head,
+            "body_last_edited_at": None,
+            "check_rollup_state": "SUCCESS",
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required build",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-08-16T10:03:00Z",
+                }
+            ],
+            "review_threads": [],
+            "_review_comments": [
+                {
+                    "authorAssociation": "OWNER",
+                    "body": f"@codex review\nExact head {head}",
+                    "createdAt": "2026-08-16T10:00:00Z",
+                }
+            ],
+            "_reviews": [
+                {
+                    "id": "review-a",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "state": "COMMENTED",
+                    "body": "",
+                    "submittedAt": "2026-08-16T10:01:00Z",
+                    "commit": {"oid": head},
+                    "comments": {"totalCount": 0},
+                }
+            ],
+            "_thumbs_up_reactions": [],
+        }
+
+        client._finalize_review_evidence([pull_request])
+
+        self.assertEqual(
+            [review["id"] for review in pull_request["_codex_reviews"]],
+            ["review-a"],
+        )
+        self.assertEqual(pull_request["observed_codex_reviews"], {})
+
     def test_persisted_review_not_restored_when_no_longer_live(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         pull_request = {

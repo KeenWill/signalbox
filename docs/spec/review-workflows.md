@@ -242,9 +242,6 @@ The orchestration loaders derive the current stage only from durable records;
 missing ancestry, an unknown closed value, a noncanonical count, or
 contradictory evidence is corruption and never an inferred result.
 
-The reviewer-verdict and usage-limit evidence rules belong to
-[tool loop](tool-loop.md).
-
 ## Planned
 
 - Concrete provider, model, and workspace adapters for the orchestration runner

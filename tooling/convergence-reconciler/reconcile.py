@@ -516,6 +516,7 @@ query($id: ID!, $after: String!) {
             quiet_oids: list[str] = []
             observed_codex_reviews: dict[str, str] = {}
             live_codex_review_oids: dict[str, str] = {}
+            live_codex_reviews: list[dict[str, Any]] = []
             authenticated_review_ids: dict[str, str] = {}
             for review in reviews:
                 commit = review.get("commit")
@@ -552,6 +553,8 @@ query($id: ID!, $after: String!) {
                     is_codex_reviewer_login(author_login(review))
                     and isinstance(review_id, str)
                 )
+                if is_live_codex_review:
+                    live_codex_reviews.append(review)
                 if is_live_codex_review and request_times:
                     observed_codex_reviews[review_id] = reviewed_oid
                 review_threads = [
@@ -641,12 +644,7 @@ query($id: ID!, $after: String!) {
             pull_request["authenticated_review_ids"] = authenticated_review_ids
             pull_request["observed_codex_reviews"] = observed_codex_reviews
             pull_request["live_codex_review_oids"] = live_codex_review_oids
-            pull_request["_codex_reviews"] = [
-                review
-                for review in reviews
-                if isinstance(review.get("id"), str)
-                and review["id"] in observed_codex_reviews
-            ]
+            pull_request["_codex_reviews"] = live_codex_reviews
             pull_request["quiet_review_head_oids"] = [
                 oid for oid in quiet_oids if oid == pull_request["head_oid"]
             ]
@@ -691,7 +689,6 @@ query($id: ID!, $after: String!) {
                 isinstance(persisted_review_id, str)
                 and record.get("authenticated_review_body")
                 == pull_request["body"]
-                and persisted_head == pull_request["head_oid"]
                 and live_codex_review_oids.get(persisted_review_id)
                 == persisted_head
                 and checks_currently_green
