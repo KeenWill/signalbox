@@ -3,7 +3,7 @@
 The web egress boundary reduces provider bytes to bounded evidence and keeps
 every outbound web request under operator policy and approval.
 
-## Map
+## Overview
 
 The daemon composes two web tools, `web_search` and `web_fetch`, in
 `crates/tools-web`. Each invocation sends at most one request and returns the
@@ -26,7 +26,7 @@ stated in [tool-loop.md](tool-loop.md). Transport and admission constrain where
 bytes go, approval constrains whether they go, and structure constrains what
 comes back.
 
-## Decisions
+## Design decisions
 
 Structural construction is the primary control on `web_search` output, and the
 credential scrubber is defense in depth after it. Why: parsing treats provider
@@ -51,7 +51,7 @@ A demonstrated violation of the structural output boundary or a named bound is
 an implementation defect. A finding only about a residual named above, or about
 provider-content semantics, is accepted and needs no code change.
 
-## Contracts
+## Boundary contracts
 
 A `web_fetch` destination resolves to between one and 32 public addresses, and
 the transport pins those addresses into the client so connection setup cannot
@@ -60,6 +60,6 @@ request; proxies, redirects, retries, and idle connection reuse are disabled,
 TLS runs on rustls with a 1.2 floor, and one 15-second timeout bounds resolution
 and the exchange. `crates/egress-transport` builds this client.
 
-## Not built
+## Planned
 
 None.
