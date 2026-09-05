@@ -224,29 +224,33 @@ compaction call that window made durable.
 
 A quiescent candidate is an active turn with an accepted-input origin in the
 running phase, with no tool round, approval, or recovery attempt, and no live
-model call or tool attempt. A turn is due only once its evidence has been
-observed unchanged for at least the bound governing its watchdog; the configured
-staleness bound governs only the quiescent watchdog, and the slot-held watchdog
-uses a separate fixed ceiling. Every turn is observed on every scan, and a turn
-missing from one scan has left the quiescent shape and is forgotten rather than
-credited on return. A rotation that cannot be drained ends the scan with no
-decision and the ledger unchanged. A scan whose reads outlast the interval
-delays the next scan rather than overlapping it. Terminalizations run one at a
-time and the next scan waits for the last, so a scan ends at most the configured
-window of turns and leaves the remainder. No scan interval leaves the liveness
-task idle until shutdown; no staleness bound leaves automatic reconciliation
-active without stale-turn terminalization. A due quiescent turn ends through the
-same committed failed-turn transition startup recovery commits, with the
-candidate predicate re-decided under the scheduler lock. Terminalization emits a
-key-bearing operator log line with the cause code
-`turn_liveness_watchdog_stale`, the session, the turn, and the bound in force;
-that code is reserved for a committed terminalization, a candidate left alone
-carries `turn_liveness_candidate_superseded`, and an unacknowledged commit
-carries `turn_liveness_terminalization_ambiguous`. A due slot-held turn is
-instead handed, with its evidence revalidated under the scheduler lock, to the
-startup classification of its current durable shape and takes that
-classification's outcome; a prepared call stays resumable and in-flight work
-ends ambiguous and parks.
+model call or tool attempt. Neither the quiescent nor the slot-held inventory
+considers a turn whose session is parked. A turn is due only once its evidence
+has been observed unchanged for at least the bound governing its watchdog; the
+configured staleness bound governs only the quiescent watchdog, and the
+slot-held watchdog uses a separate fixed ceiling. Every turn is observed on
+every scan, and a turn missing from one scan has left the quiescent shape and is
+forgotten rather than credited on return. A rotation that cannot be drained ends
+the scan with no decision and the ledger unchanged. A scan whose reads outlast
+the interval delays the next scan rather than overlapping it. Terminalizations
+run one at a time and the next scan waits for the last, so a scan ends at most
+the configured window of turns and leaves the remainder. A lap fixes its
+membership from the turns due when it opens, and successive scans consume that
+membership until it is exhausted, so every member still due is attempted before
+the next lap begins. No scan interval leaves the liveness task idle until
+shutdown; no staleness bound leaves automatic reconciliation active without
+stale-turn terminalization. A due quiescent turn ends through the same committed
+failed-turn transition startup recovery commits, with the candidate predicate
+re-decided under the scheduler lock. Terminalization emits a key-bearing
+operator log line with the cause code `turn_liveness_watchdog_stale`, the
+session, the turn, and the bound in force; that code is reserved for a committed
+terminalization, a candidate left alone carries
+`turn_liveness_candidate_superseded`, and an unacknowledged commit carries
+`turn_liveness_terminalization_ambiguous`. A due slot-held turn is instead
+handed, with its evidence revalidated under the scheduler lock, to the startup
+classification of its current durable shape and takes that classification's
+outcome; a prepared call stays resumable and in-flight work ends ambiguous and
+parks.
 
 If a daemon disappears while a reconciliation attempt is in progress, its
 recorded deadline lets the next daemon classify it as an infrastructure failure.
@@ -271,7 +275,8 @@ existed, so startup validates its frontier and leaves call, attempt, and turn
 for the scheduler to retry. A turn holding an unstopped in-flight call ends the
 call ambiguous and the attempt lost, and stays active in the model-call recovery
 wait with no failure entry or frontier; the transaction appends the call's
-terminal transition event and no turn event. A stop-requested attempt with a
+terminal transition event and no turn event, and the scan reports the session as
+awaiting a recovery decision. A stop-requested attempt with a
 cancellation-requested call ends both and terminalizes reconciliation-required
 with that call as its exact ambiguity set. A turn already parked in the
 model-call recovery wait is not reclassified; the transaction rolls back and
