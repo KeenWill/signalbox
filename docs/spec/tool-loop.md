@@ -317,7 +317,8 @@ Physical ambiguity remains a turn-level recovery wait and never becomes an
 ordinary error result. An interrupt against a tool recovery wait does not
 reinterpret or erase the ambiguous attempt. Without an interrupt, the daemon
 claims the same ambiguity through the automatic-reconciliation ledger, which
-[repo-watch](repo-watch.md) owns, and terminalizes through the same boundary.
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) owns, and
+terminalizes through the same boundary.
 
 A result larger than the bound is replaced by the typed `ResultTooLarge` error,
 and oversized bytes are never persisted. The result-text and error-detail bounds
@@ -399,10 +400,10 @@ web-fetch catalog policy in
 dispatch, and the transport that carries an admitted request is stated in
 [web-egress-threat-model](web-egress-threat-model.md). Failure before request
 dispatch returns a fixed sanitized known failure; timeout, transport, or body
-loss after dispatch begins is commit-ambiguous. For both web tools the shipped
-human posture supersedes the declaration's confirm default and the session
-blanket, so a request parks before it reaches its transport or credential
-boundary.
+loss after dispatch begins is commit-ambiguous. Both web tools declare
+`ExternalEffect`, and for both the shipped human posture supersedes the
+declaration's confirm default and the session blanket, so a request parks before
+it reaches its transport or credential boundary.
 
 The blob tools authorize only digests present in attachment stubs in the
 rendered frontier for the issuing turn. A visibility or budget closure resolves
@@ -428,7 +429,10 @@ than 512 KiB of encoded JSON. Every bounded review-log list reports whether it
 is truncated together with its continuation cursor, and a verdict never treats a
 partial evidence page as complete. The reviewer verdict is parsed from review
 bodies and issue comments merged in code-host timestamp order, and a usage-limit
-response is recognized separately as one exact canonical text. The authenticated
+response is recognized separately as one exact canonical text. Only the reviewer
+bot account supplies a verdict, and it must carry a line whose whole content is
+the `Reviewed commit:` label followed by a 7-to-40-character hexadecimal
+revision, with only emphasis or backtick markers around them. The authenticated
 job-log endpoint is the sole redirect-shaped exchange: after one 302 the adapter
 validates the location, pins a wholly public destination set, and downloads
 credential-free. A read transport or server failure is an executor
