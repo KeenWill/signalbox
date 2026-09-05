@@ -3,7 +3,7 @@
 The file and media layer gives a model typed, bounded views of attached blob
 bytes; every parser runs in an isolated worker process outside the daemon.
 
-## Map
+## Overview
 
 The layer sits above [blob storage](blob-storage.md), which owns blob identity,
 catalog placement, replica verification, raw reads, attachment visibility, and
@@ -44,7 +44,7 @@ the cursor a truncated result returned. `signalbox-file-media-provider-runtime`
 supplies the registry-backed service behind both and authorizes each request
 through an injected `FileUseResolver`.
 
-## Decisions
+## Design decisions
 
 View names and their meanings are provider-owned; the core fixes only the closed
 output kind. Why: adding a format adds an adapter and a declaration, not a
@@ -97,7 +97,7 @@ A reader revision is immutable. An earlier durable tool result keeps what the
 model saw while a later request may use a newer revision. Why: a durable result
 is never reclassified.
 
-## Contracts
+## Boundary contracts
 
 Blob identity, catalog records, replica verification, and byte relay follow the
 contract on [blob storage](blob-storage.md). Both file tools are tool executors
@@ -125,7 +125,7 @@ this binds every adapter.
 A recognized malformed file receives no permissive parser recovery unless that
 recovery is registered as part of the reader's validation.
 
-## Not built
+## Planned
 
 - Daemon composition of `file_inspect` and `file_read` behind a
   `FileUseResolver` that reuses the rendered-frontier visibility proof; no

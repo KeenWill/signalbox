@@ -14,7 +14,7 @@ that a capable model adapter can present. A classification cache and OCR or
 transcription are outside this design; both remain undecided in
 [open questions](../open-questions.md).
 
-## Shape
+## Design
 
 The resolver takes the request's digest and optional visible-part selector and
 resolves exactly one visible use. Authorization reuses the `blob_read`
@@ -53,7 +53,7 @@ referenced bytes instead of running a reader again, and rejects an unsupported
 presentation before send authorization. Visibility of a reference derives from
 the rendered durable result, not from catalog presence.
 
-## Constraints on present code
+## Compatibility constraints
 
 Registry construction keeps rejecting image, audio, and general-file views, and
 `FileReadResult` keeps only its text and structured arms, until one producer
@@ -66,7 +66,7 @@ operator, and a derived read publishes a blob. The service keeps re-inspecting
 on every read. The rich arm changes no adapter and adds no MIME branch to the
 executor, bridge, or daemon.
 
-## Acceptance
+## Acceptance criteria
 
 - `file_inspect` and `file_read` appear in the daemon catalog only when a
   resolver backed by the rendered-frontier allow-set is composed, and both are
