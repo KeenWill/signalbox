@@ -8798,6 +8798,7 @@ pub enum ModelCallCapabilityPreparation<Capability> {
 pub enum ModelCallInputTokenCount {
     Counted(u64),
     Cancelled,
+    AttachmentUnavailable,
     Unavailable,
 }
 

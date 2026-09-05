@@ -1412,6 +1412,9 @@ pub enum ModelCallInputTokenCount {
     Counted(u64),
     /// Authority or caller cancellation won before a count completed.
     Cancelled,
+    /// Attachment authority is temporarily unavailable, so the queued turn
+    /// must be retried before activation rather than sent without a count.
+    AttachmentUnavailable,
     /// No trustworthy provider-native estimate is available.
     Unavailable,
 }
