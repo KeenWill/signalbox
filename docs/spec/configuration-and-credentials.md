@@ -75,14 +75,16 @@ the `anthropic`, `openai`, `claude_cli`, and `codex_cli` adapters; no adapter
 pins a profile name, and a pool may hold several profiles for one adapter. An
 adapter mapping that names `claude_cli` requires a `[claude_cli]` table carrying
 that adapter's `executable`, `mcp_bridge_executable`, and `working_directory`.
-The required `[numeric_bounds]` table holds the central numeric-bound inventory
-and the loader supplies no default for any member, while other tables carry
-their own configured limits. `codex_cli_version_probe_bound` bounds a
-credential-free startup probe of the configured Codex executable, and a missing,
-malformed, zero, unsuccessful, or mismatched probe fails configuration before
-the socket opens. One valid document yields correlated immutable in-memory
-catalogs: the domain `ModelTargetCatalog` for execution-time target resolution
-and the `RuntimeModelCatalog` for the provider bridge.
+The optional `model_context_window_overrides` member of `[codex_cli]` maps exact
+provider-model names to positive token counts passed to the Codex process. The
+required `[numeric_bounds]` table holds the central numeric-bound inventory and
+the loader supplies no default for any member, while other tables carry their
+own configured limits. `codex_cli_version_probe_bound` bounds a credential-free
+startup probe of the configured Codex executable, and a missing, malformed,
+zero, unsuccessful, or mismatched probe fails configuration before the socket
+opens. One valid document yields correlated immutable in-memory catalogs: the
+domain `ModelTargetCatalog` for execution-time target resolution and the
+`RuntimeModelCatalog` for the provider bridge.
 
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
 binds one configured workspace root. Each session's workspace root is derived
