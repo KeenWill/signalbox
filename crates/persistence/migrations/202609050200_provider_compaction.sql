@@ -3,6 +3,7 @@
 DO $$
 DECLARE
     definition text;
+    revised_definition text;
 BEGIN
     SELECT pg_get_constraintdef(oid) INTO definition
       FROM pg_constraint
@@ -27,5 +28,73 @@ BEGIN
     EXECUTE 'ALTER TABLE semantic_transcript_entry DROP CONSTRAINT semantic_transcript_entry_response_part_ordinal_shape';
     definition := replace(definition, '''assistant_text''::text, ''assistant_tool_use''::text', '''assistant_text''::text, ''provider_compaction''::text, ''assistant_tool_use''::text');
     EXECUTE 'ALTER TABLE semantic_transcript_entry ADD CONSTRAINT semantic_transcript_entry_response_part_ordinal_shape ' || definition;
+
+    SELECT pg_get_functiondef(
+        'assert_turn_lifecycle_final_state_without_steering(uuid)'::regprocedure
+    ) INTO definition;
+    revised_definition := replace(
+        definition,
+        'payload_kind = ''assistant_text''',
+        'payload_kind IN (''assistant_text'', ''provider_compaction'')'
+    );
+    IF revised_definition = definition THEN
+        RAISE EXCEPTION 'turn final-state definition has no assistant response predicate';
+    END IF;
+    EXECUTE revised_definition;
+
+    SELECT pg_get_functiondef(
+        'assert_steering_turn_terminal_final_state(uuid)'::regprocedure
+    ) INTO definition;
+    revised_definition := replace(
+        definition,
+        'payload_kind = ''assistant_text''',
+        'payload_kind IN (''assistant_text'', ''provider_compaction'')'
+    );
+    IF revised_definition = definition THEN
+        RAISE EXCEPTION 'steering final-state definition has no assistant response predicate';
+    END IF;
+    EXECUTE revised_definition;
+
+    SELECT pg_get_functiondef(
+        'assert_tool_round_final_state(uuid)'::regprocedure
+    ) INTO definition;
+    revised_definition := replace(
+        definition,
+        'payload_kind IN (''assistant_text'', ''assistant_tool_use'')',
+        'payload_kind IN (''assistant_text'', ''provider_compaction'', ''assistant_tool_use'')'
+    );
+    IF revised_definition = definition THEN
+        RAISE EXCEPTION 'tool-round definition has no assistant response predicate';
+    END IF;
+    EXECUTE revised_definition;
+
+    SELECT pg_get_functiondef(
+        'require_semantic_entry_turn_state()'::regprocedure
+    ) INTO definition;
+    revised_definition := replace(
+        definition,
+        $needle$    CASE entry.payload_kind$needle$,
+        $replacement$    IF entry.payload_kind = 'provider_compaction' THEN
+        SELECT turn_id
+          INTO checked_turn_id
+          FROM model_call
+         WHERE model_call_id = entry.producing_model_call_id
+           AND state_kind = 'terminal'
+           AND terminal_disposition_kind = 'completed';
+    END IF;
+
+    CASE entry.payload_kind$replacement$
+    );
+    revised_definition := replace(
+        revised_definition,
+        $needle$        WHEN 'assistant_text' THEN$needle$,
+        $replacement$        WHEN 'provider_compaction' THEN
+            NULL;
+        WHEN 'assistant_text' THEN$replacement$
+    );
+    IF revised_definition = definition THEN
+        RAISE EXCEPTION 'semantic-entry authority definition has no payload dispatch';
+    END IF;
+    EXECUTE revised_definition;
 END
 $$;
