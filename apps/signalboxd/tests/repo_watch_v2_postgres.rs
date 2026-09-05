@@ -88,6 +88,23 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let default_head =
         CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))?;
     let observed_at = OffsetDateTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let body = br#"{"action":"opened"}"#;
+    let delivery = || WebhookDelivery {
+        repository: &repository,
+        hook_id: 9,
+        delivery_id: Uuid::from_u128(10),
+        event: "pull_request",
+        action: Some("opened"),
+        body_digest: [11; 32],
+        body,
+        received_at: observed_at,
+        expires_at: observed_at + Duration::from_secs(60),
+    };
+    assert_eq!(
+        store.admit_webhook(delivery()).await?,
+        WebhookAdmission::Inserted
+    );
+
     store
         .upsert_repository(RepositoryState {
             repository: &repository,
@@ -174,24 +191,11 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         EventAdmission::Replayed
     );
 
-    let body = br#"{"action":"opened"}"#;
-    let delivery = || WebhookDelivery {
-        repository: &repository,
-        hook_id: 9,
-        delivery_id: Uuid::from_u128(10),
-        event: "pull_request",
-        action: Some("opened"),
-        body_digest: [11; 32],
-        body,
-        received_at: observed_at,
-        expires_at: observed_at + Duration::from_secs(60),
-    };
+    let mut replay = delivery();
+    replay.received_at += Duration::from_secs(1);
+    replay.expires_at += Duration::from_secs(1);
     assert_eq!(
-        store.admit_webhook(delivery()).await?,
-        WebhookAdmission::Inserted
-    );
-    assert_eq!(
-        store.admit_webhook(delivery()).await?,
+        store.admit_webhook(replay).await?,
         WebhookAdmission::Replayed
     );
 
@@ -211,6 +215,9 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             )
             .await?
     );
+    assert!(store.advance_core_event(0, 4).await?);
+    assert!(store.advance_core_event(4, 9).await?);
+    assert!(!store.advance_core_event(4, 10).await?);
     assert!(
         !store
             .settle_webhook(

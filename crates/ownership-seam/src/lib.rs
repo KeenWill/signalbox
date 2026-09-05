@@ -7,9 +7,10 @@
 use std::future::Future;
 
 pub use signalbox_application::{
-    RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
-    RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventOccurrenceV1, derive_repo_watch_events,
+    CreateSessionOutcome, RepoWatchEventContentIdentityV1,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierError,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1, SubmitInputOutcome,
+    derive_repo_watch_events,
 };
 pub use signalbox_domain::{
     BranchName, CheckConclusion, CommitSha, CreateSession, DurableCommandId, GoalUserAction,
@@ -32,6 +33,10 @@ pub use signalbox_persistence::outbox::{
 };
 use signalbox_persistence::outbox::{
     DispatchedOutboxEvent, DispatchedOutboxEventKind, OutboxConsumer, OutboxConsumerReader,
+};
+pub use signalbox_persistence::{
+    goal::GoalCommandHandlingOutcome,
+    session_lifecycle_command::SessionLifecycleCommandHandlingOutcome,
 };
 use sqlx::PgPool;
 pub use sqlx::types::time::OffsetDateTime;
@@ -92,7 +97,8 @@ impl LifecycleEvent {
         self.recorded_at
     }
 
-    /// Returns the event's session, absent only for a rejected creation receipt.
+    /// Returns the event's session, absent for a rejected creation or a
+    /// lifecycle command that names an unknown session.
     pub const fn session(&self) -> Option<SessionId> {
         self.session
     }
@@ -204,18 +210,29 @@ pub struct SessionCommand {
 }
 
 impl SessionCommand {
-    /// Admits an existing typed create-session command.
-    pub const fn create_session(command: CreateSession) -> Self {
-        Self {
-            payload: SessionCommandPayload::CreateSession(command),
+    /// Admits a repository-watch-dispatched create-session command.
+    pub fn create_session(command: CreateSession) -> Result<Self, CommandOutsideSeam> {
+        if !matches!(
+            command.provenance().cause(),
+            signalbox_domain::SessionCreationCause::ModuleDispatched {
+                dispatch: signalbox_domain::ModuleDispatch::RepositoryWatch { .. }
+            }
+        ) {
+            return Err(CommandOutsideSeam);
         }
+        Ok(Self {
+            payload: SessionCommandPayload::CreateSession(command),
+        })
     }
 
     /// Admits the ordinary typed input-submission command.
-    pub const fn submit_input(command: SubmitInput) -> Self {
-        Self {
-            payload: SessionCommandPayload::SubmitInput(command),
+    pub fn submit_input(command: SubmitInput) -> Result<Self, CommandOutsideSeam> {
+        if command.actor() != signalbox_domain::Actor::User {
+            return Err(CommandOutsideSeam);
         }
+        Ok(Self {
+            payload: SessionCommandPayload::SubmitInput(command),
+        })
     }
 
     /// Admits only the goal operations named by the seam.
@@ -232,12 +249,19 @@ impl SessionCommand {
     pub fn lifecycle(command: SessionLifecycleCommand) -> Result<Self, CommandOutsideSeam> {
         match command.operation() {
             SessionLifecycleOperation::ReleaseStart
-            | SessionLifecycleOperation::Stop { .. }
+            | SessionLifecycleOperation::Stop {
+                sticky: signalbox_domain::StopStickiness::Sticky,
+                ..
+            }
             | SessionLifecycleOperation::Adopt { .. }
             | SessionLifecycleOperation::Release => Ok(Self {
                 payload: SessionCommandPayload::Lifecycle(command),
             }),
             SessionLifecycleOperation::Supersede { .. }
+            | SessionLifecycleOperation::Stop {
+                sticky: signalbox_domain::StopStickiness::Redispatchable,
+                ..
+            }
             | SessionLifecycleOperation::Abandon
             | SessionLifecycleOperation::CloseFailed { .. }
             | SessionLifecycleOperation::Resume => Err(CommandOutsideSeam),
@@ -248,6 +272,19 @@ impl SessionCommand {
     pub fn into_payload(self) -> SessionCommandPayload {
         self.payload
     }
+}
+
+/// Exact recorded result returned by the existing core command surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionCommandOutcome {
+    /// Result of create-session handling.
+    CreateSession(CreateSessionOutcome),
+    /// Result of ordinary input handling.
+    SubmitInput(SubmitInputOutcome),
+    /// Result of goal-command handling.
+    Goal(GoalCommandHandlingOutcome),
+    /// Result of lifecycle-command handling.
+    Lifecycle(SessionLifecycleCommandHandlingOutcome),
 }
 
 /// A typed core command that the ownership seam does not expose.
@@ -267,18 +304,26 @@ pub trait SessionCommandSink {
     /// Infrastructure failure returned by core command admission.
     type Error;
 
-    /// Submits one checked command under the module's authenticated principal.
+    /// Submits one checked command under the module's authenticated principal
+    /// and returns its exact durable result.
     fn submit(
         &self,
         command: SessionCommand,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<SessionCommandOutcome, Self::Error>> + Send;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionCommand, SessionLifecycleCommand, SessionLifecycleOperation};
+    use super::{
+        CreateSession, SessionCommand, SessionLifecycleCommand, SessionLifecycleOperation,
+        SubmitInput,
+    };
     use signalbox_domain::{
-        DescendantTerminationScope, DurableCommandId, SessionId, StopStickiness,
+        DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+        ModelSelectionOverride, ModelSelectionRequest, ModuleDispatch,
+        PerInputConfigurationChoices, RepoWatchDispatchId, SessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+        SessionId, StopStickiness, TranscriptAncestry, TurnId, UserContent,
     };
     use uuid::Uuid;
 
@@ -287,6 +332,26 @@ mod tests {
             DurableCommandId::from_uuid(Uuid::from_u128(1)),
             SessionId::from_uuid(Uuid::from_u128(2)),
             operation,
+        )
+    }
+
+    fn defaults() -> SessionConfigurationDefaults {
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(Uuid::from_u128(4)),
+        ))
+    }
+
+    fn ordinary_input() -> SubmitInput {
+        SubmitInput::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(5)),
+            SessionId::from_uuid(Uuid::from_u128(6)),
+            UserContent::try_text(String::from("module input")).expect("fixture text is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
         )
     }
 
@@ -300,10 +365,58 @@ mod tests {
             .is_ok()
         );
         assert!(
+            SessionCommand::lifecycle(lifecycle(SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Redispatchable,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            }))
+            .is_err()
+        );
+        assert!(
             SessionCommand::lifecycle(lifecycle(SessionLifecycleOperation::Supersede {
                 successor: SessionId::from_uuid(Uuid::from_u128(3)),
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn create_session_admits_only_repository_watch_dispatch_provenance() {
+        let repository_watch = CreateSession::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(7)),
+            SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                dispatch: RepoWatchDispatchId::from_uuid(Uuid::from_u128(8)),
+            }),
+            defaults(),
+        );
+        assert!(SessionCommand::create_session(repository_watch).is_ok());
+
+        let interactive = CreateSession::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(9)),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            defaults(),
+        );
+        assert!(SessionCommand::create_session(interactive).is_err());
+    }
+
+    #[test]
+    fn submit_input_admits_user_shape_and_rejects_core_interrupt() {
+        assert!(SessionCommand::submit_input(ordinary_input()).is_ok());
+
+        let core_interrupt = SubmitInput::new_core_interrupt(
+            DurableCommandId::from_uuid(Uuid::from_u128(10)),
+            SessionId::from_uuid(Uuid::from_u128(11)),
+            UserContent::try_text(String::from("core interrupt"))
+                .expect("fixture text is admitted"),
+            TurnId::from_uuid(Uuid::from_u128(12)),
+            DescendantTerminationScope::ParentAlone,
+            PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        );
+        assert!(SessionCommand::submit_input(core_interrupt).is_err());
     }
 }

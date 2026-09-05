@@ -330,8 +330,6 @@ impl RepoWatchStore {
                     AND delivery.action IS NOT DISTINCT FROM $5
                     AND delivery.body_digest = $6
                     AND body.body = $7
-                    AND delivery.received_at = $8
-                    AND delivery.expires_at = $9
                FROM webhook_delivery AS delivery
                JOIN webhook_body AS body USING (hook_id, delivery_id)
               WHERE delivery.hook_id = $1 AND delivery.delivery_id = $2",
@@ -343,8 +341,6 @@ impl RepoWatchStore {
         .bind(delivery.action)
         .bind(delivery.body_digest.as_slice())
         .bind(delivery.body)
-        .bind(delivery.received_at)
-        .bind(delivery.expires_at)
         .fetch_one(&mut *transaction)
         .await?;
         transaction.rollback().await?;
@@ -381,14 +377,21 @@ impl RepoWatchStore {
         Ok(updated.rows_affected() == 1)
     }
 
-    /// Advances module-local application through the exact next core event.
-    pub async fn advance_core_event(&self, sequence: u64) -> Result<bool, StoreError> {
+    /// Advances module-local application from the prior visible core event.
+    pub async fn advance_core_event(
+        &self,
+        prior_visible_sequence: u64,
+        sequence: u64,
+    ) -> Result<bool, StoreError> {
         let updated = sqlx::query(
             "UPDATE core_event_cursor
                 SET applied_through = $1, updated_at = statement_timestamp()
-              WHERE singleton AND applied_through = $1 - 1",
+              WHERE singleton
+                AND applied_through = $2
+                AND $1 > $2",
         )
         .bind(Decimal::from(sequence))
+        .bind(Decimal::from(prior_visible_sequence))
         .execute(&self.pool)
         .await?;
         Ok(updated.rows_affected() == 1)

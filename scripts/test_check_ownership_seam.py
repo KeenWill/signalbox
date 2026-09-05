@@ -13,7 +13,9 @@ CHECKER = Path(__file__).resolve().parent / "check_ownership_seam.py"
 
 
 class OwnershipSeamCheckerTests(unittest.TestCase):
-    def run_checker(self, manifest: str, source: str, core: str = "") -> subprocess.CompletedProcess[str]:
+    def run_checker(
+        self, manifest: str, source: str, core: str = "", module_sql: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             module = root / "crates" / "modules" / "example"
@@ -22,6 +24,8 @@ class OwnershipSeamCheckerTests(unittest.TestCase):
             (root / "crates" / "persistence" / "src").mkdir(parents=True)
             (module / "Cargo.toml").write_text(manifest, encoding="utf-8")
             (module / "src" / "lib.rs").write_text(source, encoding="utf-8")
+            if module_sql is not None:
+                (module / "src" / "query.sql").write_text(module_sql, encoding="utf-8")
             (root / "crates" / "persistence" / "src" / "lib.rs").write_text(
                 core, encoding="utf-8"
             )
@@ -53,6 +57,16 @@ signalbox-persistence = { path = "../../persistence" }
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden Signalbox dependency", result.stderr)
 
+    def test_target_specific_signalbox_dependency_is_rejected(self) -> None:
+        result = self.run_checker(
+            """[target.'cfg(unix)'.dependencies]
+signalbox-persistence = { path = "../../persistence" }
+""",
+            "",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Signalbox dependency", result.stderr)
+
     def test_direct_import_and_public_join_are_rejected(self) -> None:
         result = self.run_checker(
             "[dependencies]\n",
@@ -60,6 +74,15 @@ signalbox-persistence = { path = "../../persistence" }
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden import", result.stderr)
+        self.assertIn("module SQL names a public relation", result.stderr)
+
+    def test_external_module_sql_public_join_is_rejected(self) -> None:
+        result = self.run_checker(
+            "[dependencies]\n",
+            'const QUERY: &str = include_str!("query.sql");\n',
+            module_sql="SELECT * FROM public.session;\n",
+        )
+        self.assertNotEqual(result.returncode, 0)
         self.assertIn("module SQL names a public relation", result.stderr)
 
     def test_core_module_join_is_rejected(self) -> None:
