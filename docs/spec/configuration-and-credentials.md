@@ -17,25 +17,32 @@ uses it.
 
 The environment supplies a fixed set of deployment values: the database URL, the
 catalog paths, the socket paths, the paths of the two integration credential
-files, and the optional browser bind address and static-asset root.
-`DATABASE_URL` is the whole database channel, and a deployment carries every
-connection parameter in the URL. Model-provider credential paths come from
-`file` profiles in the catalog; `ANTHROPIC_API_KEY_FILE` and
-`OPENAI_API_KEY_FILE` are not read. An absent `SIGNALBOX_WEB_BIND` binds a
-loopback default, and an explicit socket must be a loopback address or
-configuration fails. The daemon's browser listener serves the `/api` routes on
-that bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names a production web build, the
-static files under that root; an empty root fails configuration and an absent
-one answers every other path 404. The DTOs and schemas under
-`crates/web-contract` are the authority for that surface, and the checked-in
-JavaScript decoders and TypeScript declarations are generated from them.
+files, the optional browser bind address and static-asset root, and the
+telemetry settings. `DATABASE_URL` is the whole database channel, and a
+deployment carries every connection parameter in the URL. Model-provider
+credential paths come from `file` profiles in the catalog;
+`ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An absent
+`SIGNALBOX_WEB_BIND` binds a loopback default, and an explicit socket must be a
+loopback address or configuration fails. The daemon's browser listener serves
+the `/api` routes on that bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names a
+production web build, the static files under that root; an empty root fails
+configuration and an absent one answers every other path 404. The DTOs and
+schemas under `crates/web-contract` are the authority for that surface, and the
+checked-in JavaScript decoders and TypeScript declarations are generated from
+them.
 
 `SIGNALBOX_OTLP_ENDPOINT` enables span export; its absence disables OTLP and
-makes every other OTLP setting inert. A separate bind setting enables a
-Prometheus listener.
+makes every other OTLP setting inert. `SIGNALBOX_OTLP_PROTOCOL` selects `grpc`
+or `http/protobuf`, `SIGNALBOX_OTLP_HEADERS_FILE` names a collector-header file
+read once at startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets the parent-based
+trace-id sampling ratio from 0 through 1, and `SIGNALBOX_OTLP_SERVICE_NAME` sets
+the service name. `SIGNALBOX_PROMETHEUS_BIND`, an exact IP socket address,
+enables a separate Prometheus listener.
 
-`signalbox-runner` reads one strict versioned TOML file at startup, whose
-checked-in example is `config/signalbox-runner.example.toml`. Its
+`signalbox-runner` takes its configuration path from exactly one source,
+`SIGNALBOX_RUNNER_CONFIG_FILE` or `--config PATH`, and rejects both or neither
+before opening a socket. It reads that file once at startup as strict versioned
+TOML, whose checked-in example is `config/signalbox-runner.example.toml`. Its
 `allowed_network_hosts` narrows a fixed host list and cannot add a hostname.
 Runner credential profiles are non-secret checked names the daemon grants and
 only the runner resolves.
@@ -70,6 +77,12 @@ fresh `/proc`. A container-process-namespace variant omits the pid unshare and
 read-only binds the existing `/proc`; it is admissible only when an outer
 container already isolates that namespace.
 
+The optional `[tool_approval_postures]` table decides, per exact composed tool
+name, whether a request is approved by policy, judged by the approval judge, or
+parked for a person. The optional `[approval_judge]` table decides which
+configured direct selection judges delegated requests, and when it is absent the
+judge reuses the request-producing call's selection.
+
 A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable
 records; its `CredentialValue` carries the secret bytes and exists only at the
@@ -95,8 +108,11 @@ one pool, and every member of that pool carries the mapping's adapter. A pool's
 name is 1 through 256 unpadded NUL-free bytes and it holds 1 through 1,024
 members, each with a priority within the pool. Priorities need not be unique or
 contiguous: `tie_break` resolves equal values, and gaps let a later profile take
-an intermediate rank. Five closed trigger keys each carry one closed action, and
-an omitted key selects `stay`; the actions are `stay`, `switch_next_turn`,
+an intermediate rank. Both `tie_break`, which admits `first_listed`, and
+`on_pool_exhausted`, which is `park` or `fail`, are required, and the five
+trigger keys `on_quota_exhausted`, `on_rate_limited`, `on_overloaded`,
+`on_credential_rejected`, and `on_headroom_low` each carry one closed action,
+where an omitted key selects `stay`. The actions are `stay`, `switch_next_turn`,
 `switch_now`, `avoid_new_sessions`, and `quarantine`. A one-member pool is the
 ordinary single-account deployment and needs no trigger keys. Selection happens
 at model-call preparation, never at session creation: it prefers the sticky
@@ -567,11 +583,14 @@ execution resumes. The plan tools require no credential profile, egress policy,
 or workspace root, and model arguments cannot select another session or storage
 adapter.
 
-The value that seeds redaction is the exact credential resolved at preparation
-and retained in the request's one-shot capability. Every provider-controlled
-text leaving an adapter, and every checked string in a successful code-host
-result, is scrubbed of that value and its JSON-escaped form before it crosses
-into evidence.
+Exact-value redaction is seeded with the credential resolved at preparation and
+retained in the request's one-shot capability, so it exists only for a profile
+whose value the daemon reads. Every provider-controlled text leaving such an
+adapter, and every checked string in a successful code-host result, is scrubbed
+of that value and its JSON-escaped form before it crosses into evidence. An
+`ambient` or `codex_home` profile gives the daemon no value, so a CLI child's
+output receives only the credential-shape redaction owned by
+[runtime substrate](runtime-substrate.md).
 
 ## Not built
 
