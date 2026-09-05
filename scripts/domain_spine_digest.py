@@ -14,7 +14,7 @@ SNAPSHOTS = {
 }
 DECLARATION = re.compile(
     r'^pub (?:(?:async|const|unsafe)\s+|extern\s+"[^"]*"\s+)*'
-    r"(?P<kind>struct|enum|union|type|trait|fn|const|static)\s+"
+    r"(?P<kind>struct|enum|union|type|trait|fn|const|static|macro)\s+"
 )
 MODULE = re.compile(r"^pub mod (?P<name>[A-Za-z_][A-Za-z0-9_#:]*)(?:\b|$)")
 AUTO_TRAIT = re.compile(
@@ -65,9 +65,16 @@ def item_name(line: str, start: int) -> str:
 
 def parse(text: str) -> tuple[str, list[Item]]:
     lines = text.splitlines()
-    modules = {match.group("name") for line in lines if (match := MODULE.match(line))}
+    module_lines = [
+        (match.group("name"), line)
+        for line in lines if (match := MODULE.match(line))
+    ]
+    modules = {name for name, _ in module_lines}
     root = min(modules, key=lambda name: name.count("::"))
-    items: list[Item] = []
+    items = [
+        Item(name.rpartition("::")[0] or root, "module", name, line)
+        for name, line in module_lines
+    ]
     include_nested_functions = include_associated_types = False
     for line in lines:
         if line.startswith(("impl ", "impl<")):
