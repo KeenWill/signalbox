@@ -252,7 +252,9 @@ records the interactive cause as well. A command naming a source-session
 ancestry is well formed but fails preparation with a nonterminal error that
 claims no command identifier. When a creation names no ownership or finish
 condition, a module-dispatched or delegated session is created owned, and a
-module-dispatched session takes an external-gate finish condition.
+module-dispatched session takes an external-gate finish condition. Attaching a
+goal to an unmonitored session confers ownership in the same transaction,
+recorded as an adopted transition.
 
 Replay equality in both modes compares provenance, placement, start gate,
 ownership, and finish condition. Explicit creation also compares the complete
@@ -340,11 +342,12 @@ tool-error detail.
 Defaults are immutable epochs identified by a positive 64-bit ordinal. Each
 replacement installs the checked successor ordinal as a new immutable row and
 moves the session's single current pointer; a replacement whose current ordinal
-has no representable successor records a version-exhausted rejection instead.
-Explicit creation installs the caller's complete defaults value, including its
-dangerous-tool blanket; template-derived creation installs the resolved
-template's copy. The blanket then changes only when a replacement installs a
-complete later epoch.
+has no representable successor records a version-exhausted rejection instead. A
+replacement naming an absent session records a typed session-not-found rejection
+under the command identity. Explicit creation installs the caller's complete
+defaults value, including its dangerous-tool blanket; template-derived creation
+installs the resolved template's copy. The blanket then changes only when a
+replacement installs a complete later epoch.
 
 Configuration-free steering inherits its configuration from its source turn and
 reads no defaults. A predecessor turn's prepared or in-flight call keeps its
@@ -398,12 +401,14 @@ retains append-only evidence that each applied receipt became current exactly
 once and rejects reinstalling an earlier receipt after a later replacement.
 
 The paginated list joins current defaults with metadata and does not
-reconstitute the aggregate. Every requested tag must match, an empty set matches
-all sessions, a non-null title filter keeps only sessions whose title contains
-that exact case-sensitive substring, archived sessions appear only when
-requested, and rows are ordered by session identity. A later page is a new
-snapshot: pagination guarantees deterministic keyset traversal, not a cross-page
-snapshot under concurrent creation or replacement.
+reconstitute the aggregate. Each row carries the current defaults facts, title,
+tags, archive state, and last-writer stamp, and excludes attributes and the
+system prompt. Every requested tag must match, an empty set matches all
+sessions, a non-null title filter keeps only sessions whose title contains that
+exact case-sensitive substring, archived sessions appear only when requested,
+and rows are ordered by session identity. A later page is a new snapshot:
+pagination guarantees deterministic keyset traversal, not a cross-page snapshot
+under concurrent creation or replacement.
 
 A `Session` is an owned snapshot, not a live cache; any transition that depends
 on current defaults revalidates them inside its own transaction. The pre-commit
