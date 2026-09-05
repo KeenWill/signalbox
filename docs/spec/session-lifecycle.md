@@ -1,8 +1,8 @@
 # Session lifecycle
 
 Session lifecycle gives every session one durable state, an ownership bit,
-deadlines, and a closed set of terminal outcomes, so that no session waits
-unseen and every owned session is driven to an outcome or to a human.
+deadlines, and a closed set of terminal outcomes, so no session waits unseen and
+every owned session is driven to an outcome or a human.
 
 ## Map
 
@@ -11,20 +11,20 @@ active, waiting, recovering, blocked, parked, and terminal. The state is a
 core-owned column on the session's lifecycle satellite row, and
 `SessionLifecycleState` in the domain crate defines the states and the
 transitions between them. The turn machine that
-[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md) owns persists
-unchanged beneath the session machine. For a session that is not parked, the
-session state is a projection of its live turn: a running turn makes the session
-active, a turn awaiting approval or a child makes it waiting, a turn in any
-recovery phase makes it recovering, and a blocked goal with no live turn makes
-it blocked. Core writes the session state in the same transaction as the turn or
-goal transition that changes the projection, so the two machines never disagree.
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md) owns runs
+beneath the session machine. For a session that is not parked, the session state
+is a projection of its live turn: a running turn makes the session active, a
+turn awaiting approval or a child makes it waiting, a turn in any recovery phase
+makes it recovering, and a blocked goal with no live turn makes it blocked. Core
+writes the session state in the same transaction as the turn or goal transition
+that changes the projection, so the two machines never disagree.
 
 Waiting carries a typed kind, a deadline, and the party expected to end the
-wait. An owned session has three deadlines, each sourced from configuration:
-admission, which covers created and dispatched; active stall; and waiting.
-Parked is the one state in which a session waits on a human. It carries a
-machine-readable cause and the responder who must act, and the operator queue is
-exactly the set of sessions whose state is parked.
+wait. An owned session has three configured deadlines: admission, which covers
+created and dispatched; active stall; and waiting. Parked is the one state in
+which a session waits on a human; it carries a machine-readable cause and the
+responder who must act. The operator queue is exactly the set of parked
+sessions.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a declared finish check passed and declared when no finish condition was
@@ -34,16 +34,15 @@ moderation block that a resume re-trips), and unknown when no cause was
 classified. A session is stopped by a human or a rule, superseded when a newer
 session owns the work or the work is gone, abandoned when an operator writes off
 a parked session and releases its worktrees, containers, and slots, and retired
-when it never did the work and never will, which is what admission expiry
-records.
+when it never did the work and never will.
 
 Every session carries an owned-or-unmonitored bit, set at creation and flipped
-in either direction by a journaled adopt or release transition. Owned means the
-daemon holds a liveness obligation: deadlines and a driven path to a terminal
-outcome. Unmonitored means a conversation the daemon does not drive. Every
-lifecycle command and every state transition records a lifecycle actor (core,
-the operator, a named module, or the watchdog) classified from the domain actor
-that [identity and commands](identity-and-commands.md) defines.
+by a journaled adopt or release. Owned means the daemon holds a liveness
+obligation: deadlines and a driven path to a terminal outcome. Unmonitored means
+a conversation the daemon does not drive. Every lifecycle command and every
+state transition records a lifecycle actor (core, the operator, a named module,
+or the watchdog) classified from the domain actor that
+[identity and commands](identity-and-commands.md) defines.
 
 The command surface creates a session, releases its start gate, submits input,
 attaches, resumes, or stops a goal, adopts, and releases; five further commands
@@ -52,14 +51,13 @@ abandon, close as failed, and resume. A parked session with a blocked goal
 resumes through the goal's resume-with-guidance command; one with a pursuing
 goal may use the session-level resume. The goal command that
 [goal mode](goal-mode.md) calls supersede starts a new goal generation in the
-same session and is goal replacement here; it is unrelated to the session
-outcome superseded.
+same session; it is goal replacement, unrelated to the session outcome
+superseded.
 
 Modules observe the lifecycle through eight event kinds with typed payloads on
 the transactional outbox that [persistence protocol](persistence-protocol.md)
-owns; the other outbox kinds stay core-internal and are not available across the
-module seam. The compaction funnel and the five lifecycle metrics are read-only
-views over durable columns.
+owns; the other outbox kinds are core-internal. The compaction funnel and the
+five lifecycle metrics are read-only views over durable columns.
 
 ## Decisions
 
@@ -67,12 +65,12 @@ The admission deadline is the one deadline whose expiry terminalizes: it retires
 the session, because before first activity nothing live is guarded and no human
 attention is owed. Every other deadline expiry parks.
 
-Lifecycle actor classification classifies the existing domain actor rather than
-replacing it; the domain actor algebra, its wire projection, and its
-replay-equality rule are untouched.
+The lifecycle actor classifies the domain actor rather than replacing it; the
+domain actor algebra, its wire projection, and its replay-equality rule are
+untouched.
 
-A turn terminal with disposition retired changes the turn vocabulary, never the
-lineage rules: it contributes no terminal frontier and stays excluded from
+A turn terminal with disposition retired extends the turn vocabulary, not the
+lineage rules: it contributes no terminal frontier and is excluded from
 predecessor selection like any retired queued work.
 
 The turn watchdog's terminalization of a provably dead turn, which blocks the
@@ -105,9 +103,9 @@ operators from durable facts. A read that encounters a state it does not
 recognize returns an error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
-daemon core; no module implements or re-implements any of them. Lifecycle
-behavior or an event kind a module needs and core does not provide is added to
-core, and modules never reconstruct events by joining core tables.
+daemon core; no module implements any of them. Lifecycle behavior or an event
+kind a module needs and core does not provide is added to core, and modules
+never reconstruct events by joining core tables.
 
 The attention classifier that
 [sessions and the transcript](sessions-and-transcript.md) owns is a projection

@@ -37,9 +37,8 @@ supersede against the parked predecessor, naming the successor, in the same
 transaction that creates the successor, so the successor never duplicates a
 pursuit the predecessor still owns. The unattended
 [repo-watch](../spec/repo-watch.md) escalation is the present case: its fresh
-dispatch fails the predecessor's turn today instead of superseding the session.
-The superseded outcome and the supersede command exist; no dispatch path issues
-it.
+dispatch fails the predecessor's turn instead of superseding the session. The
+superseded outcome and the supersede command exist; no dispatch path issues it.
 
 Every deadline expiry is a published transition: the state-change or terminal
 event the deadline runtime already emits, with the expired deadline named in its
@@ -53,17 +52,17 @@ issued by a registered program's run, as
 [identity and commands](../spec/identity-and-commands.md) commit it. It is a
 reference to the program run, not a module name. Storage admits the new
 discriminator with a run reference beside it, and classification treats a
-program-run principal as a module principal is treated today: it wins over the
-domain actor.
+program-run principal as it treats a module principal: it wins over the domain
+actor.
 
 Every dispatched session records the size of its initial payload at creation, as
 the token count estimated for the target model and the byte count, on the
 session's lifecycle satellite row. The creation command carries the payload, as
-the commissioning path already supplies its content in the creation command, so
-a dispatched session never precedes its recorded payload, and no dispatch path
-skips the measurement. An interactive session has no payload at creation; it
-records the same two measurements when its first input is accepted, because that
-input is what the session was handed.
+the commissioning path already supplies it, so a dispatched session never
+precedes its recorded payload and no dispatch path skips the measurement. An
+interactive session has no payload at creation; it records the same two
+measurements when its first input is accepted, because that input is what the
+session was handed.
 
 ## Constraints on present code
 
