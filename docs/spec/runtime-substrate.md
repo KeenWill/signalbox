@@ -311,17 +311,18 @@ never silent success: a Codex CLI exit of zero without the turn-completed event
 is boundary loss, and under the Claude Code CLI only a terminal result event
 establishes success or refusal, never prose; in a subprocess adapter that loss
 follows a zero exit, while a nonzero exit is definitive provider-error evidence
-classified from bounded stderr. A Codex turn that completes without a streamed
-agent message takes its response from the CLI's separately written final-message
-file under the same size and redaction checks, and a streamed message outranks
-it. A finish reason observed before a stream loss is retained as a reported
-finish but is not completion or refusal evidence; an unrecognized finish
-reported before the envelope is validated is an envelope violation instead, and
-no finish is retained. Within one adapter the buffered and streamed decoders
-never disagree about an output-ceiling finish inside accumulated tool content,
-which is an observed fact in both and not an envelope defect; an unrequested
-Anthropic fallback block is the exception, unintelligible-response loss in the
-buffered decoder and a stream protocol violation in the streamed one.
+with bounded stderr retained only as opaque native evidence. A Codex turn that
+completes without a streamed agent message takes its response from the CLI's
+separately written final-message file under the same size and redaction checks,
+and a streamed message outranks it. A finish reason observed before a stream
+loss is retained as a reported finish but is not completion or refusal evidence;
+an unrecognized finish reported before the envelope is validated is an envelope
+violation instead, and no finish is retained. Within one adapter the buffered
+and streamed decoders never disagree about an output-ceiling finish inside
+accumulated tool content, which is an observed fact in both and not an envelope
+defect; an unrequested Anthropic fallback block is the exception,
+unintelligible-response loss in the buffered decoder and a stream protocol
+violation in the streamed one.
 
 The tool-calls-at-loss fact reports the decoded prefix and nothing beyond it:
 none-opened says no tool call opened in what the adapter decoded, never that the
