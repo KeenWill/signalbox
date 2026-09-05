@@ -157,6 +157,21 @@ async fn generated_tar_validates_and_enumerates() -> Result<(), Box<dyn Error>> 
 }
 
 #[tokio::test]
+async fn v7_tar_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(valid_inventory(ArchiveFixture::v7_tar()?).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn disguised_dictionary_zstd_is_rejected_as_recursive() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::disguised_dictionary_zstd()?).await?,
+        "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn concatenated_tar_segments_are_all_inspected() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::concatenated_tar_with_hostile_second_segment()?)
@@ -315,21 +330,20 @@ async fn truncated_zstd_is_a_typed_malformed_inspection() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
-async fn dictionary_dependent_zstd_is_a_typed_unsupported_inspection() -> Result<(), Box<dyn Error>>
+async fn dictionary_dependent_zstd_is_malformed_without_a_dictionary() -> Result<(), Box<dyn Error>>
 {
     assert_malformed(
         malformed_inspection(ArchiveFixture::dictionary_zstd()?).await?,
-        "unsupported_dictionary",
+        "malformed_archive",
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn later_dictionary_dependent_zstd_frame_is_typed_unsupported() -> Result<(), Box<dyn Error>>
-{
+async fn later_dictionary_dependent_zstd_frame_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::concatenated_dictionary_zstd()?).await?,
-        "unsupported_dictionary",
+        "malformed_archive",
     );
     Ok(())
 }
@@ -550,15 +564,6 @@ async fn disguised_empty_tar_payload_is_rejected() -> Result<(), Box<dyn Error>>
 async fn recursive_zstd_payload_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::recursive_zstd()?).await?,
-        "recursive_container",
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn dictionary_dependent_recursive_zstd_payload_is_rejected() -> Result<(), Box<dyn Error>> {
-    assert_malformed(
-        malformed_inspection(ArchiveFixture::disguised_dictionary_zstd()?).await?,
         "recursive_container",
     );
     Ok(())

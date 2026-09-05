@@ -33,23 +33,14 @@ fn the_pin_manifest_uses_an_exact_version() {
 
     assert!(
         is_exact_pin(pinned),
-        "{PIN_MANIFEST} must pin {PIN_PACKAGE} at an exact `major.minor.patch` \
+        "{PIN_MANIFEST} must pin {PIN_PACKAGE} at an exact release \
          version, not the range, tag, or alias {pinned}"
     );
 }
 
-/// Whether `version` is an exact `major.minor.patch` pin: exactly three
-/// dot-separated components, each a nonempty run of ASCII digits — so a range
-/// (`^1.2.3`), tag (`latest`), alias, prerelease suffix, or wrong component
-/// count is rejected. Factored out of the manifest test so focused fixtures
-/// exercise both accepted and rejected shapes, not only the live manifest.
-fn is_exact_pin(version: &str) -> bool {
-    let components: Vec<&str> = version.split('.').collect();
-    components.len() == 3
-        && components
-            .iter()
-            .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
-}
+#[path = "../version_pin.rs"]
+mod version_pin;
+use version_pin::is_exact_pin;
 
 #[test]
 fn exact_pin_accepts_major_minor_patch() {
@@ -87,8 +78,8 @@ fn exact_pin_rejects_an_empty_component() {
 }
 
 #[test]
-fn exact_pin_rejects_a_prerelease_suffix() {
-    assert!(!is_exact_pin("0.145.0-beta"));
+fn exact_pin_rejects_a_prerelease() {
+    assert!(!is_exact_pin("0.145.0-beta.1"));
 }
 
 fn read_pin_manifest() -> serde_json::Value {
@@ -105,4 +96,9 @@ fn workspace_root() -> std::path::PathBuf {
         .nth(2)
         .expect("this crate sits two directories below the workspace root")
         .to_path_buf()
+}
+
+#[test]
+fn exact_pin_rejects_build_metadata() {
+    assert!(!is_exact_pin("0.145.0+build.1"));
 }

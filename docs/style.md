@@ -413,7 +413,10 @@ Review enforces these conventions:
 | SR-12 | every clap argument and `ValueEnum` variant has a doc comment |
 | SR-13 | proc-macro diagnostics are not spanned on the macro call site |
 
-Do not add a blanket crate-level `allow` to silence a lint warning.
+The other conventions in this guide are applied by the author when writing the
+change, because the fact they depend on (who owns a bound, whether two helpers
+are the same helper, whether an error value is safe to render) is not in the
+text. Do not add a blanket crate-level `allow` to silence a lint warning.
 
 ## Rust mechanics (appendix)
 

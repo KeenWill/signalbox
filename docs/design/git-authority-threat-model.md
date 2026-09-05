@@ -24,24 +24,24 @@ it; a daemon-derived row carries no command.
 Minting. Registration through the client resolves the root path once, following
 symbolic links and removing `.` and `..` components, and stores the canonical
 bytes. The store judges canonical form as bytes and cannot see the filesystem,
-so a canonical spelling whose components are symbolic links is admitted. The
+so a canonical spelling whose components are symbolic links is admitted; the
 minting boundary is the only place that resolves them. Spellings that
 canonicalization collapses are one key; two bind-mount paths to one directory
 canonicalize to different bytes and stay distinct keys. At most one live
 destination exists per workspace and name. The daemon inserts a daemon-derived
 row for each per-session root its derivation materializes
-([configuration-and-credentials.md](../spec/configuration-and-credentials.md)).
-Those rows are bookkeeping, and no path reads them to decide a binding.
+([configuration-and-credentials.md](../spec/configuration-and-credentials.md));
+those rows are bookkeeping, and no path reads them to decide a binding.
 
 Withdrawal. Retiring a destination inserts a withdrawal that retires exactly one
 mint and frees its name. A withdrawal and the replacement mint may commit in one
 transaction.
 
-Push by name. `GitPushArguments` gains the remote name beside the branch. The
-executor resolves the name to the live mint for the session's workspace and
-fails with a typed error when none stands. A destination stays `https` only, and
-the transport compiles no SSH support, so the store and the transport refuse the
-same set. No caller supplies a URL.
+Push by name. `GitPushArguments` gains the remote name beside the branch, and no
+caller supplies a URL. The executor resolves the name to the live mint for the
+session's workspace and fails with a typed error when none stands. A destination
+stays `https` only, and the transport compiles no SSH support, so the store and
+the transport refuse the same set.
 
 Relocation. A relocation is a durable fact that binds an existing workspace
 identity to a new canonical root; the identity and its grants stand. Registering
