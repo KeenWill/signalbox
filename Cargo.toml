@@ -33,6 +33,7 @@ members = [
     "crates/model-runtime-openai",
     "crates/model-provider-runtime",
     "crates/model-reference-catalog",
+    "crates/ownership-seam",
     "crates/persistence",
     "crates/process-protocol",
     "crates/program-runtime",
