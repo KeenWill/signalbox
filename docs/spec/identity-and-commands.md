@@ -20,11 +20,11 @@ that every application request constructor accepts as its idempotency key. A
 caller also passes through a replay identity minted outside the daemon, such as
 the webhook delivery key [repo-watch](repo-watch.md) records. The daemon mints
 the identity of every other identity-bearing fact it records. Configuration
-reference keys are the third source: a direct model selection or a model alias
-arrives inside a command payload and names an operator-configured selection.
-`ProviderModelIdentity` is a normalized provider-and-model value the operator
-configures. It is stored on turn and model-call rows and is neither minted nor a
-command key.
+reference keys are operator-configured references, not identities: a direct
+model selection or a model alias arrives inside a command payload and names a
+configured selection. `ProviderModelIdentity` is a normalized provider-and-model
+value the operator configures. It is stored on turn and model-call rows and is
+neither minted nor a command key.
 
 The identity types are built by the `define_identity!` macro in `crates/domain`.
 That crate depends on `uuid` without a generation feature and cannot mint an
@@ -92,8 +92,8 @@ same payload returns the recorded result once the command has settled; while it
 is pending the handler reports busy. Replaying it with a different payload or
 kind is a conflict and changes nothing. A single-transaction command commits its
 registry row, payload record, result, and every effect together, and a failed
-transaction leaves no claim behind. A rejection claims the identifier the same
-way an applied command does.
+transaction leaves no claim behind. A recorded rejection claims the identifier
+the same way an applied command does.
 
 Recording who or what caused an action is provenance only. It grants no
 lifecycle, authorization, or approval authority. No automated path can attribute
