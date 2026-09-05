@@ -43,9 +43,11 @@ produces converter version 1.
 import store once, after complete conversion. The store keeps raw bytes in the
 blob store under their content hash ([blob-storage](blob-storage.md)) and the
 header, raw-record occurrences, and normalized entries in relational tables.
-Each header also carries a display title derived once from the preserved
+Each header also records a display title derived once from the preserved
 records, so the unified conversation listing in
-[process-protocol](process-protocol.md) can show imported rows by name.
+[process-protocol](process-protocol.md) can show imported rows by name. When no
+preserved record yields a title, the header records the underivable state and
+carries none.
 
 Three surfaces reach the store. The user terminal imports one named file or
 every candidate file under a directory; a source that fits one frame is sent as
