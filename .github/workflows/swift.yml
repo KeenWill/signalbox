@@ -266,43 +266,12 @@ jobs:
       # job, and it runs even when the tests failed, because a partial
       # measurement still names untested code. No step compares the reported
       # percentage against anything.
-      #
-      # Also builds comment.md alongside the job-summary report, from the
-      # same report.md report-coverage.sh already wrote into the output
-      # directory. This mirrors coverage.yml's "Report the numbers" step: the
-      # marker up front is what the publish-native-coverage-comment job below
-      # searches for to find and rewrite its own comment on every push, and
-      # it is deliberately `signalbox-native-coverage` rather than
-      # coverage.yml's `signalbox-rust-coverage`, so the two workflows' sticky
-      # comments never collide on the same pull request.
       - name: Report native coverage (report only)
         if: ${{ always() }}
         continue-on-error: true
         env:
           SIGNALBOX_NATIVE_COVERAGE_OUTPUT_DIR: ${{ runner.temp }}/native-coverage
-          # `github.sha` is the commit this job actually checked out. On a
-          # pull_request event that is the synthetic merge of the head into
-          # the base, matching what coverage.yml reports beside its own head
-          # SHA for the same reason: the merge commit is what was measured,
-          # and the head is what a reader recognises.
-          MEASURED_SHA: ${{ github.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          clients/native/scripts/report-coverage.sh >> "$GITHUB_STEP_SUMMARY"
-
-          report_dir="$SIGNALBOX_NATIVE_COVERAGE_OUTPUT_DIR"
-          {
-            printf '%s\n\n' '<!-- signalbox-native-coverage -->'
-            cat "$report_dir/report.md"
-            printf '\nMeasured at `%s`' "$MEASURED_SHA"
-            if [ -n "$HEAD_SHA" ]; then
-              printf ', the merge commit this pull request builds, whose head is `%s`' \
-                "$HEAD_SHA"
-            fi
-            printf ', by [run %s](%s/%s/actions/runs/%s), which uploads the xccov JSON, text, and Markdown reports as an artifact.\n' \
-              "$GITHUB_RUN_ID" \
-              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-          } > "$report_dir/comment.md"
+        run: clients/native/scripts/report-coverage.sh >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the native coverage report
         if: ${{ always() }}
         continue-on-error: true
@@ -350,105 +319,6 @@ jobs:
           fail_ci_if_error: false
       - name: Check privacy boundary
         run: clients/native/scripts/check-privacy.sh
-
-  # Holds the only write token in this workflow and never builds or runs
-  # anything, mirroring the token separation coverage.yml's publish-comment
-  # job already uses: the simulator run above cannot reach a token that can
-  # write to a pull request.
-  #
-  # A pull request from a fork is skipped rather than attempted. GitHub issues
-  # such a run a read-only token no matter what `permissions` requests, so the
-  # comment would fail; the job summary and the uploaded report are unaffected
-  # and remain the whole report for a fork contributor.
-  #
-  # Gated on the same `native` output swift-validate itself is gated on,
-  # rather than only on swift-validate's result: unlike coverage.yml's
-  # rust-coverage, which always runs when its workflow triggers,
-  # swift-validate is skipped outright on a run that never touched
-  # `clients/native/**`, and a pull request that never touched native code
-  # should get no native-coverage comment at all rather than a "produced no
-  # report" one. When native code is in scope, this still runs whenever
-  # swift-validate reached an end, not only when it produced a report: a run
-  # that measured nothing must replace the previous run's numbers rather than
-  # leave them standing as the current readout. A cancelled run is the one
-  # exception, since a superseded run has a successor already on its way to
-  # overwrite the comment.
-  publish-native-coverage-comment:
-    name: Comment the native coverage report
-    needs: [swift-change-scope, swift-validate]
-    if: >-
-      always()
-      && needs.swift-change-scope.outputs.native == 'true'
-      && needs.swift-validate.result != 'cancelled'
-      && github.event_name == 'pull_request'
-      && github.event.pull_request.head.repo.full_name == github.repository
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      # `actions: read` lets the download step read this run's artifact; a
-      # job-level permissions block sets every scope it omits to none.
-      actions: read
-      pull-requests: write
-    steps:
-      # Continues on error so a run that uploaded no report still reaches the
-      # step below, which replaces the stale comment instead of leaving it.
-      - name: Download the native coverage report
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: native-coverage
-          path: ${{ runner.temp }}/native-coverage
-      # One comment per pull request, rewritten in place on every push: a
-      # coverage report is a current-state readout, and a thread of superseded
-      # readouts would bury the review conversation. The
-      # `signalbox-native-coverage` marker is what makes this comment its own
-      # thread, distinct from coverage.yml's `signalbox-rust-coverage` one, so
-      # a pull request that trips both workflows carries two independent
-      # sticky comments instead of one clobbering the other.
-      - name: Post or update the coverage comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          body="$RUNNER_TEMP/native-coverage/comment.md"
-          payload="$RUNNER_TEMP/payload.json"
-
-          # No report means the run measured nothing. Saying so under the same
-          # marker retires the previous run's numbers, which would otherwise
-          # keep reading as this head's, and names the head that has none.
-          if [ ! -f "$body" ]; then
-            mkdir -p "$RUNNER_TEMP/native-coverage"
-            {
-              printf '%s\n\n' '<!-- signalbox-native-coverage -->'
-              printf '## Native client coverage (report only)\n\n'
-              printf 'The coverage run for `%s` produced no report; see ' "$HEAD_SHA"
-              printf '[run %s](%s/%s/actions/runs/%s).\n\n' \
-                "$GITHUB_RUN_ID" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" \
-                "$GITHUB_RUN_ID"
-              printf 'Nothing is gated on this. The measurement is missing, '
-              printf 'not failing, and no merge waits on it.\n'
-            } > "$body"
-          fi
-          jq -n --rawfile body "$body" '{body: $body}' > "$payload"
-
-          # Paginated: a long-running pull request can hold more comments than
-          # one page, and the marker comment is the oldest of them.
-          existing="$(gh api --paginate \
-            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-            --jq '.[] | select(.body | startswith("<!-- signalbox-native-coverage -->")) | .id')"
-          first="${existing%%$'\n'*}"
-
-          if [ -n "$first" ]; then
-            gh api -X PATCH \
-              "repos/$GITHUB_REPOSITORY/issues/comments/$first" \
-              --input "$payload" --silent
-          else
-            gh api -X POST \
-              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              --input "$payload" --silent
-          fi
 
   # Builds Rust separately from the simulator suite so Swift-only feedback does
   # not wait behind the daemon build. The name is unique across workflows for
