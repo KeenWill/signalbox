@@ -102,8 +102,10 @@ terminalized by one transaction that consumes the wait, opens and ends a fresh
 call-free attempt, appends the failed marker, and emits the turn-failed update
 event atomically. That marker names the predecessor call as the source of its
 cause; the earlier model-call known-failure closure committed without
-terminalizing and cannot serve a transition happening now. The release and
-exhaustion conditions belong to
+terminalizing and cannot serve a transition happening now. Where the chain has
+issued no call, the same transaction consumes the wait and opens and ends a
+fresh call-free attempt, and the pre-call exhaustion producer appends its
+marker. The release and exhaustion conditions belong to
 [credential-availability](../spec/credential-availability.md).
 
 ## Compatibility constraints
