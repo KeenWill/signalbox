@@ -25,21 +25,23 @@ disposition and stores the wait, leaving no live attempt. Startup reconstitutes
 a stored wait only from its complete evidence and does not reclassify it; it
 re-evaluates every retained contended wait against the current registrations,
 and a restart alone wakes nothing. A contended wait becomes eligible on a
-reservation release by one of the bounded members it names, on its deadline, or
-on that startup re-evaluation. An exhausted wait becomes eligible on its
-deadline, when it has one, on a durable member-availability update, or on an
+reservation release by one of the bounded members it names, on its deadline, on
+that startup re-evaluation, on a durable member-availability update, or on an
+operator clearing a credential exclusion. An exhausted wait becomes eligible on
+its deadline, when it has one, on a durable member-availability update, or on an
 operator clearing a credential exclusion. A wake re-runs admission from current
 state, and the turn resumes only when that admission selects a member. A woken
 contended wait that still finds an admissible member at its bound stays parked,
 rewritten with the surviving bounded members and their live reservations. One
 that finds no admissible bounded member left takes the exhaustion outcome
-instead. Release atomically consumes the wait, creates a fresh prepared
-successor attempt, and returns the same turn to running, resuming the
-availability chain the wait was part of rather than starting a new one. A
-stop-turn request against a parked wait consumes the wait, creates a fresh
-immediate-successor attempt carrying the applied-interrupt proof, ends that
-attempt cancelled, appends the cancellation entry after the wait's latest
-frontier, and terminalizes the turn cancelled.
+instead. A woken exhausted wait whose admission selects exhausted-wait again
+stays parked and rewrites its evidence and derived deadline in place. Release
+atomically consumes the wait, creates a fresh prepared successor attempt, and
+returns the same turn to running, resuming the availability chain the wait was
+part of rather than starting a new one. A stop-turn request against a parked
+wait consumes the wait, creates a fresh immediate-successor attempt carrying the
+applied-interrupt proof, ends that attempt cancelled, appends the cancellation
+entry after the wait's latest frontier, and terminalizes the turn cancelled.
 
 Runner-loss recovery has two user commands, replace and abandon, whose request
 shapes and placement transitions are owned by
