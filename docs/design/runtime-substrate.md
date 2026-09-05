@@ -74,8 +74,9 @@ Codex file delivery as undelivered until the delivery exists.
 The exact-value redactor and the CLI shape redactor stay separate layers, and
 the CLI adapters keep a seam where exact values can be seeded before spawn.
 
-The refusal downgrade in both HTTP adapters stays unconditional, and no caller
-treats an unrecognized provider error from an HTTP adapter as a refusal.
+The refusal downgrade in both HTTP adapters holds for every exchange without
+complete-upload proof, and no caller treats an unrecognized provider error from
+an HTTP adapter as a refusal.
 
 ## Acceptance criteria
 

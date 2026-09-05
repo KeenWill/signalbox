@@ -44,17 +44,24 @@ and bridge; adapters that cannot replay that provider-qualified part reject the
 operation before send.
 
 `ModelRuntime` has two stages. `prepare` does all work that needs no provider
-traffic and returns an opaque one-shot capability or a typed failure. `execute`
-consumes that capability, performs at most one provider interaction and returns
-a terminal report. The unit of irrevocable dispatch is one HTTPS request for a
-direct adapter and one process spawn for a subprocess adapter. The caller side
-of that boundary is [model-call-execution](model-call-execution.md) scope.
+traffic and returns an opaque one-shot capability or a typed failure.
+Preparation distinguishes a trustworthy failure, an unsupported operation or an
+unusable or unavailable credential, from a construction defect; the bridge maps
+only the trustworthy failure to a known failure and fails closed on a defect.
+`execute` consumes that capability, performs at most one provider interaction
+and returns a terminal report. The unit of irrevocable dispatch is one HTTPS
+request for a direct adapter and one process spawn for a subprocess adapter. The
+caller side of that boundary is [model-call-execution](model-call-execution.md)
+scope.
 
 Observations are transient progress facts emitted during execute: the request
 about to reach the transport, the correlated exchange opening, the
 provider-reported model, text, thinking and tool-argument deltas, tool
-proposals, usage and the finish reason. The send-commenced fact marks the
-acceptance boundary: from that point the provider may have accepted the request.
+proposals, usage and the finish reason. An adapter puts the provider's request
+or session identifier, and the HTTP status where there is one, in the exchange
+facts it reports when the exchange opens and retains in terminal evidence. The
+send-commenced fact marks the acceptance boundary: from that point the provider
+may have accepted the request.
 
 Terminal evidence divides three ways. Definitive evidence is a completed
 response, a provider refusal, a classified provider error with its native facts
@@ -218,11 +225,13 @@ dependency on any runtime crate, and no runtime type appears in a domain or
 application signature.
 
 `prepare` performs all validation, translation, serialization, credential access
-and request construction with no provider traffic. `execute` consumes the
-capability, performs at most one provider interaction, emits observations
-synchronously and in order, and always returns a terminal report. Nothing in
-this layer retries, falls back, or repeats its unit of dispatch after the
-provider could have accepted it; the attempt-level retry rule is
+and request construction with no provider traffic, rejecting duplicate ordinary
+tool names, an ordinary tool whose name equals the structured-output contract
+name, and a named choice of an undeclared tool before any send. `execute`
+consumes the capability, performs at most one provider interaction, emits
+observations synchronously and in order, and always returns a terminal report.
+Nothing in this layer retries, falls back, or repeats its unit of dispatch after
+the provider could have accepted it; the attempt-level retry rule is
 [model-call-execution](model-call-execution.md)'s. In a subprocess adapter the
 send-commenced fact immediately precedes spawn, a spawn failure is proven
 unsent, and after a successful spawn no path respawns the CLI.
@@ -244,7 +253,8 @@ loss because the adapter cannot prove the full frontier reached the CLI.
 Settings are provider-enforced request controls unless an adapter records a
 capability-limited advisory exception; an adapter never presents prompt
 instructions as hard transport controls. Under the Anthropic adapter, any-tool
-and named tool choice and the output contract are advisory. Under the Codex CLI
+and named tool choice and the output contract are advisory, and a temperature or
+top-p setting fails preparation rather than being dropped. Under the Codex CLI
 adapter, the output-token ceiling, temperature, top-p and stop sequences are
 rendered into the prompt as advisory context. Under the Claude Code CLI adapter,
 temperature, top-p and stop sequences are advisory, the output-token ceiling is
@@ -272,13 +282,15 @@ Terminal evidence is typed so the caller classifies without string matching;
 strings appear only as retained detail inside already-classified variants. Each
 adapter owns an exhaustive native mapping into the shared provider-error kind,
 which lives in the core crate, and unknown material classifies as unrecognized
-with its native facts retained rather than guessed at. An error record that
-follows the provider's finish marker and names no classifiable failure is
-stream-protocol loss, while a classified one stays definitive and outranks the
-finish. A provider-directed retry delay, decoded from the HTTP `Retry-After`
-header or the Codex CLI's rendered retry phrase, rides the provider-error
-evidence, and the bridge carries it into the durable failure observation that
-feeds the availability-successor backoff.
+with its native facts retained rather than guessed at. In both HTTP adapters an
+unauthorized status is credential rejection before the body is consulted, and
+otherwise a recognized native code outranks a recognized type, which outranks
+the status. An error record that follows the provider's finish marker and names
+no classifiable failure is stream-protocol loss, while a classified one stays
+definitive and outranks the finish. A provider-directed retry delay, decoded
+from the HTTP `Retry-After` header or the Codex CLI's rendered retry phrase,
+rides the provider-error evidence, and the bridge carries it into the durable
+failure observation that feeds the availability-successor backoff.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
 never inferred from the error kind, status retryability or provider prose. An
@@ -299,11 +311,19 @@ loss in both HTTP adapters. A stream that ends in any way other than its
 protocol's terminal marker is incomplete-stream evidence, never silent success:
 a Codex CLI exit of zero without the turn-completed event is boundary loss, and
 under the Claude Code CLI only a terminal result event establishes success or
-refusal, never prose. A finish reason observed before a stream loss is retained
-as a reported finish but is not completion or refusal evidence. Within one
-adapter the buffered and streamed decoders never disagree about the same
-response; an output-ceiling finish inside accumulated tool content is an
-observed fact in both, not an envelope defect.
+refusal, never prose; in a subprocess adapter that loss follows a zero exit,
+while a nonzero exit is definitive provider-error evidence classified from
+bounded stderr. A Codex turn that completes without a streamed agent message
+takes its response from the CLI's separately written final-message file under
+the same size and redaction checks, and a streamed message outranks it. A finish
+reason observed before a stream loss is retained as a reported finish but is not
+completion or refusal evidence; an unrecognized finish reported before the
+envelope is validated is an envelope violation instead, and no finish is
+retained. Within one adapter the buffered and streamed decoders never disagree
+about an output-ceiling finish inside accumulated tool content, which is an
+observed fact in both and not an envelope defect; an unrequested Anthropic
+fallback block is the exception, unintelligible-response loss in the buffered
+decoder and a stream protocol violation in the streamed one.
 
 The tool-calls-at-loss fact reports the decoded prefix and nothing beyond it:
 none-opened says no tool call opened in what the adapter decoded, never that the
@@ -318,12 +338,17 @@ protocol violation, and a conflict stays one on a mid-stream error record. An
 error record that reports no completion id is definitive provider-error
 evidence. Under the Claude Code CLI the first assistant event may name the
 provider-resolved model and every later assistant event must repeat that value.
+Claude events stay bound to the initialized exchange: a result carrying a
+different session id, or an assistant event carrying a different first message
+id, is a protocol violation.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
 zero, a total-only report records nothing because no adapter distributes a
 total, and no cache-creation count is fabricated. A later usage report replaces
-the fields it carries and preserves the fields it omits.
+the fields it carries and preserves the fields it omits. OpenAI streamed success
+requires the final usage chunk before the stream ends, and Anthropic requires
+input usage at message start and final output usage before message stop.
 
 The shared framer bounds every line and each record's retained content, makes a
 framing failure terminal for the stream, and distinguishes a truncated final
@@ -374,9 +399,11 @@ violation. Malformed or over-depth JSON in a success body is
 unintelligible-response boundary loss. In the HTTP and Claude Code CLI decoders,
 over-depth streamed material and malformed known-event JSON are stream protocol
 violations; the Codex CLI decoder fails both closed as an unrecognized provider
-error. A malformed or over-depth body attached to a definitive error status
-cannot erase that exchange: the adapter falls back to status classification with
-bounded sanitized native material.
+error. Both CLI decoders reject a syntactically valid record that repeats an
+object member, at any nesting depth, as a stream protocol violation. A malformed
+or over-depth body attached to a definitive error status cannot erase that
+exchange: the adapter falls back to status classification with bounded sanitized
+native material.
 
 Each CLI adapter mechanically disables every native facility of the pinned CLI
 that could add a model-visible tool, an instruction source, an external
@@ -425,7 +452,10 @@ the adapter reads neither store. An ambient Claude Code adapter likewise accepts
 only its one configured reference. Under file delivery the Claude Code adapter
 replaces only the already allowlisted configuration-directory variable with a
 private request-scoped directory, never adds the API-key variable to the child
-environment, and removes the directory when the capability drops.
+environment, and removes the directory when the capability drops. It creates the
+credential, settings and helper files owner-only, and the helper that delivers
+the key runs under a fixed shell interpreter using only builtins, never an
+executable resolved through the search path.
 
 Provider-controlled text is credential-sanitized before it leaves the adapter.
 An adapter that reads the credential value redacts that exact value from the
@@ -466,10 +496,14 @@ materialized when the job ends.
 
 `OperatorFailureClass` states only a failure's severity and carries no user
 content, so shared telemetry may emit it while the underlying error keeps its
-diagnostic detail internally. The sanitized cause code stating what happened is
-owned by the page that owns the behavior raising it:
-[model-call-execution](model-call-execution.md) for provider and model-call
-causes, [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) for
+diagnostic detail internally. The class is one of infrastructure, which states
+whether the commit is ambiguous, fail-closed corruption, identity collision, or
+a caller or hub defect; the daemon treats corruption and caller defects as fatal
+and distinguishes an ambiguous infrastructure failure from a nonambiguous one.
+The sanitized cause code stating what happened is owned by the page that owns
+the behavior raising it: [model-call-execution](model-call-execution.md) for
+provider and model-call causes,
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) for
 turn-liveness causes.
 
 ## Planned
