@@ -17,7 +17,9 @@ snapshot to the call. A fresh admission reselects the member the session's most
 recent call on that pool used while no durable exclusion removes it, otherwise
 the first member in policy order that none removes. The commit that closes a
 failed call applies the action the pinned policy fixes for the failure's cause,
-and either prepares a successor call or terminalizes the turn.
+and either prepares a successor attempt or terminalizes the turn. The
+successor's member is admitted and its call created at that attempt's
+preparation.
 
 An availability chain begins at a fresh admission inside one turn and holds the
 call that admission prepares, if any, and every successor that follows a
@@ -102,10 +104,9 @@ Successor: the pinned action for a qualifying cause is `switch_now`, a member
 remains, and the adapter supplied pre-stream proof that the provider never
 accepted the request. The turn stays active and keeps its slot; the predecessor
 attempt ends KnownFailure without terminalizing, and the same commit prepares a
-successor attempt against the next admitted member and writes the failed
-member's chain exclusion. That commit appends no `TurnFailed`: one commit never
-both terminalizes the turn and authorizes a successor. The same rotation test
-pins this ending.
+successor attempt and writes the failed member's chain exclusion. That commit
+appends no `TurnFailed`: one commit never both terminalizes the turn and
+authorizes a successor. The same rotation test pins this ending.
 
 A chain exclusion removes the failed member for the remainder of the turn, not
 merely for the chain, and is insert-only: no passed reset, operator clear or
@@ -142,7 +143,7 @@ gates at once, and the first names the actionable reason.
 - Wait-transition fail (after call): the same release and exhaustion after this
   chain issued a call; a fresh call-free attempt is opened and ended
   KnownFailure ([design](../design/credential-availability.md)).
-- Park selects a wait only when at least one exclusion in the snapshot is one a
+- Park selects a wait only when some member's every active exclusion is one a
   wake can clear ([design](../design/credential-availability.md)).
 - Releasing a parked wait resumes the chain that parked and re-evaluates
   admission from current state ([design](../design/credential-availability.md)).

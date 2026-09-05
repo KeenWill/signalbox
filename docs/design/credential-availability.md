@@ -30,10 +30,13 @@ Contended-wait: nothing is admissible and at least one otherwise-admissible
 member was skipped only for its bound. The turn enters the
 credential-availability wait phase with closed cause contended. The attempt ends
 call-free WithoutStop(YieldedToDurableWait); the turn keeps its slot, appends no
-transcript entry, and is not terminal. Three wakes release it: a reservation
+transcript entry, and is not terminal. Five wakes release it: a reservation
 release by one of the bounded members the wait names; the wait's deadline;
 startup's re-evaluation of retained contended waits against current
-registrations. A restart alone is not a wake.
+registrations; a durable member-availability update; an operator clear of an
+exclusion. The last two matter because the wait also records excluded members,
+and one can become admissible while every bounded member stays saturated. A
+restart alone is not a wake.
 
 Exhausted-wait: nothing is admissible, nothing was skipped merely for a bound,
 and a wait is selected. The same wait phase with closed cause exhausted, and the
@@ -73,11 +76,12 @@ cause only inside a nonnull terminal model call, so it cannot serve.
 
 Wait selection: `park` and `fail` act through one question, whether this
 exhaustion selects a wait. `fail` never selects one. `park` selects one only
-when at least one exclusion in the snapshot is one a wake can clear. Where every
-member is excluded solely by chain exclusions written in this turn, no wait is
-selected and the exhaustion ends in a failure ending exactly as a `fail` pool
-would: post-failure fail at a fresh admission, wait-transition fail (after call)
-at a release.
+when some member's every active exclusion is one a wake can clear, so that one
+wake can readmit that whole member. No wake clears a chain exclusion or a
+`switch_next_turn` displacement, so a member holding either never qualifies,
+whatever else it holds. Where no member qualifies, no wait is selected and the
+exhaustion ends in a failure ending exactly as a `fail` pool would: post-failure
+fail at a fresh admission, wait-transition fail (after call) at a release.
 
 A contended wait that becomes exhausted re-runs the exhaustion policy rather
 than staying parked. When a woken contended waiter finds every formerly bounded
@@ -112,8 +116,11 @@ conflated: the admission that finds every candidate at its bound and inserts the
 wait; the reservation completion that publishes its wake; the evidence rewrite
 by which a woken transaction that still finds every candidate at its bound
 replaces the wait's reservation identities and stays parked; and the release
-that consumes the wait and prepares a call. An exhausted wait has three: the
-admission, the rewrite from a contended wait, and the release. Lock order is
+that consumes the wait and prepares a call. An exhausted wait has four: the
+admission; the rewrite from a contended wait; the evidence rewrite by which a
+woken transaction that reruns admission and still selects an exhausted wait
+replaces the wait's exclusion evidence and deadline from current state and stays
+parked, so a past deadline never wakes it again; and the release. Lock order is
 [persistence protocol](../spec/persistence-protocol.md)'s.
 
 Wire: a parked turn projects an active transcript turn state that retains the
@@ -165,14 +172,20 @@ spec page states.
   exclusion expires enters exhausted-wait, keeps its slot, appends no
   `TurnFailed`, and is released at the computed deadline; the released chain
   admits that member and reaches selected.
-- A `park` pool whose members are excluded only by chain exclusions of this turn
-  fails rather than parking: post-failure fail at a fresh admission,
-  wait-transition fail (after call) at a release.
+- A `park` pool in which every member holds a chain exclusion of this turn,
+  alone or beside an expiring exclusion, fails rather than parking: post-failure
+  fail at a fresh admission, wait-transition fail (after call) at a release.
 - A contended wait whose bounded candidates all become durably excluded re-runs
   the exhaustion policy: a `fail` pool terminalizes and a `park` pool converts
   to exhausted-wait in place.
 - A released wait that finds exhaustion terminalizes through a fresh call-free
   attempt; the wait attempt and any predecessor attempt are unchanged.
+- A wake that reruns admission and still selects an exhausted wait rewrites the
+  wait in place with current evidence and deadline; the turn stays parked and
+  opens no attempt.
+- A contended wait is released by a durable member-availability update or an
+  operator clear that readmits an excluded member it records, and the released
+  chain admits that member.
 - An accepted stop against a parked wait terminalizes Cancelled with
   `TurnCancelled`, never Failed.
 - A restart alone releases no wait; retained contended waits are re-evaluated
