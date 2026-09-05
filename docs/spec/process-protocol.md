@@ -5,9 +5,9 @@ The process protocol is the wire boundary between a local client process and
 
 ## Map
 
-The vocabulary lives in `crates/process-protocol`: one protocol version, integer
-1, whose closed set of request, message, event, and field shapes is every wire
-shape the daemon implements. The daemon side of the boundary is
+`crates/process-protocol` defines one protocol version, integer 1, and a closed
+set of request, message, event, and field shapes; that set is the whole wire
+surface the daemon implements. The daemon side of the boundary is
 `apps/signalboxd/src/process_runtime.rs`; the first client is the `signalbox`
 terminal binary in `apps/client`.
 
@@ -17,7 +17,7 @@ unless given an explicit path. Each frame is one UTF-8 JSON object followed by a
 newline, at most 8 MiB including the newline; an empty line is a malformed
 frame. Every frame carries the version, a request identity, and exactly one
 tagged request or message object. Request and message objects carry a required
-string `type` and reject fields their variant does not admit. Identifiers are
+string `type`; a field the variant does not admit is rejected. Identifiers are
 canonical UUID strings; request identities, versions, indices, counts, and
 cursors are canonical decimal strings that preserve the full unsigned 64-bit
 range.
@@ -26,7 +26,7 @@ A client sends requests and receives receipts, reads, or errors. A mutation
 carries a client-supplied command identity under the claim protocol in
 [identity-and-commands.md](identity-and-commands.md). Submitted input is an
 ordered array of parts, each a text part or an attachment reference carrying a
-blob digest and its metadata. The request chooses how the input is delivered:
+blob digest and its metadata. The request states how the input is delivered:
 started when the session is idle, steered into the active turn, or queued behind
 it, with idle start as the default. A session placement is pathless or names a
 directory path. A model selection names a configured selection directly or by
@@ -36,9 +36,9 @@ attribute keys are nonempty and contain no U+0000.
 Conversation imports and blob uploads move bytes in chunks through a begin,
 append, commit sequence under one process-wide bulk-ingest permit. A chunked
 operation has a five-minute inactivity deadline that resets after each accepted
-append and a non-resetting twenty-four-hour deadline from the moment its begin
-takes the permit; the first bounds a stalled client and the second bounds one
-making indefinite minimal progress. Blob storage is owned by
+append and a non-resetting twenty-four-hour deadline from when its begin takes
+the permit; the first bounds a stalled client and the second bounds one making
+indefinite minimal progress. Blob storage is owned by
 [blob-storage.md](blob-storage.md) and the import pipeline by
 [conversation-import.md](conversation-import.md).
 
@@ -60,27 +60,27 @@ cascade rules are owned by
 Durable events reach followers through the dispatcher. It reads the
 transactional outbox owned by [persistence-protocol.md](persistence-protocol.md)
 one sequence at a time and offers each event to two process-local fan-outs: one
-durable-only, and one composite fan-out that also admits deltas. A
-database-scoped advisory guard and a generation fence in
-`crates/persistence/src/hub_fence.rs` together enforce one active daemon
-process, and therefore one dispatcher and its fan-outs, for a database.
+durable-only and one composite that also admits deltas. A database-scoped
+advisory guard and a generation fence in `crates/persistence/src/hub_fence.rs`
+together enforce one active daemon process, and therefore one dispatcher and its
+fan-outs, for a database.
 
 ## Decisions
 
-In-place editing of version 1 ends at the first durable deployment, the first
+Version 1 is edited in place until the first durable deployment, the first
 client that cannot be rebuilt at will; an owner-operated remote daemon or
-installed app triggers that condition as surely as an external installation, and
-every later incompatible change allocates a permanent new version number.
+installed app counts as one, and every later incompatible change allocates a
+permanent new version number.
 
-Every frame carries the version because a version on every independent line
-makes captured traffic and errors self-describing without connection-global
-negotiation state. Selecting a session never requires a feature-specific version
-gate, because every durable representation is expressible at version 1.
+Every frame carries the version so captured traffic and errors are
+self-describing without connection-global negotiation state. Selecting a session
+never requires a feature-specific version gate, because every durable
+representation is expressible at version 1.
 
 The socket's immediate parent directory must be owner-private even when the
 socket node itself is mode 0600, because not every Unix enforces socket-node
-permissions. Socket filesystem access is the deployment boundary; it is not
-represented as application-level file-owner proof. The lack of authentication is
+permissions. Socket filesystem access is the deployment boundary; the daemon
+adds no application-level file-owner proof. The lack of authentication is
 provisional: remote access would require an authenticated identity and
 revocation design that does not exist, recorded in
 [open-questions.md](../open-questions.md).
@@ -186,9 +186,10 @@ part of the canonical decision payload; the session named by
 recorded override is a session-scoped standing fact.
 
 A one-segment root path is legal only under the `root_global_read` placement,
-whose explicit intent records that the session gains global conversation read.
-The client accepts a placement receipt only when the session and placement echo
-its request and the version is exactly one greater than the version it expected.
+which records the explicit intent that the session gains global conversation
+read. The client accepts a placement receipt only when the session and placement
+echo its request and the version is exactly one greater than the version it
+expected.
 
 A commission binds every supplied template name by copy and reports the
 template's canonical lowercase 64-hex digest, so a name is never mutable
@@ -275,8 +276,8 @@ successor daemon can acquire the singleton guard immediately but cannot pass the
 exclusive prior-generation fence until every old pooled session is gone.
 
 The durable-only and composite fan-outs each retain 64 update events; wire
-followers use the composite one. Having no connected follower never blocks
-durable cursor advancement. A follower that overruns its fan-out receives
+followers use the composite one. Durable cursor advancement never waits for a
+connected follower. A follower that overruns its fan-out receives
 `resync_required` and reconnects for a fresh authoritative snapshot and its
 durable cursor. Delivery order and deduplication by cursor are the outbox
 contract in [persistence-protocol.md](persistence-protocol.md).
@@ -285,8 +286,8 @@ For a follow, the server subscribes to the fan-out before reading the snapshot,
 sends the snapshot first, then sends the events above its cursor in order; every
 client-visible transition committed before the snapshot is represented in it
 even when it adds no semantic transcript entry. The server discards the deltas
-queued in the fixed prefix recorded when the snapshot completed, so terminal
-reply truth is never followed by stale fragments.
+queued in the fixed prefix recorded when the snapshot completed, so a terminal
+reply is never followed by stale fragments.
 
 A delta is a process-local presentation event with no outbox cursor: it is never
 appended to the outbox, never advances the follow cursor, never enters the

@@ -47,8 +47,7 @@ earlier command already cleared is `already_cleared`. Success returns
 `already_cleared`, and the inactive record is retained so the second answer is
 durable. An equal `command_id` replay returns its stored receipt before current
 state is evaluated. Both operations are authorized as every other request is:
-reaching the owner-private socket is the authority, and no response code is
-reserved for a future authorization failure.
+reaching the owner-private socket is the authority.
 
 Configuration reload is one `reload_configuration` request with no members and
 no `command_id`, because the swap changes process memory alone and a repeat
