@@ -34,16 +34,7 @@ use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
 use crate::translate::build_request_with_fast_mode;
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
 
-const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
-const CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS: &str =
-    "context-management-2025-06-27,fast-mode-2026-02-01";
-
-const fn anthropic_beta_header(request_fast_mode: FastMode) -> &'static str {
-    match request_fast_mode {
-        FastMode::Enabled => CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS,
-        FastMode::Disabled => CONTEXT_MANAGEMENT_BETA,
-    }
-}
+const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 
 /// The Anthropic Messages adapter.
 ///
@@ -379,14 +370,16 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         };
         let delivery = operation.delivery;
         let stop_sequences = operation.settings.stop_sequences.clone();
-        let builder = self
+        let mut builder = self
             .client
             .post(self.messages_url.clone())
             .header("x-api-key", api_key_header)
             .header("anthropic-version", self.version_header.clone())
-            .header("anthropic-beta", anthropic_beta_header(request_fast_mode))
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
+        if request_fast_mode == FastMode::Enabled {
+            builder = builder.header("anthropic-beta", FAST_MODE_BETA);
+        }
         let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(defect) => {
@@ -681,14 +674,16 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
         let Some(api_key_header) = sensitive_header(&credential) else {
             return InputTokenCountOutcome::Failed { correlation };
         };
-        let builder = self
+        let mut builder = self
             .client
             .post(self.count_tokens_url.clone())
             .header("x-api-key", api_key_header)
             .header("anthropic-version", self.version_header.clone())
-            .header("anthropic-beta", anthropic_beta_header(request_fast_mode))
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
+        if request_fast_mode == FastMode::Enabled {
+            builder = builder.header("anthropic-beta", FAST_MODE_BETA);
+        }
         let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },

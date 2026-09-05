@@ -1363,6 +1363,46 @@ impl PostgresModelCallRepository {
         .await
     }
 
+    /// Checkpoints and closes the exact prospective call after attachment
+    /// verification found a definitive failure during provider-native counting.
+    pub(crate) async fn fail_counted_attachment_in_transaction(
+        &self,
+        connection: &mut PgConnection,
+        activated: &signalbox_domain::ActivatedTurn,
+        prospective: &ProspectiveModelCall,
+        failure: AttachmentPreparationFailure,
+        identities: FailedModelCallTurnIdentities,
+        outbox_order_guard: ModelCallOutboxOrderGuard,
+    ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
+        self.checkpoint_counted_activation_in_transaction(
+            connection,
+            activated,
+            prospective,
+            outbox_order_guard,
+        )
+        .await?;
+        let call = prospective.prepared().call().id();
+        let execution = require_exact_call(
+            require_live_execution(connection, activated.session(), &self.targets).await?,
+            call,
+        )?;
+        let failed = execution.fail_prepared_call(identities).map_err(|_| {
+            ModelCallRepositoryError::InvalidTransition(
+                "counted attachment failure requires the exact Prepared call",
+            )
+        })?;
+        persist_failed_with_delegated_child_result(
+            connection,
+            &failed,
+            TurnTerminalCause::AttachmentPreparationFailed,
+            ProviderReportedTokenUsage::unreported(),
+            None,
+            Some(failure),
+        )
+        .await?;
+        Ok(failed)
+    }
+
     /// Commits Prepared while consuming the complete locked steering inventory.
     pub async fn prepare_initial_call<NextSteeringIdentities>(
         &self,

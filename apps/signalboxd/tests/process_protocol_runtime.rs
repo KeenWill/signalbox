@@ -112,16 +112,16 @@ use signalbox_process_protocol::{
     ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
     ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionLifecycleEffect,
     SessionMetadata, SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UserInputContent,
-    decode_server_line, encode_client_line,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UserAttachmentKind,
+    UserInputContent, UserInputPart, decode_server_line, encode_client_line,
 };
 use signalboxd::{
-    ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
-    ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
-    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution,
-    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError, ReportedUsageCompaction,
-    ReportedUsageCompactionError, SessionTemplateConfiguration, TurnLivenessNumericBounds,
-    TurnLivenessRuntime,
+    ActivatedTurnPass, AttachmentPreparingModelCallProvider, BlobStorageClass, BlobStoreRegistry,
+    ContextGuardedTurnPass, ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy,
+    FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
+    PostgresProviderModelExecution, ProcessProviderTextDeltaSink, ProcessRuntime,
+    ProcessRuntimeError, ReportedUsageCompaction, ReportedUsageCompactionError,
+    SessionTemplateConfiguration, TurnLivenessNumericBounds, TurnLivenessRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tempfile::TempDir;
@@ -9635,6 +9635,148 @@ impl ModelCallInputTokenCounter for CommitAmbiguousCounter {
     {
         std::future::ready(Err(CommitAmbiguousCountFailure))
     }
+}
+
+#[derive(Clone, Debug)]
+struct CountingProbe {
+    interactions: Arc<AtomicUsize>,
+}
+
+impl ModelCallInputTokenCounter for CountingProbe {
+    type Error = CommitAmbiguousCountFailure;
+
+    fn count_input_tokens<Cancellation>(
+        &self,
+        _operation: PreparedModelOperation,
+        _cancellation: Cancellation,
+    ) -> impl std::future::Future<Output = Result<ModelCallInputTokenCount, Self::Error>> + Send
+    where
+        Cancellation: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.interactions.fetch_add(1, Ordering::SeqCst);
+        std::future::ready(Ok(ModelCallInputTokenCount::Counted(1)))
+    }
+}
+
+/// INV-062: the provider-native counter is behind attachment verification, so
+/// a missing replica closes the exact prospective call without provider I/O.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv062_attachment_verification_precedes_provider_counting() -> Result<(), Box<dyn Error>> {
+    let mut fixture = CommittedBlobReadFixture::start(b"count guard attachment").await?;
+    let session_id = create_alias_session(&mut fixture.connection).await?;
+    fixture
+        .connection
+        .request(
+            4,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::from_parts(vec![UserInputPart::Attachment {
+                    digest: fixture.wire_digest,
+                    kind: UserAttachmentKind::File,
+                    media_type: String::from("application/octet-stream"),
+                    display_filename: None,
+                }]),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut fixture.connection, session_id, 1).await?;
+    fs::remove_file(fixture.object_path())?;
+
+    let model_configuration = support::parse_model_configuration(
+        &fixture
+            .runtime
+            .blob_storage_root
+            .as_ref()
+            .expect("the fixture owns blob configuration")
+            .model_configuration(),
+    )?;
+    let runtime_models = model_configuration.runtime_model_catalog();
+    let provider = RuntimeModelCallProvider::new(
+        ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
+        runtime_models.clone(),
+        None,
+    )
+    .with_text_delta_sink(fixture.runtime.provider_text_delta_sink());
+    let interactions = Arc::new(AtomicUsize::new(0));
+    let counter = AttachmentPreparingModelCallProvider::for_counting(
+        CountingProbe {
+            interactions: Arc::clone(&interactions),
+        },
+        fixture.runtime.pool.clone(),
+        Some(fixture.runtime.blob_store_registry()),
+        model_configuration.provider_input_count_targets(),
+    );
+    let repository = PostgresModelCallRepository::new(
+        fixture.runtime.pool.clone(),
+        model_configuration.target_catalog(),
+        ModelCallCredentialReference::new("attachment-count-guard-fixture"),
+    )
+    .with_session_credentials(model_configuration.credential_family_catalog());
+    let guarded_repository = repository.clone();
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(
+                fixture.runtime.pool.clone(),
+                None,
+                Vec::new(),
+            ),
+        ));
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
+            runtime_models.clone(),
+        ));
+    let mut pass = ContextGuardedTurnPass::new(
+        StartEligibleTurnRepository::new(fixture.runtime.pool.clone()),
+        guarded_repository,
+        counter,
+        NoToolCatalog,
+        runtime_models,
+        model_configuration,
+        compaction_model,
+        execution,
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        fixture.runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
+
+    pass.run(SessionId::from_uuid(session_id.into_uuid()))
+        .await?;
+    assert_eq!(interactions.load(Ordering::SeqCst), 0);
+    assert!(!fatal_execution.is_triggered());
+    let closure: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind,
+                terminal_attachment_preparation_failure_cause
+           FROM model_call
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&fixture.runtime.pool)
+    .await?;
+    assert_eq!(
+        closure,
+        (
+            String::from("terminal"),
+            Some(String::from("known_failed")),
+            Some(String::from("missing")),
+        )
+    );
+
+    fixture.stop().await
 }
 
 /// S03 / INV-034: the production guarded pass reports post-activation failure

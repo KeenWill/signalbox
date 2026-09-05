@@ -1395,7 +1395,7 @@ pub enum ModelCallInputTokenCount {
     /// must be retried before activation rather than sent without a count.
     AttachmentUnavailable,
     /// Attachment preparation found a definitive request-local failure.
-    AttachmentFailure,
+    AttachmentFailure(AttachmentPreparationFailure),
     /// No trustworthy provider-native estimate is available.
     Unavailable,
 }

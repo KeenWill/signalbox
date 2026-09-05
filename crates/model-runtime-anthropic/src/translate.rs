@@ -9,8 +9,7 @@ use signalbox_model_runtime::{
 };
 
 use crate::wire::{
-    ContextManagement, MessagesRequest, OutputConfig, WireMessage, WireRequestBlock, WireTool,
-    WireToolChoice,
+    MessagesRequest, OutputConfig, WireMessage, WireRequestBlock, WireTool, WireToolChoice,
 };
 
 /// Builds the wire request for one operation.
@@ -79,7 +78,6 @@ pub(crate) fn build_request_with_fast_mode<C>(
         speed: (request_fast_mode == FastMode::Enabled).then_some("fast"),
         tools: plan.tools,
         tool_choice: plan.tool_choice,
-        context_management: ContextManagement::clear_tool_uses(),
         stream: operation.delivery == DeliveryMode::Streamed,
     })
 }
@@ -637,13 +635,6 @@ mod tests {
 
         expect![[r#"
             {
-              "context_management": {
-                "edits": [
-                  {
-                    "type": "clear_tool_uses_20250919"
-                  }
-                ]
-              },
               "max_tokens": 64,
               "messages": [
                 {
@@ -729,13 +720,6 @@ mod tests {
     fn minimal_operation_omits_every_unset_optional_field() {
         expect![[r#"
             {
-              "context_management": {
-                "edits": [
-                  {
-                    "type": "clear_tool_uses_20250919"
-                  }
-                ]
-              },
               "max_tokens": 64,
               "messages": [
                 {
