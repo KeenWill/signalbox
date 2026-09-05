@@ -77,8 +77,7 @@ INV-tagged test names and attached doc comments.
   attempt ends; each model call is prepared → in flight → terminal/completed.
 - **Transient updates:** Client presentation follows the durable-update and
   authoritative-replacement contract in
-  [process-protocol](spec/process-protocol.md#follow-synchronization).
-  Provider-token relay remains
+  [process-protocol](spec/process-protocol.md). Provider-token relay remains
   [open](open-questions.md#protocols-and-persistence).
 - **Owning component:** The daemon resolves and calls the provider; Postgres
   owns durable provenance and final content; clients render drafts.
@@ -88,10 +87,9 @@ INV-tagged test names and attached doc comments.
   retried, and an ambiguous outcome never creates a successor. When pool policy
   selects `switch_now`, a proven availability failure may create the S22
   successor on a new attempt against the same target and a different credential
-  profile, under
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  profile, under [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  [credential pools and selection](spec/configuration-and-credentials.md#overview).
   No partial draft becomes final content. A later authorized call must retain
   steering already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
@@ -585,14 +583,13 @@ INV-tagged test names and attached doc comments.
   names the exact parent tool request, with ancestry `None`, task input, and a
   background or bound relationship. `await_session` records foreground or
   background delivery; `send_session_message` records either direction, as owned
-  by the
-  [delegation tool contract](spec/tool-loop.md#session-delegation-tool-family).
+  by the [delegation tool contract](spec/tool-loop.md).
 - **State transitions:** A foreground wait retains the parent's only active turn
   slot until an explicit child result arrives. A background wait registers
   delivery without retaining that slot; result commit creates a durable parent
   wake. The returned value or typed failure becomes delivered parent content,
   never child transcript content, under the
-  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#boundary-contracts).
 - **Transient updates:** Best-effort nudges reduce result/message wake latency;
   the durable eligibility sweep is the restart and lost-wake backstop.
 - **Owning component:** Daemon owns relationships and scheduling; each session
@@ -600,8 +597,7 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Restart restores the relationship, exact wait, messages,
   and undelivered result. Child failure, stop, or cancellation is delivered as a
   typed outcome. A detached result remains durable after parent termination, as
-  owned by
-  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+  owned by [session delegation](spec/sessions-and-transcript.md).
 - **Required invariants:** INV-003, INV-010, INV-034.
 - **Remaining questions:** Multi-source or merged transcript ancestry remains
   separate and unchanged.
@@ -613,7 +609,7 @@ INV-tagged test names and attached doc comments.
 - **Durable commands:** Parent stop/cancel carries `ParentAlone` or
   `ParentAndDescendants`. The latter atomically records a disposition for each
   evaluated relationship from the durable descendant walk defined by
-  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+  [session delegation](spec/sessions-and-transcript.md).
 - **State transitions:** Background children continue. Bound children apply
   their separately recorded stop/cancel action; `KeepRunning` is itself a typed
   disposition. A child is never deleted and may finish after the parent.
@@ -624,7 +620,7 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Every evaluated child has an explicit reason and exact
   spawn, parent-event, and command provenance. Already-issued effects are not
   undone and ambiguous effects remain reconcilable under the
-  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#boundary-contracts).
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-034.
 - **Remaining questions:** Ordinary archive remains independently non-cascading;
   destructive retention remains separate later scope.
@@ -719,16 +715,15 @@ INV-tagged test names and attached doc comments.
   the session-pinned pool policy; create a distinct successor attempt and model
   call that pin the same target, a different eligible profile from that pool,
   the predecessor call, and the qualifying cause, as owned by
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  [credential pools and selection](spec/configuration-and-credentials.md#overview).
 - **State transitions:** Predecessor call → known availability failure and
   predecessor attempt → known failed; turn → successor eligible; successor
   attempt/call → terminal. Each availability-successor chain is bounded to at
   most one call per pool member; a successful call ends that chain before later
   continuation, while releasing a parked wait resumes the chain the wait belongs
-  to
-  ([availability successor calls](spec/model-call-execution.md#availability-successor-calls)).
+  to ([availability successor calls](spec/model-call-execution.md)).
 - **Transient updates:** No current client update announces that a successor is
   being considered or selected. The predecessor, cause, and successor are
   committed future durable evidence that no present migration or repository
@@ -743,8 +738,8 @@ INV-tagged test names and attached doc comments.
   credential rejection never do. The successor cannot cross adapters or change
   the exact target. Exhausting the pool follows its configured durable park or
   known-failure outcome
-  ([credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection)).
-  A provider-reported mismatch against either call's own target follows the
+  ([credential pools and selection](spec/configuration-and-credentials.md)). A
+  provider-reported mismatch against either call's own target follows the
   accepted timing-sensitive mismatch failure rule
   ([model-call-execution](spec/model-call-execution.md)) and is never an allowed
   substitution.
@@ -806,7 +801,7 @@ INV-tagged test names and attached doc comments.
   reading an authoritative repeatable-read snapshot of transcript entries, turn
   states, and the outbox cursor, then sends matching events above that cursor;
   no new logical work is created merely by reconnecting
-  ([follow synchronization](spec/process-protocol.md#follow-synchronization)).
+  ([follow synchronization](spec/process-protocol.md)).
 - **State transitions:** Client disconnected → synchronized snapshot → live
   observer; server-side turn remains unchanged.
 - **Transient updates:** Previously seen draft may be replaced. Version one
@@ -820,7 +815,7 @@ INV-tagged test names and attached doc comments.
   prevents a waiter from depending on an already-covered event. Large
   transcripts arrive as validated bounded frames; a partial sequence is never
   authoritative. Final durable content replaces any draft
-  ([process protocol](spec/process-protocol.md#transcript-snapshots)).
+  ([process protocol](spec/process-protocol.md)).
 - **Required invariants:** INV-005, INV-012, INV-032, INV-033.
 - **Remaining questions:** Transient updates, retention, later compatibility,
   and browser transport remain
