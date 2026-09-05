@@ -161,8 +161,9 @@ Each tool family owns its bounded capture, truncation, and completeness
 evidence; no universal true-size field exists, because a traversal cannot always
 know it.
 
-Bounds are on durable content, never on wall-clock time, so one model-controlled
-chain cannot hold the progressing slot indefinitely or exhaust daemon memory.
+The loop's bounds are on durable content, not on wall-clock time, so one
+model-controlled chain cannot hold the progressing slot indefinitely or exhaust
+daemon memory.
 
 Pending approval has no timeout.
 
