@@ -496,11 +496,6 @@ pub struct NumericBoundsConfiguration {
 }
 
 const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
-    (
-        "repository_reconciliation_quantum",
-        NumericBoundKind::Integer,
-    ),
-    ("webhook_drain_work_budget", NumericBoundKind::Duration),
     ("fenced_pool_min_connections", NumericBoundKind::Integer),
     (
         "fenced_pool_floor_reconciliation_interval",
@@ -551,34 +546,6 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         NumericBoundKind::Duration,
     ),
     (
-        "convergence_sweep_request_timeout",
-        NumericBoundKind::Duration,
-    ),
-    (
-        "max_convergence_sweep_connection_pages",
-        NumericBoundKind::Integer,
-    ),
-    (
-        "max_concurrent_convergence_sweep_targets",
-        NumericBoundKind::Integer,
-    ),
-    (
-        "max_convergence_sweep_request_attempts",
-        NumericBoundKind::Integer,
-    ),
-    (
-        "convergence_sweep_request_retry_delay",
-        NumericBoundKind::Duration,
-    ),
-    (
-        "convergence_sweep_retry_backoff_base",
-        NumericBoundKind::Duration,
-    ),
-    (
-        "convergence_sweep_retry_backoff_cap",
-        NumericBoundKind::Duration,
-    ),
-    (
         "terminalizations_per_liveness_scan",
         NumericBoundKind::Integer,
     ),
@@ -594,9 +561,6 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "automatic_reconciliation_attempt_bound",
         NumericBoundKind::Duration,
     ),
-    ("max_convergence_sweep_targets", NumericBoundKind::Integer),
-    ("max_convergence_sweep_interval", NumericBoundKind::Duration),
-    ("max_convergence_sweep_cool_off", NumericBoundKind::Duration),
     ("automatic_resume_base_backoff", NumericBoundKind::Duration),
     ("automatic_resume_backoff_cap", NumericBoundKind::Duration),
     ("automatic_resume_attempt_budget", NumericBoundKind::Integer),
@@ -3551,8 +3515,6 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
 version = 1
 
 [numeric_bounds]
-repository_reconciliation_quantum = 16
-webhook_drain_work_budget = "45s"
 fenced_pool_min_connections = 48
 fenced_pool_floor_reconciliation_interval = "5s"
 fenced_pool_floor_reconciliation_attempt_bound = "30s"
@@ -3572,20 +3534,10 @@ expired_pass_recovery_attempts = 4
 expired_pass_recovery_attempt_bound = "3s"
 expired_pass_recovery_lock_retry_delay = "6s"
 expired_pass_recovery_conservative_retry_delay = "120s"
-convergence_sweep_request_timeout = "30s"
-max_convergence_sweep_connection_pages = 100
-max_concurrent_convergence_sweep_targets = 8
-max_convergence_sweep_request_attempts = 3
-convergence_sweep_request_retry_delay = "250ms"
-convergence_sweep_retry_backoff_base = "60s"
-convergence_sweep_retry_backoff_cap = "900s"
 terminalizations_per_liveness_scan = 64
 turn_liveness_recovery_attempt_bound = "10s"
 automatic_reconciliations_per_liveness_scan = 64
 automatic_reconciliation_attempt_bound = "60s"
-max_convergence_sweep_targets = 256
-max_convergence_sweep_interval = "300s"
-max_convergence_sweep_cool_off = "1800s"
 automatic_resume_base_backoff = "120s"
 automatic_resume_backoff_cap = "1800s"
 automatic_resume_attempt_budget = 20

@@ -1,22 +1,5 @@
--- Repository-watch v1 state is disposable derived data. Preserve only the
--- core-owned operator requirement before dropping the old surface.
-
-ALTER TABLE goal_execution_failure_recovery
-    DROP CONSTRAINT goal_execution_failure_recovery_cause_kind_closed,
-    ADD CONSTRAINT goal_execution_failure_recovery_cause_kind_closed
-    CHECK (cause_kind IN (
-        'context_compaction_input_does_not_fit',
-        'headless_approval_escalation'
-    ));
-
-INSERT INTO goal_execution_failure_recovery
-    (turn_id, session_id, cause_kind, recorded_at)
-SELECT escalation.turn_id,
-       escalation.session_id,
-       'headless_approval_escalation',
-       escalation.escalated_at
-  FROM repo_watch_headless_approval_escalation AS escalation
-ON CONFLICT (turn_id) DO NOTHING;
+-- Repository-watch v1 state is disposable derived data. The v2 module is not
+-- dispatched yet, so cutover drops the old surface without a backfill.
 
 DROP TRIGGER commissioned_dispatch_counts_pull_request_session
     ON commissioned_dispatch;

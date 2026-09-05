@@ -72,7 +72,6 @@ const EXECUTION_FAILURE_NEED: &str =
 /// from one planned from block provenance alone, so it is exported for a
 /// consumer asserting which of the two a lineage recorded.
 pub const CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED: &str = "No safe context-compaction boundary fits the configured model window. Start a fresh session or reduce the imported context before resuming this goal; no automatic resumption is scheduled.";
-const HEADLESS_APPROVAL_ESCALATION_NEED: &str = "Approval-required work reached a headless boundary. Resolve the pending approval before resuming this goal; no automatic resumption is scheduled.";
 /// Preamble for an execution-failure block automatic resumption still owes.
 ///
 /// The repair follows it rather than replacing it with a promise of automation,
@@ -1305,9 +1304,6 @@ impl AutomaticResumption {
             Self::OperatorRequired {
                 cause: GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit,
             } => String::from(CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED),
-            Self::OperatorRequired {
-                cause: GoalExecutionFailureRecoveryCause::HeadlessApprovalEscalation,
-            } => String::from(HEADLESS_APPROVAL_ESCALATION_NEED),
             Self::Unmonitored => {
                 format!("{EXECUTION_FAILURE_UNMONITORED_PREAMBLE} {EXECUTION_FAILURE_NEED}")
             }
@@ -1903,12 +1899,6 @@ mod tests {
         }
         .need()
         .expect("the operator-required need is admitted");
-        let headless_approval = AutomaticResumption::OperatorRequired {
-            cause: GoalExecutionFailureRecoveryCause::HeadlessApprovalEscalation,
-        }
-        .need()
-        .expect("the headless-approval need is admitted");
-
         let unmonitored = AutomaticResumption::Unmonitored
             .need()
             .expect("the unmonitored need is admitted");
@@ -1920,10 +1910,6 @@ mod tests {
         assert_eq!(
             operator_required.as_str(),
             CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED
-        );
-        assert_eq!(
-            headless_approval.as_str(),
-            HEADLESS_APPROVAL_ESCALATION_NEED
         );
         assert_eq!(
             scheduled.as_str(),
