@@ -56,7 +56,8 @@ one current GitHub snapshot:
    current head OID, and the configured reviewer subsequently completed either
    a comment-free review or a review whose findings were all validly declined
    and resolved. Authenticated evidence is retained for an unchanged head across
-   later check reruns.
+   later check reruns only while its settled check-context identity inventory
+   remains unchanged.
 3. A check rollup exists on the commit whose OID equals the current head OID,
    every gating check is green, and the nonempty check-context inventory is
    unchanged from the preceding tick.
@@ -103,10 +104,11 @@ at the head and, unless newly added, at the base. Additional
 thread or check pages use dynamically aliased GraphQL fields, up to 20
 continuations in one request. The fetched review-thread count must equal the
 connection's stable `totalCount` and must not exceed the configured census
-limit; otherwise the tick fails closed. Review-thread
-identity and resolution state and the complete check census are traversed a
-second time and must remain identical before the final OID check. Review-thread
-comments, top-level comments, and reviews are also paginated. REST compare
+limit; otherwise the tick fails closed. Review-thread identity, resolution,
+reviewer edit time, and disposition evidence and the complete check census are
+traversed a second time and must remain identical before the final OID check.
+Review-thread comments, top-level comments, and reviews are also paginated. REST
+compare
 requests conservatively classify post-review rename-only, source-comment-only,
 and proven clean base-forward
 changes; a base forward must be a single merge of the reviewed head and exact

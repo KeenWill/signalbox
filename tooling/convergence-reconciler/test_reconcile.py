@@ -456,7 +456,40 @@ class ConvergencePredicateTests(unittest.TestCase):
             client._revalidate_review_threads([pull_request])
 
         client.execute.assert_called_once()
+    def test_reviewer_edit_after_disposition_invalidates_thread(self) -> None:
+        reviewer_comment = {
+            "author": {"login": "reviewer"},
+            "authorAssociation": "NONE",
+            "body": "This code has a different defect now.",
+            "createdAt": "2026-09-05T10:00:00Z",
+            "lastEditedAt": "2026-09-05T10:10:00Z",
+            "pullRequestReview": {"id": "review-1"},
+        }
+        prior_reply = {
+            "author": {"login": "owner"},
+            "authorAssociation": "OWNER",
+            "body": "Fixed in commit abcdef123.",
+            "createdAt": "2026-09-05T10:05:00Z",
+            "lastEditedAt": None,
+            "pullRequestReview": None,
+        }
+        raw_thread = {
+            "id": "thread-1",
+            "isResolved": True,
+            "comments": {
+                "totalCount": 2,
+                "nodes": [reviewer_comment, prior_reply],
+                "pageInfo": empty_page_info(),
+            },
+        }
 
+        normalized = normalize_review_threads([raw_thread], "owner")[0]
+
+        self.assertEqual(
+            normalized["latestReviewerAt"], "2026-09-05T10:10:00Z"
+        )
+        self.assertFalse(normalized["isDispositioned"])
+        self.assertIsNone(normalized["dispositionKind"])
     def test_check_revalidation_detects_an_early_context_change(self) -> None:
         client = GitHubGraphQL(
             "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
@@ -1032,6 +1065,10 @@ class GitHubGraphQLTests(unittest.TestCase):
                 "authenticated_review_id": "review-a",
                 "authenticated_review_body": "description",
                 "authenticated_review_check_policy": [],
+                "authenticated_review_check_inventory": [
+                    "CheckRun:required build"
+                ],
+                "check_inventory": ["CheckRun:required build"],
             },
             "head_oid": "head",
             "body": "description",
@@ -1079,6 +1116,10 @@ class GitHubGraphQLTests(unittest.TestCase):
                 "authenticated_review_id": "review-a",
                 "authenticated_review_body": "description",
                 "authenticated_review_check_policy": [],
+                "authenticated_review_check_inventory": [
+                    "CheckRun:required build"
+                ],
+                "check_inventory": ["CheckRun:required build"],
             },
             "head_oid": "head",
             "body": "description",
@@ -1133,6 +1174,43 @@ class GitHubGraphQLTests(unittest.TestCase):
             "observed_codex_reviews": {"review-a": "head"},
             "live_codex_review_oids": {"review-a": "head"},
             "checks": [],
+            "check_rollup_state": "SUCCESS",
+            "quiet_review_head_oids": [],
+        }
+
+        client._restore_persisted_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+
+    def test_persisted_review_is_invalidated_by_new_check_identity(self) -> None:
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": "head",
+                "authenticated_review_id": "review-a",
+                "authenticated_review_body": "description",
+                "authenticated_review_check_policy": [],
+                "authenticated_review_check_inventory": ["CheckRun:fast"],
+                "check_inventory": ["CheckRun:fast", "CheckRun:late"],
+            },
+            "head_oid": "head",
+            "body": "description",
+            "authenticated_quiet_review_oids": [],
+            "authenticated_review_ids": {},
+            "observed_codex_reviews": {},
+            "live_codex_review_oids": {"review-a": "head"},
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": name,
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+                for name in ("fast", "late")
+            ],
             "check_rollup_state": "SUCCESS",
             "quiet_review_head_oids": [],
         }
@@ -2506,8 +2584,21 @@ class GitHubGraphQLTests(unittest.TestCase):
     def test_wave_eight_escalation_is_eligible_at_hard_stop(self) -> None:
         self._assert_escalation_boundary(wave=8, total_waves=8, eligible=True)
 
+    def test_bot_suffix_reviews_count_toward_escalation_wave(self) -> None:
+        self._assert_escalation_boundary(
+            wave=5,
+            total_waves=5,
+            eligible=True,
+            reviewer_login="chatgpt-codex-connector[bot]",
+        )
+
     def _assert_escalation_boundary(
-        self, *, wave: int, total_waves: int, eligible: bool
+        self,
+        *,
+        wave: int,
+        total_waves: int,
+        eligible: bool,
+        reviewer_login: str = "chatgpt-codex-connector",
     ) -> None:
         client = GitHubGraphQL(
             "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
@@ -2525,7 +2616,7 @@ class GitHubGraphQLTests(unittest.TestCase):
         reviews = [
             {
                 "id": f"review-{number}",
-                "author": {"login": "chatgpt-codex-connector"},
+                "author": {"login": reviewer_login},
                 "submittedAt": f"2026-08-16T10:{number:02d}:00Z",
             }
             for number in range(1, total_waves + 1)
@@ -2826,6 +2917,8 @@ class DispatchFenceTests(unittest.TestCase):
                 "head_oid": "head",
                 "checked_head_oid": "head",
                 "check_rollup_state": "SUCCESS",
+                "check_inventory": ["CheckRun:required build"],
+                "check_inventory_stable": True,
                 "mergeable": "MERGEABLE",
                 "quiet_review_head_oids": ["head"],
                 "review_threads": [
@@ -2847,6 +2940,12 @@ class DispatchFenceTests(unittest.TestCase):
         self.assertEqual(
             state["pull_requests"]["17"]["authenticated_review_head"],
             "head",
+        )
+        self.assertEqual(
+            state["pull_requests"]["17"][
+                "authenticated_review_check_inventory"
+            ],
+            ["CheckRun:required build"],
         )
 
     def test_state_save_fsyncs_file_and_parent_directory(self) -> None:

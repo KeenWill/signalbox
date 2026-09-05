@@ -684,6 +684,16 @@ query($id: ID!, $after: String!) {
             ) == sorted(
                 {pattern.casefold() for pattern in self.non_gating_check_patterns}
             )
+            current_check_inventory = sorted(
+                f"{check['__typename']}:{check_name(check)}"
+                for check in pull_request.get("checks", [])
+            )
+            inventory_unchanged_since_authentication = (
+                bool(current_check_inventory)
+                and record.get("authenticated_review_check_inventory")
+                == current_check_inventory
+                and record.get("check_inventory") == current_check_inventory
+            )
             # A rerun of gating checks on the same, unchanged head advances
             # those checks' completion timestamps, so the fresh recomputation
             # in `_finalize_review_evidence` can stop finding a qualifying
@@ -706,6 +716,7 @@ query($id: ID!, $after: String!) {
                         and live_codex_review_oids.get(persisted_review_id)
                         == persisted_head
                         and checks_currently_green
+                        and inventory_unchanged_since_authentication
                     )
                 )
             )
@@ -799,9 +810,9 @@ query($id: ID!, $after: String!) {
             (
                 review
                 for review in reviews
-                if author_login(review) is not None
-                and author_login(review).casefold()
-                == self.reviewer_login.casefold()
+                if is_reviewer_login(
+                    author_login(review), self.reviewer_login
+                )
                 and review.get("state") != "DISMISSED"
                 and isinstance(review.get("submittedAt"), str)
             ),
@@ -1791,11 +1802,29 @@ def normalize_review_threads(
             ),
             default=0,
         )
+        reviewer_comments = comments[: latest_reviewer_index + 1]
+        latest_reviewer_at = max(
+            (
+                effective_at
+                for comment in reviewer_comments
+                for effective_at in [comment_effective_at(comment)]
+                if effective_at is not None
+            ),
+            default=None,
+        )
         author_replies = [
             comment
             for comment in comments[latest_reviewer_index + 1 :]
+            for effective_at in [comment_effective_at(comment)]
             if comment.get("authorAssociation")
             in TRUSTED_REVIEW_REQUEST_ASSOCIATIONS
+            and (
+                latest_reviewer_at is None
+                or (
+                    effective_at is not None
+                    and effective_at > latest_reviewer_at
+                )
+            )
         ]
         dispositions = [
             disposition_kind(comment.get("body") or "")
@@ -1809,14 +1838,6 @@ def normalize_review_threads(
             fixing_commit(comment.get("body") or "")
             for comment in author_replies
         ]
-        latest_reviewer_at = max(
-            (
-                comment["createdAt"]
-                for comment in comments[: latest_reviewer_index + 1]
-                if isinstance(comment.get("createdAt"), str)
-            ),
-            default=None,
-        )
         disposition_at = max(
             (
                 effective_at
@@ -2383,6 +2404,7 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
                 raise ValueError(f"unsupported or malformed state file: {path}")
         for field in (
             "authenticated_review_check_policy",
+            "authenticated_review_check_inventory",
             "check_inventory",
         ):
             value = record.get(field)
@@ -2534,11 +2556,17 @@ def process_pull_request(
             "terminal_state": None,
         }
     )
-    if pull_request["head_oid"] in pull_request["quiet_review_head_oids"]:
+    if (
+        pull_request["head_oid"] in pull_request["quiet_review_head_oids"]
+        and pull_request.get("check_inventory_stable") is True
+    ):
         record["authenticated_review_head"] = pull_request["head_oid"]
         record["authenticated_review_body"] = pull_request.get("body", "")
         record["authenticated_review_check_policy"] = sorted(
             {pattern.casefold() for pattern in config.non_gating_check_patterns}
+        )
+        record["authenticated_review_check_inventory"] = list(
+            pull_request.get("check_inventory", [])
         )
         review_id = pull_request.get("authenticated_review_ids", {}).get(
             pull_request["head_oid"]
