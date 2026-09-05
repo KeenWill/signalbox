@@ -97,7 +97,7 @@ not a blanket but a distinct decider that can still deny or escalate.
 Every decision records its source, so unattended operation is inspectable
 without presenting policy as human consent, and only an explicit user, delegate,
 or consumed-override decision emits an approval-decided event naming its
-decider.
+decider, its decision, and, for a delegate, its rationale.
 
 A denial reason is bounded and free of control characters, so a client can
 render it directly.
@@ -441,32 +441,34 @@ the command and last-writer stamp to the exact `ToolRequestId`.
 
 Code-host read-only declarations default to automatic approval and the mutations
 to confirmation, so the approval transaction authorizes each mutation before
-credentials resolve. `repository_read_file` requires an exact lowercase 40-hex
-commit revision and never defaults to a branch head. Paths use canonical
-repository-relative spelling with no empty, dot, or parent component; a bare dot
-names the repository root for a file read or directory listing and is rejected
-as a changed-file patch path. A returned node id, head revision, or continuation
-is admitted by the same predicate as its argument counterpart, so it can be
-passed back as an argument. Every returned URL is one absolute credential-free
-HTTPS location. No code-host result has more than 100 collection members or more
-than 512 KiB of encoded JSON. Every bounded review-log list reports whether it
-is truncated together with its continuation cursor, and a verdict never treats a
-partial evidence page as complete. The reviewer verdict is parsed from review
-bodies and issue comments merged in code-host timestamp order, and a usage-limit
-response is recognized separately as one exact canonical text that supersedes an
-earlier verdict until a later verdict arrives. Only the reviewer bot account
-supplies a verdict or a usage-limit response, and a verdict must carry a line
-whose whole content is the `Reviewed commit:` label followed by a
-7-to-40-character hexadecimal revision, with only emphasis or backtick markers
-around them; a verdict whose revision does not prefix the current head is stale
-and never counts as current convergence evidence. The latest exact review
-request by an owner, member, or collaborator with no later reviewer response
-marks the review in flight and blocks convergence. The authenticated job-log
-endpoint is the sole redirect-shaped exchange: after one 302 the adapter
-validates the location, pins a wholly public destination set, and downloads
-credential-free. A read transport or server failure is an executor
-infrastructure failure, while a mutation transport loss, server failure, or
-malformed acknowledgement is commit-ambiguous. `change_request_thread_reply` and
+credentials resolve. Every code-host declaration, reads included, is
+`ExternalEffect`. `repository_read_file` and `repository_list_directory` require
+an exact lowercase 40-hex commit revision and never default to a branch head.
+Paths use canonical repository-relative spelling with no empty, dot, or parent
+component; a bare dot names the repository root for a file read or directory
+listing and is rejected as a changed-file patch path. A returned node id, head
+revision, or continuation is admitted by the same predicate as its argument
+counterpart, so it can be passed back as an argument. Every returned URL is one
+absolute credential-free HTTPS location. No code-host result has more than 100
+collection members or more than 512 KiB of encoded JSON. Every bounded
+review-log list reports whether it is truncated together with its continuation
+cursor, and a verdict never treats a partial evidence page as complete. The
+reviewer verdict is parsed from review bodies and issue comments merged in
+code-host timestamp order, and a usage-limit response is recognized separately
+as one exact canonical text that supersedes an earlier verdict until a later
+verdict arrives. Only the reviewer bot account supplies a verdict or a
+usage-limit response, and a verdict must carry a line whose whole content is the
+`Reviewed commit:` label followed by a 7-to-40-character hexadecimal revision,
+with only emphasis or backtick markers around them; a verdict whose revision
+does not prefix the current head is stale and never counts as current
+convergence evidence. The latest exact review request by an owner, member, or
+collaborator with no later reviewer response marks the review in flight and
+blocks convergence. The authenticated job-log endpoint is the sole
+redirect-shaped exchange: after one 302 the adapter validates the location, pins
+a wholly public destination set, and downloads credential-free. A read transport
+or server failure is an executor infrastructure failure, while a mutation
+transport loss, server failure, or malformed acknowledgement is
+commit-ambiguous. `change_request_thread_reply` and
 `change_request_thread_resolve` query thread ownership before they mutate, and a
 failure of that query classifies the mutation as not dispatched rather than
 ambiguous. The adapter never returns code-host response bodies as error detail.
