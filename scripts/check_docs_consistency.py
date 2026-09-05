@@ -2510,11 +2510,9 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
         for suite in postgres_integration_suites.load_suites(root)
     ]
     workflow_path = root / postgres_integration_suites.WORKFLOW
-    workflow = (
-        workflow_path.read_text(encoding="utf-8")
-        if workflow_path.is_file()
-        else ""
-    )
+    if not workflow_path.is_file():
+        return runs
+    workflow = workflow_path.read_text(encoding="utf-8")
     executed_commands = [
         tokens
         for command, _, _ in postgres_integration_suites.workflow_shell_commands(
