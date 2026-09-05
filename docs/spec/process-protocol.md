@@ -18,8 +18,9 @@ newline, at most 8 MiB including the newline; an empty line is a malformed
 frame. Every frame carries the version as a JSON integer, a request identity,
 and exactly one request or message object tagged by its `type` string; a field
 the variant does not admit is rejected. Identifiers are canonical UUID strings;
-request identities, indices, counts, and cursors are canonical decimal strings
-that preserve the full unsigned 64-bit range.
+indices, counts, and cursors are canonical decimal strings that preserve the
+full unsigned 64-bit range. A request identity is a nonzero decimal string; zero
+is reserved for an error the daemon cannot correlate to a request.
 
 A client sends requests and receives receipts, reads, or errors. A mutation
 carries a client-supplied command identity under the claim protocol in
@@ -115,8 +116,9 @@ generation fence is unsupported.
 ## Boundary contracts
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
-identifiers. They never contain source bytes, file paths, provider payloads,
-SQL, or user content. Retained source content, such as an imported transcript
+identifiers. They never contain source bytes, host or credential paths, provider
+payloads, SQL, or user content; a tool failure may name a bounded
+workspace-relative path. Retained source content, such as an imported transcript
 entry, is not diagnostic evidence.
 
 The transport is local-machine and single-user; the protocol has no
@@ -152,9 +154,9 @@ equal retransmission reaches the replay boundary in
 retried with the same command identity, session, content, expected version, and
 treatment; changing any of them is conflicting reuse. Durable command equality
 is computed over the validated semantic request, never the frame: a review
-command's identity is its operation kind plus the SHA-256 of its validated
-request, and tag order and attribute order do not affect a metadata command's
-equality.
+command's equality key is its operation kind plus the SHA-256 of its validated
+request, recorded beside its client-supplied identity, and tag order and
+attribute order do not affect a metadata command's equality.
 
 A replay answers from the durable record before anything current is consulted: a
 replayed commission resolves before the live template catalog, a replayed
@@ -174,8 +176,10 @@ session, so the caller retries the same command identity and payload.
 The daemon applies the delivery the client selected and never guesses an
 interrupt, steering, or queued treatment. Steer and queue name the exact active
 turn the client observed; an idle slot or a changed turn is a typed rejection,
-never a retarget. Every projection of accepted input carries the same parts
-array in order, with attachment metadata and no blob bytes.
+never a retarget. The acceptance receipt carries correlation and turn identity
+without the parts; the durable event, the snapshot's queued turn, and the
+transcript user entry carry the same parts array in order, with attachment
+metadata and no blob bytes.
 
 An applied interrupt binds its immediate-successor origin in the same
 transaction. A stop can neither decide nor bypass a tool-approval wait; the
@@ -200,9 +204,10 @@ record. The alias catalog read reports current deployment configuration, not
 durable session state; an existing session keeps its frozen selection when the
 catalog changes.
 
-A metadata request that violates shape, cardinality, or byte bounds is a
-malformed frame, refused before application construction; `invalid_request` is
-reserved for the fail-closed mapping case.
+A metadata request that violates shape, uniqueness, or byte bounds is a
+malformed frame, refused before application construction; a request that exceeds
+a configured tag, attribute, required-tag, or page-size limit is
+`invalid_request`, as is the fail-closed mapping case.
 
 Every database-backed read is served from the authoritative tables, with no
 materialized view, cache, or analytical artifact, and takes no lock any writer
@@ -244,10 +249,11 @@ values, and a client never infers the semantic arm by reparsing either string.
 The projection resolves the domain's reference-only tool entries before crossing
 the wire, so a client never needs private storage access. A physically ambiguous
 tool attempt never becomes an execution result; it projects as `tool_closed`,
-naming only the tool request. `operator_action_required` is false while
-automatic recovery is scheduled or attempting and true only after the recovery
-budget in [turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md)
-is exhausted.
+carrying the tool request identity and the closure content and omitting the
+attempt identity. `operator_action_required` is false while automatic recovery
+is scheduled or attempting and true only after the recovery budget in
+[turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md) is
+exhausted.
 
 Each delegation request carries the invoking session, turn, and tool request
 identity, which must reconstitute one matching logical request before any
@@ -311,17 +317,18 @@ A client disconnect never cancels model or tool work. A side reread does not
 advance the follow connection's observed cursor; only events consumed from the
 subscribed connection do.
 
-The terminal client puts no conversation content in process arguments and sends
-no local path over the wire. When no command identity is given, it generates a
-fresh one and prints it to standard error before any socket I/O; every
-client-generated or server-discovered recovery value is printed before the
-commit it belongs to can become ambiguous, each recovery set is printed all or
-none, and the client never substitutes a new command identity for an ambiguous
-attempt. Its ambiguity diagnostic never echoes standard-input content and never
-synthesizes a shell command. It renders every C0 control code point other than
-line feed, DEL, and every C1 code point in process-derived text as a visible
-escape; a single explicit raw-output option is the only opt-in to unescaped
-text.
+The terminal client reads submitted input from standard input, never from
+process arguments; only the delegation message and spawn task flags accept their
+text on the command line or from a file. It sends no local path over the wire.
+When no command identity is given, it generates a fresh one and prints it to
+standard error before any socket I/O; every client-generated or
+server-discovered recovery value is printed before the commit it belongs to can
+become ambiguous, each recovery set is printed all or none, and the client never
+substitutes a new command identity for an ambiguous attempt. Its ambiguity
+diagnostic never echoes standard-input content and never synthesizes a shell
+command. It renders every C0 control code point other than line feed, DEL, and
+every C1 code point in process-derived text as a visible escape; a single
+explicit raw-output option is the only opt-in to unescaped text.
 
 ## Planned
 
@@ -330,9 +337,8 @@ text.
 - Configuration reload request: [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).
-- Runner placement on the wire, the runner status read with its failure evidence
-  and the runner state-transition event family:
-  [design](../design/process-protocol.md).
+- Runner placement on the wire and the runner status read with its failure
+  evidence: [design](../design/process-protocol.md).
 - `spawn_session` creation of a delegated child:
   [design](../design/process-protocol.md).
 - Cascade metadata on stop receipts: [design](../design/process-protocol.md).

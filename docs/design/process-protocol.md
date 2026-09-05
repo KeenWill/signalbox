@@ -71,9 +71,9 @@ belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
 version-1 encoding, and the closed receipt algebra belong here, and a later
 incompatible shape requires a new protocol version.
 
-Runner placement facts are a paged `read_runner_status` read and the
-`runner_state_transition` event family. The read carries `page_size` 1 through
-100 and an exclusive keyset `after`, and returns `runner_status`,
+Runner placement facts are a paged `read_runner_status` read beside the built
+`runner_state_transition` event. The read carries `page_size` 1 through 100 and
+an exclusive keyset `after`, and returns `runner_status`,
 `runner_operation_failure`, and `runner_workspace_leak` messages followed by
 `runner_status_end { runner_count, failure_count, leak_count, next_after }`.
 Each failure names its runner, the refused operation's correlation, one closed
@@ -82,16 +82,12 @@ bounded `code`, `message`, and structured `payload`. The category set is exactly
 the closed daemon-actionable set the runner wire carries, member for member, so
 every retained failure is serializable. The daemon bounds the detail and
 reproduces it without interpretation; runner evidence never carries an absolute
-host path, a repository URL, or a credential fact. The event is
-`runner_state_transition { runner_id, placement_revision, sandbox_profile, working_directory, state }`
-with state `pinned`, `suspect`, `connected`, `runner_lost_before_pin`,
-`runner_lost`, `replaced`, `working_directory_changed`, or `abandoned`;
-`working_directory` is the placement's directory or null for the runner default.
-This family is the only surface on which a follower learns that its session
-lost, changed, or moved runner, and it is the extension point for later runner
-facts: a new fact adds a state and its members to this event kind, never a
-second kind. A snapshot's session summary carries the same runner object, with
-connection health present exactly for a pinned placement.
+host path, a repository URL, or a credential fact. The event family is the only
+surface on which a follower learns that its session lost, changed, or moved
+runner, and it is the extension point for later runner facts: a new fact adds a
+state and its members to this event kind, never a second kind. A snapshot's
+session summary carries the same runner object, with connection health present
+exactly for a pinned placement.
 
 `spawn_session` carries a bounded `task` and the closed relationship object and
 returns `session_spawned { tool_request_id, child_session_id, relationship }`.
