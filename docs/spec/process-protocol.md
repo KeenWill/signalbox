@@ -161,9 +161,11 @@ mutation at a time and releases the inbound frame slot after acquiring that
 permit and before application handling.
 
 Every accepted non-review mutation, import transport request, or blob transport
-request produces exactly one receipt message or an error. A mutation whose
-commit outcome is unknown returns `commit_ambiguous`; an infrastructure failure
-known to precede the commit returns `unavailable`.
+request produces exactly one receipt message or an error, except a chunked
+import or blob request that crosses its non-resetting deadline and is closed
+without one. A mutation whose commit outcome is unknown returns
+`commit_ambiguous`; an infrastructure failure known to precede the commit
+returns `unavailable`.
 
 The client, never the server, supplies a durable-command mutation's command
 identity, so an equal retransmission reaches the replay boundary in
@@ -227,19 +229,19 @@ a configured tag, attribute, required-tag, or page-size limit is
 `invalid_request`, as is the fail-closed mapping case.
 
 Every database-backed read is served from the authoritative tables, with no
-materialized view, cache, or analytical artifact, and takes no lock any writer
-waits on. A read whose answer must be coherent across statements is one
-repeatable-read, read-only transaction; a transcript snapshot, the conversation
-list, and the review-orchestration projection each answer from one such
-snapshot. A single-statement read, such as session defaults or a blob catalog
-entry, runs directly on a pooled connection, and the review-findings listing
-takes its run and its findings from separate transactions. A read answered from
-deployment configuration opens no transaction. A transcript snapshot observes
-the outbox cursor, the session's semantic frontier, and every turn in acceptance
-order together. The conversation list orders by conversation identity value, a
-native session before an imported conversation of equal value. Every reported
-duration is clamped nonnegative and sampled against the database transaction
-timestamp, not a client clock.
+materialized view, cache, or analytical artifact, and takes no row or table lock
+an application mutation waits on. A read whose answer must be coherent across
+statements is one repeatable-read, read-only transaction; a transcript snapshot,
+the conversation list, and the review-orchestration projection each answer from
+one such snapshot. A single-statement read, such as session defaults or a blob
+catalog entry, runs directly on a pooled connection, and the review-findings
+listing takes its run and its findings from separate transactions. A read
+answered from deployment configuration opens no transaction. A transcript
+snapshot observes the outbox cursor, the session's semantic frontier, and every
+turn in acceptance order together. The conversation list orders by conversation
+identity value, a native session before an imported conversation of equal value.
+Every reported duration is clamped nonnegative and sampled against the database
+transaction timestamp, not a client clock.
 
 Every read that holds a pooled connection across more than one statement takes
 one snapshot-reader admission; the single-statement defaults read takes none.
@@ -256,12 +258,13 @@ transaction, and only then stream the completed file; the imported-conversation
 and goal reads load the complete aggregate first, then spool it the same way. A
 projection or spool failure before transmission returns `unavailable` and
 exposes no partial snapshot. Every bounded sequence read is a start message, its
-items, and an end message carrying the count. The client spools each complete
-snapshot or page into an owner-private anonymous temporary file and treats it as
-authoritative only after the end message arrives and its counts, indices,
-fragment sequence, session, and cursor validate. Snapshot deduplication uses the
-complete semantic identity of source session and entry; a second occurrence of
-that key fails the snapshot.
+items, and an end message carrying the count. A session metadata page orders its
+summaries by strictly increasing session identity, continuing after the
+requested cursor. The client spools each complete snapshot or page into an
+owner-private anonymous temporary file and treats it as authoritative only after
+the end message arrives and its counts, indices, fragment sequence, session, and
+cursor validate. Snapshot deduplication uses the complete semantic identity of
+source session and entry; a second occurrence of that key fails the snapshot.
 
 The imported-conversation read is `imported_conversation_start` naming the
 inspected conversation, one `imported_conversation_entry` per normalized entry,
