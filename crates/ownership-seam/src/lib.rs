@@ -8,21 +8,23 @@ use std::future::Future;
 
 pub use signalbox_application::{CreateSessionOutcome, SubmitInputOutcome};
 pub use signalbox_domain::{
-    BranchName, CommitSha, CreateSession, DurableCommandId, GoalUserAction, GoalUserCommand,
-    PullRequestBody, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepositorySlug,
-    SessionId, SessionLifecycleCommand, SessionLifecycleOperation, SubmitInput,
+    BranchName, CommitSha, ContextFrontierId, CreateSession, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId, FinishCondition,
+    GoalGuidance, GoalStatement, GoalUserAction, GoalUserCommand, LifecycleActor, ModelCallId,
+    ModelSelectionOverride, ModelSelectionRequest, ModuleDispatch, PerInputConfigurationChoices,
+    PullRequestBody, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
+    RepoWatchDispatchId, RepositorySlug, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionFailureCause, SessionId, SessionLifecycleCommand, SessionLifecycleOperation,
+    SessionLifecycleState, SessionOwnership, SessionOwnershipTransition, SessionTerminalOutcome,
+    StartGate, StopStickiness, SubmitInput, ToolAttemptId, TurnId, UserContent, UserContentPart,
 };
-pub use signalbox_persistence::mapping::GoalEventDiscriminator as GoalEventKind;
-pub use signalbox_persistence::outbox::{
-    DispatchedCommandSettlement as CommandSettlement, DispatchedGoalChange as GoalChange,
-    DispatchedInjectionOutcome as InjectionOutcome, DispatchedOwnershipChange as OwnershipChange,
-    DispatchedSessionCreation as SessionCreated,
-    DispatchedSessionStateChange as SessionStateChanged,
-    DispatchedSessionStateKind as SessionStateKind, DispatchedSessionTerminal as SessionTerminal,
-    DispatchedTurnTerminalDisposition as TurnTerminalDisposition, OutboxDispatchError,
-};
+pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{
-    DispatchedOutboxEvent, DispatchedOutboxEventKind, OutboxConsumer, OutboxConsumerReader,
+    DispatchedCommandSettlement, DispatchedGoalChange, DispatchedInjectionOutcome,
+    DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
+    DispatchedSessionStateKind, DispatchedTurnTerminalDisposition, OutboxConsumer,
+    OutboxConsumerReader,
 };
 pub use signalbox_persistence::{
     goal::GoalCommandHandlingOutcome,
@@ -30,6 +32,119 @@ pub use signalbox_persistence::{
 };
 use sqlx::PgPool;
 pub use sqlx::types::time::OffsetDateTime;
+
+/// Creation facts visible across the ownership seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionCreated {
+    pub cause: SessionCreationCause,
+    pub ownership: SessionOwnership,
+}
+
+/// Bare lifecycle state left by one transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionStateKind {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+}
+
+/// One nonterminal lifecycle transition visible across the seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionStateChanged {
+    pub prior: SessionStateKind,
+    pub state: SessionLifecycleState,
+    pub actor: LifecycleActor,
+}
+
+/// One terminal session transition visible across the seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTerminal {
+    pub prior: SessionStateKind,
+    pub outcome: SessionTerminalOutcome,
+    pub standing: Option<SessionFailureCause>,
+    pub actor: LifecycleActor,
+}
+
+/// Ambiguous operation that made a turn require reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconciliationOperation {
+    ModelCall(ModelCallId),
+    ToolAttempt(ToolAttemptId),
+}
+
+/// Turn terminal disposition visible across the seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TurnTerminalDisposition {
+    Completed {
+        call: ModelCallId,
+        completion_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    },
+    Refused {
+        call: ModelCallId,
+        terminal_frontier: ContextFrontierId,
+    },
+    Failed {
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    },
+    Cancelled {
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    },
+    ReconciliationRequired {
+        operation: ReconciliationOperation,
+        terminal_frontier: ContextFrontierId,
+    },
+    Retired,
+}
+
+/// Closed goal event kind visible across the seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GoalEventKind {
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+    SessionClosed,
+}
+
+/// One goal lineage event visible across the seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GoalChange {
+    pub event_ordinal: u64,
+    pub generation: u64,
+    pub kind: GoalEventKind,
+}
+
+/// One ownership transition visible across the seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnershipChange {
+    pub event_ordinal: u64,
+    pub transition: SessionOwnershipTransition,
+    pub actor: LifecycleActor,
+}
+
+/// Durable command settlement visible across the seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CommandSettlement {
+    Applied,
+    Rejected { kind: String },
+}
+
+/// Accepted input settlement visible across the seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InjectionOutcome {
+    Delivered { turn: Option<TurnId> },
+    NotDelivered,
+    Rejected { kind: String },
+}
 
 /// One of the eight lifecycle event families visible to ownership modules.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -139,26 +254,66 @@ impl LifecycleEventSource {
 fn project_lifecycle_event(event: DispatchedOutboxEvent) -> Option<LifecycleEvent> {
     let kind = match event.kind().clone() {
         DispatchedOutboxEventKind::SessionCreated(value) => {
-            LifecycleEventKind::SessionCreated(value)
+            LifecycleEventKind::SessionCreated(SessionCreated {
+                cause: value.cause,
+                ownership: value.ownership,
+            })
         }
         DispatchedOutboxEventKind::SessionStateChanged(value) => {
-            LifecycleEventKind::SessionStateChanged(value)
+            LifecycleEventKind::SessionStateChanged(SessionStateChanged {
+                prior: project_session_state(value.prior),
+                state: value.state,
+                actor: value.actor,
+            })
         }
         DispatchedOutboxEventKind::SessionTerminal(value) => {
-            LifecycleEventKind::SessionTerminal(value)
+            LifecycleEventKind::SessionTerminal(SessionTerminal {
+                prior: project_session_state(value.prior),
+                outcome: value.outcome,
+                standing: value.standing,
+                actor: value.actor,
+            })
         }
         DispatchedOutboxEventKind::TurnTerminal { turn, disposition } => {
-            LifecycleEventKind::TurnTerminal { turn, disposition }
+            LifecycleEventKind::TurnTerminal {
+                turn,
+                disposition: project_turn_terminal(disposition),
+            }
         }
-        DispatchedOutboxEventKind::GoalChanged(value) => LifecycleEventKind::GoalChanged(value),
+        DispatchedOutboxEventKind::GoalChanged(value) => {
+            LifecycleEventKind::GoalChanged(project_goal_change(value))
+        }
         DispatchedOutboxEventKind::CommandSettled { command, result } => {
-            LifecycleEventKind::CommandSettled { command, result }
+            LifecycleEventKind::CommandSettled {
+                command,
+                result: match result {
+                    DispatchedCommandSettlement::Applied => CommandSettlement::Applied,
+                    DispatchedCommandSettlement::Rejected { kind } => {
+                        CommandSettlement::Rejected { kind }
+                    }
+                },
+            }
         }
         DispatchedOutboxEventKind::InjectionSettled { command, outcome } => {
-            LifecycleEventKind::InjectionSettled { command, outcome }
+            LifecycleEventKind::InjectionSettled {
+                command,
+                outcome: match outcome {
+                    DispatchedInjectionOutcome::Delivered { turn } => {
+                        InjectionOutcome::Delivered { turn }
+                    }
+                    DispatchedInjectionOutcome::NotDelivered => InjectionOutcome::NotDelivered,
+                    DispatchedInjectionOutcome::Rejected { kind } => {
+                        InjectionOutcome::Rejected { kind }
+                    }
+                },
+            }
         }
         DispatchedOutboxEventKind::SessionOwnershipChanged(value) => {
-            LifecycleEventKind::SessionOwnershipChanged(value)
+            LifecycleEventKind::SessionOwnershipChanged(OwnershipChange {
+                event_ordinal: value.event_ordinal,
+                transition: value.transition,
+                actor: value.actor,
+            })
         }
         DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
         | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
@@ -178,6 +333,86 @@ fn project_lifecycle_event(event: DispatchedOutboxEvent) -> Option<LifecycleEven
         session: event.session(),
         kind,
     })
+}
+
+const fn project_session_state(value: DispatchedSessionStateKind) -> SessionStateKind {
+    match value {
+        DispatchedSessionStateKind::Created => SessionStateKind::Created,
+        DispatchedSessionStateKind::Dispatched => SessionStateKind::Dispatched,
+        DispatchedSessionStateKind::Active => SessionStateKind::Active,
+        DispatchedSessionStateKind::Waiting => SessionStateKind::Waiting,
+        DispatchedSessionStateKind::Recovering => SessionStateKind::Recovering,
+        DispatchedSessionStateKind::Blocked => SessionStateKind::Blocked,
+        DispatchedSessionStateKind::Parked => SessionStateKind::Parked,
+    }
+}
+
+fn project_turn_terminal(value: DispatchedTurnTerminalDisposition) -> TurnTerminalDisposition {
+    match value {
+        DispatchedTurnTerminalDisposition::Completed {
+            call,
+            completion_entry,
+            terminal_frontier,
+        } => TurnTerminalDisposition::Completed {
+            call,
+            completion_entry,
+            terminal_frontier,
+        },
+        DispatchedTurnTerminalDisposition::Refused {
+            call,
+            terminal_frontier,
+        } => TurnTerminalDisposition::Refused {
+            call,
+            terminal_frontier,
+        },
+        DispatchedTurnTerminalDisposition::Failed {
+            failure_entry,
+            terminal_frontier,
+        } => TurnTerminalDisposition::Failed {
+            failure_entry,
+            terminal_frontier,
+        },
+        DispatchedTurnTerminalDisposition::Cancelled {
+            cancellation_entry,
+            terminal_frontier,
+        } => TurnTerminalDisposition::Cancelled {
+            cancellation_entry,
+            terminal_frontier,
+        },
+        DispatchedTurnTerminalDisposition::ReconciliationRequired {
+            operation,
+            terminal_frontier,
+        } => TurnTerminalDisposition::ReconciliationRequired {
+            operation: match operation {
+                DispatchedReconciliationOperation::ModelCall(call) => {
+                    ReconciliationOperation::ModelCall(call)
+                }
+                DispatchedReconciliationOperation::ToolAttempt(attempt) => {
+                    ReconciliationOperation::ToolAttempt(attempt)
+                }
+            },
+            terminal_frontier,
+        },
+        DispatchedTurnTerminalDisposition::Retired => TurnTerminalDisposition::Retired,
+    }
+}
+
+const fn project_goal_change(value: DispatchedGoalChange) -> GoalChange {
+    use signalbox_persistence::mapping::GoalEventDiscriminator;
+
+    GoalChange {
+        event_ordinal: value.event_ordinal,
+        generation: value.generation,
+        kind: match value.kind {
+            GoalEventDiscriminator::Commissioned => GoalEventKind::Commissioned,
+            GoalEventDiscriminator::Blocked => GoalEventKind::Blocked,
+            GoalEventDiscriminator::Resumed => GoalEventKind::Resumed,
+            GoalEventDiscriminator::Achieved => GoalEventKind::Achieved,
+            GoalEventDiscriminator::UserStopped => GoalEventKind::UserStopped,
+            GoalEventDiscriminator::Superseded => GoalEventKind::Superseded,
+            GoalEventDiscriminator::SessionClosed => GoalEventKind::SessionClosed,
+        },
+    }
 }
 
 /// The checked existing core command carried by one seam submission.
