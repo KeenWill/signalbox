@@ -564,15 +564,41 @@ impl RepoWatchStore {
         repository: &RepositorySlug,
         stream_identity: &[u8; 32],
     ) -> Result<bool, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
+            .bind(repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
         let deleted = sqlx::query(
             "DELETE FROM frontier
               WHERE repository = $1 AND stream_identity = $2",
         )
         .bind(repository.as_str())
         .bind(stream_identity.as_slice())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        Ok(deleted.rows_affected() == 1)
+        if deleted.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let advanced = sqlx::query(
+            "UPDATE repository_state
+                SET frontier_generation = frontier_generation + 1,
+                    last_frontier_commit_digest = sha256($3),
+                    updated_at = statement_timestamp()
+              WHERE repository = $1 AND frontier_generation < $2",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(u64::MAX))
+        .bind(frontier_release_identity(stream_identity))
+        .execute(&mut *transaction)
+        .await?;
+        if advanced.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(StoreError::InvalidFrontierGeneration);
+        }
+        transaction.commit().await?;
+        Ok(true)
     }
 
     /// Activates one checked rule revision without retaining configuration text.
@@ -761,6 +787,12 @@ fn frontier_candidate_identity(
     for occurrence in events {
         identity.extend_from_slice(occurrence.content_identity().as_bytes());
     }
+    identity
+}
+
+fn frontier_release_identity(stream_identity: &[u8; 32]) -> Vec<u8> {
+    let mut identity = b"signalbox-repo-watch-frontier-release-v1".to_vec();
+    identity.extend_from_slice(stream_identity);
     identity
 }
 
