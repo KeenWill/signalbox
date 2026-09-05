@@ -20,8 +20,9 @@ this repository, with identifiers shortened.
    ([Software Engineering at Google, ch. 12](https://abseil.io/resources/swe-book/html/ch12.html))
 
 2. **Tests are verified by inspection, not by tests of tests.** Test bodies are
-   straight-line code: no loops, no conditionals, and no expectation
-   recalculated by logic mirroring the code under test. An expected value is a
+   straight-line code: no conditionals, and no expectation recalculated by logic
+   mirroring the code under test; a loop over a table of cases is acceptable
+   when each case is identifiable in the failure output. An expected value is a
    hardcoded literal or a value the fixture already states (rule 6). Logic that
    must exist moves into a helper, and a nontrivial helper gets its own tests.
    ([Don't put logic in tests](https://testing.googleblog.com/2014/07/testing-on-toilet-dont-put-logic-in.html))
@@ -65,8 +66,8 @@ this repository, with identifiers shortened.
 
 ### Rewrites from the test sweeps
 
-Rule 2 — a loop over same-behavior cases unrolls into named straight-line calls
-(domain sweep, `turn_attempt.rs`):
+Rule 2 — a loop whose cases are not identifiable in the failure output unrolls
+into named straight-line calls (domain sweep, `turn_attempt.rs`):
 
 ```rust
 // Bad: three cases share one anonymous failure site inside a loop.
@@ -268,7 +269,7 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
 
 ## Split versus unroll
 
-17. **A loop is removed from a test body in one of two ways.** Few cases
+17. **A loop that leaves a test body does so in one of two ways.** Few cases
     exercising one behavior unroll in place into straight-line calls (rule 2);
     cases exercising distinct behaviors split into separately named tests — one
     behavior per test (rule 7). The exception is a requirement that is itself
