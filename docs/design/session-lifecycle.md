@@ -48,10 +48,11 @@ in its cause. Admission expiry reaches the terminal event the satellite's
 trigger appends; the state-change event for a waiting or active-stall expiry is
 to be built, because the deadline pass parks the row and appends no event. The
 daemon reads the active-stall bound from configuration, and the pass parks an
-active or recovering session whose stall exceeds it with the active-stall cause.
-Modules and the program substrate subscribe to those events and run no timer
-over a session of their own. A module that needs a deadline core does not arm
-asks for a new deadline kind in core.
+active or recovering session whose stall exceeds it, with the cause selected
+from the state: active-stall deadline expired from active, recovering deadline
+expired from recovering. Modules and the program substrate subscribe to those
+events and run no timer over a session of their own. A module that needs a
+deadline core does not arm asks for a new deadline kind in core.
 
 The lifecycle actor vocabulary gains a run-scoped program-run actor for commands
 issued by a registered program's run, as
@@ -108,8 +109,8 @@ cause retry budget exhausted, and the operator queue lists it.
 A redispatch of parked repo-watch work leaves the predecessor terminal as
 superseded, naming the successor, in the commit that creates the successor.
 
-No module owns a session timer; every module transition that follows a deadline
-follows a published expiry event.
+No module owns a session timer beyond the repo-watch start lease; every other
+module transition that follows a deadline follows a published expiry event.
 
 A lifecycle command issued by a program run records the program-run actor with
 its run reference, and replaying the command classifies it identically.

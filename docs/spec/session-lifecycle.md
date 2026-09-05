@@ -51,12 +51,13 @@ or the watchdog) classified from the domain actor that
 
 The command surface creates a session, releases its start gate, submits input,
 attaches, resumes, or stops a goal, adopts, and releases. Five further commands
-reach every transition and every outcome but the successor-free supersession: a
-session-level stop, supersede, abandon, close as failed, and resume. A parked
-session with a blocked goal resumes through the goal's resume-with-guidance
-command; one with a pursuing goal may use the session-level resume. The goal
-command that [goal mode](goal-mode.md) calls supersede starts a new goal
-generation in the same session and is unrelated to the session outcome
+close a session or lift a park: a session-level stop closes any non-terminal
+session, supersede closes it in favour of a named successor, abandon and close
+as failed close a parked session, and resume returns a parked session to its
+mapped state. A parked session with a blocked goal resumes through the goal's
+resume-with-guidance command; one with a pursuing goal may use the session-level
+resume. The goal command that [goal mode](goal-mode.md) calls supersede starts a
+new goal generation in the same session and is unrelated to the session outcome
 superseded.
 
 Modules observe the lifecycle through eight event kinds with typed payloads on
