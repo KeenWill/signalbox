@@ -12,15 +12,18 @@ by [configuration and credentials](configuration-and-credentials.md). This page
 owns the endings of a credential-pool selection attempt.
 
 The machine runs in `crates/persistence/src/model_execution.rs` at two points.
-Preparation resolves the session's pool, admits the first member no durable
-exclusion removes, and pins the policy snapshot to the call. The commit that
-closes a failed call applies the action the pinned policy fixes for the
-failure's cause, and either prepares a successor call or terminalizes the turn.
+Preparation resolves the session's pool, admits a member, and pins the policy
+snapshot to the call. A fresh admission reselects the member the session's most
+recent call on that pool used while no durable exclusion removes it, otherwise
+the first member in policy order that none removes. The commit that closes a
+failed call applies the action the pinned policy fixes for the failure's cause,
+and either prepares a successor call or terminalizes the turn.
 
-An availability chain is one call and the successors that follow it inside one
-turn after qualifying failures. [Model-call execution](model-call-execution.md)
-owns what bounds a chain, when a turn starts a fresh one, and the rule that no
-attempt is ever sent again with the credential that failed.
+An availability chain begins at a fresh admission inside one turn and holds the
+call that admission prepares, if any, and every successor that follows a
+qualifying failure. [Model-call execution](model-call-execution.md) owns what
+bounds a chain, when a turn starts a fresh one, and the rule that no attempt is
+ever sent again with the credential that failed.
 
 The durable records are the policy snapshot pinned to each call, one exclusion
 row for each member a qualifying failure in the turn removed, one successor row
@@ -110,10 +113,11 @@ an automatic retry against the profile that just failed. The turn-scoped key on
 `credential_pool_chain_exclusion` in the model-calls migration enforces the
 scope; nothing enforces that no path deletes a row.
 
-A successor prepared after a rate-limit or overload failure is not sent before
-the provider's reported delay has passed, capped at five minutes
+A successor prepared after a rate-limit or overload failure waits a backoff
+computed from the provider's reported delay and capped at five minutes
 (`MAX_AVAILABILITY_BACKOFF` in `crates/persistence/src/model_execution.rs`); a
-successor after a quota failure is immediate.
+reported delay longer than the cap is truncated to it. A successor after a quota
+failure is immediate.
 
 Terminal: a known failure no successor is authorized to follow terminalizes the
 turn Failed exactly as it would with no pool. Four gates are checked in order,

@@ -131,17 +131,19 @@ rows in policy order, each naming the member's exclusion, widest scope first.
 Partial, foreign or stale evidence fails reconstitution closed.
 
 Park on the pre-call path: a fresh admission that finds the pool exhausted
-consults the pinned exhaustion value. `park` selects a wait under the
-wait-selection rule above; `fail` terminalizes as the spec page states.
+consults the exhaustion value of the pool-policy revision it resolved. `park`
+selects a wait under the wait-selection rule above; `fail` terminalizes as the
+spec page states.
 
 ## Constraints on present code
 
 - A chain exclusion stays insert-only and turn-local. The release rule re-reads
   every other exclusion from current state and depends on chain exclusions never
   being cleared; no code path may delete or expire one before the turn ends.
-- The pinned policy snapshot keeps recording the pool's exhaustion value per
-  call, so a wait is selected from the value frozen at preparation, never from
-  live configuration.
+- The admission resolves the session's immutable pool-policy revision before any
+  call exists; a wait is selected from that revision's exhaustion value, never
+  from live configuration, and the wait row carries that revision as its frozen
+  policy identity. A prepared call pins the same revision.
 - The attempt disposition WithoutStop(YieldedToDurableWait) exists in the domain
   and has no writer. Nothing writes it for any purpose other than a parked wait.
 - The pre-call exhaustion header row keeps its present shape; member evidence
