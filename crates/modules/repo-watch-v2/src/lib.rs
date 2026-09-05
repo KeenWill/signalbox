@@ -9,7 +9,9 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_ownership_seam::{
     BranchName, CommitSha, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepositorySlug,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventContentIdentityV1,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchEventTarget,
+    RepoWatchRule, RepositorySlug,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -122,6 +124,32 @@ pub enum WebhookDisposition {
     Rejected,
 }
 
+/// Result of idempotently recording one normalized GitHub fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventAdmission {
+    /// The fact was new.
+    Inserted,
+    /// The exact fact was already retained.
+    Replayed,
+    /// Either durable identity was already bound to different fact metadata.
+    ConflictingReuse,
+}
+
+/// Result of activating one configured rule revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuleAdmission {
+    /// The rule was first observed.
+    Inserted,
+    /// A newer revision became active.
+    Updated,
+    /// The exact active revision was already retained.
+    Replayed,
+    /// The revision was already bound to different rule semantics.
+    ConflictingReuse,
+    /// The supplied revision predates the active revision.
+    Stale,
+}
+
 impl WebhookDisposition {
     const fn storage(self) -> &'static str {
         match self {
@@ -141,6 +169,8 @@ pub enum StoreError {
     InvalidProviderIdentity,
     /// The webhook expiry does not follow its receipt time.
     InvalidWebhookExpiry,
+    /// The event retention boundary does not follow its recording time.
+    InvalidEventRetention,
 }
 
 impl fmt::Display for StoreError {
@@ -149,6 +179,9 @@ impl fmt::Display for StoreError {
             Self::Database(_) => "repository-watch module database operation failed",
             Self::InvalidProviderIdentity => "repository-watch provider identity is not positive",
             Self::InvalidWebhookExpiry => "repository-watch webhook expiry is not after receipt",
+            Self::InvalidEventRetention => {
+                "repository-watch event retention is not after recording"
+            }
         })
     }
 }
@@ -157,7 +190,9 @@ impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
-            Self::InvalidProviderIdentity | Self::InvalidWebhookExpiry => None,
+            Self::InvalidProviderIdentity
+            | Self::InvalidWebhookExpiry
+            | Self::InvalidEventRetention => None,
         }
     }
 }
@@ -357,6 +392,265 @@ impl RepoWatchStore {
         .execute(&self.pool)
         .await?;
         Ok(updated.rows_affected() == 1)
+    }
+
+    /// Upserts the durable occurrence counter for one normalized event stream.
+    pub async fn upsert_frontier(
+        &self,
+        repository: &RepositorySlug,
+        entry: RepoWatchEventIdentityFrontierEntryV1,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO frontier
+                (repository, stream_identity, sequence, pull_request_number, updated_at)
+             VALUES ($1, $2, $3, $4, statement_timestamp())
+             ON CONFLICT (repository, stream_identity) DO UPDATE
+             SET sequence = EXCLUDED.sequence,
+                 pull_request_number = EXCLUDED.pull_request_number,
+                 updated_at = statement_timestamp()",
+        )
+        .bind(repository.as_str())
+        .bind(entry.stream_identity().as_slice())
+        .bind(Decimal::from(entry.sequence().get()))
+        .bind(
+            entry
+                .pull_request_number()
+                .map(|number| Decimal::from(number.get())),
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Releases one recurring stream after its rebuild subject has retired.
+    pub async fn release_frontier(
+        &self,
+        repository: &RepositorySlug,
+        stream_identity: &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        let deleted = sqlx::query(
+            "DELETE FROM frontier
+              WHERE repository = $1 AND stream_identity = $2",
+        )
+        .bind(repository.as_str())
+        .bind(stream_identity.as_slice())
+        .execute(&self.pool)
+        .await?;
+        Ok(deleted.rows_affected() == 1)
+    }
+
+    /// Appends one normalized fact with its caller-selected retention boundary.
+    pub async fn append_event(
+        &self,
+        event: &RepoWatchEvent,
+        content_identity: RepoWatchEventContentIdentityV1,
+        recorded_at: OffsetDateTime,
+        retain_until: OffsetDateTime,
+    ) -> Result<EventAdmission, StoreError> {
+        if retain_until <= recorded_at {
+            return Err(StoreError::InvalidEventRetention);
+        }
+        let (target_kind, pull_request_number) = match event.target() {
+            RepoWatchEventTarget::PullRequest(context) => {
+                ("pull_request", Some(Decimal::from(context.number().get())))
+            }
+            RepoWatchEventTarget::Branch => ("branch", None),
+        };
+        let inserted = sqlx::query(
+            "INSERT INTO gh_event
+                (event_id, content_identity, repository, event_kind, target_kind,
+                 pull_request_number, recorded_at, retain_until)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(event.id().into_uuid())
+        .bind(content_identity.as_bytes().as_slice())
+        .bind(event.repository().as_str())
+        .bind(event_kind_storage(event.kind().name()))
+        .bind(target_kind)
+        .bind(pull_request_number)
+        .bind(recorded_at)
+        .bind(retain_until)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1;
+        if inserted {
+            return Ok(EventAdmission::Inserted);
+        }
+        let exact: bool = sqlx::query_scalar(
+            "SELECT COALESCE(
+                count(*) = 1 AND bool_and(
+                    event_id = $1
+                    AND content_identity = $2
+                    AND repository = $3
+                    AND event_kind = $4
+                    AND target_kind = $5
+                    AND pull_request_number IS NOT DISTINCT FROM $6
+                    AND recorded_at = $7
+                    AND retain_until = $8
+                ), false)
+               FROM gh_event
+              WHERE event_id = $1 OR content_identity = $2",
+        )
+        .bind(event.id().into_uuid())
+        .bind(content_identity.as_bytes().as_slice())
+        .bind(event.repository().as_str())
+        .bind(event_kind_storage(event.kind().name()))
+        .bind(target_kind)
+        .bind(pull_request_number)
+        .bind(recorded_at)
+        .bind(retain_until)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(if exact {
+            EventAdmission::Replayed
+        } else {
+            EventAdmission::ConflictingReuse
+        })
+    }
+
+    /// Activates one checked rule revision without retaining configuration text.
+    pub async fn record_rule(
+        &self,
+        rule: &RepoWatchRule,
+        activated_at: OffsetDateTime,
+    ) -> Result<RuleAdmission, StoreError> {
+        let revision = Decimal::from(rule.version().get());
+        let digest = rule.content_digest();
+        let mut transaction = self.pool.begin().await?;
+        let active: Option<(Decimal, Vec<u8>)> = sqlx::query_as(
+            "SELECT active_revision, content_digest
+               FROM rule
+              WHERE rule_id = $1
+              FOR UPDATE",
+        )
+        .bind(rule.id().as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((active_revision, active_digest)) = active else {
+            sqlx::query(
+                "INSERT INTO rule
+                    (rule_id, active_revision, content_digest, updated_at)
+                 VALUES ($1, $2, $3, statement_timestamp())",
+            )
+            .bind(rule.id().as_str())
+            .bind(revision)
+            .bind(digest.as_bytes().as_slice())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO rule_revision
+                    (rule_id, revision, content_digest, activated_at)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(rule.id().as_str())
+            .bind(revision)
+            .bind(digest.as_bytes().as_slice())
+            .bind(activated_at)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(RuleAdmission::Inserted);
+        };
+        if revision < active_revision {
+            transaction.rollback().await?;
+            return Ok(RuleAdmission::Stale);
+        }
+        if revision == active_revision {
+            transaction.rollback().await?;
+            return Ok(if active_digest == digest.as_bytes() {
+                RuleAdmission::Replayed
+            } else {
+                RuleAdmission::ConflictingReuse
+            });
+        }
+        sqlx::query(
+            "UPDATE rule_revision
+                SET retired_at = GREATEST(activated_at, $3)
+              WHERE rule_id = $1 AND revision = $2",
+        )
+        .bind(rule.id().as_str())
+        .bind(active_revision)
+        .bind(activated_at)
+        .execute(&mut *transaction)
+        .await?;
+        let inserted = sqlx::query(
+            "INSERT INTO rule_revision
+                (rule_id, revision, content_digest, activated_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(rule.id().as_str())
+        .bind(revision)
+        .bind(digest.as_bytes().as_slice())
+        .bind(activated_at)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1;
+        if !inserted {
+            let exact: bool = sqlx::query_scalar(
+                "SELECT content_digest = $3 AND activated_at = $4
+                   FROM rule_revision
+                  WHERE rule_id = $1 AND revision = $2",
+            )
+            .bind(rule.id().as_str())
+            .bind(revision)
+            .bind(digest.as_bytes().as_slice())
+            .bind(activated_at)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !exact {
+                transaction.rollback().await?;
+                return Ok(RuleAdmission::ConflictingReuse);
+            }
+        }
+        sqlx::query(
+            "UPDATE rule
+                SET active_revision = $2,
+                    content_digest = $3,
+                    updated_at = statement_timestamp()
+              WHERE rule_id = $1",
+        )
+        .bind(rule.id().as_str())
+        .bind(revision)
+        .bind(digest.as_bytes().as_slice())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(RuleAdmission::Updated)
+    }
+}
+
+/// Returns configured rules whose checked matcher accepts one normalized fact.
+pub fn matching_rules<'a>(
+    rules: &'a [RepoWatchRule],
+    event: &RepoWatchEvent,
+) -> Vec<&'a RepoWatchRule> {
+    rules
+        .iter()
+        .filter(|rule| rule.matcher().matches(event))
+        .collect()
+}
+
+const fn event_kind_storage(kind: RepoWatchEventKindNameV1) -> &'static str {
+    match kind {
+        RepoWatchEventKindNameV1::PullRequestOpened => "pull_request_opened",
+        RepoWatchEventKindNameV1::PullRequestClosed => "pull_request_closed",
+        RepoWatchEventKindNameV1::PullRequestMerged => "pull_request_merged",
+        RepoWatchEventKindNameV1::HeadChanged => "head_changed",
+        RepoWatchEventKindNameV1::MergeableStateChanged => "mergeable_state_changed",
+        RepoWatchEventKindNameV1::ChecksCompleted => "checks_completed",
+        RepoWatchEventKindNameV1::CheckRunCompleted => "check_run_completed",
+        RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => "branch_workflow_run_completed",
+        RepoWatchEventKindNameV1::ReviewSubmitted => "review_submitted",
+        RepoWatchEventKindNameV1::ThreadOpened => "thread_opened",
+        RepoWatchEventKindNameV1::ThreadResolved => "thread_resolved",
+        RepoWatchEventKindNameV1::Labeled => "labeled",
+        RepoWatchEventKindNameV1::Unlabeled => "unlabeled",
+        RepoWatchEventKindNameV1::BaseAdvanced => "base_advanced",
+        RepoWatchEventKindNameV1::ReactionChanged => "reaction_changed",
     }
 }
 

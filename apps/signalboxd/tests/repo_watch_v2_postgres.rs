@@ -7,12 +7,16 @@
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use signalbox_module_repo_watch_v2::{
-    PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryState, WebhookAdmission,
-    WebhookDelivery, WebhookDisposition,
+    EventAdmission, PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryState,
+    RuleAdmission, WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules,
 };
 use signalbox_ownership_seam::{
     BranchName, CommitSha, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepositorySlug,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventContentIdentityV1, RepoWatchEventId,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
+    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope, RepositorySlug,
+    SessionTemplateName, WorkflowName,
 };
 use signalbox_persistence::{
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
@@ -112,6 +116,63 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             observed_at,
         })
         .await?;
+
+    let stream = [13; 32];
+    let frontier = RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+        stream,
+        NonZeroU64::new(2).expect("two is positive"),
+        PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+    );
+    store.upsert_frontier(&repository, frontier).await?;
+    assert!(store.release_frontier(&repository, &stream).await?);
+    assert!(!store.release_frontier(&repository, &stream).await?);
+
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("branch-ci"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            repository: Some(repository.clone()),
+            labels: RepoWatchLabelMatcher::default(),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("repo-watch"))?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::ZERO,
+    )?;
+    assert_eq!(
+        store.record_rule(&rule, observed_at).await?,
+        RuleAdmission::Inserted
+    );
+    assert_eq!(
+        store.record_rule(&rule, observed_at).await?,
+        RuleAdmission::Replayed
+    );
+
+    let event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(14)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("ci"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    assert_eq!(matching_rules(std::slice::from_ref(&rule), &event), [&rule]);
+    let identity = RepoWatchEventContentIdentityV1::from_bytes([15; 32]);
+    let retain_until = observed_at + Duration::from_secs(120);
+    assert_eq!(
+        store
+            .append_event(&event, identity, observed_at, retain_until)
+            .await?,
+        EventAdmission::Inserted
+    );
+    assert_eq!(
+        store
+            .append_event(&event, identity, observed_at, retain_until)
+            .await?,
+        EventAdmission::Replayed
+    );
 
     let body = br#"{"action":"opened"}"#;
     let delivery = || WebhookDelivery {

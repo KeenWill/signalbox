@@ -6,10 +6,20 @@
 
 use std::future::Future;
 
+pub use signalbox_application::{
+    RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
+    RepoWatchEventOccurrenceV1, derive_repo_watch_events,
+};
 pub use signalbox_domain::{
-    BranchName, CommitSha, CreateSession, DurableCommandId, GoalUserAction, GoalUserCommand,
-    PullRequestBody, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepositorySlug,
-    SessionId, SessionLifecycleCommand, SessionLifecycleOperation, SubmitInput,
+    BranchName, CheckConclusion, CommitSha, CreateSession, DurableCommandId, GoalUserAction,
+    GoalUserCommand, PullRequestBody, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
+    RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
+    RepoWatchEventTarget, RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
+    RepoWatchRuleVersion, RepoWatchSingletonScope, RepositorySlug, SessionId,
+    SessionLifecycleCommand, SessionLifecycleOperation, SessionTemplateName, SubmitInput,
+    WorkflowName,
 };
 pub use signalbox_persistence::mapping::GoalEventDiscriminator as GoalEventKind;
 pub use signalbox_persistence::outbox::{
