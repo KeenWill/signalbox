@@ -89,6 +89,8 @@ signalbox-model-runtime-anthropic = { path = "../../crates/model-runtime-anthrop
 signalbox-model-runtime-claude-cli = { path = "../../crates/model-runtime-claude-cli" }
 signalbox-model-runtime-codex-cli = { path = "../../crates/model-runtime-codex-cli" }
 signalbox-model-runtime-openai = { path = "../../crates/model-runtime-openai" }
+signalbox-module-repo-watch-v2 = { path = "../../crates/modules/repo-watch-v2" }
+signalbox-ownership-seam = { path = "../../crates/ownership-seam" }
 signalbox-persistence = { path = "../../crates/persistence" }
 signalbox-process-protocol = { path = "../../crates/process-protocol" }
 signalbox-runner-wire = { path = "../../crates/runner-wire" }
