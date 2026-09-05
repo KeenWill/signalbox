@@ -37,16 +37,16 @@ surviving bounded members and their reservation identities, the remaining
 exclusions, and the derived deadline. One that finds no admissible bounded
 member left takes the exhaustion outcome instead. A woken exhausted wait whose
 admission selects exhausted-wait again stays parked and rewrites its evidence
-and derived deadline in place. A woken exhausted wait whose cleared exclusion
-leaves the newly admissible member at its bound is rewritten as a contended
-wait, whose bounded members with their reservations, remaining exclusions, and
-derived deadline are recomputed from current state. Release atomically consumes
-the wait, creates a fresh prepared successor attempt, and returns the same turn
-to running, resuming the availability chain the wait was part of rather than
-starting a new one. A stop-turn request against a parked wait consumes the wait,
-creates a fresh immediate-successor attempt carrying the applied-interrupt
-proof, ends that attempt cancelled, appends the cancellation entry after the
-wait's latest frontier, and terminalizes the turn cancelled.
+and derived deadline in place; one whose cleared exclusion leaves the newly
+admissible member at its bound is rewritten as a contended wait, whose bounded
+members with their reservations, remaining exclusions, and derived deadline are
+recomputed from current state. Release atomically consumes the wait, creates a
+fresh prepared successor attempt, and returns the same turn to running, resuming
+the availability chain the wait was part of rather than starting a new one. A
+stop-turn request against a parked wait consumes the wait, creates a fresh
+immediate-successor attempt carrying the applied-interrupt proof, ends that
+attempt cancelled, appends the cancellation entry after the wait's latest
+frontier, and terminalizes the turn cancelled.
 
 Runner-loss recovery has two user commands, replace and abandon, whose request
 shapes and placement transitions are owned by
