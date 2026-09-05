@@ -41,13 +41,13 @@ eligible bundle: headings for a document, validated metadata and headings for a
 skill, with the source byte length. `instructions_read` names one eligible
 bundle, requests admission, and returns a typed receipt naming the admission,
 the source hash, the rendered hash, the rendered byte length, and any truncation
-boundary, never the body. Preview and read reread the source under the entry's
-authorizing root, compare its length and hash with the registered evidence, and
-reject a mismatch, so no unregistered byte is previewed or admitted. List and
-preview declare the Auto permission default and admit nothing. All three tools
-declare the `EffectFree` effect class: list and preview read only daemon-local
-state, and a read's only durable effect commits with its result, so a daemon
-lost before result commit closes the attempt `KnownFailed`
+boundary, never the body. Preview and a fresh read reread the source under the
+entry's authorizing root, compare its length and hash with the registered
+evidence, and reject a mismatch, so no unregistered byte is previewed or
+admitted. List and preview declare the Auto permission default and admit
+nothing. All three tools declare the `EffectFree` effect class: list and preview
+read only daemon-local state, and a read's only durable effect commits with its
+result, so a daemon lost before result commit closes the attempt `KnownFailed`
 ([tool-loop.md](../spec/tool-loop.md)). Each tool takes a closed JSON-object
 argument schema, and no schema accepts a session identity.
 
@@ -93,9 +93,10 @@ the prior admitted-set head, the bundle, the rendered hash and byte length, the
 exact rendered wrapper bytes, and the request identity, and the session's
 admitted-set head advances to it. The row is the plaintext authority for every
 later projection even if the workspace source changes or disappears. A second
-request for an admitted bundle returns an already-admitted receipt and appends
-nothing; a replay returns its recorded receipt. Process memory and the live
-workspace are never authority for the admitted set.
+request for an admitted bundle returns its durable already-admitted receipt
+without rereading the source and appends nothing; a replay returns its recorded
+receipt. Process memory and the live workspace are never authority for the
+admitted set.
 
 Admitted instructions are a model-input projection rebuilt each turn from the
 rendered bytes the admission rows retain, not transcript entries. Signalbox
@@ -113,9 +114,10 @@ outrank the region.
 The region is a fixed preamble, then one wrapper per admitted bundle in
 projection order, with one LF between consecutive parts and no leading or
 trailing byte. Projection order is the one canonical order the catalog also
-uses: documents before skills; documents by root, workspace first, then scope
-depth, relative path, and bundle identity; skills by bundle identity; never
-admission order. The preamble is these exact bytes:
+uses: documents before skills; documents by root, workspace roots before
+configured roots and each kind by canonical path, then scope depth, relative
+path, and bundle identity; skills by bundle identity; never admission order. The
+preamble is these exact bytes:
 
 ```text
 <signalbox_workspace_instruction_preamble>

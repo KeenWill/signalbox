@@ -165,7 +165,8 @@ corruption ([persistence-protocol.md](persistence-protocol.md)).
   `instructions_read` admits ([design](../design/workspace-instructions.md)).
 - Admission approval: `instructions_read` declares the AlwaysConfirm permission
   default with an explicit Delegated posture, so the approval judge decides an
-  admission, not a prompted person
+  admission; the request stays parked and admits a user decision when the judge
+  escalates or the judge call ends in a terminal failure
   ([design](../design/workspace-instructions.md)).
 - Untrusted-data region: repository-controlled strings in a catalog or preview
   result are emitted inside a delimited region under a fixed daemon-authored
