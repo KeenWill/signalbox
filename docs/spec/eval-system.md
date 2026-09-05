@@ -5,25 +5,25 @@ reports a scorecard.
 
 ## Map
 
-This page owns evaluation semantics on top of the
-[program substrate](program-substrate.md): what an evaluation is and how its
+The evaluation system defines, on top of the
+[program substrate](program-substrate.md), what an evaluation is and how its
 corpus, expectations, and results are recorded. Only the approval-judge harness
-is built; what the design still owes is listed under Not built.
+is built.
 
 The harness is the `signalbox-approval-judge-eval` workspace crate, a temporary
 standalone evaluation surface for the three-disposition approval judge that the
-[tool loop](tool-loop.md) owns. Its data is a version-one JSON corpus of
-synthetic cases. Each case pairs a tool request and its frozen authority context
-with the expected disposition and the provenance of that label. A portable
-manifest names the corpus, its version, and the source of its cases.
+[tool loop](tool-loop.md) owns. Its data is a JSON corpus of synthetic cases.
+Each case pairs a tool request and its frozen authority context with the
+expected disposition and the provenance of that label. A portable manifest names
+the corpus, its version, and the source of its cases.
 
 The harness has three parts. The library loads a corpus through a pluggable
-store contract, whose disk store and database store both verify the corpus
-digest on load, replays each case through the judge, and scores the verdicts
-into a scorecard. The offline entry point replays recorded provider responses
+store contract, replays each case through the judge, and scores the verdicts
+into a scorecard. Both the disk store and the database store verify the corpus
+digest on load. The offline entry point replays recorded provider responses
 through a scripted model adapter and prints the scorecard as JSON. The
-live-provider runner in `signalboxd` sends the same cases to a configured
-provider and can record the run in judge-specific tables.
+live-provider runner in the daemon sends the same cases to a configured provider
+and can record the run in judge-specific tables.
 
 ## Decisions
 
@@ -36,8 +36,7 @@ checkout that holds the manifest and its source files, and the recorded
 repository identity is provenance only. Why: corpus metadata never drives a
 network request.
 
-Evaluation verdicts gate nothing; every evaluation surface is report-only, and
-any future gating is a separate decision this page does not make.
+Evaluation verdicts gate nothing; every evaluation surface is report-only.
 
 The checked-in seed manifest, corpus, and response file contain synthetic
 strings only, so no real request data enters the repository.
@@ -46,8 +45,8 @@ The live-provider runner is a separate, operator-driven surface outside the
 offline harness, because it spends provider quota.
 
 No case field admits a number, so canonical JSON never serializes one. Why: RFC
-8785 number serialization is not implemented, and a numeric field would open a
-canonicalization gap the digest could not close.
+8785 number serialization is not implemented, so a numeric field would leave the
+digest undefined.
 
 ## Contracts
 
