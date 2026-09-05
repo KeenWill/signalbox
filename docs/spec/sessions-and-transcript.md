@@ -358,12 +358,13 @@ move mid-call.
 Both creation families carry the optional system prompt inside their complete
 initial defaults, and a replacement changes it only as part of the complete
 successor epoch. The domain rejects an empty or U+0000-containing prompt and
-represents absence as no prompt, never an empty string. It imposes no byte
-policy of its own; daemon configuration applies its byte limit at each ingress.
-The epoch row is the prompt's single content authority: per-turn origin rows
-copy no prompt text, and model-call preparation reads the prompt through the
-calling turn's frozen version, including the inherited version of a reclassified
-steering origin.
+represents absence as no prompt, never an empty string. Admitted prompt text is
+stored byte-exact, never trimmed or normalized, and compared by exact value. It
+imposes no byte policy of its own; daemon configuration applies its byte limit
+at each ingress. The epoch row is the prompt's single content authority:
+per-turn origin rows copy no prompt text, and model-call preparation reads the
+prompt through the calling turn's frozen version, including the inherited
+version of a reclassified steering origin.
 
 When a started turn's frozen direct selection differs from its immediate
 predecessor's, eligibility appends one model-identity entry immediately before
@@ -374,13 +375,15 @@ through an immutable per-turn compatibility fact.
 A replacement whose compare-and-set affects zero rows re-derives the result
 against current state in the same transaction; a re-derivation that still
 reports applied, or an update affecting more than one row, fails closed as
-corruption. A caller that validates settings outside the lock may ask the same
-transaction to record a version mismatch only; a current expected version under
-the lock rolls back the claim and applies nothing. A supplied session that does
-not match the command target is a nonterminal preparation error, not a recorded
-rejection.
+corruption. A caller whose state-dependent validation fails outside the lock
+asks the same transaction to record a version mismatch only before returning
+that failure; a current expected version under the lock rolls back the claim and
+applies nothing. A supplied session that does not match the command target is a
+nonterminal preparation error, not a recorded rejection.
 
-No metadata string is trimmed, normalized, or case-folded. The daemon applies
+No metadata string is trimmed, normalized, or case-folded. Admission rejects an
+empty title, tag, or attribute key, U+0000 in any field, and duplicate tags or
+attribute keys, and accepts an empty attribute value. The daemon applies
 deployment-owned tag and attribute count policies before command handling;
 domain reconstitution has no count policy. A successful point read returns the
 root, tags, and attributes from one repeatable-read snapshot. Absence of
@@ -422,12 +425,14 @@ A session load is one statement-consistent read joining the session row, its one
 current-defaults pointer and exactly the version that pointer names, and its one
 current-placement pointer and exactly the placement event that pointer names;
 for imported ancestry it also joins the seed record and frontier header as a
-constant-size proof. Both pointers are authoritative, and a load never infers
-current defaults or placement from version one, the greatest stored version, a
-caller-supplied version, or a cache. The loaded placement head is authenticated
-under the current-placement load rule. The load returns none only when no
-session row exists in the read snapshot; a row that exists but does not decode
-follows the corruption rule in [persistence-protocol](persistence-protocol.md).
+constant-size proof, accepting the seed only when seed ownership and identity
+agree and the declared member count equals the ancestry boundary position. Both
+pointers are authoritative, and a load never infers current defaults or
+placement from version one, the greatest stored version, a caller-supplied
+version, or a cache. The loaded placement head is authenticated under the
+current-placement load rule. The load returns none only when no session row
+exists in the read snapshot; a row that exists but does not decode follows the
+corruption rule in [persistence-protocol](persistence-protocol.md).
 
 The attention journal is authoritative for activity kind and timestamp. The
 per-session last-activity timestamp maintained from it is only the indexed
