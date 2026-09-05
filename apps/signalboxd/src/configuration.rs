@@ -23,8 +23,9 @@ use signalbox_domain::{
     RepoWatchEventKindNameV1, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput,
     RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
     RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepositorySlug, ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay,
-    ToolApprovalPosture, ToolName, UnsupportedModelSetting, ValidatedModelSettings,
+    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
+    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
+    ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -701,6 +702,23 @@ impl RepositoryWatchConfiguration {
                 },
             )
         }
+    }
+
+    /// Validates every rule against the immutable session-template catalog.
+    pub fn validate_template_contexts(
+        &self,
+        declarations: &[RepoWatchTemplateContextDeclaration],
+    ) -> Result<(), HubModelConfigurationError> {
+        for rule in &self.rules {
+            rule.validate_template_contexts(declarations)
+                .map_err(
+                    |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                        rule: rule.id().as_str().to_owned(),
+                        reason: error.to_string(),
+                    },
+                )?;
+        }
+        Ok(())
     }
 }
 
@@ -4492,9 +4510,9 @@ pub(crate) mod tests {
     use signalbox_domain::{
         AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
         ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
-        PullRequestNumber, ReasoningLevel, RepoWatchEventKindNameV1, RepoWatchRuleVersion,
-        RepoWatchSingletonScope, ServiceTier, SessionTemplateName, SettingOverlay,
-        ToolApprovalPosture,
+        PullRequestNumber, ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+        ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
@@ -6008,6 +6026,48 @@ cool_off_seconds = {}
         assert!(rule.matcher().mergeable_state().is_empty());
         assert!(rule.matcher().conclusion().is_empty());
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+    }
+
+    #[test]
+    fn repository_watch_rule_accepts_its_declared_template_context() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
+            .expect("repository-watch rule fixture is valid");
+        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
+            .expect("template fixture name is valid");
+        let declaration = RepoWatchTemplateContextDeclaration::try_new(
+            template,
+            vec![RepoWatchDispatchContextShape::PullRequest],
+        )
+        .expect("template declaration is nonempty");
+
+        assert_eq!(
+            configured
+                .repository_watch()
+                .expect("fixture configures repository watch")
+                .validate_template_contexts(&[declaration]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn repository_watch_rule_rejects_a_template_context_mismatch() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
+            .expect("repository-watch rule fixture is valid");
+        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
+            .expect("template fixture name is valid");
+        let declaration = RepoWatchTemplateContextDeclaration::try_new(
+            template,
+            vec![RepoWatchDispatchContextShape::Branch],
+        )
+        .expect("template declaration is nonempty");
+        let error = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .validate_template_contexts(&[declaration])
+            .expect_err("pull-request rule cannot target branch-only template");
+
+        assert!(error.to_string().contains(WATCH_RULE_ID));
+        assert!(error.to_string().contains(WATCH_TEMPLATE));
     }
 
     #[test]

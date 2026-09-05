@@ -1598,8 +1598,21 @@ async fn run_hub(
         )
     })?;
     if let Some(repository_watch) = model_configuration.repository_watch() {
+        let declarations = template_configuration
+            .repo_watch_context_declarations()
+            .map_err(|error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::TemplateConfiguration(&error),
+                )
+            })?;
         repository_watch
-            .validate_convergence_template(template_configuration.summaries().map(|(name, _)| name))
+            .validate_template_contexts(&declarations)
+            .and_then(|()| {
+                repository_watch.validate_convergence_template(
+                    template_configuration.summaries().map(|(name, _)| name),
+                )
+            })
             .map_err(|error| {
                 erase_startup_cause(
                     RuntimePhase::Configuration,
