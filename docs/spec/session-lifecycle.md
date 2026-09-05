@@ -76,7 +76,8 @@ five lifecycle metrics are read-only views over durable columns.
 
 The admission deadline is the one deadline whose expiry terminalizes: it retires
 the session, because before first activity nothing live is guarded and no human
-attention is owed. Every other deadline expiry parks.
+attention is owed. Every other implemented deadline expiry, the waiting
+deadline, parks; active-stall expiry is planned.
 
 The lifecycle actor classifies the domain actor rather than replacing it; the
 domain actor algebra, its wire projection, and its replay-equality rule are
@@ -115,11 +116,11 @@ whose automatic reconciliation budget is exhausted is a further operator wait
 until the operator reconciles the turn; an ambiguous external-effect tool
 attempt whose budget is exhausted stays an exhausted recovery wait with operator
 action required until the deferred tool-recovery surface exists. A turn awaiting
-runner recovery is an operator wait too, and only replacement or abandonment
-leaves the lost state. A module that parks something wrapping a session drives
-the session itself to parked. Attention states shown to operators are derived
-from durable facts by one classifier, and a read that encounters a state it does
-not recognize returns an error rather than a guess.
+runner recovery is an operator wait too; the replacement and abandonment
+commands that leave the lost state are planned. A module that parks something
+wrapping a session drives the session itself to parked. Attention states shown
+to operators are derived from durable facts by one classifier, and a read that
+encounters a state it does not recognize returns an error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
 daemon core; no module implements any of them except the core-integrated
