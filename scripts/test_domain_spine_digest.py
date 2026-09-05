@@ -2,7 +2,10 @@
 """Exercise the domain API digest's parser and revision selection."""
 
 import os
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +13,56 @@ import domain_spine_digest as digest
 
 
 class DomainSpineDigestTests(unittest.TestCase):
+    def test_enum_variants_and_public_fields_are_delta_members_not_types(self) -> None:
+        baseline = "pub mod sample\n"
+        current = """\
+pub mod sample
+pub enum sample::Status
+pub sample::Status::Ready
+pub struct sample::Record
+pub sample::Record::field: u64
+"""
+        expected = """\
+sample
+  (root): types=2 traits=0 functions=0
+    added: member Record::field, member Status::Ready, type Record, type Status
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
+    def test_nonblanket_trait_implementation_is_delta_identity(self) -> None:
+        baseline = "pub mod sample\npub struct sample::Packet\n"
+        current = baseline + "impl external::Pod for sample::Packet\n"
+        expected = """\
+sample
+  (root): types=1 traits=0 functions=0
+    added: implementation Packet as external::Pod
+    removed: none
+"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            snapshot = Path(temporary_directory) / "sample.txt"
+            snapshot.write_text(current)
+            output = StringIO()
+            with (
+                patch.object(digest, "previous_text", return_value=baseline),
+                redirect_stdout(output),
+            ):
+                digest.render("sample", snapshot)
+
+        self.assertEqual(output.getvalue(), expected)
+
     def test_generic_owner_keeps_qualified_method_name(self) -> None:
         snapshot = """\
 pub mod sample
