@@ -59,7 +59,7 @@ def item_name(line: str, start: int) -> str:
             break
         elif generic_depth == 0:
             name.append(char)
-    return "".join(name)
+    return "".join(name).rstrip(":")
 
 
 def parse(text: str) -> tuple[str, list[Item]]:
