@@ -66,10 +66,10 @@ present adapter mapping declares typed-system capacity. An adapter may not
 concatenate such a region into ordinary system text, emit it as a user or tool
 message, or enable a native project-file loader.
 
-The Codex adapter's child environment stays cleared, with `OPENAI_API_KEY` and
-every other direct credential value excluded. The file env_key grammar admits
-only `OPENAI_API_KEY`, and composition keeps rejecting Codex file delivery as
-undelivered until the delivery exists.
+In ambient delivery the Codex adapter's child environment stays cleared, with
+`OPENAI_API_KEY` and every other direct credential value excluded. The file
+env_key grammar admits only `OPENAI_API_KEY`, and composition keeps rejecting
+Codex file delivery as undelivered until the delivery exists.
 
 The exact-value redactor and the CLI shape redactor stay separate layers, and
 the CLI adapters keep a seam where exact values can be seeded before spawn.

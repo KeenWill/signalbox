@@ -241,7 +241,9 @@ fails before any send when the wire representation cannot preserve the order of
 typed conversation parts. Adapters send exactly the resolved target as the
 provider model parameter, never the requested selection, and surface a
 provider-reported identity as soon as it is observed without fabricating a match
-or mismatch.
+or mismatch. The Claude Code CLI adapter reports the model its init event
+announces, and no observation or record carries the provider-resolved model a
+later assistant event names.
 
 Observations are transient progress facts, never canonical transcript history.
 For a correctly correlated text delta the bridge copies the adapter-sanitized
@@ -294,9 +296,10 @@ withholding in every adapter.
 
 Under the OpenAI adapter streamed chunks must agree on identity: a missing or
 conflicting completion id, or a conflicting reported model, is a terminal
-protocol violation even on a mid-stream error record. Under the Claude Code CLI
-the first assistant event may name the provider-resolved model and every later
-assistant event must repeat that value.
+protocol violation, and a conflict stays one on a mid-stream error record. An
+error record that reports no completion id is definitive provider-error
+evidence. Under the Claude Code CLI the first assistant event may name the
+provider-resolved model and every later assistant event must repeat that value.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
@@ -309,15 +312,17 @@ the failure.
 
 The structured-output contract is a request constraint, not a response
 guarantee: a nonconforming response can carry zero or several proposals, and the
-provider-independent decoder enforces exactly one. A proposal's raw argument
-JSON is kept verbatim and never re-serialized. When a CLI adapter's redaction
-suppresses a whole argument object, the proposal crosses the adapter as typed
-non-executable material that keeps its admitted tool name and withholds only its
-arguments, so it can neither hide a second conflicting value nor satisfy a named
-tool choice under a foreign name. The decoders impose no argument-size ceiling;
-the normalized-argument ceiling [tool-loop](tool-loop.md) states belongs to the
-bridge, which fails the model call as unrepresentable tool material before any
-tool round rather than reaching one as invalid arguments.
+provider-independent decoder enforces exactly one. Under the Claude Code CLI
+adapter an empty proposal set for a named tool requirement is
+unintelligible-response boundary loss before that decoder runs. A proposal's raw
+argument JSON is kept verbatim and never re-serialized. When a CLI adapter's
+redaction suppresses a whole argument object, the proposal crosses the adapter
+as typed non-executable material that keeps its admitted tool name and withholds
+only its arguments, so it can neither hide a second conflicting value nor
+satisfy a named tool choice under a foreign name. The decoders impose no
+argument-size ceiling; the normalized-argument ceiling [tool-loop](tool-loop.md)
+states belongs to the bridge, which fails the model call as unrepresentable tool
+material before any tool round rather than reaching one as invalid arguments.
 
 Both HTTP clients force the rustls backend, verify certificate and hostname
 against platform trust roots, require TLS 1.2 or newer, and carry no custom-root
@@ -338,16 +343,17 @@ an exchange. Before serde sees a buffered success body or a JSON stream record,
 a shared allocation-free scanner rejects JSON nested beyond a fixed depth,
 unknown fields and raw material included. Unknown fields stay tolerated for
 additive provider evolution under the same byte and nesting limits as known
-ones. The HTTP and Codex CLI decoders also tolerate an unknown event name and
-discard its bounded payload without typed parsing; the Claude Code CLI decoder
-rejects an unrecognized top-level event type as a stream protocol violation.
-Malformed or over-depth JSON in a success body is unintelligible-response
-boundary loss. In the HTTP and Claude Code CLI decoders, over-depth streamed
-material and malformed known-event JSON are stream protocol violations; the
-Codex CLI decoder fails both closed as an unrecognized provider error. A
-malformed or over-depth body attached to a definitive error status cannot erase
-that exchange: the adapter falls back to status classification with bounded
-sanitized native material.
+ones. The Anthropic and Codex CLI decoders also tolerate an unknown event name
+and discard its bounded payload without typed parsing, while the OpenAI decoder
+parses every record's payload whatever its event name; the Claude Code CLI
+decoder rejects an unrecognized top-level event type as a stream protocol
+violation. Malformed or over-depth JSON in a success body is
+unintelligible-response boundary loss. In the HTTP and Claude Code CLI decoders,
+over-depth streamed material and malformed known-event JSON are stream protocol
+violations; the Codex CLI decoder fails both closed as an unrecognized provider
+error. A malformed or over-depth body attached to a definitive error status
+cannot erase that exchange: the adapter falls back to status classification with
+bounded sanitized native material.
 
 Each CLI adapter mechanically disables every native facility of the pinned CLI
 that could add a model-visible tool, an instruction source, an external
