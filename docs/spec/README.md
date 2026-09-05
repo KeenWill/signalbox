@@ -24,7 +24,9 @@ A design document is titled `<Subsystem> design`, opens with one sentence saying
 it is not built and which spec page it extends, and has the sections Goal,
 Design, Compatibility constraints, and Acceptance criteria. It keeps decisions,
 shapes, transitions, and acceptance criteria, and links the spec page for built
-behavior instead of restating it.
+behavior instead of restating it. A foundation-weight change proposes its
+semantics in that document at the bottom of the implementing stack; the spec
+page changes with the code that builds them.
 
 ## Page shape
 
@@ -60,10 +62,12 @@ and no pull-request or branch names. A version number stays when it defines a
 wire or storage contract, and goes when it only records when behavior changed. A
 page says what the system does, not what a reader should do. Code identifiers
 appear only where the map names a core mechanism or a contract names its
-enforcer. Prose carries no INV tags; invariants are tests, and a contract names
-its enforcer by path. Pages have no Open edges section and no paragraph labelled
-as committed but unimplemented. Every link targets a page, never an anchor,
-unless the anchor is a heading on the linking page.
+enforcer. A contract also names an identifier that is itself contract data, such
+as a field name, a discriminator, or a preimage. Prose carries no INV tags;
+invariants are tests, and a contract names its enforcer by path. Pages have no
+Open edges section and no paragraph labelled as committed but unimplemented.
+Every link targets a page, never an anchor, unless the anchor is a heading on
+the linking page.
 
 ## Pages
 
