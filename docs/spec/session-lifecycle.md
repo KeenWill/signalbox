@@ -35,9 +35,8 @@ again (a compaction wall, a broken toolchain, a moderation block that a resume
 re-trips), and unknown when no cause was classified. A session is stopped by a
 human or a rule, and the stop records whether it is sticky. It is superseded
 when a newer session owns the work; the outcome also admits a successor-free
-form, for work that is gone, that no command produces. It is abandoned when an
-operator writes off a parked session, and retired when it never did the work and
-never will.
+form, for work that is gone. It is abandoned when an operator writes off a
+parked session, and retired when it never did the work and never will.
 
 Every session carries an owned-or-unmonitored bit, set at creation and flipped
 by a journaled adopt or release. Owned means the daemon holds a liveness
@@ -49,12 +48,13 @@ or the watchdog) classified from the domain actor that
 
 The command surface creates a session, releases its start gate, submits input,
 attaches, resumes, or stops a goal, adopts, and releases. Five further commands
-make every outcome and transition reachable: a session-level stop, supersede,
-abandon, close as failed, and resume. A parked session with a blocked goal
-resumes through the goal's resume-with-guidance command; one with a pursuing
-goal may use the session-level resume. The goal command that
-[goal mode](goal-mode.md) calls supersede starts a new goal generation in the
-same session and is unrelated to the session outcome superseded.
+reach every transition and every outcome but the successor-free supersession: a
+session-level stop, supersede, abandon, close as failed, and resume. A parked
+session with a blocked goal resumes through the goal's resume-with-guidance
+command; one with a pursuing goal may use the session-level resume. The goal
+command that [goal mode](goal-mode.md) calls supersede starts a new goal
+generation in the same session and is unrelated to the session outcome
+superseded.
 
 Modules observe the lifecycle through eight event kinds with typed payloads on
 the transactional outbox that [persistence protocol](persistence-protocol.md)
@@ -98,12 +98,12 @@ instead of ending it, and any event it does not recognize counts as progress.
 When a guard trips, the daemon waits, asks, or parks the session; it never ends
 work on staleness evidence alone.
 
-An owned session that waits for an operator is in the parked state and no other;
-a pending tool-approval decision is the separate waiting state. A module that
-parks something wrapping a session drives the session itself to parked.
-Attention states shown to operators are derived from durable facts by one
-classifier, and a read that encounters a state it does not recognize returns an
-error rather than a guess.
+An owned session that waits for an operator is parked, or blocked on a goal that
+no automatic resumption will lift; a pending tool-approval decision is the
+separate waiting state. A module that parks something wrapping a session drives
+the session itself to parked. Attention states shown to operators are derived
+from durable facts by one classifier, and a read that encounters a state it does
+not recognize returns an error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
 daemon core; no module implements any of them. Lifecycle behavior or an event
@@ -129,10 +129,10 @@ session is unmonitored with no finish condition. Attaching a goal to an
 unmonitored session records it as owned, with the adoption journaled to the
 attaching actor, in the same transaction.
 
-An unmonitored session has no deadlines, no automatic resumption, and no held
-slot; no external sweep acts on it, and it is excluded from occupancy
-accounting. Turn-liveness recovery covers its turns, because a dead turn left
-active would block its next input.
+An unmonitored session has no deadlines and no automatic resumption; no external
+sweep acts on it, and it is excluded from occupancy accounting. Turn-liveness
+recovery covers its turns, because a dead turn left active would block its next
+input.
 
 Release never interrupts a live operation: a running turn completes to its
 boundary under the resources already held.
