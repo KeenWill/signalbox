@@ -661,7 +661,10 @@ async fn assert_pinned_version(executable: &std::path::Path) {
     let version = reported
         .lines()
         .next()
-        .and_then(|line| line.split_whitespace().next_back())
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|token| semver::Version::parse(token).ok())
+        })
         .unwrap_or_else(|| {
             panic!(
                 "`{} --version` printed no version token",
@@ -671,7 +674,8 @@ async fn assert_pinned_version(executable: &std::path::Path) {
 
     assert_eq!(
         version,
-        SUPPORTED_CODEX_CLI_VERSION,
+        semver::Version::parse(SUPPORTED_CODEX_CLI_VERSION)
+            .expect("the build-validated pin is SemVer"),
         "the executable at `{}` reports {version}, but this smoke can \
          only produce compatibility evidence for the pinned \
          {SUPPORTED_CODEX_CLI_VERSION}; install the version pinned in \
