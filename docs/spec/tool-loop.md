@@ -8,11 +8,11 @@ below.
 This page specifies the implemented daemon-owned tool subsystem. Its
 runner-locus paragraphs are committed unimplemented functionality that extends
 the same laws to the runner locus;
-[runner protocol and placement](runner-protocol.md#version-one-executable-boundary)
-owns their present implementation status. This page owns logical tool requests,
-approval policy and decisions, physical tool attempts, result admission,
-intra-turn continuation, crash classification, the compiled registry, and the
-daemon-local catalog. Turn and attempt lifecycle law lives in
+[runner protocol and placement](runner-protocol.md#planned) owns their present
+implementation status. This page owns logical tool requests, approval policy and
+decisions, physical tool attempts, result admission, intra-turn continuation,
+crash classification, the compiled registry, and the daemon-local catalog. Turn
+and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
@@ -157,13 +157,14 @@ precedence:
 2. the registry default (`Auto` or `Confirm`); then
 3. fail-closed `Confirm` when no declaration exists.
 
-Runner execution instead uses the immutable placement policy owned by
-[runner protocol and placement](runner-protocol.md#sandbox-profiles-and-approval):
+Runner execution instead resolves approval from the immutable placement facts
+that [runner protocol and placement](runner-protocol.md) owns:
 
 1. an exact per-tool override, recording `SessionOverride` for `Auto` and
    leaving `Confirm` undecided;
-2. the selected profile default, recording `PolicyAuto` for `Auto` and leaving
-   `Confirm` undecided; then
+2. otherwise the sandbox profile: a workspace-restricted placement approves
+   every tool and an ambient placement approves only a pure tool, both recording
+   `PolicyAuto`, and every other tool is left undecided; then
 3. fail closed when no exact daemon-owned runner declaration exists.
 
 The dangerous blanket has no runner rung. The producing-call completion
@@ -463,9 +464,8 @@ registration remain undecided under
 [Daemon Git push transport](../open-questions.md#scheduling-and-runners).
 
 This daemon-local registry supplies no runner execution path. The
-[runner executable boundary](runner-protocol.md#version-one-executable-boundary)
-owns the present implementation status and committed compatibility constraints;
-the
+[runner executable boundary](runner-protocol.md#planned) owns the present
+implementation status and committed compatibility constraints; the
 [runner workstation open question](../open-questions.md#scheduling-and-runners)
 owns the remaining undecided registry work.
 
@@ -502,9 +502,8 @@ one performs no automatic local retry. A crash-lost in-flight attempt declared
 `ExternalEffect` closes `Ambiguous`, ends the abandoned turn attempt `Lost`, and
 parks the turn in `AwaitingRecoveryDecision` naming that exact tool attempt
 (INV-025, INV-026, INV-034). Runner lease loss uses the separate re-lease law in
-[runner protocol and placement](runner-protocol.md#effect-classes-and-runner-leases);
-re-leasing one fenced runner attempt is not the local executor fabricating a new
-physical attempt.
+[runner protocol and placement](runner-protocol.md); re-leasing one fenced
+runner attempt is not the local executor fabricating a new physical attempt.
 
 ## Serialized staged execution
 
