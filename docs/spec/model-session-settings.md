@@ -9,25 +9,25 @@ declared capabilities, and record the result before any provider traffic.
 The subsystem owns three provider-neutral settings: a reasoning level, a
 fast-mode switch, and a provider-tagged service tier. They travel with the
 generation controls that [runtime-substrate.md](runtime-substrate.md) owns. The
-vocabulary, the precedence chain, and the capability record live in
+vocabulary, precedence chain, and capability record live in
 `crates/domain/src/model_settings.rs`: `ModelSettingsPrecedence` resolves a
 value, and `ModelCapabilities` decides whether the selected model supports it.
 
 Settings resolve highest to lowest: per-call override, session override, the
 selected model's named settings profile, then the deployment global default.
-Each nullable override is inherit, clear, or set(value): inherit consults the
-next layer, clear selects the provider default, and set requests the value. The
-profile catalog and the global default are daemon configuration, described on
+Each override is inherit, clear, or set(value): inherit consults the next layer,
+clear selects the provider default, and set requests the value. The profile
+catalog and the global default are daemon configuration, described on
 [configuration-and-credentials.md](configuration-and-credentials.md). The three
 lower layers are resolved when a session defaults epoch is installed; the
 per-call layer is resolved when an input is accepted, under the turn-binding
 rule on [sessions-and-transcript.md](sessions-and-transcript.md).
 
-Every configured model carries one capability record: the reasoning levels it
-supports, how it supports fast mode, and the service tiers it supports. Fast
-mode is either a request control on the selected target or a declared alternate
-serving target. A model change carries the inherited settings to the new model,
-adjusts those the new model does not support, and records each adjustment.
+Every configured model carries one capability record: the reasoning levels and
+service tiers it supports, and how it supports fast mode. Fast mode is either a
+request control on the selected target or a declared alternate serving target. A
+model change carries the inherited settings to the new model, adjusts those the
+new model does not support, and records each adjustment.
 
 Two durable events record settings outcomes: `SessionModelSettingsChanged` when
 a defaults replacement changes a setting or model, and

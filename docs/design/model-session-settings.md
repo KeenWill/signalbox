@@ -20,13 +20,13 @@ is offered through the record of the direct selection it currently resolves to.
 Inherit and provider default are offered for every setting.
 
 Each override member the screen submits is inherit, clear, or set(value), the
-overlay the settings-carrying commands already accept. The screen displays an
-inherited value distinctly from an explicitly set value. It submits inherit for
-a member the user did not touch, and it never converts an inherited value into
-set(value) on the user's behalf.
+overlay the settings-carrying commands accept. The screen displays an inherited
+value distinctly from an explicitly set value. It submits inherit for a member
+the user did not touch, and it never converts an inherited value into set(value)
+on the user's behalf.
 
 The screen shows the automatic adjustments carried on the settings events the
-daemon already records; it derives none itself.
+daemon records; it derives none itself.
 
 ## Constraints on present code
 
