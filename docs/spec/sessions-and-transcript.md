@@ -1094,14 +1094,14 @@ complete member evidence are owned by
 present transcript writer can produce this shape.
 
 That third producer serves two endings, which share its commit shape exactly.
-This page owns the transcript-producer column of
-[the credential-availability machine](credential-availability.md), and that
-column is total over all nine endings: `pre-call fail` and
-`wait-transition fail (no call)` use this producer; `post-failure fail` and
-`terminal` use the existing model-call known-failure closure, because their turn
-did issue a call and that closure is already the writer which commits one; and
-`selected`, `contended-wait`, `exhausted-wait`, and `successor` have no producer
-and append no entry, because none of them terminalizes a turn.
+This page owns which transcript producer serves each ending of
+[the credential-availability machine](credential-availability.md), and answers
+that for all nine endings: `pre-call fail` and `wait-transition fail (no call)`
+use this producer; `post-failure fail` and `terminal` use the existing
+model-call known-failure closure, because their turn did issue a call and that
+closure is already the writer which commits one; and `selected`,
+`contended-wait`, `exhausted-wait`, and `successor` have no producer and append
+no entry, because none of them terminalizes a turn.
 
 The remaining ending, `wait-transition fail (after call)`, needs a fourth
 producer, because it is a transition rather than an initial admission and the

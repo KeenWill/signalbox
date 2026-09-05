@@ -76,8 +76,8 @@ with exact invocation-reservation identities. Startup may reconstitute either
 only from that complete evidence. Which ending a selection attempt reaches — and
 therefore whether a wait is stored at all, and in which form — is owned by
 [the credential-availability machine](credential-availability.md). This page
-owns two of that table's columns, turn phase with attempt disposition and wake
-conditions, and states no rule about which row is reached. Startup reconstitutes
+owns turn phase with attempt disposition and wake conditions for each of its
+endings, and states no rule about which ending is reached. Startup reconstitutes
 the persisted choice without reclassifying it, and release consumes only a
 stored wait. Entering either wait form atomically ends the call-free current
 attempt as `WithoutStop(YieldedToDurableWait)` and stores the wait, leaving no
@@ -132,15 +132,15 @@ excluded — the contention is over and the transaction re-runs the pool's
 exhaustion policy rather than assuming a wait. Which ending that re-run reaches
 is the contended-to-exhausted rule of
 [the credential-availability machine](credential-availability.md): the turn
-moves to whichever row that table names, and releasing a contended wait does not
-change which one. A `fail` pool therefore cannot be left parked indefinitely by
-having entered contention first, and cannot acquire a pre-call cause it never
-earned. Releasing a bounded reservation holds that profile's capacity row across
-the atomic release-and-wake commit, and a rewrite holds the capacity rows of
-every bounded member its evidence names, so a completion cannot slip between a
-loser's read and its commit. A reservation identity therefore never outlives the
-wait that names it, and losing a race costs a re-park rather than a failed turn,
-a missed wake, or an admission above the bound.
+moves to whichever ending that machine names, and releasing a contended wait
+does not change which one. A `fail` pool therefore cannot be left parked
+indefinitely by having entered contention first, and cannot acquire a pre-call
+cause it never earned. Releasing a bounded reservation holds that profile's
+capacity row across the atomic release-and-wake commit, and a rewrite holds the
+capacity rows of every bounded member its evidence names, so a completion cannot
+slip between a loser's read and its commit. A reservation identity therefore
+never outlives the wait that names it, and losing a race costs a re-park rather
+than a failed turn, a missed wake, or an admission above the bound.
 
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a

@@ -6,9 +6,9 @@ commit-observation effects, assistant content, intra-turn tool rounds and final
 turn completion, provider failure classification into physical dispositions, and
 the retry prohibition. What a credential-pool selection attempt can end as, and
 every projection of each ending, is owned by
-[credential availability](credential-availability.md); this page owns the
-terminal-evidence-and-cause column of that table and the successor call's own
-mechanics. Tool requests, approvals, attempts, and continuation are owned by
+[credential availability](credential-availability.md); this page owns each
+ending's terminal evidence and cause and the successor call's own mechanics.
+Tool requests, approvals, attempts, and continuation are owned by
 [tool-loop](tool-loop.md). Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
@@ -638,7 +638,7 @@ automatic retry after a known failure and no automatic retry of an ambiguous
 outcome (INV-025, INV-026); a known failure fails the attempt and turn unless
 its pool authorizes an availability successor against a *different* eligible
 profile ([availability successor calls](#availability-successor-calls)) — the
-`terminal` and `successor` rows of
+`terminal` and `successor` endings of
 [the credential-availability machine](credential-availability.md), which states
 the four ordered gates that decide between them; a failure ends `terminal` at
 the first gate it fails — and ambiguity parks the turn for recovery. That

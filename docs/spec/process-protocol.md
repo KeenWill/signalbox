@@ -3006,11 +3006,11 @@ The `signalbox-debug` binary is a development harness, not a protocol client.
 ### Credential-pool preparation failure
 
 **Committed unimplemented functionality.** No present event or transcript state
-admits this shape. This section is the wire-projection column of
-[the credential-availability machine](credential-availability.md) for its
-`pre-call fail` and `wait-transition fail (no call)` endings, which share one
-wire projection; that table states which endings project to a terminal state and
-which to an active one. The wire projection must add
+admits this shape. This section owns the wire projection of the `pre-call fail`
+and `wait-transition fail (no call)` endings of
+[the credential-availability machine](credential-availability.md), which share
+one wire projection; that page states which endings project to a terminal state
+and which to an active one. The wire projection must add
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a distinct `transcript_turn.state` variant and
 `turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, policy_members, members }`
@@ -3074,11 +3074,11 @@ producer may terminalize a turn for this pre-call cause.
 No present request, event, transcript message, or closed turn-state object
 exposes an availability-successor chain or credential-availability wait — the
 `successor`, `contended-wait`, and `exhausted-wait` endings of
-[the credential-availability machine](credential-availability.md), whose
-wire-projection column this section owns. The predecessor, authorizing cause,
-selected profile, and wait evidence are themselves committed future storage — no
-present migration, repository operation, or reconstitution path supplies them —
-so the wire cannot project them until that storage exists, and must then add a
+[the credential-availability machine](credential-availability.md), whose wire
+projection this section owns. The predecessor, authorizing cause, selected
+profile, and wait evidence are themselves committed future storage — no present
+migration, repository operation, or reconstitution path supplies them — so the
+wire cannot project them until that storage exists, and must then add a
 version-one shape together with its daemon and client consumers. The wait must
 be projected as an active state retaining the same turn and session slot.
 Nothing is committed about a client-visible successor relation: whether the
