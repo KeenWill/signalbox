@@ -583,8 +583,7 @@ INV-tagged test names and attached doc comments.
   names the exact parent tool request, with ancestry `None`, task input, and a
   background or bound relationship. `await_session` records foreground or
   background delivery; `send_session_message` records either direction, as owned
-  by the
-  [delegation tool contract](spec/tool-loop.md#session-delegation-tool-family).
+  by the [delegation tool contract](spec/tool-loop.md).
 - **State transitions:** A foreground wait retains the parent's only active turn
   slot until an explicit child result arrives. A background wait registers
   delivery without retaining that slot; result commit creates a durable parent

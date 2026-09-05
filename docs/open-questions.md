@@ -466,9 +466,8 @@ automatic resumption of an execution-failure block are specified in
   representation, revision identity, change audit, compatibility, and safe
   rebinding decisions.
 - **Execution-strategy configuration placement.** Whether a future
-  serial/concurrent choice beyond the
-  [fixed serial loop](spec/tool-loop.md#serialized-staged-execution) is a
-  deployment, session-default, per-turn, or executor-selection value remains
+  serial/concurrent choice beyond the [fixed serial loop](spec/tool-loop.md) is
+  a deployment, session-default, per-turn, or executor-selection value remains
   undecided. Blocks configurable/concurrent execution.
 - **Model-declared approval expiry.** Pending user approval currently waits
   indefinitely. Whether a model may request an expiry, how it is frozen, and
@@ -498,11 +497,11 @@ automatic resumption of an execution-failure block are specified in
   does not settle escalates rather than approves.
 - **Per-template thread-resolution policy.** Whether a session template may
   choose its own posture toward
-  [`change_request_thread_resolve`](spec/tool-loop.md#provider-bridge-and-daemon-catalog)
-  — so that one template resolves the reviewer threads it has answered while
-  another may only reply and leave resolution to the reviewer — is undecided.
-  Deciding it requires the template configuration surface to carry per-template
-  tool posture at all, which is itself open under
+  [`change_request_thread_resolve`](spec/tool-loop.md) — so that one template
+  resolves the reviewer threads it has answered while another may only reply and
+  leave resolution to the reviewer — is undecided. Deciding it requires the
+  template configuration surface to carry per-template tool posture at all,
+  which is itself open under
   [Template storage and authoring](#template-storage-and-authoring). Recorded as
   a design question rather than a blocker; it blocks only a per-template choice,
   never the posture the daemon composition already applies.
@@ -514,18 +513,18 @@ automatic resumption of an execution-failure block are specified in
   policy rather than by physics: 1 MiB of result text, 1 MiB of arguments, 4,096
   bytes of error detail, and 4,096 bytes of exact runner value, all held in
   PostgreSQL `text` columns with no physical ceiling near those values. Under
-  [tool-loop result authority](spec/tool-loop.md#result-authority-and-the-continuation-boundary),
-  every admitted result fits those bounds. A family may compact output with its
-  crate-owned truncation and completeness evidence, or its bounded transport may
-  reject an oversized response before result admission; the family contract owns
-  that choice. `ResultTooLarge` remains the admission classification for an
-  admitted result that still exceeds the durable bound. Blob storage decides
-  only where deliberately larger byte payloads live: content-addressed blobs
-  with model-visible attachment stubs and bounded explicit reads. The
-  tool-result side remains open — whether and how a family's durable admitted
-  result references a blob rather than embedding bytes, its truncation and
-  completeness evidence, and per-family adoption. The existing family caps
-  remain correct until that lands.
+  [tool-loop result authority](spec/tool-loop.md), every admitted result fits
+  those bounds. A family may compact output with its crate-owned truncation and
+  completeness evidence, or its bounded transport may reject an oversized
+  response before result admission; the family contract owns that choice.
+  `ResultTooLarge` remains the admission classification for an admitted result
+  that still exceeds the durable bound. Blob storage decides only where
+  deliberately larger byte payloads live: content-addressed blobs with
+  model-visible attachment stubs and bounded explicit reads. The tool-result
+  side remains open — whether and how a family's durable admitted result
+  references a blob rather than embedding bytes, its truncation and completeness
+  evidence, and per-family adoption. The existing family caps remain correct
+  until that lands.
 - **Repository configuration outside the model's writable root.** A session's
   `.git` sits inside its writable root, so repository-local Git configuration is
   model-writable, and version one answers that key by key: a forced transport
