@@ -101,10 +101,6 @@ def parse(text: str) -> tuple[str, list[Item]]:
     return root, items
 
 
-def identity(item: Item) -> tuple[str, str, str, str]:
-    return item.module, item.category, item.name, item.declaration
-
-
 def display_name(item: Item) -> str:
     return item.name.removeprefix(f"{item.module}::")
 
@@ -114,14 +110,14 @@ def render(crate: str, path: Path) -> None:
     root, current = parse(current_text)
     baseline = previous_text(path, current_text)
     _, previous = parse(baseline) if baseline else (root, [])
-    current_counts = Counter(identity(item) for item in current)
-    previous_counts = Counter(identity(item) for item in previous)
+    current_counts = Counter(current)
+    previous_counts = Counter(previous)
     added = current_counts - previous_counts
     removed = previous_counts - current_counts
     by_module: dict[str, list[Item]] = defaultdict(list)
     for item in current:
         by_module[item.module].append(item)
-    changed_modules = {key[0] for key in added + removed}
+    changed_modules = {item.module for item in added + removed}
 
     print(crate)
     for module in sorted(set(by_module) | changed_modules):
@@ -134,9 +130,9 @@ def render(crate: str, path: Path) -> None:
         for heading, changes in (("added", added), ("removed", removed)):
             names = sorted(
                 {
-                    f"{category} {display_name(Item(owner, category, name, line))}"
-                    for (owner, category, name, line), count in changes.items()
-                    if owner == module and count
+                    f"{item.category} {display_name(item)}"
+                    for item, count in changes.items()
+                    if item.module == module and count
                 }
             )
             print(f"    {heading}: {', '.join(names) if names else 'none'}")
