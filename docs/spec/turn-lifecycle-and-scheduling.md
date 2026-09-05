@@ -377,21 +377,20 @@ names its ended attempt and exactly one terminal ambiguous model call or tool
 attempt; the attempt end is lost or ambiguous without a stop, with a later
 applied interrupt or a durable automatic recovery attempt, or it is a
 cancellation end carrying the interrupt proof. Automatic reconciliation
-authority binds the exact session, turn, and model call and is not admitted for
-a tool reconciliation. A model-call reconciliation terminal frontier is an
-equal-content boundary over the ambiguous call's source frontier; a tool
-reconciliation adds one result per request with the ambiguous request closed. A
-consumed steering input reconstitutes only against its exact consuming call,
-whose frontier is the start or round-result projection extended by the consumed
-entries in acceptance order; a consumer that completed by proposing a tool round
-stays correlated through its validated assistant history for the rest of the
-turn. Every active turn's projection carries a session-scoped acceptance tail
-anchored at the turn's origin and extending gap-free through the last observed
-acceptance position; a position consumed by the predecessor remains in that tail
-after a queued origin activates, and only steering consumed by the new active
-turn enters its execution aggregate. A tail entry recording an accepted
-interrupt is admitted only when the current stop or recovery state carries its
-exact proof.
+authority binds the exact session, turn, and the model call or tool attempt it
+reconciles. A model-call reconciliation terminal frontier is an equal-content
+boundary over the ambiguous call's source frontier; a tool reconciliation adds
+one result per request with the ambiguous request closed. A consumed steering
+input reconstitutes only against its exact consuming call, whose frontier is the
+start or round-result projection extended by the consumed entries in acceptance
+order; a consumer that completed by proposing a tool round stays correlated
+through its validated assistant history for the rest of the turn. Every active
+turn's projection carries a session-scoped acceptance tail anchored at the
+turn's origin and extending gap-free through the last observed acceptance
+position; a position consumed by the predecessor remains in that tail after a
+queued origin activates, and only steering consumed by the new active turn
+enters its execution aggregate. A tail entry recording an accepted interrupt is
+admitted only when the current stop or recovery state carries its exact proof.
 
 A spawned child's first turn has a closed delegated-task origin naming the exact
 spawning request, with a starting frontier containing the delegated-task entry
