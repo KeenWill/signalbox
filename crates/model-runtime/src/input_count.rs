@@ -19,6 +19,11 @@ pub enum InputTokenCountOutcome<C> {
         /// Caller-owned operation correlation.
         correlation: C,
     },
+    /// The selected adapter has no provider-native exact count operation.
+    Unavailable {
+        /// Caller-owned operation correlation.
+        correlation: C,
+    },
     /// Translation, credential access, transport, status, or response
     /// validation failed; no estimate is substituted.
     Failed {

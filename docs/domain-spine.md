@@ -8779,6 +8779,7 @@ pub enum ModelCallCapabilityPreparation<Capability> {
 pub enum ModelCallInputTokenCount {
     Counted(u64),
     Cancelled,
+    Unavailable,
 }
 
 pub trait ModelCallInputTokenCounter {

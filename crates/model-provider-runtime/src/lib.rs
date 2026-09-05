@@ -1159,11 +1159,15 @@ where
             signalbox_model_runtime::InputTokenCountOutcome::Cancelled {
                 correlation: returned,
             } if returned == correlation => Ok(ModelCallInputTokenCount::Cancelled),
+            signalbox_model_runtime::InputTokenCountOutcome::Unavailable {
+                correlation: returned,
+            } if returned == correlation => Ok(ModelCallInputTokenCount::Unavailable),
             signalbox_model_runtime::InputTokenCountOutcome::Failed {
                 correlation: returned,
             } if returned == correlation => Err(RuntimeInputTokenCountError::CountFailed),
             signalbox_model_runtime::InputTokenCountOutcome::Counted { .. }
             | signalbox_model_runtime::InputTokenCountOutcome::Cancelled { .. }
+            | signalbox_model_runtime::InputTokenCountOutcome::Unavailable { .. }
             | signalbox_model_runtime::InputTokenCountOutcome::Failed { .. } => {
                 Err(RuntimeInputTokenCountError::CorrelationMismatch)
             }

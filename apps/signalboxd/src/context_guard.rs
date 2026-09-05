@@ -3,8 +3,8 @@
 use std::{error::Error, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityPass, ModelCallInputTokenCount, ModelCallInputTokenCounter,
-    OperatorFailureClass, ToolCatalog,
+    ClassifyOperatorFailure, EligibilityPass, InProcessEligibilityNudge, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, OperatorFailureClass, SchedulerPassExpiryHandler, ToolCatalog,
 };
 use signalbox_domain::{
     AcceptedInputTurnActivationIdentities, ContextFrontierId, FailedModelCallTurnIdentities,
@@ -23,8 +23,9 @@ use signalbox_persistence::{
 };
 
 use crate::{
-    ActivatedTurnExecution, HubModelConfiguration, TurnPassExecutionStage,
-    WorkspaceInstructionRuntime, WorkspaceInstructionRuntimeError,
+    ActivatedTurnExecution, ExpiredPassRecoveryPolicy, HubModelConfiguration, ModelAdapter,
+    SchedulerPassOccupancyRecovery, TurnPassExecutionStage, WorkspaceInstructionRuntime,
+    WorkspaceInstructionRuntimeError,
     process_runtime::compact_automatically,
     report_ambiguous_commit,
     usage_limits::{
@@ -334,6 +335,13 @@ impl ReportedUsageCompaction {
                 operation.request().model_settings().effective().fast_mode(),
             )
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
+        if self
+            .model_configuration
+            .adapter_for_provider_model(definition.provider_model())
+            == Some(ModelAdapter::Anthropic)
+        {
+            return Ok(None);
+        }
         // The preview's starting frontier is never committed, so it names the
         // model-visible input it would send rather than an identity no durable
         // membership resolves.
@@ -377,6 +385,8 @@ impl ReportedUsageCompaction {
 /// Exact-guard failure before activation or during the resulting execution.
 #[derive(Debug)]
 pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
+    /// Reported-usage preflight for an adapter without exact counting failed.
+    ReportedUsageCompaction(ReportedUsageCompactionError),
     /// Read-only activation preview or exact guarded commit failed.
     Activation {
         /// Selected turn, absent when preview failed before selection.
@@ -471,6 +481,7 @@ where
 {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
+            Self::ReportedUsageCompaction(error) => error.operator_failure_class(),
             Self::Activation { source, .. } => source.operator_failure_class(),
             Self::Operation { source, .. } => source.operator_failure_class(),
             Self::Render { .. } => OperatorFailureClass::FailClosedCorruption,
@@ -490,6 +501,7 @@ where
 
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
+            Self::ReportedUsageCompaction(error) => error.operator_failure_cause_code(),
             Self::Activation { .. } => "turn_activation_repository",
             Self::Operation { .. } => "model_call_repository",
             Self::Render { .. } => "model_frontier_rendering",
@@ -517,8 +529,11 @@ pub struct ContextGuardedTurnPass<Counter, Catalog, Execution> {
     runtime_models: RuntimeModelCatalog,
     model_configuration: HubModelConfiguration,
     compaction_model: Arc<dyn ContextCompactionModel>,
+    reported_usage_compaction: Option<ReportedUsageCompaction>,
     workspace_instructions: Option<WorkspaceInstructionRuntime>,
     execution: Execution,
+    occupancy_recovery: Option<SchedulerPassOccupancyRecovery>,
+    dispatch_start: bool,
 }
 
 impl<Counter, Catalog, Execution> fmt::Debug for ContextGuardedTurnPass<Counter, Catalog, Execution>
@@ -537,8 +552,11 @@ where
             .field("runtime_models", &self.runtime_models)
             .field("model_configuration", &self.model_configuration)
             .field("compaction_model", &"[context compaction model]")
+            .field("reported_usage_compaction", &self.reported_usage_compaction)
             .field("workspace_instructions", &self.workspace_instructions)
             .field("execution", &self.execution)
+            .field("occupancy_recovery", &self.occupancy_recovery)
+            .field("dispatch_start", &self.dispatch_start)
             .finish()
     }
 }
@@ -564,9 +582,39 @@ impl<Counter, Catalog, Execution> ContextGuardedTurnPass<Counter, Catalog, Execu
             runtime_models,
             model_configuration,
             compaction_model,
+            reported_usage_compaction: None,
             workspace_instructions: None,
             execution,
+            occupancy_recovery: None,
+            dispatch_start: false,
         }
+    }
+
+    /// Keeps the reported-usage preflight for adapters without exact counting.
+    pub fn with_reported_usage_compaction(mut self, compaction: ReportedUsageCompaction) -> Self {
+        self.reported_usage_compaction = Some(compaction);
+        self
+    }
+
+    /// Installs daemon-owned recovery for passes ended by the occupancy bound.
+    pub fn with_occupancy_recovery(
+        mut self,
+        pool: sqlx::PgPool,
+        eligibility_nudge: InProcessEligibilityNudge,
+        policy: ExpiredPassRecoveryPolicy,
+        persistence_bounds: signalbox_persistence::turn_liveness::TurnLivenessPersistenceBounds,
+    ) -> Self
+    where
+        Execution: ActivatedTurnExecution,
+    {
+        self.occupancy_recovery = Some(SchedulerPassOccupancyRecovery::new(
+            pool,
+            eligibility_nudge,
+            &self.execution,
+            policy,
+            persistence_bounds,
+        ));
+        self
     }
 
     /// Records the empty queued-turn manifest needed by the atomic counted
@@ -595,6 +643,7 @@ where
     }
     fn failure_turn(error: &Self::Error) -> Option<TurnId> {
         match error {
+            ContextGuardedTurnPassError::ReportedUsageCompaction(error) => error.turn(),
             ContextGuardedTurnPassError::Activation { turn, .. }
             | ContextGuardedTurnPassError::Execution { turn, .. } => *turn,
             ContextGuardedTurnPassError::Operation { turn, .. }
@@ -610,10 +659,17 @@ where
         }
     }
 
+    fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
+        self.occupancy_recovery
+            .clone()
+            .map(|recovery| Arc::new(recovery) as _)
+    }
+
     fn run(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let dispatch_start = std::mem::take(&mut self.dispatch_start);
         let activation = self.activation.clone();
         let model_calls = self.model_calls.clone();
         let counter = self.counter.clone();
@@ -621,16 +677,49 @@ where
         let runtime_models = self.runtime_models.clone();
         let model_configuration = self.model_configuration.clone();
         let compaction_model = Arc::clone(&self.compaction_model);
+        let reported_usage_compaction = self.reported_usage_compaction.clone();
         let workspace_instructions = self.workspace_instructions.clone();
         let execution = self.execution.clone();
+        let occupancy_recovery = self.occupancy_recovery.clone();
         async move {
-            execution.resume_active(session).await.map_err(|source| {
-                ContextGuardedTurnPassError::Execution {
-                    stage: TurnPassExecutionStage::ActiveTurnRecovery,
-                    turn: Execution::active_resume_failure_turn(&source),
-                    source,
-                }
+            let occupancy_tracking = occupancy_recovery
+                .as_ref()
+                .map(|recovery| recovery.resume_turn_observer(session));
+            let observe_turn = occupancy_tracking
+                .as_ref()
+                .map(|(_, observer)| Arc::clone(observer))
+                .unwrap_or_else(|| Arc::new(|_| {}));
+            let resumed = if dispatch_start {
+                execution
+                    .resume_dispatch_start_with_observer(session, Arc::clone(&observe_turn))
+                    .await
+            } else {
+                execution
+                    .resume_active_with_observer(session, Arc::clone(&observe_turn))
+                    .await
+            };
+            resumed.map_err(|source| ContextGuardedTurnPassError::Execution {
+                stage: TurnPassExecutionStage::ActiveTurnRecovery,
+                turn: Execution::active_resume_failure_turn(&source),
+                source,
             })?;
+            if let Some(compaction) = reported_usage_compaction {
+                let compaction_window = occupancy_recovery
+                    .as_ref()
+                    .map(|recovery| recovery.compaction_window(session));
+                let observe_prepared = compaction_window
+                    .as_ref()
+                    .map(|(_, observer)| Arc::clone(observer));
+                let compacted = compaction
+                    .compact_if_needed(session, observe_prepared.as_deref())
+                    .await;
+                drop(compaction_window);
+                if let Err(error) = compacted {
+                    let error = ContextGuardedTurnPassError::ReportedUsageCompaction(error);
+                    report_guarded_ambiguity(&execution, &error);
+                    return Err(error);
+                }
+            }
             let outcome: Result<
                 (),
                 ContextGuardedTurnPassError<Counter::Error, Execution::Error>,
@@ -674,9 +763,16 @@ where
                                     execution.report_post_activation_failure();
                                     return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
                                 }
+                                observe_turn(activated.turn());
                                 report_guarded_turn_activation(activated.session(), activated.turn());
+                                let execution = async {
+                                    if dispatch_start {
+                                        execution.execute_dispatch_start(activated).await
+                                    } else {
+                                        execution.execute(activated).await
+                                    }
+                                };
                                 return execution
-                                    .execute(activated)
                                     .instrument(guarded_turn_span(session, turn))
                                     .await
                                     .map_err(|source| ContextGuardedTurnPassError::Execution {
@@ -709,6 +805,44 @@ where
                         ModelCallInputTokenCount::Cancelled => {
                             return Err(ContextGuardedTurnPassError::CountCancelled(turn));
                         }
+                        ModelCallInputTokenCount::Unavailable => {
+                            let committed = activation
+                                .commit_preview(preview)
+                                .await
+                                .map_err(|source| ContextGuardedTurnPassError::Activation {
+                                    turn: Some(turn),
+                                    source,
+                                })?;
+                            match committed {
+                                CommitActivationPreviewOutcome::Stale => continue,
+                                CommitActivationPreviewOutcome::Activated(activated) => {
+                                    if activated.session() != session {
+                                        execution.report_post_activation_failure();
+                                        return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
+                                    }
+                                    observe_turn(activated.turn());
+                                    report_guarded_turn_activation(
+                                        activated.session(),
+                                        activated.turn(),
+                                    );
+                                    let execution = async {
+                                        if dispatch_start {
+                                            execution.execute_dispatch_start(activated).await
+                                        } else {
+                                            execution.execute(activated).await
+                                        }
+                                    };
+                                    return execution
+                                        .instrument(guarded_turn_span(session, turn))
+                                        .await
+                                        .map_err(|source| ContextGuardedTurnPassError::Execution {
+                                            stage: TurnPassExecutionStage::Execution,
+                                            turn: Some(turn),
+                                            source,
+                                        });
+                                }
+                            }
+                        }
                     };
                     let requested_tokens = input_tokens
                         .checked_add(u64::from(model.max_output_tokens()))
@@ -734,16 +868,23 @@ where
                             }
                             return Err(ContextGuardedTurnPassError::ContextStillExceeded(turn));
                         }
-                        match compact_automatically(
+                        let compaction_window = occupancy_recovery
+                            .as_ref()
+                            .map(|recovery| recovery.compaction_window(session));
+                        let observe_prepared = compaction_window
+                            .as_ref()
+                            .map(|(_, observer)| Arc::clone(observer));
+                        let compaction_result = compact_automatically(
                             &model_calls,
                             &model_configuration,
                             &compaction_model,
                             session,
                             turn,
-                            None,
+                            observe_prepared.as_deref(),
                         )
-                        .await
-                        {
+                        .await;
+                        drop(compaction_window);
+                        match compaction_result {
                             Ok(_) => {}
                             Err(crate::process_runtime::AutomaticContextCompactionError::AlreadyAttempted) => {
                                 match close_failed_compaction_turn(
@@ -847,9 +988,16 @@ where
                                 execution.report_post_activation_failure();
                                 return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
                             }
+                            observe_turn(activated.turn());
                             report_guarded_turn_activation(activated.session(), activated.turn());
+                            let execution = async {
+                                if dispatch_start {
+                                    execution.execute_dispatch_start(activated).await
+                                } else {
+                                    execution.execute(activated).await
+                                }
+                            };
                             return execution
-                                .execute(activated)
                                 .instrument(guarded_turn_span(session, turn))
                                 .await
                                 .map_err(|source| ContextGuardedTurnPassError::Execution {
@@ -868,6 +1016,14 @@ where
             outcome
         }
     }
+
+    fn run_dispatch_start(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.dispatch_start = true;
+        self.run(session)
+    }
 }
 
 /// Returns one closed guarded-pass stage without inspecting payload-bearing
@@ -879,6 +1035,7 @@ fn guarded_failure_stage<CountError, ExecutionError>(
     error: &ContextGuardedTurnPassError<CountError, ExecutionError>,
 ) -> &'static str {
     match error {
+        ContextGuardedTurnPassError::ReportedUsageCompaction(_) => "context_compaction",
         ContextGuardedTurnPassError::Activation { turn: None, .. } => "activation_preview",
         ContextGuardedTurnPassError::Activation { turn: Some(_), .. } => "activation_commit",
         ContextGuardedTurnPassError::Operation { .. } => "model_operation",

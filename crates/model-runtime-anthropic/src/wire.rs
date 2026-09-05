@@ -39,7 +39,28 @@ pub(crate) struct MessagesRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
+    pub context_management: ContextManagement,
     pub stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContextManagement {
+    pub edits: [ContextManagementEdit; 1],
+}
+
+impl ContextManagement {
+    pub(crate) const fn clear_tool_uses() -> Self {
+        Self {
+            edits: [ContextManagementEdit::ClearToolUses],
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub(crate) enum ContextManagementEdit {
+    #[serde(rename = "clear_tool_uses_20250919")]
+    ClearToolUses,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +134,7 @@ pub(crate) struct CountTokensRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
+    pub context_management: ContextManagement,
 }
 
 impl From<MessagesRequest> for CountTokensRequest {
@@ -125,6 +147,7 @@ impl From<MessagesRequest> for CountTokensRequest {
             speed: request.speed,
             tools: request.tools,
             tool_choice: request.tool_choice,
+            context_management: request.context_management,
         }
     }
 }
