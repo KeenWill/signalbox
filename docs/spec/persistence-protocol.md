@@ -135,17 +135,16 @@ constraints, because a row set that passes SQL checks can still fail domain
 correlation.
 
 No template catalog or mutable template object exists in Postgres; a template
-reaches the schema only as provenance, the pair on a session and its creation
-command, the name and digest on repo-watch dispatch rows, and the digests on
-review-orchestration attempt rows.
+reaches the schema only as provenance recorded on the rows that used it.
 
 Frontier lineage is either absent or checked imported-frontier ancestry; native
 fork ancestry is not admitted.
 
 Each command kind stores its caller-supplied fields in one typed,
-check-constrained record family, a parent row and any ordered content-part
-satellites, rather than a serialized payload column, because a universal
-serializer would become a second semantic authority.
+check-constrained record family, a parent row and its typed satellites, ordered
+content parts and set or map satellites such as metadata tags and attributes,
+rather than a serialized payload column, because a universal serializer would
+become a second semantic authority.
 
 Duplicate concurrent submission of a command is a database conflict on the
 registry, not an application race, and the loser rereads the winner.
@@ -161,8 +160,9 @@ so their order is auditable instead of scattered through query strings.
 Creating a session from an imported frontier takes no explicit row lock, because
 the selected imported aggregate is immutable and append-only.
 
-Approval-judge completion locks the session row before the scheduler row so a
-goal-closing transition and the completion recheck exclude each other.
+Approval-judge completion takes the session row FOR NO KEY UPDATE before the
+scheduler row so a goal-closing transition and the completion recheck exclude
+each other.
 
 Input submitted to a delegated child locks both endpoint session rows in
 identity order before the child's scheduler row, because processing the input
@@ -195,8 +195,9 @@ A stopped delegated child keeps its physical execution evidence; eligibility
 excludes it through its logical terminal proof, and a late provider response is
 discarded rather than stored.
 
-A guarded transition that changes no durable state appends no event, so state
-without its event, or an event without its state, is unrepresentable.
+A guarded transition that changes no durable state appends no event, so where
+the transition has a producer, state without its event, or an event without its
+state, is unrepresentable.
 
 The command-settled record authenticates its header without the session column,
 because that column is null for a receipt with no session and a null key member
