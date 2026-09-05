@@ -39,15 +39,18 @@ repository.
 
 Live administration reads are implemented in the authority layer rather than
 through a path-based repository API, because such an API cannot express the
-descriptor-pinned, no-follow, bounded-read contract. A review request to move a
-live read back to a path-based library, absent a stated invariant violation, is
-dispositioned as an accepted residual citing this page.
+descriptor-pinned, no-follow, bounded-read contract.
 
 No operation accepts a command line, shell fragment, executable, repository
 path, or remote destination, and the implementation never spawns a Git binary.
 
 Minting a destination is a human act; pushing to a minted destination is an
 approval-gated agent act. A session cannot mint a workspace or a destination.
+
+Workspace, mint, and withdrawal rows are append-only; retiring a destination
+records a withdrawal rather than editing or deleting the mint. The live
+destination table is derived from those facts, so a mint stands in it until its
+withdrawal is recorded.
 
 A push destination is `https` only; the durable mint and the configured remote
 judge a URL by one type, so both refuse the same set.

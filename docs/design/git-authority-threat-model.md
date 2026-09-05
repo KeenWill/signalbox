@@ -13,12 +13,12 @@ identity and its grants.
 
 ## Shape
 
-Storage. The `workspace` table and the `configured_git_remote_mint` and
-`configured_git_remote_withdrawal` tables exist and are append-only. A trigger
-maintains `configured_git_remote_live` as the mints without a withdrawal, keyed
-by workspace and remote name. `workspace_id` is the primary key and `root_path`
-is unique. An operator-registered row carries the `register_workspace` command
-that created it; a daemon-derived row carries no command.
+Storage. The `workspace`, `configured_git_remote_mint`,
+`configured_git_remote_withdrawal`, and `configured_git_remote_live` tables
+exist. `workspace_id` is the primary key, `root_path` is unique, and a live
+destination is keyed by workspace and remote name. An operator-registered row
+carries the `register_workspace` command that created it; a daemon-derived row
+carries no command.
 
 Minting. Registration through the client resolves the root path once, following
 symbolic links and removing `.` and `..` components, and stores the canonical
@@ -42,8 +42,9 @@ the transport compiles no SSH support, so the store and the transport refuse the
 same set. No caller supplies a URL.
 
 Relocation. A relocation is a durable fact that binds an existing workspace
-identity to a new canonical root; the identity and its grants stand.
-Re-registering a moved directory no longer mints a new identity.
+identity to a new canonical root; the identity and its grants stand. Registering
+a durably relocated directory resolves to that identity instead of minting a new
+one.
 
 ## Constraints on present code
 
@@ -56,10 +57,6 @@ tables to decide which roots the daemon may open.
 
 `WorkspaceRootPath` admits canonical bytes only and performs no normalization;
 no comparison-time normalization is added anywhere.
-
-The `workspace`, mint, and withdrawal tables stay append-only; retiring is a new
-fact, never an update or a delete. `configured_git_remote_live` is a projection
-of those facts, so a withdrawal deletes the retired mint from it.
 
 `WorkspaceOrigin` enumerates both variants without a wildcard, so a further tier
 cannot default to carrying no human act.
