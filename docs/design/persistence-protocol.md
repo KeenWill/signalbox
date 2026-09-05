@@ -14,17 +14,17 @@ material.
 
 ## Design
 
-Runner replacement and abandonment are each one orchestration transaction that
-holds authority outside the placement aggregate, moves the placement, and
-appends one runner-state-transition event per affected session in the same
-transaction. Replacement of a pinned placement also appends the placement
-transcript entry: one positive placement revision with a foreign key to the same
-session's placement record at that revision, which reconstitution resolves,
-rejecting a missing, cross-session, non-successor, or duplicated reference.
-Replacing a `RunnerLostBeforePin` placement updates only the exact selector and
-returns to `Unpinned`, appending no such entry. The record kind already carries
-the replacement and abandonment states; the transactions that produce them do
-not exist.
+Runner replacement and abandonment each end in one terminal orchestration
+transaction that holds authority outside the placement aggregate, moves the
+placement, and appends one runner-state-transition event per affected session in
+the same transaction. Replacement of a pinned placement also appends the
+placement transcript entry: one positive placement revision with a foreign key
+to the same session's placement record at that revision, which reconstitution
+resolves, rejecting a missing, cross-session, non-successor, or duplicated
+reference. Replacing a `RunnerLostBeforePin` placement updates only the exact
+selector and returns to `Unpinned`, appending no such entry. The record kind
+already carries the replacement and abandonment states; the transactions that
+produce them do not exist.
 
 A daemon transaction retires a workspace release the lost runner never
 acknowledged, so a lost runner leaves no release outstanding.
