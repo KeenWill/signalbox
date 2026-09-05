@@ -29,14 +29,29 @@ class Item:
     declaration: str
 
 
-def previous_text(path: Path) -> str:
+def git_text(revision: str, path: Path) -> str:
     result = subprocess.run(
-        ["git", "show", f"HEAD:{path.as_posix()}"],
+        ["git", "show", f"{revision}:{path.as_posix()}"],
         check=False,
         capture_output=True,
         text=True,
     )
     return result.stdout if result.returncode == 0 else ""
+
+
+def previous_text(path: Path, current: str) -> str:
+    dirty = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", path.as_posix()], check=False
+    )
+    if dirty.returncode == 1:
+        return git_text("HEAD", path)
+    history = subprocess.run(
+        ["git", "log", "--format=%H", "-2", "HEAD", "--", path.as_posix()],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    return git_text(history[1], path) if len(history) == 2 else current
 
 
 def parse(text: str) -> tuple[str, list[Item]]:
@@ -85,8 +100,9 @@ def display_name(item: Item) -> str:
 
 
 def render(crate: str, path: Path) -> None:
-    root, current = parse(path.read_text())
-    baseline = previous_text(path)
+    current_text = path.read_text()
+    root, current = parse(current_text)
+    baseline = previous_text(path, current_text)
     _, previous = parse(baseline) if baseline else (root, [])
     current_counts = Counter(identity(item) for item in current)
     previous_counts = Counter(identity(item) for item in previous)
