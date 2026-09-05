@@ -151,9 +151,8 @@ per-turn provenance. The following extensions remain undecided:
   admission beyond the inherited process-frame bound, raw-record access, and any
   authorization beyond the owner-private local socket remain undecided. Listing
   across imported conversations is implemented by the unified conversation
-  listing in [process protocol](spec/process-protocol.md#client-requests);
-  filesystem discovery of unimported sources beyond the explicit directory scan
-  is not. (S28)
+  listing in [process protocol](spec/process-protocol.md); filesystem discovery
+  of unimported sources beyond the explicit directory scan is not. (S28)
 
 ## Transcript ancestry
 
@@ -376,9 +375,8 @@ phase, the placement transcript payload, creation-record placement, and the
 runner event family in
 [persistence-protocol](spec/persistence-protocol.md#relational-representation);
 the closed runner execution object, creation-request placement, and template
-creation carrying placement in
-[process-protocol](spec/process-protocol.md#client-requests); the relocation
-transcript boundary in
+creation carrying placement in [process-protocol](spec/process-protocol.md); the
+relocation transcript boundary in
 [sessions-and-transcript](spec/sessions-and-transcript.md#semantic-transcript-entries);
 capability-derived tool advertisement in
 [model-call-execution](spec/model-call-execution.md#frontier-rendering). Why: a
@@ -741,8 +739,8 @@ questions below remain open.
 - **Client approval presentation.** The terminal baseline now surfaces the
   pending request through the transcript's awaiting-turn and tool-use lines and
   collects decisions through `approve`/`deny`
-  ([process-protocol](spec/process-protocol.md#terminal-client)); interactive
-  prompting and later client forms remain undesigned. (S10, S11, S24)
+  ([process-protocol](spec/process-protocol.md)); interactive prompting and
+  later client forms remain undesigned. (S10, S11, S24)
 
 ## General-purpose artifacts
 
