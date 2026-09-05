@@ -5404,7 +5404,10 @@ fn close_cancelled_turn(
 }
 
 #[cfg(test)]
-pub(crate) use tests::{cancelled_turn_fixture, completed_turn_fixture, failed_turn_fixture};
+pub(crate) use tests::{
+    cancelled_turn_fixture, completed_turn_fixture,
+    completed_turn_with_provider_compaction_fixture, failed_turn_fixture,
+};
 
 #[cfg(test)]
 mod tests {
@@ -6031,6 +6034,46 @@ mod tests {
             .expect("definitive fixture completion is admissible");
         let ModelCallTerminalOutcome::Completed(completed) = outcome else {
             panic!("completed fixture evidence selects completed outcome");
+        };
+        completed
+    }
+
+    pub(crate) fn completed_turn_with_provider_compaction_fixture(
+        value: &str,
+    ) -> CompletedModelCallTurn {
+        let execution = in_flight_execution();
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                response: vec![
+                    AssistantResponsePart::ProviderCompaction(
+                        crate::ProviderCompactionBlock::try_new(
+                            r#"{"type":"compaction","content":"summary"}"#.to_string(),
+                        )
+                        .expect("fixture compaction block is complete"),
+                    ),
+                    AssistantResponsePart::Text(
+                        crate::AssistantText::try_new(value.to_owned())
+                            .expect("nonempty fixture text"),
+                    ),
+                ],
+            },
+        );
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![
+                        semantic_transcript_entry_id(10),
+                        semantic_transcript_entry_id(11),
+                    ],
+                    semantic_transcript_entry_id(12),
+                    context_frontier_id(13),
+                )),
+            )
+            .expect("provider compaction fixture completion is admissible");
+        let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+            panic!("provider compaction evidence selects completed outcome");
         };
         completed
     }

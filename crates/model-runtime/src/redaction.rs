@@ -8,8 +8,9 @@ use std::collections::VecDeque;
 use crate::{
     AssistantPart, CompletionFinish, CredentialValue, ExchangeFacts, FinishReason, LossCause,
     NativeErrorFacts, Observation, ObservationFact, ObservationSink, ProvenUnsentEvidence,
-    ProviderMessageId, ProviderReportedModel, ProviderRequestId, StreamInterruption,
-    TerminalEvidence, ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
+    ProviderRequestId, StreamInterruption, TerminalEvidence, ToolCallId, ToolCallProposal,
+    ToolName, TransportFacts, UnsentCause,
 };
 
 const NATIVE_MESSAGE_TRUNCATION_SUFFIX: &str = " … [truncated]";
@@ -521,6 +522,22 @@ pub fn redact_evidence(
             TerminalEvidence::BoundaryLoss(loss)
         }
         TerminalEvidence::Completed(mut completion) => {
+            if provider_compaction_contains_credential(&completion.content, api_key) {
+                return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    exchange: redact_exchange(completion.exchange, api_key),
+                    reported_model: completion.reported_model.map(|model| {
+                        ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
+                    }),
+                    kind: ProviderErrorKind::Unrecognized,
+                    non_acceptance_proven: false,
+                    native: NativeErrorFacts {
+                        error_token: Some("credential_in_provider_compaction".to_string()),
+                        error_code: None,
+                        message: None,
+                    },
+                    usage: completion.usage,
+                });
+            }
             completion.exchange = redact_exchange(completion.exchange, api_key);
             completion.message_id = completion
                 .message_id
@@ -537,6 +554,22 @@ pub fn redact_evidence(
             TerminalEvidence::Completed(completion)
         }
         TerminalEvidence::Refused(mut refusal) => {
+            if provider_compaction_contains_credential(&refusal.content, api_key) {
+                return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    exchange: redact_exchange(refusal.exchange, api_key),
+                    reported_model: refusal.reported_model.map(|model| {
+                        ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
+                    }),
+                    kind: ProviderErrorKind::Unrecognized,
+                    non_acceptance_proven: false,
+                    native: NativeErrorFacts {
+                        error_token: Some("credential_in_provider_compaction".to_string()),
+                        error_code: None,
+                        message: None,
+                    },
+                    usage: refusal.usage,
+                });
+            }
             refusal.exchange = redact_exchange(refusal.exchange, api_key);
             refusal.message_id = refusal
                 .message_id
@@ -552,6 +585,20 @@ pub fn redact_evidence(
             TerminalEvidence::Refused(refusal)
         }
     }
+}
+
+fn provider_compaction_contains_credential(
+    content: &[AssistantPart],
+    credential: &CredentialValue,
+) -> bool {
+    let key = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    !key.is_empty()
+        && content.iter().any(|part| match part {
+            AssistantPart::ProviderCompaction { block_json } => {
+                block_json.contains(key) || json_escapes_decode_to_credential(block_json, key)
+            }
+            _ => false,
+        })
 }
 
 fn redact_text(text: String, credential: &CredentialValue) -> String {
@@ -798,8 +845,8 @@ fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> A
         AssistantPart::RedactedThinking { data } => AssistantPart::RedactedThinking {
             data: redact_bounded_text(data, credential),
         },
-        // The provider requires this opaque block to be replayed byte-for-byte.
-        // Credential values are never inserted into it by this boundary.
+        // Credential-bearing blocks are rejected before this mapper because
+        // replay requires the surviving opaque block byte-for-byte.
         AssistantPart::ProviderCompaction { block_json } => {
             AssistantPart::ProviderCompaction { block_json }
         }
@@ -1487,6 +1534,32 @@ mod tests {
                 AssistantPart::Text("safe [redacted]".to_string()),
                 AssistantPart::Text("loop tail".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn credential_bearing_provider_compaction_is_rejected_without_rewriting_replay_bytes() {
+        let key = credential("fixture_secret");
+        let evidence = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::ProviderCompaction {
+                block_json:
+                    r#"{"type":"compaction","content":"fixture_secret","encrypted_content":"opaque"}"#
+                        .to_string(),
+            }],
+            usage: TokenUsage::unreported(),
+        });
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential-bearing opaque replay evidence is rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
         );
     }
 

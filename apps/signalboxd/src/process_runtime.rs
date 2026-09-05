@@ -8125,6 +8125,11 @@ fn transcript_entry_reference(
             entry,
             ..
         }
+        | ProcessTranscriptEntry::ProviderCompaction {
+            source_session,
+            entry,
+            ..
+        }
         | ProcessTranscriptEntry::AssistantToolUse {
             source_session,
             entry,
@@ -8346,6 +8351,19 @@ async fn context_compaction_entry_value(
             "turn_id": turn.into_uuid().hyphenated().to_string(),
             "model_call_id": model_call.into_uuid().hyphenated().to_string(),
             "content": content,
+        }),
+        ProcessTranscriptEntry::ProviderCompaction {
+            entry_index,
+            turn,
+            model_call,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "provider_compaction",
+            "turn_id": turn.into_uuid().hyphenated().to_string(),
+            "model_call_id": model_call.into_uuid().hyphenated().to_string(),
         }),
         ProcessTranscriptEntry::AssistantToolUse {
             entry_index,
@@ -13823,6 +13841,29 @@ where
             )
             .await?;
             write_content(writer, version, request_id, *entry_index, content).await
+        }
+        ProcessTranscriptEntry::ProviderCompaction {
+            entry_index,
+            source_session,
+            entry,
+            turn,
+            model_call,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::ProviderCompaction {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                        model_call_id: wire_uuid(model_call.into_uuid()),
+                    },
+                },
+            )
+            .await
         }
         ProcessTranscriptEntry::AssistantToolUse {
             entry_index,

@@ -1479,6 +1479,7 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
     }
     match classified.observation {
         ModelCallTerminalObservation::Completed { .. }
+        | ModelCallTerminalObservation::CompletedWithProviderCompaction { .. }
         | ModelCallTerminalObservation::CompletedWithTools { .. } => {
             tracing::debug!(
                 cause_code = classified.cause.as_str(),

@@ -1044,6 +1044,19 @@ pub enum ProcessTranscriptEntry {
         /// Exact committed assistant text.
         content: String,
     },
+    /// Opaque provider compaction retained without exposing replay bytes.
+    ProviderCompaction {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Owning turn.
+        turn: TurnId,
+        /// Producing model call.
+        model_call: ModelCallId,
+    },
     /// Assistant tool proposal.
     AssistantToolUse {
         /// Zero-based position in the projected frontier.
@@ -5322,13 +5335,12 @@ fn decode_transcript_entry(
             None,
             Some(turn),
         ) if signalbox_domain::ProviderCompactionBlock::try_new(block_json.clone()).is_ok() => {
-            ProcessTranscriptEntry::Assistant {
+            ProcessTranscriptEntry::ProviderCompaction {
                 entry_index,
                 source_session,
                 entry,
                 turn: TurnId::from_uuid(turn),
                 model_call: ModelCallId::from_uuid(call),
-                content: block_json,
             }
         }
         ("turn_failed", None, None, Some(turn), None, None, None, None, None, None, None, None) => {

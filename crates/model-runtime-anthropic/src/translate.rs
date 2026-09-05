@@ -64,13 +64,14 @@ pub(crate) fn build_request_with_fast_mode<C>(
         .map(anthropic_effort)
         .transpose()?;
     let service_tier = anthropic_service_tier(&operation.settings, request_fast_mode)?;
+    let server_compaction = server_compaction_supported(operation.resolved_target.as_str());
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
         max_tokens: operation.settings.max_output_tokens,
         messages: operation
             .messages
             .iter()
-            .map(wire_message)
+            .map(|message| wire_message(message, server_compaction))
             .collect::<Result<Vec<_>, _>>()?,
         system: plan.system_text(operation.system.as_deref()),
         stop_sequences: operation.settings.stop_sequences.clone(),
@@ -79,9 +80,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
         speed: (request_fast_mode == FastMode::Enabled).then_some("fast"),
         tools: plan.tools,
         tool_choice: plan.tool_choice,
-        context_management: ContextManagement::for_target(server_compaction_supported(
-            operation.resolved_target.as_str(),
-        )),
+        context_management: ContextManagement::for_target(server_compaction),
         stream: operation.delivery == DeliveryMode::Streamed,
     })
 }
@@ -433,7 +432,10 @@ fn tool_plan<C>(operation: &ModelOperation<C>) -> Result<ToolPlan, PreparationFa
     })
 }
 
-fn wire_message(message: &ConversationMessage) -> Result<WireMessage, PreparationFailure> {
+fn wire_message(
+    message: &ConversationMessage,
+    server_compaction: bool,
+) -> Result<WireMessage, PreparationFailure> {
     let mut user_text_seen = false;
     for part in &message.parts {
         let valid_role = matches!(part, MessagePart::Text(_))
@@ -536,6 +538,12 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                 WireKnownRequestBlock::RedactedThinking { data: data.clone() },
             )),
             MessagePart::ProviderCompaction { block_json } => {
+                if !server_compaction {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "the resolved Anthropic target does not support replaying provider compaction blocks"
+                            .to_string(),
+                    });
+                }
                 let block = serde_json::value::RawValue::from_string(block_json.clone()).map_err(
                     |error| PreparationFailure::UnsupportedOperation {
                         detail: format!(
@@ -1234,6 +1242,23 @@ mod tests {
         assert!(server_compaction_supported("claude-sonnet-5"));
         assert!(!server_compaction_supported("claude-haiku-4-5"));
         assert!(!server_compaction_supported("model-exact-1"));
+    }
+
+    #[test]
+    fn compaction_replay_is_rejected_for_an_unsupported_target() {
+        let mut operation = operation("call-unsupported-provider-compaction");
+        operation.resolved_target = ResolvedTarget::new("claude-haiku-4-5");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ProviderCompaction {
+                block_json: r#"{"type":"compaction","content":"summary"}"#.to_string(),
+            }],
+        }];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 
     #[test]

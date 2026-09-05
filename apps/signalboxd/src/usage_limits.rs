@@ -378,6 +378,7 @@ where
         let completed = matches!(
             observation.observation(),
             ModelCallTerminalObservation::Completed { .. }
+                | ModelCallTerminalObservation::CompletedWithProviderCompaction { .. }
                 | ModelCallTerminalObservation::CompletedWithTools { .. }
         );
         if let Some(excess) = completed

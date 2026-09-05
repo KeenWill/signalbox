@@ -2822,6 +2822,14 @@ impl<'a> Output<'a> {
                 entry.source_session_id,
                 entry.entry_id
             ),
+            SnapshotEntryKind::Marker(TranscriptEntry::ProviderCompaction {
+                turn_id,
+                model_call_id,
+            }) => writeln!(
+                self.stdout,
+                "provider_compaction turn={turn_id} call={model_call_id} source={} entry={}",
+                entry.source_session_id, entry.entry_id
+            ),
             SnapshotEntryKind::Marker(TranscriptEntry::AssistantToolUse {
                 turn_id,
                 model_call_id,
@@ -3365,6 +3373,7 @@ impl SnapshotSelection {
                 | SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::ModelIdentityChanged { .. }
+                    | TranscriptEntry::ProviderCompaction { .. }
                     | TranscriptEntry::DelegatedTask { .. }
                     | TranscriptEntry::DelegationMessage { .. }
                     | TranscriptEntry::DelegationResult { .. }
