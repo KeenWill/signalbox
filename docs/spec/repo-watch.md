@@ -461,20 +461,22 @@ deliveries pending, invalidates partial freshness, emits a closed timeout cause,
 and enters projection backoff. A deadline reached by the pre-poll drain stops
 that poll before its provider sweep can advance the cursor past the
 still-pending delivery, and a poll that observes the same transition as an
-admitted delivery cannot advance the cursor past it. A targeted completion
-started by a cancelled drain retains its exact terminal request and cursor
-write, recording disposition and projections as the durable recovery handoff
-before the cursor write. If every settling read is unavailable, the shadow is
-discarded rather than trusted, because a disposition may have landed without
-being reflected in that baseline. A delivery whose target-specific processing
-fails is deferred for the rest of that drain rather than failing it, and the
-attempt still reports the first such failure; credential, transport,
-provider-throttle, and provider-outage failures stop the current page, because
-they prove later targeted requests cannot make independent progress. The
-repository task schedules a new drain attempt after five seconds, doubling to a
-five-minute ceiling on consecutive failures and returning to five seconds on
-success. A failing pre-poll drain is reported and not propagated, so
-acceleration never cancels the reconciliation sweep.
+admitted delivery cannot advance the cursor past it. Expiry during the dispatch
+work after a delivery's terminal record leaves no projection pending; that
+attempt is rescheduled at five seconds without backoff and does not stop a
+pre-poll drain's poll. A targeted completion started by a cancelled drain
+retains its exact terminal request and cursor write, recording disposition and
+projections as the durable recovery handoff before the cursor write. If every
+settling read is unavailable, the shadow is discarded rather than trusted,
+because a disposition may have landed without being reflected in that baseline.
+A delivery whose target-specific processing fails is deferred for the rest of
+that drain rather than failing it, and the attempt still reports the first such
+failure; credential, transport, provider-throttle, and provider-outage failures
+stop the current page, because they prove later targeted requests cannot make
+independent progress. The repository task schedules a new drain attempt after
+five seconds, doubling to a five-minute ceiling on consecutive failures and
+returning to five seconds on success. A failing pre-poll drain is reported and
+not propagated, so acceleration never cancels the reconciliation sweep.
 
 A signature-valid delivery outside the mapped set, including ordinary issue
 comments, other actions in mapped families, tag pushes, create and delete
@@ -488,12 +490,15 @@ failure, unpublished provider freshness is invalidated, so a later unrelated
 commit cannot authorize reuse of state that never reached that cursor. A mapped
 delivery needing a missing baseline, current mergeability, or a check rollup
 records a targeted-query projection and reuses the poller's credential, client,
-cache, normalization, and bounds. Guards classify stale head, lifecycle, branch,
-workflow-attempt, and immutable-provider facts as superseded or duplicate rather
-than allowing a regression. Event projections carry no uniqueness constraint,
-because separate deliveries may represent one content occurrence. Terminal
-payload bytes remain seven days; after a successful full poll, at most once per
-day starting with the first poll after boot, expired bytes are deleted.
+cache, normalization, and bounds. Within one drain page, a whole-pull-request
+hydration an earlier delivery already landed is not repeated, so the later
+delivery records no query for it; mergeability and check-rollup refreshes always
+issue. Guards classify stale head, lifecycle, branch, workflow-attempt, and
+immutable-provider facts as superseded or duplicate rather than allowing a
+regression. Event projections carry no uniqueness constraint, because separate
+deliveries may represent one content occurrence. Terminal payload bytes remain
+seven days; after a successful full poll, at most once per day starting with the
+first poll after boot, expired bytes are deleted.
 
 The repository's single serialized worker applies the closed guarded patch to
 the latest cursor in memory and runs the same differ and content-identity
@@ -631,9 +636,9 @@ the stalled one, or review activity against it.
 
 A completed approval-judge escalation judged under dispatch authority is an
 execution-failure terminal transition rather than an attended approval wait. The
-turn keeps awaiting approval while a steer names it, while operator-commissioned
-authority still stands, and while authority still stands for a sweep-dispatched
-session that already recorded an escalation.
+turn keeps awaiting approval while a steer names it, while operator- or
+sweep-commissioned authority still stands, and while authority still stands for
+a repository-watch dispatch whose session already recorded an escalation.
 
 While a pull request's lifecycle remains terminal, repository watch applies the
 parent-only stop to each generation-one goal it commissioned for that pull
