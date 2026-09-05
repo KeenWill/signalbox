@@ -22,8 +22,8 @@ normative surfaces sit outside those homes:
 domain and application crates, and [invariants.md](../invariants.md) indexes the
 INV-tagged tests.
 
-A design document is titled `<Subsystem> design`, opens with one sentence saying
-it is not built and which spec page it extends, and has the sections Goal,
+A design document is titled `<Subsystem> design`, opens with a preamble saying
+it is not built and naming the spec page it extends, and has the sections Goal,
 Design, Compatibility constraints, and Acceptance criteria. It keeps decisions,
 shapes, transitions, and acceptance criteria, and links the spec page for built
 behavior instead of restating it. A foundation-weight change proposes its
@@ -55,7 +55,8 @@ has one home page; every other page links to that page by name and never
 restates the contract.
 
 Planned has one line per committed unbuilt capability, naming it and linking its
-design document. Nothing else about unbuilt design appears on the page.
+design document, and reads `None.` when the subsystem has no committed unbuilt
+capability. Nothing else about unbuilt design appears on the page.
 
 ## Prose standard
 
