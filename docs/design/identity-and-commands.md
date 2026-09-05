@@ -20,17 +20,20 @@ runner. Each has one typed record family keyed by command identifier and follows
 the claim protocol on the spec page. Their semantics belong to
 [runner-protocol](../spec/runner-protocol.md).
 
-Runner replacement is the one multi-transaction command in this set. Its first
-transaction claims the registry identity, stores the complete immutable request
-row, and stores a single-use provisioning authorization; the request row alone
-satisfies typed-record completeness while provisioning crosses the runner
-boundary. The handler then waits without holding a database transaction while
-the pending runner returns or replays its workspace receipt. The terminal
-transaction appends exactly one result row and installs the replacement or its
-typed rejection; no success or rejection response exists before that row
-commits. Equal replay during provisioning joins the same durable operation and
-can neither start another workspace nor acquire another meaning. Startup resumes
-an unterminated request before it admits clients.
+Replacement is the one command in this set that can span more than one
+transaction, and only when it provisions a workspace. A replacement that needs
+no provisioning, such as one recovering a runner lost before its placement was
+pinned, claims and terminates in a single transaction. A provisioning
+replacement's first transaction claims the registry identity, stores the
+complete immutable request row, and stores a single-use provisioning
+authorization; the request row alone satisfies typed-record completeness while
+provisioning crosses the runner boundary. The handler then waits without holding
+a database transaction while the pending runner returns or replays its workspace
+receipt. The terminal transaction appends exactly one result row and installs
+the replacement or its typed rejection; no success or rejection response exists
+before that row commits. Equal replay during provisioning joins the same durable
+operation and can neither start another workspace nor acquire another meaning.
+Startup resumes an unterminated request before it admits clients.
 
 Abandonment is one ordinary claim-and-terminal-result transaction. Promotion is
 the one command in the set whose payload names no session, because the fact it
@@ -60,11 +63,22 @@ placement where the first handling had none, is conflicting reuse.
 `Actor` gains a program arm: a verified reference to the issuing program run,
 constructible only by the program substrate's host-side session capability, with
 the same validated-reference and no-conferred-authority semantics as every other
-arm. Submit-input gains a program admissibility path that fixes that actor, and
-the same path gives a module-composed initial input a non-user actor. Storage
-follows the existing convention: a new closed `actor_kind` spelling, a
-variant-shaped reference column under a check constraint, and inclusion in
-replay equality and hashing.
+arm. Submit-input gains a program admissibility path that fixes that actor.
+
+Repository watch and commissioned dispatch create no program run, so their
+initial inputs take a module arm instead of the program arm. It names the
+dispatch that composed the input, either a `RepoWatchDispatchId` or a
+`CommissionedDispatchId`, and never a fabricated program-run reference. The
+module boundary that stamps the registry issuer principal fixes it, and it ends
+the exception that attributes a module-composed input to the user.
+
+Each new arm follows the existing storage convention: a closed `actor_kind`
+spelling, a variant-shaped reference column under a check constraint, and
+inclusion in replay equality and hashing. The new arms enter the submit-input
+record at storage version 4, so their spellings and reference columns are
+written only from that version on. A version-3 row carries none of them and
+reconstitutes under the actor its stored kind names; a version-3 row carrying
+one is corruption. The reader accepts both versions.
 
 Create-session actor adoption is a maintainer choice made explicitly; every
 existing version carries no actor and reconstitutes without one, and a version
@@ -72,14 +86,15 @@ that adds the field states how each earlier version reconstitutes.
 
 ## Compatibility constraints
 
-- The actor storage convention stays extensible to a program arm, and nothing
-  assumes the submit-input actor is always the user.
+- The actor storage convention stays extensible to a program arm and a module
+  arm, and nothing assumes the submit-input actor is always the user.
 - Replace-session-defaults gains no actor field until a non-user boundary issues
   it.
 - Imported-creation version 4 and create-session version 5 stay unwritten; no
   writer uses either number and the decoders keep rejecting them.
-- Runner replacement is the only new kind that spans more than one transaction;
-  every other new kind is one claim-and-terminal-result transaction.
+- Only a replacement that provisions a workspace spans more than one
+  transaction; every other new kind, and every replacement that needs no
+  provisioning, is one claim-and-terminal-result transaction.
 
 ## Acceptance criteria
 
@@ -102,5 +117,7 @@ that adds the field states how each earlier version reconstitutes.
   versions reconstitute it absent, and replay equality compares it.
 - A program-issued submit-input records the program actor, and replaying its
   identifier under the user actor is conflicting reuse.
-- A module-composed initial input records a non-user actor.
+- A module-composed initial input records a module actor naming its dispatch.
+- Submit-input writes the new actor arms only at storage version 4, and
+  version-3 rows reconstitute without them.
 - No telemetry site emits a command identifier after the change.

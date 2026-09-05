@@ -161,7 +161,8 @@ reconstruction.
 After registry inspection and before it inserts the claim for an unseen
 identifier, a handler may read current state and reject on it; such a rejection
 is an admission error and claims nothing. The handler inserts the claim together
-with the applied result.
+with its result, applied or rejected; a recorded rejection claims the identifier
+the same way an applied command does.
 
 Equal semantic content never merges distinct commands, and a caller who needs
 corrected intent after a recorded rejection uses a new identifier.
