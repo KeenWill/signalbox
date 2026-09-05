@@ -2155,7 +2155,7 @@ async fn a_turn_failed_echo_after_a_stream_error_keeps_the_provider_error() {
     let error = provider_error(&result.evidence);
 
     assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
-    assert!(error.non_acceptance_proven);
+    assert!(!error.non_acceptance_proven);
     assert_eq!(
         error.native.message.as_deref(),
         Some(fixtures::STREAM_ERROR_MESSAGE)

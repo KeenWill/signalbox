@@ -361,10 +361,10 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, true)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Unrecoverable(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, false)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) => self.completed(sink),
             None => boundary_loss_before_envelope(
@@ -389,10 +389,10 @@ impl<C: Clone> EventDecoder<C> {
     ) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, true)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Unrecoverable(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, false)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) | None => {
                 provider_failure_with_kind(self.exchange, self.usage, fallback, kind, sink)
@@ -411,10 +411,10 @@ impl<C: Clone> EventDecoder<C> {
     ) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, true)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Unrecoverable(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, false)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) | None => {
                 boundary_loss_before_envelope(self.exchange, self.usage, cause)
@@ -1137,13 +1137,12 @@ fn provider_failure<C: Clone>(
     usage: TokenUsage,
     message: &str,
     sink: &RedactingSink<'_, C>,
-    non_acceptance_proven: bool,
 ) -> TerminalEvidence {
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
         reported_model: None,
         kind: ProviderErrorKind::Unrecognized,
-        non_acceptance_proven,
+        non_acceptance_proven: false,
         native: NativeErrorFacts {
             error_token: Some("codex_cli_error".to_string()),
             error_code: None,

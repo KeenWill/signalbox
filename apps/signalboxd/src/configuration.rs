@@ -198,9 +198,8 @@ impl ModelAdapter {
     /// (`docs/spec/runtime-substrate.md`); a status-derived fallback carries
     /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
     /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
-    /// `insufficient_quota` but reaches overload only by status. The CLI
-    /// adapters retain rendered failures as opaque native evidence and expose
-    /// no machine-readable availability cause. Listing every pair
+    /// `insufficient_quota` but reaches overload only by status. Neither CLI
+    /// adapter supplies a machine-readable availability cause. Listing every pair
     /// rather than matching on a group makes a later adapter state its own
     /// answer.
     pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
@@ -874,6 +873,10 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
     ("max_review_findings_per_run", NumericBoundKind::Integer),
     (
         "max_automatic_tool_rounds_per_turn",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "max_same_credential_attempts_per_turn",
         NumericBoundKind::Integer,
     ),
     ("max_required_tags", NumericBoundKind::Integer),
@@ -4204,7 +4207,7 @@ impl fmt::Display for HubModelConfigurationError {
         }
         // Startup telemetry formats this value, so the failing member and the
         // closed admission cause must both survive. The path never appears, as
-        // `configuration-and-credentials.md#the-codex_home-delivery` requires.
+        // `configuration-and-credentials.md` requires.
         if let Self::InvalidCredentialHome {
             credential_profile,
             failure,
@@ -4721,6 +4724,7 @@ min_metadata_page_size = 1
 max_metadata_page_size = 100
 max_review_findings_per_run = 32
 max_automatic_tool_rounds_per_turn = 32
+max_same_credential_attempts_per_turn = 2
 max_required_tags = 256
 reconciliation_sweep_interval = "1s"
 nudge_buffer_capacity = 1024
@@ -7748,17 +7752,38 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
         );
     }
 
-    #[test]
-    fn configuration_rejects_switch_now_for_an_opaque_codex_failure() {
-        let substituting = CONFIGURATION.replace(
-            CODEX_POOL,
-            &format!("{CODEX_POOL}\non_rate_limited = \"switch_now\""),
+    #[track_caller]
+    fn assert_codex_action_rejected(trigger: &str, action: &str) {
+        let configured =
+            CONFIGURATION.replace(CODEX_POOL, &format!("{CODEX_POOL}\n{trigger} = {action:?}"));
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(
+                HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                    trigger: Arc::from(trigger),
+                }
+            ),
+            "{trigger} = {action}",
         );
+    }
 
-        assert!(matches!(
-            HubModelConfiguration::parse(&substituting),
-            Err(HubModelConfigurationError::UnprovableSubstitutionPolicy { .. })
-        ));
+    #[track_caller]
+    fn assert_codex_trigger_rejects_actions(trigger: &str) {
+        assert_codex_action_rejected(trigger, "switch_now");
+        assert_codex_action_rejected(trigger, "switch_next_turn");
+        assert_codex_action_rejected(trigger, "avoid_new_sessions");
+        assert_codex_action_rejected(trigger, "quarantine");
+        let configured =
+            CONFIGURATION.replace(CODEX_POOL, &format!("{CODEX_POOL}\n{trigger} = \"stay\""));
+        HubModelConfiguration::parse(&configured).expect("stay needs no classified failure");
+    }
+
+    #[test]
+    fn configuration_rejects_actions_for_opaque_codex_failures() {
+        assert_codex_trigger_rejects_actions("on_rate_limited");
+        assert_codex_trigger_rejects_actions("on_quota_exhausted");
+        assert_codex_trigger_rejects_actions("on_overloaded");
+        assert_codex_trigger_rejects_actions("on_credential_rejected");
     }
 
     #[test]
