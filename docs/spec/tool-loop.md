@@ -262,12 +262,14 @@ classification, not permission identity.
 The workspace read, workspace mutation, local Git, and execution families bind
 one workspace root, and that root is per session;
 [configuration-and-credentials](configuration-and-credentials.md) owns its
-derivation. Executors bound to one root are composed once per session and
+derivation. Executors for a derived root are composed once per session and
 retained under a bound, so two concurrent sessions bound to distinct derived
-roots take two independent serialization domains. One session holds exactly one
-such domain at a time, and a retained set a request still holds is never
-released. Every declaration a workspace-root-bound family advertises is a
-property of the family's code, not of the repository it binds.
+roots take two independent serialization domains. A session whose derived
+directory is absent binds the configured root and shares the one composition
+made at startup. One session holds exactly one such domain at a time, and a
+retained set a request still holds is never released. Every declaration a
+workspace-root-bound family advertises is a property of the family's code, not
+of the repository it binds.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
@@ -304,13 +306,14 @@ trustworthy evidence returns but its commit fails, the service retains that
 exact correlated observation as an opaque linear same-incarnation value and
 never downgrades still-owned evidence to restart crash loss.
 
-Typed errors resolve the logical request and are visible to the next model
-round; they do not by themselves fail the turn. Physical ambiguity remains a
-turn-level recovery wait and never becomes an ordinary error result. An
-interrupt against a tool recovery wait does not reinterpret or erase the
-ambiguous attempt. Without an interrupt, the daemon claims the same ambiguity
-through the automatic-reconciliation ledger, which [repo-watch](repo-watch.md)
-owns, and terminalizes through the same boundary.
+Preflight and executor errors resolve the logical request and are visible to the
+next model round; they do not by themselves fail the turn. A crash-lost error
+appends its result suffix and then fails the turn, so no next round observes it.
+Physical ambiguity remains a turn-level recovery wait and never becomes an
+ordinary error result. An interrupt against a tool recovery wait does not
+reinterpret or erase the ambiguous attempt. Without an interrupt, the daemon
+claims the same ambiguity through the automatic-reconciliation ledger, which
+[repo-watch](repo-watch.md) owns, and terminalizes through the same boundary.
 
 A result larger than the bound is replaced by the typed `ResultTooLarge` error,
 and oversized bytes are never persisted. The result-text and error-detail bounds
@@ -396,13 +399,14 @@ blanket, so a request parks before it reaches its transport or credential
 boundary.
 
 The blob tools authorize only digests present in attachment stubs in the
-rendered frontier for the issuing turn. A budget closure or store failure
-resolves the logical request, crosses no executor or store boundary, leaves
-previously charged bytes charged, and permits the next model round; it never
-enters the crash-loss path or fails the turn. [blob-storage](blob-storage.md)
-owns the budgets. `session_status_update` derives a durable command identity
-from the physical tool attempt and attributes the command and last-writer stamp
-to the exact `ToolRequestId`.
+rendered frontier for the issuing turn. A visibility or budget closure resolves
+the logical request before the request reaches the executor, and a store failure
+is returned by the executor after it traverses and verifies the recorded
+replicas. Both leave previously charged bytes charged and permit the next model
+round; neither enters the crash-loss path nor fails the turn.
+[blob-storage](blob-storage.md) owns the budgets. `session_status_update`
+derives a durable command identity from the physical tool attempt and attributes
+the command and last-writer stamp to the exact `ToolRequestId`.
 
 Code-host read-only declarations default to automatic approval and the mutations
 to confirmation, so the approval transaction authorizes each mutation before
@@ -423,8 +427,10 @@ job-log endpoint is the sole redirect-shaped exchange: after one 302 the adapter
 validates the location, pins a wholly public destination set, and downloads
 credential-free. A read transport or server failure is an executor
 infrastructure failure, while a mutation transport loss, server failure, or
-malformed acknowledgement is commit-ambiguous. The adapter never returns
-code-host response bodies as error detail.
+malformed acknowledgement is commit-ambiguous. `change_request_thread_reply` and
+`change_request_thread_resolve` query thread ownership before they mutate, and a
+failure of that query classifies the mutation as not dispatched rather than
+ambiguous. The adapter never returns code-host response bodies as error detail.
 
 Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round
