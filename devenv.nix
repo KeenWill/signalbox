@@ -178,7 +178,10 @@ in
   # keep incremental compilation and are passed through uncached. CI never
   # enters this environment — its caching is configured in
   # .github/workflows/rust.yml.
-  packages = [ pkgs.sccache ];
+  packages = [
+    pkgs.cargo-public-api
+    pkgs.sccache
+  ];
   env.RUSTC_WRAPPER = "sccache";
 
   # The terminal client and the managed daemon share one socket without the
