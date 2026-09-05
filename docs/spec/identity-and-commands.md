@@ -60,9 +60,9 @@ The daemon accepts any non-sentinel RFC 9562 UUID as a `DurableCommandId`
 without checking its version bits. Why: idempotency comes from the user-global
 claim plus payload comparison, never from a caller's clock or version bits.
 
-Production generators mint UUIDv7. Why: insertion locality on append-heavy
-Postgres B-tree keys at no change to the 128-bit storage shape; nothing measures
-the effect.
+Application and daemon-runtime generators mint UUIDv7. Why: insertion locality
+on append-heavy Postgres B-tree keys at no change to the 128-bit storage shape;
+nothing measures the effect.
 
 When the number of identities a transition needs is known only under the
 repository lock, orchestration passes a generator closure into the transaction
