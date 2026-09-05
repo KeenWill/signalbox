@@ -291,7 +291,7 @@ per-turn provenance. The following extensions remain undecided:
   qualifying causes and the successor-call shape by
   [availability successor calls](spec/model-call-execution.md); the pool
   grammar, per-membership ranking, and closed action vocabulary by
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  [credential pools and selection](spec/configuration-and-credentials.md#overview).
   What remains open is the client projection: snapshots expose each call's usage
   and the final turn state, while the predecessor, cause, and successor relation
   is committed future storage that no present migration or repository operation
@@ -311,26 +311,28 @@ per-turn provenance. The following extensions remain undecided:
   `headroom_reserve_percent`, `tie_break = "least_used"`, and any
   `on_headroom_low` action other than `stay`, under the fail-closed admission
   rule in
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection),
+  [credential pools and selection](spec/configuration-and-credentials.md#design-decisions),
   because a protection that silently never fires reads as one the deployment
   has. What remains undecided is which adapters can supply headroom at all and
   the normalized quantity, observation lifetime, and deterministic secondary
   tie-break a later contract must define before `least_used` is admitted, and
   whether a free probe exists that does not consume the quota it reports. Blocks
   capacity-aware selection, not availability failover. (S22)
-- **Zero-cost liveness probes.** Quarantine semantics are decided and owned by
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection):
-  durable, profile-scoped, cleared by an operator command or by a probe that
-  calls no model. What remains open is whether any adapter can offer such a
-  probe. Absent one, an operator command is the only clearing path. Blocks
-  automatic recovery from a rejected credential, not recovery itself. (S22)
+- **Zero-cost liveness probes.** Operator clear and probe recovery belong to the
+  planned credential-exclusion lifecycle in
+  [the configuration and credentials design](design/configuration-and-credentials.md),
+  and no present command or adapter probe clears a quarantine. What remains open
+  is whether any adapter can offer a probe that calls no model. Absent one, an
+  operator command or another durable availability update are the clearing paths
+  that design admits. Blocks automatic recovery from a rejected credential, not
+  recovery itself. (S22)
 - **Access-token-only Codex CLI conformance evidence.** The committed `oauth`
   delivery contract is owned by
-  [credential deliveries](spec/configuration-and-credentials.md#credential-deliveries).
-  What remains open is the minimum supported CLI version and exact live
-  conformance check that establish this behavior. The implementing slice cannot
-  land until that evidence exists; a current CLI version declining the store
-  blocks that slice rather than making the committed delivery optional. (S22)
+  [credential deliveries](spec/configuration-and-credentials.md#planned). What
+  remains open is the minimum supported CLI version and exact live conformance
+  check that establish this behavior. The implementing slice cannot land until
+  that evidence exists; a current CLI version declining the store blocks that
+  slice rather than making the committed delivery optional. (S22)
 - **Reuse-detection blast radius.** Whether a provider rejecting a reused
   refresh token invalidates only that token or the whole authorization family is
   not determinable from either CLI's source. It does not affect the `oauth`
@@ -596,7 +598,7 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Several bound workspaces per session, and explicit session relocation.** A
   session binds one workspace root, derived from the configured root by the
   fixed session-UUID formula owned by
-  [configuration and credentials](spec/configuration-and-credentials.md#derived-session-workspace-roots),
+  [configuration and credentials](spec/configuration-and-credentials.md#overview),
   which is what keeps the set of roots the daemon can open a property of
   deployment configuration alone. Two operations are anticipated on that
   mechanism and are inexpressible today: a session bound to several workspaces
@@ -637,7 +639,7 @@ questions below remain open.
   pools. (S30, S32)
 - **Runner result credential egress beyond exact-value redaction.** Whether
   stronger taint, isolation, or egress controls beyond the
-  [runner credential boundary](spec/configuration-and-credentials.md#runner-credential-lifecycle)
+  [runner credential boundary](spec/configuration-and-credentials.md#planned)
   apply remains undecided. Blocks a general no-credential-disclosure claim for
   runner output.
 - **In-memory credential hygiene.** Zeroization or equivalent handling for the

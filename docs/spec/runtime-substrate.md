@@ -798,8 +798,7 @@ delivery gives the adapter a daemon-minted access token, the identity token
 issued with it, and the account metadata in a scratch credential home rather
 than through the child environment. Before anything is written or the child
 starts, the adapter must seed the exact-value redaction boundary with every
-value that
-[the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery)
+value that [the `oauth` delivery](configuration-and-credentials.md#planned)
 requires the redactor to be seeded with. That contract decides *which* values
 those are and why; this page owns *how* the adapter installs and applies the
 scrub. Each such value is seeded both as the raw token and as the JSON string
@@ -1160,7 +1159,7 @@ service tier is always rejected.
 The crate itself defines no provider-selection or configuration mapping.
 signalboxd composes it from the deployment-owned `claude_cli` adapter mapping
 and its three absolute process paths, described in
-[configuration-and-credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
+[configuration-and-credentials](configuration-and-credentials.md).
 
 The wrapped CLI is an external program on its own release cadence, so the same
 three statements the Codex adapter binds must agree here too: the version pinned
