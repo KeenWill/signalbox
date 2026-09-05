@@ -296,9 +296,10 @@ commit mints the generation; a later commit for an exclusion already active at
 the same scope and of the same origin records its correlation against that
 generation and mints no second one. Origin is part of the coalescing key because
 a policy-origin quarantine is clearable by operator command while a
-delivery-origin one requires re-provisioning; a delivery-origin failure against
-a profile carrying an active policy-origin generation mints its own, and the two
-are cleared and reported separately.
+delivery-origin one requires re-provisioning, except a `codex_home` quarantine,
+which an operator clears once the store is repaired; a delivery-origin failure
+against a profile carrying an active policy-origin generation mints its own, and
+the two are cleared and reported separately.
 
 The session credential history event carries a complete family-to-pool-policy
 snapshot rather than a family-to-reference one. Each immutable policy includes
@@ -420,8 +421,9 @@ snapshot atomically without a reader observing two documents.
   remaining capacity.
 - An exclusion with a reported reset clears when it passes, an operator clear or
   zero-cost probe ends an indefinite policy-origin generation while a
-  delivery-origin one ends only by re-provisioning, and repeated triggers of one
-  origin coalesce onto one generation.
+  delivery-origin one ends only by re-provisioning except a `codex_home`
+  quarantine, which an operator clears once the store is repaired, and repeated
+  triggers of one origin coalesce onto one generation.
 - Session credential history carries the complete pool policy, each call pins
   its policy id, every existing entry whose profile is still registered migrates
   to a singleton policy that resolves the same credential it did before, and an
