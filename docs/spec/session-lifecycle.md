@@ -1,8 +1,8 @@
 # Session lifecycle
 
 Session lifecycle gives every session one durable state, an ownership bit,
-deadlines, and a closed set of terminal outcomes, so no session waits unseen and
-every owned session is driven to an outcome or a human.
+deadlines, and a closed set of terminal outcomes; its goal is that every owned
+session reaches an outcome or a human.
 
 ## Map
 
@@ -19,13 +19,14 @@ makes it recovering, and a blocked goal with no live turn makes it blocked. Core
 writes the session state in the same transaction as the turn or goal transition
 that changes the projection, so the two machines never disagree.
 
-Waiting carries a typed kind, a deadline, and the party expected to end the
-wait. An owned session has one armed deadline, of a kind set by its state:
-admission, which covers created and dispatched; active stall, which covers
-active and recovering; and waiting. The admission and waiting bounds come from
-configuration. A parked session waits on a human and carries a machine-readable
-cause and the responder who must act. The operator queue is exactly the set of
-parked sessions.
+Waiting carries a typed kind and the party expected to end the wait. Only an
+owned session carries a deadline, and it carries exactly one, of a kind set by
+its state: admission, which covers created and dispatched; active stall, which
+covers active and recovering; and waiting. The admission and waiting bounds come
+from configuration. A parked session carries a machine-readable cause and the
+responder who must act, the operator queue or one module. An expired waiting
+deadline and a module park are the two paths into parked. The operator queue is
+exactly the set of parked sessions.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a finish check passed and declared when no check did. A failure is
@@ -97,11 +98,12 @@ instead of ending it, and any event it does not recognize counts as progress.
 When a guard trips, the daemon waits, asks, or parks the session; it never ends
 work on staleness evidence alone.
 
-A session that is waiting on a human is in the parked state and no other. When a
-module parks a thing that is or contains a session, the module also moves that
-session to parked. One classifier derives the attention states shown to
-operators from durable facts. A read that encounters a state it does not
-recognize returns an error rather than a guess.
+An owned session that waits for an operator is in the parked state and no other;
+a pending tool-approval decision is the separate waiting state. A module that
+parks something wrapping a session drives the session itself to parked.
+Attention states shown to operators are derived from durable facts by one
+classifier, and a read that encounters a state it does not recognize returns an
+error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
 daemon core; no module implements any of them. Lifecycle behavior or an event
@@ -133,8 +135,7 @@ accounting. Turn-liveness recovery covers its turns, because a dead turn left
 active would block its next input.
 
 Release never interrupts a live operation: a running turn completes to its
-boundary under the resources already held, and the slot releases at that
-boundary.
+boundary under the resources already held.
 
 Core mints every lifecycle identity; no module pre-allocates a turn, input, or
 frontier identity inside its own transaction.
