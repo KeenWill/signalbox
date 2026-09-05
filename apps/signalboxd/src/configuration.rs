@@ -4207,7 +4207,7 @@ impl fmt::Display for HubModelConfigurationError {
         }
         // Startup telemetry formats this value, so the failing member and the
         // closed admission cause must both survive. The path never appears, as
-        // `configuration-and-credentials.md#the-codex_home-delivery` requires.
+        // `configuration-and-credentials.md` requires.
         if let Self::InvalidCredentialHome {
             credential_profile,
             failure,

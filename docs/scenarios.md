@@ -89,7 +89,7 @@ INV-tagged test names and attached doc comments.
   successor on a new attempt against the same target and a different credential
   profile, under [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  [credential pools and selection](spec/configuration-and-credentials.md#overview).
   No partial draft becomes final content. A later authorized call must retain
   steering already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
@@ -583,8 +583,7 @@ INV-tagged test names and attached doc comments.
   names the exact parent tool request, with ancestry `None`, task input, and a
   background or bound relationship. `await_session` records foreground or
   background delivery; `send_session_message` records either direction, as owned
-  by the
-  [delegation tool contract](spec/tool-loop.md#session-delegation-tool-family).
+  by the [delegation tool contract](spec/tool-loop.md).
 - **State transitions:** A foreground wait retains the parent's only active turn
   slot until an explicit child result arrives. A background wait registers
   delivery without retaining that slot; result commit creates a durable parent
@@ -720,7 +719,7 @@ INV-tagged test names and attached doc comments.
   profile for `switch_now`, as owned by
   [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  [credential pools and selection](spec/configuration-and-credentials.md#overview).
 - **State transitions:** Predecessor call → known availability failure and
   predecessor attempt → known failed; turn → successor eligible; successor
   attempt/call → terminal. A credential's initial call and same-credential
@@ -746,8 +745,8 @@ INV-tagged test names and attached doc comments.
   never authorize a successor. The successor cannot cross adapters or change the
   exact target. Exhausting the pool follows its configured durable park or
   known-failure outcome
-  ([credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection)).
-  A provider-reported mismatch against either call's own target follows the
+  ([credential pools and selection](spec/configuration-and-credentials.md)). A
+  provider-reported mismatch against either call's own target follows the
   accepted timing-sensitive mismatch failure rule
   ([model-call-execution](spec/model-call-execution.md)) and is never an allowed
   substitution.

@@ -205,7 +205,7 @@ configuration requests for future origin input. See
 
 The complete immutable semantic configuration governing one turn, frozen from
 the request and session defaults when its origin input is accepted. See
-[model-selection validation](spec/configuration-and-credentials.md#model-selection-validation).
+[model-selection validation](spec/configuration-and-credentials.md#boundary-contracts).
 
 ## Dispatch generation
 
