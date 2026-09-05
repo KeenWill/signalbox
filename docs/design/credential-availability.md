@@ -32,14 +32,16 @@ credential-availability wait phase with closed cause contended. The attempt ends
 call-free WithoutStop(YieldedToDurableWait); the turn keeps its slot, appends no
 transcript entry, and is not terminal. Five wakes make it eligible to re-run
 admission: a reservation release by one of the bounded members the wait names;
-the wait's deadline; startup's re-evaluation of retained contended waits against
-current registrations; a durable member-availability update; an operator clear
-of an exclusion. A wake grants eligibility rather than release: the rerun of
-admission that selects a member and prepares its call in the same transaction
-consumes the wait. Where bounded members compete for one freed reservation, only
-the transaction that acquires it consumes the wait. The last two wakes matter
-because the wait also records excluded members, and one can become admissible
-while every bounded member stays saturated. A restart alone is not a wake.
+the wait's deadline, derived over the exclusions it records by the same
+per-member rule as an exhausted wait's; startup's re-evaluation of retained
+contended waits against current registrations; a durable member-availability
+update; an operator clear of an exclusion. A wake grants eligibility rather than
+release: the rerun of admission that selects a member and prepares its call in
+the same transaction consumes the wait. Where bounded members compete for one
+freed reservation, only the transaction that acquires it consumes the wait. The
+last two wakes matter because the wait also records excluded members, and one
+can become admissible while every bounded member stays saturated. A restart
+alone is not a wake.
 
 Exhausted-wait: nothing is admissible, nothing was skipped merely for a bound,
 and a wait is selected. The same wait phase with closed cause exhausted, and the
@@ -50,9 +52,11 @@ passage exactly when every one of its active exclusions expires at the reset it
 reports, and it does so at the latest of those resets. The wait's deadline is
 the earliest such time across the members that qualify. A chain exclusion, a
 `switch_next_turn` displacement and a profile quarantine never contribute a
-deadline, because each clears only by turn end, by another member being
-prepared, or by operator command. The wait is deadline-free only when no member
-can become admissible by time passage, and no timer ends a deadline-free wait.
+deadline, because none of them expires by time passage. A chain exclusion clears
+at turn end, a displacement when another member is prepared or an operator
+clears it, and a quarantine by operator command. The wait is deadline-free only
+when no member can become admissible by time passage, and no timer ends a
+deadline-free wait.
 
 Wait-transition fail (no call): a released wait finds the pool exhausted, no
 wait is selected again, and this chain has issued no call. The wait's own
@@ -123,13 +127,14 @@ conflated: the admission that finds every candidate at its bound and inserts the
 wait; the reservation completion that frees capacity and makes the waiters it
 wakes eligible; the evidence rewrite by which a woken transaction that still
 finds every candidate at its bound replaces the wait's reservation identities
-and stays parked; and the release, the call preparation that takes the selected
-member's reservation with its Prepared call on a fresh successor attempt and
-consumes the wait in that same transaction. An exhausted wait has four: the
-admission; the rewrite from a contended wait; the evidence rewrite by which a
-woken transaction that reruns admission and still selects an exhausted wait
-replaces the wait's exclusion evidence and deadline from current state and stays
-parked, so a past deadline never wakes it again; and the release. Lock order is
+and stays parked; and the release, the call preparation that puts its Prepared
+call on a fresh successor attempt and consumes the wait in that same
+transaction, inserting a reservation only where the selected member is a
+`codex_home` one. An exhausted wait has four: the admission; the rewrite from a
+contended wait; the evidence rewrite by which a woken transaction that reruns
+admission and still selects an exhausted wait replaces the wait's exclusion
+evidence and deadline from current state and stays parked, so a past deadline
+never wakes it again; and the release. Lock order is
 [persistence protocol](../spec/persistence-protocol.md)'s.
 
 Wire: a parked turn projects an active transcript turn state that retains the
