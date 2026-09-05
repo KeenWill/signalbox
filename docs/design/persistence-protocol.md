@@ -37,7 +37,8 @@ Imported-create command records at storage version 4 carry runner placement.
 The instruction admitted set is one durable table with one repository operation
 that writes it. Its row locks join `crates/persistence/src/lock_inventory.rs`,
 and a transaction takes the admitted-set head after the session's scheduler row
-and before the current-defaults pointer row and any credential-pool row.
+and before the current-defaults pointer row and any credential-pool row, FOR
+SHARE to snapshot or replace and FOR UPDATE to admit.
 
 Credential-pool state, capacity reservations, and availability waits are durable
 rows with locks recorded in the same inventory. A transaction takes the
@@ -57,13 +58,15 @@ OAuth material storage supplies three shapes: a per-generation
 refresh-in-progress marker that exactly one transaction can win; an atomic
 replace-and-clear that installs the new material and clears the marker in one
 commit; and a reread that reports whether a replacement committed and whether
-the marker is set. The replace shape expresses an exchange that returns a new
-identity token and one that returns none, without a second commit and without
-mixing tokens from different exchanges. Provisioning locks its own profile row
-and every co-member profile row in one reference-ordered acquisition, rereads
-membership under those locks and repeats when the set has grown, and interning a
-pool-policy revision locks every member's profile row in the same order.
-Delivery of OAuth material to a model call is owned by
+the marker is set. The replace-and-clear commit publishes the durable
+member-availability update that wakes a parked deadline-free exhausted wait. The
+replace shape expresses an exchange that returns a new identity token and one
+that returns none, without a second commit and without mixing tokens from
+different exchanges. Provisioning locks its own profile row and every co-member
+profile row in one reference-ordered acquisition, rereads membership under those
+locks and repeats when the set has grown, and interning a pool-policy revision
+locks every member's profile row in the same order. Delivery of OAuth material
+to a model call is owned by
 [configuration-and-credentials](../spec/configuration-and-credentials.md).
 
 ## Compatibility constraints
@@ -111,3 +114,6 @@ session-state-changed event in the outbox.
 
 Exactly one refresh transaction wins per generation, replace-and-clear is one
 commit, and a reread distinguishes a committed replacement from none.
+
+A replace-and-clear commit publishes a durable member-availability update, and a
+deadline-free exhausted wait parked on that member wakes.

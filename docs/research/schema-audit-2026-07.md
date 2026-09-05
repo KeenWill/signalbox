@@ -303,9 +303,6 @@ bound by foreign key and command transaction behavior.
   `model_call.credential_reference` NOT NULL and non-empty, and the store no
   longer carries the NULL-read branch. This matches the authorizing change in
   [PR #217](https://github.com/KeenWill/signalbox/pull/217).
-- The former stale migration inventory is fixed:
-  [persistence-protocol](../spec/persistence-protocol.md) says 27 files through
-  `202607280001`.
 - The new nullable fields are domain optionality, not compatibility: imported
   source-session lineage is unknown or conflicting evidence; context-frontier
   prefix identity is optional; tool, metadata, and lifecycle payload columns are

@@ -70,9 +70,10 @@ One driver, pool, and migration stack, and no ORM: the module boundary, not the
 driver, enforces the split between stored records and domain values, and one
 stack keeps the dependency surface small.
 
-Ordinal columns avoid `bigint` because it is signed and silently narrows valid
-ordinals above `i64::MAX`; `numeric(20, 0)` keeps the full range and its
-ordering.
+Columns for unsigned 64-bit domain ordinals avoid `bigint` because it is signed
+and silently narrows valid ordinals above `i64::MAX`; `numeric(20, 0)` keeps the
+full range and its ordering, and a bounded ordinal uses `bigint`, `integer`, or
+`smallint`.
 
 Migrations are checksummed forward-only files so every schema change is a
 reviewed, immutable artifact and no deployed database's history is silently
@@ -134,15 +135,17 @@ constraints, because a row set that passes SQL checks can still fail domain
 correlation.
 
 No template catalog or mutable template object exists in Postgres; a template
-reaches the schema only as the provenance pair on a session and its creation
-command.
+reaches the schema only as provenance, the pair on a session and its creation
+command, the name and digest on repo-watch dispatch rows, and the digests on
+review-orchestration attempt rows.
 
 Frontier lineage is either absent or checked imported-frontier ancestry; native
 fork ancestry is not admitted.
 
 Each command kind stores its caller-supplied fields in one typed,
-check-constrained record table rather than a serialized payload column, because
-a universal serializer would become a second semantic authority.
+check-constrained record family, a parent row and any ordered content-part
+satellites, rather than a serialized payload column, because a universal
+serializer would become a second semantic authority.
 
 Duplicate concurrent submission of a command is a database conflict on the
 registry, not an application race, and the loser rereads the winner.
