@@ -104,9 +104,11 @@ media-type sniffing, and use the quoted digest as the ETag with immutable
 year-long caching. Why: the bytes behind a digest never change, so an immutable
 cache lifetime is safe.
 
-The terminal client escapes DEL and every C1 control code point inside the part
-JSON it prints, so the ordered part values stay parseable while text and
-filenames cannot forge another terminal line or execute terminal controls.
+By default the terminal client escapes DEL and every C1 control code point
+inside the part JSON it prints, so the ordered part values stay parseable while
+text and filenames cannot forge another terminal line or execute terminal
+controls. `--raw-output` is the explicit opt-in that leaves those characters
+literal.
 
 The terminal transcript, follow, and chat views show attachment metadata and
 interleaving but never render blob bytes, in either the default or the raw
@@ -133,8 +135,8 @@ requests a tiny range from a store without generation-pinned reuse.
 
 The database records which stores hold each blob; a read uses those records, not
 configuration, to find the blob. A replica row is written only after the upload
-was verified. Every read checks the length and hash of the bytes against the
-recorded replica row before it returns them. Clients never receive a store
+was verified. Every content read checks the length and hash of the bytes against
+the recorded replica row before it returns them. Clients never receive a store
 credential, bucket name, path, or presigned URL. The daemon relays every blob
 byte between a client and a store.
 
@@ -302,8 +304,8 @@ ordinary blob reference and the bytes live in a routed store.
 
 - A `program_journal` storage class for over-threshold program journal payloads;
   see [blob storage design](../design/blob-storage.md).
-- Generation-pinned verification reuse across ranges and the turn-scoped
-  verification inventory, seeded by attachment preparation; see
+- Generation-pinned verification reuse across ranges and the connection- or
+  turn-scoped verification inventory, seeded by attachment preparation; see
   [blob storage design](../design/blob-storage.md).
 - Transcript projections that carry blob descriptors and URLs; see
   [blob storage design](../design/blob-storage.md).
