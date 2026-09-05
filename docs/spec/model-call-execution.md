@@ -652,16 +652,14 @@ exactly-once claim.
 ### Availability successor calls
 
 The rule above governs repetition: one durable authorization never reaches the
-provider twice. It does not govern substitution of the credential that failed,
-which is the `successor` ending of
-[the credential-availability machine](credential-availability.md). A
+provider twice. It does not govern substitution of the credential that failed. A
 `KnownFailed` call whose cause is one of the three availability causes —
 `provider_quota_exhausted`, `provider_rate_limited`, or `provider_overloaded` —
 and whose pool configures `switch_now` for that cause may be followed by a
 *successor call*: a distinct model call, on a successor turn attempt, against
 the next admitted member of the same credential pool
 ([configuration-and-credentials](configuration-and-credentials.md#credential-pools-and-selection)).
-This is the `successor` row of
+This substitution is the `successor` ending of
 [the credential-availability machine](credential-availability.md), which owns
 every other projection of it; this section owns the call's own mechanics.
 
