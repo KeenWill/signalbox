@@ -123,9 +123,13 @@ survives restart unchanged, becomes eligible on exactly the wake conditions of
 its wait form, and resumes with a fresh prepared attempt on the same
 availability chain only when the woken admission selects a member. When one
 release wakes several contended waits, the turn whose admission selects the
-freed member resumes; each other rewrites its reservation evidence in place and
-stays parked. A stop-turn request against a parked turn terminalizes it
-cancelled through a fresh cancelled successor attempt and leaves no wait stored.
+freed member resumes; each loser that still finds every named member at its
+bound rewrites its reservation evidence in place and stays parked. A loser that
+instead finds every named member durably excluded is exhausted rather than
+contended, so its wake re-runs the exhaustion decision and a `fail` pool
+terminalizes it through the same failure rows. A stop-turn request against a
+parked turn terminalizes it cancelled through a fresh cancelled successor
+attempt and leaves no wait stored.
 
 A pinned-loss replacement command issued while a call is in flight is accepted,
 and its placement boundary commits after that call's observation boundary; a
