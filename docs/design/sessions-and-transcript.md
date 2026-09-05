@@ -102,14 +102,14 @@ Wait-transition failure. A turn whose frozen credential pool is exhausted when
 its durable wait releases, and whose predecessor model call already issued, is
 terminalized by one transaction that consumes the wait, opens and ends a fresh
 call-free attempt, appends the failed marker, and emits the turn-failed update
-event atomically. That marker names the predecessor call as the source of its
-cause; the earlier model-call known-failure closure committed without
-terminalizing and cannot serve a transition happening now. Where the chain has
-issued no call, the same transaction consumes the wait and opens and ends a
-fresh call-free attempt, and the pre-call exhaustion producer appends its
-marker. On both paths that transaction also reclassifies any steering still
-pending on the source turn as a queued successor. The release and exhaustion
-conditions belong to
+event atomically. The fresh attempt's wait-release continuation origin, not that
+marker, names the predecessor call, its cause, and its non-acceptance proof; the
+earlier model-call known-failure closure committed without terminalizing and
+cannot serve a transition happening now. Where the chain has issued no call, the
+same transaction consumes the wait and opens and ends a fresh call-free attempt,
+and the pre-call exhaustion producer appends its marker. On both paths that
+transaction also reclassifies any steering still pending on the source turn as a
+queued successor. The release and exhaustion conditions belong to
 [credential-availability](../spec/credential-availability.md).
 
 ## Compatibility constraints

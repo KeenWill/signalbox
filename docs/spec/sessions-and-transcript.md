@@ -77,7 +77,8 @@ compaction is triggered as [model-call-execution](model-call-execution.md)
 describes.
 
 Accepted-input content is `UserContent`, one ordered nonempty sequence of closed
-text or attachment parts. The multipart bounds belong to
+text or attachment parts; a text part is nonempty and free of U+0000, and
+whitespace-only text is admitted. The multipart bounds belong to
 [blob-storage](blob-storage.md).
 
 A delegated child is a distinct independently browsable session whose cause
@@ -356,11 +357,13 @@ move mid-call.
 
 Both creation families carry the optional system prompt inside their complete
 initial defaults, and a replacement changes it only as part of the complete
-successor epoch. The domain imposes no byte policy on the prompt; daemon
-configuration applies its byte limit at each ingress. The epoch row is the
-prompt's single content authority: per-turn origin rows copy no prompt text, and
-model-call preparation reads the prompt through the calling turn's frozen
-version, including the inherited version of a reclassified steering origin.
+successor epoch. The domain rejects an empty or U+0000-containing prompt and
+represents absence as no prompt, never an empty string. It imposes no byte
+policy of its own; daemon configuration applies its byte limit at each ingress.
+The epoch row is the prompt's single content authority: per-turn origin rows
+copy no prompt text, and model-call preparation reads the prompt through the
+calling turn's frozen version, including the inherited version of a reclassified
+steering origin.
 
 When a started turn's frozen direct selection differs from its immediate
 predecessor's, eligibility appends one model-identity entry immediately before
