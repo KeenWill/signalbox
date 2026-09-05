@@ -136,12 +136,21 @@ where
                 prepared = &mut preparation => prepared,
             }
         };
-        if prepared.is_err() {
-            // Capability preparation reports the typed attachment failure. The
-            // counter must only prevent provider interaction before that path.
-            return Ok(ModelCallInputTokenCount::Unavailable);
+        if let Err(failure) = prepared {
+            return Ok(attachment_count_failure(failure));
         }
         self.inner.count_input_tokens(operation, cancellation).await
+    }
+}
+
+fn attachment_count_failure(failure: AttachmentPreparationFailure) -> ModelCallInputTokenCount {
+    match failure {
+        AttachmentPreparationFailure::Unavailable => {
+            ModelCallInputTokenCount::AttachmentUnavailable
+        }
+        AttachmentPreparationFailure::TooLarge { .. }
+        | AttachmentPreparationFailure::Missing
+        | AttachmentPreparationFailure::Corrupt => ModelCallInputTokenCount::Unavailable,
     }
 }
 
@@ -286,7 +295,21 @@ mod tests {
     use signalbox_blob_store::ExpectedBlob;
     use signalbox_domain::BlobDigest;
 
-    use super::{StreamVerificationFailure, verify_stream};
+    use signalbox_application::{AttachmentPreparationFailure, ModelCallInputTokenCount};
+
+    use super::{StreamVerificationFailure, attachment_count_failure, verify_stream};
+
+    #[test]
+    fn transient_attachment_failure_defers_count_before_activation() {
+        assert_eq!(
+            attachment_count_failure(AttachmentPreparationFailure::Unavailable),
+            ModelCallInputTokenCount::AttachmentUnavailable
+        );
+        assert_eq!(
+            attachment_count_failure(AttachmentPreparationFailure::Missing),
+            ModelCallInputTokenCount::Unavailable
+        );
+    }
 
     fn expected(bytes: &[u8]) -> ExpectedBlob {
         ExpectedBlob::new(

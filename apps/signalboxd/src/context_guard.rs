@@ -805,6 +805,12 @@ where
                         ModelCallInputTokenCount::Cancelled => {
                             return Err(ContextGuardedTurnPassError::CountCancelled(turn));
                         }
+                        ModelCallInputTokenCount::AttachmentUnavailable => {
+                            // The preview is still uncommitted. Leave the turn
+                            // queued so recovery must verify and recount the
+                            // attachment before any later activation.
+                            return Ok(());
+                        }
                         ModelCallInputTokenCount::Unavailable => {
                             let committed = activation
                                 .commit_preview(preview)
