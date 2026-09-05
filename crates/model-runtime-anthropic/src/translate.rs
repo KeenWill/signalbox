@@ -81,7 +81,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
         speed: (request_fast_mode == FastMode::Enabled).then_some("fast"),
         tools: plan.tools,
         tool_choice: plan.tool_choice,
-        context_management: ContextManagement::for_target(server_compaction),
+        context_management: server_compaction.then_some(ContextManagement::compact()),
         stream: operation.delivery == DeliveryMode::Streamed,
     })
 }
@@ -595,27 +595,10 @@ mod tests {
         )
     }
 
-    fn sort_json_object_keys(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(object) => {
-                object.sort_keys();
-                for nested in object.values_mut() {
-                    sort_json_object_keys(nested);
-                }
-            }
-            serde_json::Value::Array(values) => {
-                for nested in values {
-                    sort_json_object_keys(nested);
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn request_json(operation: &ModelOperation<String>) -> String {
         let request = build_request(operation).expect("translatable operation builds");
         let mut value = serde_json::to_value(&request).expect("wire request serializes");
-        sort_json_object_keys(&mut value);
+        value.sort_all_objects();
         format!("{value:#}")
     }
 
@@ -696,13 +679,6 @@ mod tests {
 
         expect![[r#"
             {
-              "context_management": {
-                "edits": [
-                  {
-                    "type": "clear_tool_uses_20250919"
-                  }
-                ]
-              },
               "max_tokens": 64,
               "messages": [
                 {
@@ -788,13 +764,6 @@ mod tests {
     fn minimal_operation_omits_every_unset_optional_field() {
         expect![[r#"
             {
-              "context_management": {
-                "edits": [
-                  {
-                    "type": "clear_tool_uses_20250919"
-                  }
-                ]
-              },
               "max_tokens": 64,
               "messages": [
                 {
@@ -1224,7 +1193,7 @@ mod tests {
 
         assert!(serialized.contains(raw));
         assert!(
-            serialized.contains(r#""context_management":{"edits":[{"type":"clear_tool_uses_20250919"},{"type":"compact_20260112"}]}"#)
+            serialized.contains(r#""context_management":{"edits":[{"type":"compact_20260112"}]}"#)
         );
     }
 
@@ -1246,11 +1215,7 @@ mod tests {
         let request = build_request(&operation).expect("the summary operation translates");
         let serialized = serde_json::to_string(&request).expect("request serializes");
 
-        assert!(
-            serialized.contains(
-                r#""context_management":{"edits":[{"type":"clear_tool_uses_20250919"}]}"#
-            )
-        );
+        assert!(!serialized.contains("context_management"));
         assert!(!serialized.contains("compact_20260112"));
     }
 

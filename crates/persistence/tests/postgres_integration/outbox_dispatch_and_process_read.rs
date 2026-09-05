@@ -3364,6 +3364,135 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     Ok(())
 }
 
+/// INV-062: a definitive attachment failure discovered before counting
+/// atomically retains the exact unsent Prepared-call closure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv062_counted_attachment_failure_closes_exact_call_atomically()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0xcd40));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xcd41));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xcd42));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            0xcd43,
+            0xcd40,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xcd44));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xcd45,
+                0xcd40,
+                "attachment failure origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xcd46)),
+            Some(turn),
+        )
+        .await?;
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd47)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd48)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xcd49)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(0xcd4a)),
+            ),
+        )
+        .await?
+        .expect("the queued origin has one exact activation preview");
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one fixture target forms a catalog");
+    let model_calls =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xcd4b));
+    let prospective = model_calls
+        .preview_activation_operation(preview.prepared(), call)
+        .await?
+        .expect("an admitted credential previews the activation operation");
+    let instruction_snapshot = signalbox_application::discover_workspace_instructions(Vec::new());
+    let instruction_manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0xcd4e)),
+        session,
+        turn,
+    );
+    let no_instruction_bundles = [];
+    let instruction_placement =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        )
+        .observe_session_runner_placement(session)
+        .await?;
+    let instruction_evidence = CountedActivationInstructionEvidence::new(
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0xcd4f)),
+        &instruction_manifest,
+        &instruction_snapshot,
+        &no_instruction_bundles,
+        &instruction_placement,
+    );
+
+    let outcome = activation
+        .commit_counted_attachment_failure_preview(
+            preview,
+            prospective,
+            &model_calls,
+            AttachmentPreparationFailure::Missing,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd4c)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xcd4d)),
+            ),
+            Some(instruction_evidence),
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        CommitCountedAttachmentFailurePreviewOutcome::Failed(turn)
+    );
+    let stored: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind,
+                terminal_attachment_preparation_failure_cause
+           FROM model_call
+          WHERE session_id = $1 AND model_call_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored,
+        (
+            String::from("terminal"),
+            Some(String::from("known_failed")),
+            Some(String::from("missing")),
+        )
+    );
+    let issued_events: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM model_call_transition_outbox_event
+          WHERE session_id = $1 AND model_call_id = $2
+            AND call_state_kind = 'in_flight'",
+    )
+    .bind(session.into_uuid())
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(issued_events, 0);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-061: authoritative revalidation that rejects a stale counted preview
 /// also rejects its prepared instruction evidence without retaining rows.
 #[tokio::test(flavor = "multi_thread")]

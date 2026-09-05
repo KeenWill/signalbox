@@ -397,17 +397,14 @@ async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
     assert!(request.starts_with("POST /v1/messages HTTP/1.1\r\n"));
     assert!(request.contains("x-api-key: key_loop\r\n"));
     assert!(request.contains("anthropic-version: 2023-06-01\r\n"));
-    assert!(request.contains("anthropic-beta: context-management-2025-06-27\r\n"));
+    assert!(!request.contains("anthropic-beta:"));
     assert!(request.contains("content-type: application/json\r\n"));
     let json_start = request.find("\r\n\r\n").expect("request has a body") + 4;
     let sent: serde_json::Value =
         serde_json::from_str(&request[json_start..]).expect("request body is JSON");
     assert_eq!(sent["model"], serde_json::json!("model-exact-1"));
     assert_eq!(sent["max_tokens"], serde_json::json!(64));
-    assert_eq!(
-        sent["context_management"],
-        serde_json::json!({"edits": [{"type": "clear_tool_uses_20250919"}]})
-    );
+    assert!(sent.get("context_management").is_none());
     assert_eq!(sent["stream"], serde_json::json!(false));
 
     assert!(observations.iter().any(|observation| matches!(
@@ -861,10 +858,11 @@ async fn input_count_uses_the_declared_fast_target() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains(&format!(r#""model":"{}""#, mapped.as_str())));
     assert!(!requests[0].contains(r#""speed":"fast""#));
-    assert!(requests[0].contains("anthropic-beta: context-management-2025-06-27\r\n"));
-    assert_eq!(
-        sent_request_body(&server)["context_management"],
-        serde_json::json!({"edits": [{"type": "clear_tool_uses_20250919"}]})
+    assert!(!requests[0].contains("anthropic-beta:"));
+    assert!(
+        sent_request_body(&server)
+            .get("context_management")
+            .is_none()
     );
 }
 
@@ -915,10 +913,7 @@ async fn input_count_preserves_reasoning_and_same_target_fast_controls() {
     ));
     assert_eq!(
         sent_request_body(&server)["context_management"],
-        serde_json::json!({"edits": [
-            {"type": "clear_tool_uses_20250919"},
-            {"type": "compact_20260112"}
-        ]})
+        serde_json::json!({"edits": [{"type": "compact_20260112"}]})
     );
 }
 

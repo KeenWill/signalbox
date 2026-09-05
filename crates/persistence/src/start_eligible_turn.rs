@@ -269,6 +269,16 @@ pub enum CommitCompactionFailurePreviewOutcome {
     Stale,
 }
 
+/// Outcome of atomically activating and closing the exact prospective call
+/// after definitive attachment failure during provider-native counting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitCountedAttachmentFailurePreviewOutcome {
+    /// The exact preview activated and its Prepared call terminalized as failed.
+    Failed(TurnId),
+    /// Authoritative state changed after preview; the caller must restart the pass.
+    Stale,
+}
+
 enum TransactionDecision {
     Commit(StartEligibleTurnOutcome),
     Rollback(StartEligibleTurnOutcome),
@@ -444,6 +454,114 @@ impl StartEligibleTurnRepository {
         Ok(CommitActivationPreviewOutcome::Activated(Box::new(
             activated,
         )))
+    }
+
+    /// Revalidates one counted preview and atomically commits its activation,
+    /// exact Prepared call, and definitive attachment-failure closure.
+    pub async fn commit_counted_attachment_failure_preview(
+        &self,
+        preview: PreparedActivationPreview,
+        prospective: crate::model_execution::ProspectiveModelCall,
+        model_calls: &crate::model_execution::PostgresModelCallRepository,
+        failure: signalbox_application::AttachmentPreparationFailure,
+        identities: signalbox_domain::FailedModelCallTurnIdentities,
+        instruction_evidence: Option<CountedActivationInstructionEvidence<'_>>,
+    ) -> Result<CommitCountedAttachmentFailurePreviewOutcome, CommitActivationPreviewError> {
+        let session = preview.prepared.turn().session();
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(StartEligibleTurnRepositoryError::from)
+            .map_err(CommitActivationPreviewError::Activation)?;
+        lock_delegated_child_endpoint_sessions(&mut transaction, session)
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
+        let session_uuid = session_id_to_uuid(session);
+        let (session_exists, scheduler_session) =
+            sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
+                .bind(session_uuid)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+        if !session_exists
+            || scheduler_session.is_none()
+            || session_refuses_new_work(&mut transaction, session)
+                .await
+                .map_err(CommitActivationPreviewError::Activation)?
+        {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitCountedAttachmentFailurePreviewOutcome::Stale);
+        }
+        if dispatch_start_lease_is_expired(&mut transaction, session)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?
+        {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitCountedAttachmentFailurePreviewOutcome::Stale);
+        }
+        let Some(current) = prepare_preview(&mut transaction, session, preview.identities)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?
+        else {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitCountedAttachmentFailurePreviewOutcome::Stale);
+        };
+        if current != preview.prepared {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitCountedAttachmentFailurePreviewOutcome::Stale);
+        }
+        let outbox_order_guard =
+            crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+                .await
+                .map_err(CommitActivationPreviewError::ModelCall)?;
+        let activated = insert_prepared_activation(&mut transaction, current)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?;
+        if let Some(evidence) = instruction_evidence {
+            WorkspaceInstructionRepository::record_counted_activation_in_transaction(
+                &mut transaction,
+                evidence,
+            )
+            .await
+            .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
+        }
+        let turn = activated.turn();
+        model_calls
+            .fail_counted_attachment_in_transaction(
+                &mut transaction,
+                &activated,
+                &prospective,
+                failure,
+                identities,
+                outbox_order_guard,
+            )
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
+        transaction.commit().await.map_err(|error| {
+            let commit_ambiguous = commit_failure_is_ambiguous(&error);
+            CommitActivationPreviewError::Activation(
+                StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous),
+            )
+        })?;
+        Ok(CommitCountedAttachmentFailurePreviewOutcome::Failed(turn))
     }
 
     /// Revalidates one preview and atomically closes it as a call-free failed

@@ -17,8 +17,8 @@ use signalbox_persistence::{
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     start_eligible_turn::{
         CommitActivationPreviewError, CommitActivationPreviewOutcome,
-        CommitCompactionFailurePreviewOutcome, PreparedActivationPreview,
-        StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
+        CommitCompactionFailurePreviewOutcome, CommitCountedAttachmentFailurePreviewOutcome,
+        PreparedActivationPreview, StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
     },
 };
 
@@ -34,6 +34,8 @@ use crate::{
     },
 };
 use tracing::Instrument;
+
+const PROVIDER_COUNT_ADMISSION_PERCENT: u64 = 95;
 
 /// Failure while reconciling provider-reported context growth before activation.
 #[derive(Debug)]
@@ -855,44 +857,55 @@ where
                             // attachment before any later activation.
                             return Ok(());
                         }
-                        ModelCallInputTokenCount::AttachmentFailure => {
-                            // Activate without compaction so ordinary
-                            // capability preparation records the exact
-                            // definitive attachment failure before any send.
-                            let committed = activation
-                                .commit_preview(preview)
+                        ModelCallInputTokenCount::AttachmentFailure(failure) => {
+                            let prepared_instructions = if let Some(workspace_instructions) = &workspace_instructions {
+                                let Some(prepared) = workspace_instructions
+                                    .prepare_counted_activation(session, turn)
+                                    .await
+                                    .map_err(|source| {
+                                        ContextGuardedTurnPassError::WorkspaceInstructions {
+                                            turn,
+                                            source,
+                                        }
+                                    })?
+                                else {
+                                    continue;
+                                };
+                                Some(prepared)
+                            } else {
+                                None
+                            };
+                            let committed = close_counted_attachment_failure(
+                                &activation,
+                                &model_calls,
+                                preview,
+                                prospective,
+                                failure,
+                                prepared_instructions
+                                    .as_ref()
+                                    .map(|prepared| prepared.evidence()),
+                            )
                                 .await
-                                .map_err(|source| ContextGuardedTurnPassError::Activation {
-                                    turn: Some(turn),
-                                    source,
+                                .map_err(|error| match error {
+                                    CommitActivationPreviewError::Activation(error) => {
+                                        ContextGuardedTurnPassError::Activation { turn: Some(turn), source: error }
+                                    }
+                                    CommitActivationPreviewError::ModelCall(error) => {
+                                        ContextGuardedTurnPassError::Operation { turn, source: error }
+                                    }
+                                    CommitActivationPreviewError::WorkspaceInstructions(error) => {
+                                        ContextGuardedTurnPassError::WorkspaceInstructions {
+                                            turn,
+                                            source: WorkspaceInstructionRuntimeError::Persistence(error),
+                                        }
+                                    }
                                 })?;
                             match committed {
-                                CommitActivationPreviewOutcome::Stale => continue,
-                                CommitActivationPreviewOutcome::Activated(activated) => {
-                                    if activated.session() != session {
-                                        execution.report_post_activation_failure();
-                                        return Err(
-                                            ContextGuardedTurnPassError::ActivationSessionMismatch(
-                                                turn,
-                                            ),
-                                        );
-                                    }
-                                    observe_turn(activated.turn());
-                                    report_guarded_turn_activation(
-                                        activated.session(),
-                                        activated.turn(),
-                                    );
-                                    return execution
-                                        .execute(activated)
-                                        .instrument(guarded_turn_span(session, turn))
-                                        .await
-                                        .map_err(|source| {
-                                            ContextGuardedTurnPassError::Execution {
-                                                stage: TurnPassExecutionStage::Execution,
-                                                turn: Some(turn),
-                                                source,
-                                            }
-                                        });
+                                CommitCountedAttachmentFailurePreviewOutcome::Stale => continue,
+                                CommitCountedAttachmentFailurePreviewOutcome::Failed(failed_turn) => {
+                                    observe_turn(failed_turn);
+                                    report_guarded_turn_activation(session, failed_turn);
+                                    return Ok(());
                                 }
                             }
                         }
@@ -967,10 +980,11 @@ where
                             }
                         }
                     };
-                    let requested_tokens = input_tokens
-                        .checked_add(u64::from(model.max_output_tokens()))
-                        .ok_or(ContextGuardedTurnPassError::ContextStillExceeded(turn))?;
-                    if requested_tokens > u64::from(model.context_window_tokens()) {
+                    if !provider_count_admits(
+                        input_tokens,
+                        u64::from(model.max_output_tokens()),
+                        u64::from(model.context_window_tokens()),
+                    ) {
                         if dispatch_start {
                             // The estimate is advisory and creates no durable
                             // state. Leave the turn queued so an ordinary pass
@@ -1235,6 +1249,18 @@ fn report_guarded_turn_activation(session: SessionId, turn: TurnId) {
     );
 }
 
+fn provider_count_admits(
+    input_tokens: u64,
+    max_output_tokens: u64,
+    context_window_tokens: u64,
+) -> bool {
+    let admission_ceiling =
+        context_window_tokens.saturating_mul(PROVIDER_COUNT_ADMISSION_PERCENT) / 100;
+    input_tokens
+        .checked_add(max_output_tokens)
+        .is_some_and(|requested| requested <= admission_ceiling)
+}
+
 fn activation_identities() -> AcceptedInputTurnActivationIdentities {
     AcceptedInputTurnActivationIdentities::new(
         SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
@@ -1271,6 +1297,38 @@ async fn close_failed_compaction_turn(
                 identities,
                 terminal_cause,
                 recovery_cause,
+            )
+            .await
+        {
+            Err(error) if compaction_failure_closure_collision_is_retryable(&error) => {}
+            outcome => return outcome,
+        }
+    }
+}
+
+async fn close_counted_attachment_failure(
+    activation: &StartEligibleTurnRepository,
+    model_calls: &PostgresModelCallRepository,
+    preview: PreparedActivationPreview,
+    prospective: signalbox_persistence::model_execution::ProspectiveModelCall,
+    failure: signalbox_application::AttachmentPreparationFailure,
+    instruction_evidence: Option<
+        signalbox_persistence::workspace_instructions::CountedActivationInstructionEvidence<'_>,
+    >,
+) -> Result<CommitCountedAttachmentFailurePreviewOutcome, CommitActivationPreviewError> {
+    loop {
+        let identities = FailedModelCallTurnIdentities::new(
+            SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+            ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+        );
+        match activation
+            .commit_counted_attachment_failure_preview(
+                preview.clone(),
+                prospective.clone(),
+                model_calls,
+                failure,
+                identities,
+                instruction_evidence,
             )
             .await
         {
@@ -1338,7 +1396,7 @@ mod tests {
     use super::{
         ContextGuardedTurnPassError, compaction_failure_closure_collision_is_retryable,
         compaction_recovery_cause, guarded_failure_stage, persisted_preflight_prefix,
-        report_guarded_ambiguity,
+        provider_count_admits, report_guarded_ambiguity,
     };
 
     #[test]
@@ -1347,6 +1405,13 @@ mod tests {
             compaction_recovery_cause(&AutomaticContextCompactionError::InputDoesNotFit),
             Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
         );
+    }
+
+    #[test]
+    fn provider_count_retains_conservative_headroom_for_admission() {
+        assert!(provider_count_admits(79, 16, 100));
+        assert!(!provider_count_admits(80, 16, 100));
+        assert!(!provider_count_admits(u64::MAX, 1, u64::MAX));
     }
 
     #[test]

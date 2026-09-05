@@ -875,7 +875,7 @@ async fn execute_process<C: Clone + Send + Sync>(
     );
     // The selected profile controls this child only; the adapter passes the
     // path reference and never opens the login material, as required by
-    // `docs/spec/configuration-and-credentials.md#the-codex_home-delivery`.
+    // `docs/spec/configuration-and-credentials.md`.
     let environment_overrides = prepared
         .credential_home
         .map(|home| {

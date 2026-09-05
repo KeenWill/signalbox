@@ -1550,6 +1550,14 @@ async fn run_hub(
             .filter(|interval| !interval.is_zero());
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
     let automatic_tool_round_limit = configured_usize("max_automatic_tool_rounds_per_turn")?;
+    let same_credential_attempt_bound = configured_usize("max_same_credential_attempts_per_turn")?
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_same_credential_attempt_bound"),
+            )
+        })?;
     let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
     let native_message_limit = configured_usize("max_native_message_bytes")?;
     let code_host_numeric_bounds = CodeHostNumericBounds::new(
@@ -2426,6 +2434,7 @@ async fn run_hub(
     )
     .with_session_credentials(model_configuration.credential_family_catalog())
     .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
+    .with_same_credential_attempt_bound(same_credential_attempt_bound)
     .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
     .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
     let provider = AttachmentPreparingModelCallProvider::new(

@@ -13,9 +13,10 @@ use signalbox_model_runtime::{
     MAX_BUFFERED_PROVIDER_RESPONSE_BYTES as MAX_BUFFERED_RESPONSE_BYTES,
     MAX_STREAMED_PROVIDER_RESPONSE_BYTES as MAX_STREAMED_RESPONSE_BYTES, ModelInputTokenCounter,
     ModelOperation, ModelRuntime, NativeErrorFacts, ObservationFact, ObservationSink,
-    PreparationDefect, PreparationFailure, PreparationOutcome, ProviderErrorEvidence,
-    ProviderErrorKind, ProviderRequestId, ResponsePrefixBudget as PrefixBudget, SseFraming,
-    StreamInterruption, TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
+    PreparationDefect, PreparationFailure, PreparationOutcome, ProviderCompactionMode,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderRequestId,
+    ResponsePrefixBudget as PrefixBudget, SseFraming, StreamInterruption, TerminalEvidence,
+    TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
     boundary_loss_evidence as exchange_loss, emit_provider_observation as emit, parse_retry_after,
     pre_exchange_loss_evidence as pre_exchange_loss, proven_unsent_evidence as proven_unsent,
     provider_response_body_too_large as response_body_too_large,
@@ -37,19 +38,17 @@ use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
 const CONTEXT_MANAGEMENT_BETAS: &str = "context-management-2025-06-27,compact-2026-01-12";
 const CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS: &str =
     "context-management-2025-06-27,compact-2026-01-12,fast-mode-2026-02-01";
-const CONTEXT_EDITING_BETA: &str = "context-management-2025-06-27";
-const CONTEXT_EDITING_AND_FAST_MODE_BETAS: &str =
-    "context-management-2025-06-27,fast-mode-2026-02-01";
+const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 
 const fn anthropic_beta_header(
     request_fast_mode: FastMode,
     server_compaction: bool,
-) -> &'static str {
+) -> Option<&'static str> {
     match (server_compaction, request_fast_mode) {
-        (true, FastMode::Enabled) => CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS,
-        (true, FastMode::Disabled) => CONTEXT_MANAGEMENT_BETAS,
-        (false, FastMode::Enabled) => CONTEXT_EDITING_AND_FAST_MODE_BETAS,
-        (false, FastMode::Disabled) => CONTEXT_EDITING_BETA,
+        (true, FastMode::Enabled) => Some(CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS),
+        (true, FastMode::Disabled) => Some(CONTEXT_MANAGEMENT_BETAS),
+        (false, FastMode::Enabled) => Some(FAST_MODE_BETA),
+        (false, FastMode::Disabled) => None,
     }
 }
 
@@ -386,19 +385,19 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             };
         };
         let delivery = operation.delivery;
-        let server_compaction = server_compaction_supported(operation.resolved_target.as_str());
+        let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
+            && server_compaction_supported(operation.resolved_target.as_str());
         let stop_sequences = operation.settings.stop_sequences.clone();
-        let builder = self
+        let mut builder = self
             .client
             .post(self.messages_url.clone())
             .header("x-api-key", api_key_header)
             .header("anthropic-version", self.version_header.clone())
-            .header(
-                "anthropic-beta",
-                anthropic_beta_header(request_fast_mode, server_compaction),
-            )
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
+        if let Some(beta_header) = anthropic_beta_header(request_fast_mode, server_compaction) {
+            builder = builder.header("anthropic-beta", beta_header);
+        }
         let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(defect) => {
@@ -674,7 +673,8 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             Ok(request_fast_mode) => request_fast_mode,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
-        let server_compaction = server_compaction_supported(operation.resolved_target.as_str());
+        let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
+            && server_compaction_supported(operation.resolved_target.as_str());
         let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
             Ok(request) => CountTokensRequest::from(request),
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
@@ -694,17 +694,16 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
         let Some(api_key_header) = sensitive_header(&credential) else {
             return InputTokenCountOutcome::Failed { correlation };
         };
-        let builder = self
+        let mut builder = self
             .client
             .post(self.count_tokens_url.clone())
             .header("x-api-key", api_key_header)
             .header("anthropic-version", self.version_header.clone())
-            .header(
-                "anthropic-beta",
-                anthropic_beta_header(request_fast_mode, server_compaction),
-            )
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
+        if let Some(beta_header) = anthropic_beta_header(request_fast_mode, server_compaction) {
+            builder = builder.header("anthropic-beta", beta_header);
+        }
         let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
@@ -953,16 +952,34 @@ fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
 #[cfg(test)]
 mod tests {
     use signalbox_model_runtime::{
-        CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts, LossCause,
-        Observation, ObservationFact, ObservationSink, PreparationDefect, RefusalEvidence,
-        SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
+        CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts, FastMode,
+        LossCause, Observation, ObservationFact, ObservationSink, PreparationDefect,
+        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
     };
 
     use super::{
-        MAX_STREAMED_RESPONSE_BYTES, build_http_request, process_streamed_chunk,
-        without_unproven_refusal,
+        CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS, CONTEXT_MANAGEMENT_BETAS, FAST_MODE_BETA,
+        MAX_STREAMED_RESPONSE_BYTES, anthropic_beta_header, build_http_request,
+        process_streamed_chunk, without_unproven_refusal,
     };
     use crate::stream::StreamDecoder;
+
+    #[test]
+    fn beta_header_follows_enabled_request_features() {
+        assert_eq!(anthropic_beta_header(FastMode::Disabled, false), None);
+        assert_eq!(
+            anthropic_beta_header(FastMode::Enabled, false),
+            Some(FAST_MODE_BETA)
+        );
+        assert_eq!(
+            anthropic_beta_header(FastMode::Disabled, true),
+            Some(CONTEXT_MANAGEMENT_BETAS)
+        );
+        assert_eq!(
+            anthropic_beta_header(FastMode::Enabled, true),
+            Some(CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS)
+        );
+    }
 
     #[test]
     fn refusal_without_full_upload_proof_is_known_failure_evidence() {

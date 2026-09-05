@@ -179,7 +179,9 @@ fn attachment_count_failure(failure: AttachmentPreparationFailure) -> ModelCallI
         }
         AttachmentPreparationFailure::TooLarge { .. }
         | AttachmentPreparationFailure::Missing
-        | AttachmentPreparationFailure::Corrupt => ModelCallInputTokenCount::AttachmentFailure,
+        | AttachmentPreparationFailure::Corrupt => {
+            ModelCallInputTokenCount::AttachmentFailure(failure)
+        }
     }
 }
 
@@ -336,7 +338,7 @@ mod tests {
         );
         assert_eq!(
             attachment_count_failure(AttachmentPreparationFailure::Missing),
-            ModelCallInputTokenCount::AttachmentFailure
+            ModelCallInputTokenCount::AttachmentFailure(AttachmentPreparationFailure::Missing)
         );
     }
 

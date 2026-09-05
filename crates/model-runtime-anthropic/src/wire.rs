@@ -39,30 +39,27 @@ pub(crate) struct MessagesRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
-    pub context_management: ContextManagement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<ContextManagement>,
     pub stream: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ContextManagement {
-    pub edits: Vec<ContextManagementEdit>,
+    pub edits: [ContextManagementEdit; 1],
 }
 
 impl ContextManagement {
-    pub(crate) fn for_target(server_compaction: bool) -> Self {
-        let mut edits = vec![ContextManagementEdit::ClearToolUses];
-        if server_compaction {
-            edits.push(ContextManagementEdit::Compact);
+    pub(crate) const fn compact() -> Self {
+        Self {
+            edits: [ContextManagementEdit::Compact],
         }
-        Self { edits }
     }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum ContextManagementEdit {
-    #[serde(rename = "clear_tool_uses_20250919")]
-    ClearToolUses,
     #[serde(rename = "compact_20260112")]
     Compact,
 }
@@ -145,7 +142,8 @@ pub(crate) struct CountTokensRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
-    pub context_management: ContextManagement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<ContextManagement>,
 }
 
 impl From<MessagesRequest> for CountTokensRequest {

@@ -1259,9 +1259,8 @@ pub enum ModelCallTerminalIdentityCandidates {
     },
     /// Both legal closures for one classified availability failure.
     ///
-    /// Persistence validates the call-pinned pool policy under its lock. A
-    /// configured `switch_now` consumes the fresh successor attempt; every
-    /// other action consumes the ordinary failed-turn identities.
+    /// Persistence validates the call-pinned pool policy and retry bound under
+    /// its lock, then consumes the identities for the authorized ending.
     Availability {
         /// Ordinary terminal failure when policy does not authorize a successor.
         failed: FailedModelCallTurnIdentities,
@@ -1416,7 +1415,7 @@ pub enum ModelCallInputTokenCount {
     /// must be retried before activation rather than sent without a count.
     AttachmentUnavailable,
     /// Attachment preparation found a definitive request-local failure.
-    AttachmentFailure,
+    AttachmentFailure(AttachmentPreparationFailure),
     /// No trustworthy provider-native estimate is available.
     Unavailable,
 }
@@ -2464,6 +2463,7 @@ where
                     signalbox_domain::ProviderModelCallFailureCause::RateLimited
                         | signalbox_domain::ProviderModelCallFailureCause::QuotaExhausted
                         | signalbox_domain::ProviderModelCallFailureCause::Overloaded
+                        | signalbox_domain::ProviderModelCallFailureCause::ProviderInternal
                         | signalbox_domain::ProviderModelCallFailureCause::CredentialRejected
                 )
             ) && let ModelCallTerminalIdentityCandidates::Exact(
