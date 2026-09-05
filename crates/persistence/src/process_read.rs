@@ -2233,8 +2233,9 @@ async fn open_transcript_in_transaction(
     )?;
     let runner = load_process_runner_projection(&mut transaction, requested_session).await?;
     let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
-    //  remains fail-closed on every transcript open: native lineage
-    // supersedes the seed as the rendered frontier, not as an integrity fact.
+    // Imported seed integrity remains fail-closed on every transcript open:
+    // native lineage supersedes the seed as the rendered frontier, not as an
+    // integrity fact.
     let imported_seed =
         load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
     let expected_turn_count =

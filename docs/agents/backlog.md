@@ -695,9 +695,9 @@ excluded, or fails closed to confirmation. A runner never widens its own
 approval surface, and the no-permission-downgrade-on-re-registration point above
 stands. Credential doctrine for the first slice: a tool declaring credential
 access is Daemon-only, and signalboxd hands no credentials over the runner
-protocol — read as placement law. Runners may hold their own ambient machine or
-environment credentials, which sit outside this model; credential-scoped runner
-classes are a recorded deferred extension.
+protocol. Runners may hold their own ambient machine or environment credentials,
+which sit outside this model; credential-scoped runner classes are a recorded
+deferred extension.
 
 Runner identity and session placement, kernel only (the design pass owns the
 rest): runner identity is logical — enrollment-based, not hardware-fingerprinted

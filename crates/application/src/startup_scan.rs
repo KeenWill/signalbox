@@ -2,8 +2,8 @@
 //!
 //! docs/spec/turn-lifecycle-and-scheduling.md requires the inventory scan to
 //! finish before the scheduler starts. docs/spec/sessions-and-transcript.md
-//! owns the failed marker and terminal frontier, while  requires
-//! prior-process nonterminal attempts to end as Lost.
+//! owns the failed marker and terminal frontier. Prior-process nonterminal
+//! attempts end as Lost.
 
 use std::{error::Error, fmt, future::Future};
 

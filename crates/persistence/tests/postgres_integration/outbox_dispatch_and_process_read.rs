@@ -635,12 +635,11 @@ async fn s24_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     Ok(())
 }
 
-/// S24 / INV-032: each compiled-in outbox consumer advances an independent
+/// S24: each compiled-in outbox consumer advances an independent
 /// prefix while decoding the same commit-ordered typed events.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_inv032_outbox_consumers_advance_independent_typed_prefixes()
--> Result<(), Box<dyn Error>> {
+async fn s24_outbox_consumers_advance_independent_typed_prefixes() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_session = insert_outbox_session_fixture(&pool, 0xe19).await?;
     let second_session = insert_outbox_session_fixture(&pool, 0xe1a).await?;

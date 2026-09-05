@@ -403,7 +403,7 @@ struct Verdict {
     accepted: bool,
 }
 
-/// , : one completed call crosses exactly one process-spawn
+/// One completed call crosses exactly one process-spawn
 /// dispatch boundary.
 #[tokio::test]
 async fn buffered_completion_is_terminal_only_after_turn_completed() {
@@ -2340,7 +2340,7 @@ async fn nonzero_signal_exit_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("killed_process", ProviderErrorKind::Unrecognized).await;
 }
 
-/// , : losing the CLI terminal marker remains ambiguous and
+/// Losing the CLI terminal marker remains ambiguous and
 /// never triggers a replacement spawn.
 #[tokio::test]
 async fn exit_zero_without_terminal_marker_is_boundary_loss() {
@@ -2417,7 +2417,7 @@ async fn total_only_usage_does_not_invent_axis_counts() {
     assert_eq!(completed(&result.evidence).usage, TokenUsage::unreported());
 }
 
-/// , : pre-dispatch cancellation performs no process spawn.
+/// Pre-dispatch cancellation performs no process spawn.
 #[tokio::test]
 async fn cancellation_before_spawn_is_proven_unsent() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
@@ -2476,7 +2476,7 @@ async fn missing_cli_binary_is_proven_unsent() {
     assert_eq!(spawn_count(temporary.path()), 0);
 }
 
-/// , : post-dispatch cancellation interrupts the original
+/// Post-dispatch cancellation interrupts the original
 /// process and never respawns it.
 #[tokio::test]
 async fn cancellation_after_spawn_interrupts_once_without_respawn() {
@@ -3328,7 +3328,7 @@ async fn completed_stderr_is_preserved_during_stdout_cleanup() {
     );
 }
 
-/// INV / evidence: a leader that wrote a classifiable stderr failure but handed
+/// A leader that wrote a classifiable stderr failure but handed
 /// its stderr to a surviving descendant (so the reader is not yet finished at
 /// the cleanup deadline) still keeps that failure's typed kind. The group kill
 /// closes the descendant's write end, and the bounded drain awaits the reader

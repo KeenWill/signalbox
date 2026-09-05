@@ -359,7 +359,7 @@ crate's `tests/loopback.rs`.
   `status.rs` (classification tables, ideally via `signalbox-expect-table`),
   `response.rs` (buffered decode plus finish-reason mapping), `stream.rs`
   (protocol-integrity cases driving the *real* `SseFraming` plus your decoder),
-  and `runtime.rs` ( redaction across buffered content, streamed deltas, and
+  and `runtime.rs` (redaction across buffered content, streamed deltas, and
   fallback error bodies, plus the credential resolve-once / rotation behavior).
 
 ### Minimum test matrix every adapter must cover

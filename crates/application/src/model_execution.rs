@@ -1299,7 +1299,7 @@ pub enum RetainedModelCallObservationStatus {
 ///
 /// This state prevents a later service invocation or explicit composition
 /// handoff from repeating credential work, losing proof that provider entry
-/// never occurred, or dropping an unchanged terminal observation.  and
+/// never occurred, or dropping an unchanged terminal observation.
 /// docs/spec/model-call-execution.md requires a linear handoff token: callers
 /// may move it between service `into_parts` and `from_parts` handoffs, but
 /// cannot construct or clone evidence.
@@ -6351,7 +6351,7 @@ mod tests {
             captured
                 .text()
                 .contains("terminal_outcome=\"tool_round_limit_reached\""),
-            "the service terminalization must expose the  label"
+            "the service terminalization must expose the tool_round_limit_reached label"
         );
         let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
@@ -6909,7 +6909,7 @@ mod tests {
         );
         assert!(
             telemetry.contains("terminal_outcome=\"tool_round_limit_reached\""),
-            "the service terminalization must expose the  label"
+            "the service terminalization must expose the tool_round_limit_reached label"
         );
         let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);

@@ -2149,11 +2149,9 @@ mod tests {
         }
     }
 
-    /// The reassembly is the only reason the check is stronger than a
-    /// per-observation scan, and a helper carrying logic the  cases
-    /// depend on is verified rather than assumed: a credential split across
-    /// two deltas leaks recoverably even though neither fragment contains it,
-    /// and the projection those cases use never reconstructs that stream.
+    /// The reassembly check catches a credential split across two deltas even
+    /// though neither fragment contains it. A projection that never
+    /// reconstructs that stream cannot detect the recoverable credential.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
     fn split_credential_on_an_uninspected_stream_is_caught() {
@@ -2324,7 +2322,7 @@ mod tests {
     /// The reconstructed arguments for one tool index, as a reader of the
     /// stream would see them.
     ///
-    /// constrains the *content* a consumer reassembles — safe bytes
+    /// The check constrains the *content* a consumer reassembles — safe bytes
     /// preserved, credential absent — not how the scrubber chops it into
     /// deltas. Asserting exact fragment boundaries would fail a
     /// behaviour-preserving change that buffered the safe prefix or coalesced
@@ -2382,8 +2380,8 @@ mod tests {
         // Pinned exactly rather than by credential absence and a count. Those
         // two hold just as well when redaction replaces the *whole* value, so
         // a regression that scrubbed `model-` and `-v1` away with the
-        // credential would satisfy them while losing the safe bytes
-        // preserves. Comparing the forwarded facts states both halves at once:
+        // credential would satisfy them while losing safe bytes.
+        // Comparing the forwarded facts states both halves at once:
         // the credential is gone, the surrounding bytes and the non-credential
         // `http_status` are untouched, and each variant is still itself.
         assert_eq!(
