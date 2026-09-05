@@ -306,9 +306,11 @@ independently optional: an omitted field stays unreported rather than becoming
 zero, a total-only report records nothing because no adapter distributes a
 total, and no cache-creation count is fabricated.
 
-Framing results never depend on how the transport fragments bytes into chunks,
-and records completed before a failure in the same chunk are delivered alongside
-the failure.
+The shared framer bounds every line and each record's retained content, makes a
+framing failure terminal for the stream, and distinguishes a truncated final
+record from a clean end. Framing results never depend on how the transport
+fragments bytes into chunks, and records completed before a failure in the same
+chunk are delivered alongside the failure.
 
 The structured-output contract is a request constraint, not a response
 guarantee: a nonconforming response can carry zero or several proposals, and the
@@ -331,8 +333,10 @@ surfaces as unexpected-status boundary loss rather than a hidden second POST.
 The configured whole-exchange timeout covers connection establishment through
 the complete buffered body or streamed terminal record, and callers may
 configure a shorter connect timeout; a connect timeout is proven unsent, while a
-whole-exchange timeout after send is boundary loss. Success is HTTP 200 only;
-another 2xx is not terminal success.
+whole-exchange timeout after send is boundary loss. The whole-exchange timeout
+is a required deployment bound supplied to both HTTP adapters, and a `none`
+setting leaves the exchange unbounded. Success is HTTP 200 only; another 2xx is
+not terminal success.
 
 The HTTP adapters bound all provider-controlled response input before it can
 accumulate into parsed or retained output, and complete records inside the byte
@@ -393,14 +397,16 @@ another adapter stays unmapped. An HTTP adapter scopes the resolved value to the
 one prepared request as a sensitivity-marked header and performs no second
 lookup; Claude Code file delivery retains it in the one-shot capability instead.
 
-The Codex CLI adapter supports only its ambient credential home: it accepts the
-configured non-secret credential reference, keeps every direct credential value
-outside the cleared child environment, and never locates, reads, copies, logs or
-transports the CLI credential store. An ambient Claude Code adapter likewise
-accepts only its one configured reference. Under file delivery the Claude Code
-adapter replaces only the already allowlisted configuration-directory variable
-with a private request-scoped directory, never adds the API-key variable to the
-child environment, and removes the directory when the capability drops.
+The Codex CLI adapter accepts the configured non-secret credential reference,
+keeps every direct credential value outside the cleared child environment, and
+never locates, reads, copies, logs or transports the CLI credential store. An
+operation that selects an admitted `codex_home` profile receives that profile's
+path as a request-scoped `CODEX_HOME` override beside the ambient reference, and
+the adapter reads neither store. An ambient Claude Code adapter likewise accepts
+only its one configured reference. Under file delivery the Claude Code adapter
+replaces only the already allowlisted configuration-directory variable with a
+private request-scoped directory, never adds the API-key variable to the child
+environment, and removes the directory when the capability drops.
 
 Provider-controlled text is credential-sanitized before it leaves the adapter.
 An adapter that reads the credential value redacts that exact value from the
