@@ -56,13 +56,14 @@ design document. Nothing else about unbuilt design appears on the page.
 
 Sentences are plain and declarative, about twenty words, one idea each. Pages
 carry no rationale narrative, no metaphor, no hedges, no provenance, no history,
-no version literals, and no pull-request or branch names. A page says what the
-system does, not what a reader should do. Code identifiers appear only where the
-map names a core mechanism or a contract names its enforcer. Prose carries no
-INV tags; invariants are tests, and a contract names its enforcer by path. Pages
-have no Open edges section and no paragraph labelled as committed but
-unimplemented. Every link targets a page, never an anchor, unless the anchor is
-a heading on the linking page.
+and no pull-request or branch names. A version number stays when it defines a
+wire or storage contract, and goes when it only records when behavior changed. A
+page says what the system does, not what a reader should do. Code identifiers
+appear only where the map names a core mechanism or a contract names its
+enforcer. Prose carries no INV tags; invariants are tests, and a contract names
+its enforcer by path. Pages have no Open edges section and no paragraph labelled
+as committed but unimplemented. Every link targets a page, never an anchor,
+unless the anchor is a heading on the linking page.
 
 ## Pages
 
