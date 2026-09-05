@@ -9,8 +9,8 @@ reader of it, and it serves two consumers that must never disagree:
   emits the tab-separated rows its build job archives from, and `--matrix`
   emits the JSON its run job expands into a shard matrix. The workflow
   therefore restates no package, no feature, no filter, and no shard count.
-* `scripts/check_docs_consistency.py` previously imported it to correlate
-  ignored test execution with the generated invariant index.
+* `scripts/check_docs_consistency.py` imports it to check agreement among the
+  suite manifest, workflow, documentation, and workspace packages.
 
 A manifest both sides read turns ordinary drift into a check failure, and
 `check_docs_consistency.py` gates the agreement so the manifest itself cannot

@@ -14,11 +14,31 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_inline import autolink, image, link
 
 import postgres_integration_suites
 
 ROOT = Path(__file__).resolve().parent.parent
 MARKDOWN = MarkdownIt("commonmark", {"html": True})
+
+
+def with_source_line(rule):
+    """Attach the originating line while the Markdown rule has its source position."""
+    def parse(state, silent):
+        position = state.pos
+        first_token = len(state.tokens)
+        matched = rule(state, silent)
+        if matched and not silent:
+            line = state.src.count("\n", 0, position)
+            for token in state.tokens[first_token:]:
+                token.meta.setdefault("source_line", line)
+        return matched
+
+    return parse
+
+
+for name, rule in (("link", link), ("image", image), ("autolink", autolink)):
+    MARKDOWN.inline.ruler.at(name, with_source_line(rule))
 
 
 class TrackedFilesError(RuntimeError):
@@ -116,14 +136,15 @@ def parsed_document(text: str) -> tuple[list[Link], set[str]]:
         line = (token.map[0] + 1) if token.map else 1
         if token.type == "inline":
             for child in token.children or []:
+                child_line = line + child.meta.get("source_line", 0)
                 if child.type == "link_open":
                     destination = child.attrGet("href")
                     if destination is not None:
-                        links.append(Link(destination, line))
+                        links.append(Link(destination, child_line))
                 elif child.type == "image":
                     destination = child.attrGet("src")
                     if destination is not None:
-                        links.append(Link(destination, line, is_image=True))
+                        links.append(Link(destination, child_line, is_image=True))
                 elif child.type == "html_inline":
                     parser = AnchorParser()
                     parser.feed(child.content)

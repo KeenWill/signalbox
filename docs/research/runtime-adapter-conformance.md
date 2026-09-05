@@ -20,8 +20,8 @@
   adapter-PR versus wiring-PR split, and the loopback test pattern with a
   minimum test matrix. Per the one-owning-source rule in
   [AGENTS.md](../../AGENTS.md), the checklist names each obligation and cites
-  its owning spec section instead of restating the requirement, so reuse of this
-  page cannot age into a divergent second contract
+  its owning spec section or test instead of restating the requirement, so reuse
+  of this page cannot age into a divergent second contract
 - Intended use: reusable body for the subscription-runtime tracks in the
   [backlog](../agents/backlog.md), with one scoping caveat: the stability
   verdict (§1), the PR split (§3), and the test-matrix obligations apply to any
@@ -128,118 +128,111 @@ off and exactly the `rustls-no-provider` and `stream` features (the
 workspace-pinned reqwest 0.13.4 exposes no `rustls-tls-native-roots` feature), a
 direct `rustls` dependency enabling `ring`, `std`, and `tls12` — the
 crypto-provider selection required by the TLS rules in
-[Provider adapters](../spec/runtime-substrate.md#provider-adapters) — plus
-`serde` (derive), `serde_json` (with `raw_value`), and `futures-util`. Copy the
-Anthropic crate as the skeleton; consult the OpenAI crate where the provider's
-wire shape differs. Exemplar paths below are in `crates/model-runtime-anthropic`
-unless noted.
+[Provider adapters](../spec/runtime-substrate.md) — plus `serde` (derive),
+`serde_json` (with `raw_value`), and `futures-util`. Copy the Anthropic crate as
+the skeleton; consult the OpenAI crate where the provider's wire shape differs.
+Exemplar paths below are in `crates/model-runtime-anthropic` unless noted.
 
 01. **`Config` struct** — the exemplar carries `base_url`, an optional
     `connect_timeout`, a required `exchange_timeout`, and `sse_record_limit`,
     and no credential. Base-URL admission and its narrow plain-HTTP carve-out,
     the required whole-exchange timeout and its default, and the limit rules are
-    owned by
-    [Provider adapters](../spec/runtime-substrate.md#provider-adapters);
-    validate them at construction as the exemplar does. Exemplar:
-    `src/config.rs`, with the construction checks in `src/runtime.rs`.
+    owned by [Provider adapters](../spec/runtime-substrate.md); validate them at
+    construction as the exemplar does. Exemplar: `src/config.rs`, with the
+    construction checks in `src/runtime.rs`.
 02. **Wire serde structs** — hand-rolled request body plus response/stream/error
     deserialization; no provider SDK. Unknown-field tolerance and the bounds
-    that apply to it:
-    [Provider adapters](../spec/runtime-substrate.md#provider-adapters).
+    that apply to it: [Provider adapters](../spec/runtime-substrate.md).
     Verbatim `Box<RawValue>` tool-call arguments, never re-serialized:
-    [Structured output and tool decode](../spec/runtime-substrate.md#structured-output-and-tool-decode).
-    Exemplar: `src/wire.rs`.
+    [Structured output and tool decode](../spec/runtime-substrate.md). Exemplar:
+    `src/wire.rs`.
 03. **`translate.rs`:
     `build_request(&operation) -> Result<WireRequest, PreparationFailure>`** —
     the sole translation entry. Call `operation.validate()` before any
     adapter-specific checks, then map anything the provider cannot represent to
     `PreparationFailure::UnsupportedOperation`. The provider-neutral validation
     rules and the resolved-target-as-model rule:
-    [The operation](../spec/runtime-substrate.md#the-operation). The
-    forced-single-tool-call realization of the output contract:
-    [Structured output and tool decode](../spec/runtime-substrate.md#structured-output-and-tool-decode).
-    Exemplar: `src/translate.rs` (`tools_and_choice`); the OpenAI `translate.rs`
-    shows the forced-function divergence.
+    [The operation](../spec/runtime-substrate.md). The forced-single-tool-call
+    realization of the output contract:
+    [Structured output and tool decode](../spec/runtime-substrate.md). Exemplar:
+    `src/translate.rs` (`tools_and_choice`); the OpenAI `translate.rs` shows the
+    forced-function divergence.
 04. **`status.rs`: exhaustive single-`match` classifiers** — one for HTTP status
     → `ProviderErrorKind` and one per native error discriminator the provider
     exposes, each with an `Unrecognized` arm; the count is provider-specific,
-    not fixed at two. The per-provider classification precedence (401 first,
-    then recognized native material across every native field, then status) is
-    owned by
-    [Provider adapters](../spec/runtime-substrate.md#provider-adapters).
-    Exemplar: `src/status.rs` (`classify_error_status`, `classify_error_token`,
-    `classify_error`); the OpenAI `status.rs` (`classify_error_envelope`) shows
-    the multi-field shape — an unrecognized `error.code` falls through to a
-    recognized `error.type` before the status table.
+    not fixed at two. The classification precedence is owned by
+    [Terminal evidence](../spec/runtime-substrate.md), which also states that
+    the mapping is exhaustive and unknown material is unrecognized; each
+    adapter's `status.rs` implements it. Exemplar: `src/status.rs`
+    (`classify_error_status`, `classify_error_token`, `classify_error`); the
+    OpenAI `status.rs` (`classify_error_envelope`) shows the multi-field shape —
+    an unrecognized `error.code` falls through to a recognized `error.type`
+    before the status table.
 05. **`response.rs`: `decode_buffered_response(...)`** — a pure map of a
     buffered success body to `TerminalEvidence`. Which status is success and
     what an unintelligible success body becomes:
-    [Provider adapters](../spec/runtime-substrate.md#provider-adapters) and
-    [Terminal evidence](../spec/runtime-substrate.md#terminal-evidence). The
-    observation ordering the decode drives:
-    [Observations](../spec/runtime-substrate.md#observations). Exemplar:
+    [Provider adapters](../spec/runtime-substrate.md) and
+    [Terminal evidence](../spec/runtime-substrate.md). The observation ordering
+    the decode drives: [Observations](../spec/runtime-substrate.md). Exemplar:
     `src/response.rs`.
 06. **`stream.rs`: `StreamDecoder`** driving the shared `SseFraming` from
     `model-runtime` — do NOT write your own SSE framer. Framing guarantees and
-    limit semantics: [SSE framing](../spec/runtime-substrate.md#sse-framing).
-    The provider's terminal-marker protocol and every stream-integrity rule the
-    decoder enforces: the per-provider stream-integrity paragraphs in
-    [Provider adapters](../spec/runtime-substrate.md#provider-adapters). The
-    decoder's record bound is only one of the response bounds: the same
-    section's buffered-body and cumulative-stream caps apply before parsing and
-    live in `runtime.rs` (`MAX_BUFFERED_RESPONSE_BYTES`,
+    limit semantics: [SSE framing](../spec/runtime-substrate.md). The provider's
+    terminal-marker protocol and every stream-integrity rule the decoder
+    enforces: each exemplar's `StreamDecoder` and the module comment of its
+    `src/stream.rs`; the runtime page owns only the shared rule that a stream
+    ending without its terminal marker is incomplete-stream evidence, never
+    success. The decoder's record bound is only one of the response bounds: the
+    same section's buffered-body and cumulative-stream caps apply before parsing
+    and live in `runtime.rs` (`MAX_BUFFERED_RESPONSE_BYTES`,
     `MAX_STREAMED_RESPONSE_BYTES` in both exemplars), in addition to
     `SseFraming`'s per-record limit. Exemplar: `src/stream.rs`; the OpenAI
     `stream.rs` for a `[DONE]`-style protocol.
 07. **`Prepared` capability struct** — holds the built `reqwest::Request`, a
     cloned `Client`, execution settings, and the captured `CredentialValue`. Its
     required properties (opaque, one-shot, non-cloneable, non-serializable):
-    [Two-stage execution](../spec/runtime-substrate.md#two-stage-execution).
-    Mark it `#[must_use]` as the exemplar does. Exemplar:
-    `AnthropicPreparedRequest<C>` in `src/runtime.rs`.
+    [Two-stage execution](../spec/runtime-substrate.md). Mark it `#[must_use]`
+    as the exemplar does. Exemplar: `AnthropicPreparedRequest<C>` in
+    `src/runtime.rs`.
 08. **`Runtime::new(config, credentials) -> Result<Self, ConstructionError>`** —
     build the one `reqwest::Client` here. The transport discipline (no redirect
     following, no protocol retries, no idle-connection reuse, the timeout rules)
     and the TLS and no-proxy requirements are owned by
-    [Provider adapters](../spec/runtime-substrate.md#provider-adapters);
-    construction failure is a configuration defect, not operation evidence.
-    Exemplar: client construction in `src/runtime.rs`.
+    [Provider adapters](../spec/runtime-substrate.md); construction failure is a
+    configuration defect, not operation evidence. Exemplar: client construction
+    in `src/runtime.rs`.
 09. **`prepare`** for the
     `impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C>`.
     Everything prepare must and must not do — all no-traffic work up front, the
     outcome vocabulary, per-request credential resolution and its failure
     typing, the work-first cancellation race — is owned by
-    [Two-stage execution](../spec/runtime-substrate.md#two-stage-execution) and
-    the
-    [credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary).
-    The exemplar's internal order (clone correlation → `build_request` →
-    serialize → resolve the credential raced work-first against cancellation →
-    sensitivity-marked header → build the `reqwest::Request`) is a faithful
-    sequencing of those rules to copy: `src/runtime.rs` (`prepare_request`,
-    `with_cancellation`).
+    [Two-stage execution](../spec/runtime-substrate.md) and the
+    [credential-access boundary](../spec/runtime-substrate.md). The exemplar's
+    internal order (clone correlation → `build_request` → serialize → resolve
+    the credential raced work-first against cancellation → sensitivity-marked
+    header → build the `reqwest::Request`) is a faithful sequencing of those
+    rules to copy: `src/runtime.rs` (`prepare_request`, `with_cancellation`).
 10. **`execute`** — consumes the capability; at most one provider interaction.
     Its obligations — observation emission and ordering, classifying send
     failures into proven-unsent versus boundary loss, the work-first
     cancellation bias, the refusal downgrade to
     `ProviderError { kind: Unrecognized }` when complete upload cannot be
     proven, and credential redaction of all provider-controlled output — are
-    owned by
-    [Two-stage execution](../spec/runtime-substrate.md#two-stage-execution),
-    [Observations](../spec/runtime-substrate.md#observations),
-    [Terminal evidence](../spec/runtime-substrate.md#terminal-evidence), and the
-    [credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary).
-    The exemplar realizes them as `execute`/`exchange`, `with_cancellation`
-    (work future polled first), `without_unproven_refusal`, and
-    `RedactingObservationSink` + `redact_evidence` — copy all of them; none is
-    optional. Exemplar: `src/runtime.rs`.
+    owned by [Two-stage execution](../spec/runtime-substrate.md),
+    [Observations](../spec/runtime-substrate.md),
+    [Terminal evidence](../spec/runtime-substrate.md), and the
+    [credential-access boundary](../spec/runtime-substrate.md). The exemplar
+    realizes them as `execute`/`exchange`, `with_cancellation` (work future
+    polled first), `without_unproven_refusal`, and `RedactingObservationSink` +
+    `redact_evidence` — copy all of them; none is optional. Exemplar:
+    `src/runtime.rs`.
 
 **Cross-cutting rules (owned elsewhere, all binding):** the
 one-operation-one-physical-request rule and typed-evidence-never-exceptions
-([Two-stage execution](../spec/runtime-substrate.md#two-stage-execution)); the
-credential-hygiene rules (the
-[credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary)).
-A goal prompt built from this page should cite those sections rather than copy
-them: the copies age, the sections do not.
+([Two-stage execution](../spec/runtime-substrate.md)); the credential-hygiene
+rules (the [credential-access boundary](../spec/runtime-substrate.md)). A goal
+prompt built from this page should cite those sections rather than copy them:
+the copies age, the sections do not.
 
 ## 3. Clean split — adapter PR vs. wiring PR
 
@@ -255,8 +248,7 @@ them: the copies age, the sections do not.
 - The owning-spec update: [runtime-substrate](../spec/runtime-substrate.md)
   describes the implemented adapters, so the same PR updates its adapter
   coverage — or the bottom specification diff of the PR's stack supplies it —
-  per the living-specification rule in [AGENTS.md](../../AGENTS.md). Add the new
-  crate's focused behavioral tests in the same change.
+  per the living-specification rule in [AGENTS.md](../../AGENTS.md).
 
 It does **NOT** touch: `model-provider-runtime` (the bridge is generic),
 `crates/application` (the `ModelCallProvider` port is provider-agnostic),
@@ -340,9 +332,9 @@ crate's `tests/loopback.rs`.
   records the raw request text into `Arc<Mutex<Vec<String>>>`, writes the canned
   bytes, and shuts down. Point the adapter at it by overriding `config.base_url`
   to `http://127.0.0.1:<port>` (the literal-loopback plain-HTTP admission of
-  [Provider adapters](../spec/runtime-substrate.md#provider-adapters) exists for
-  exactly this harness). This exercises the *true* reqwest path — headers,
-  redirect discipline, connect failure, SSE framing — deterministically.
+  [Provider adapters](../spec/runtime-substrate.md) exists for exactly this
+  harness). This exercises the *true* reqwest path — headers, redirect
+  discipline, connect failure, SSE framing — deterministically.
   (`crates/model-runtime-anthropic/tests/loopback.rs`, `CannedServer`; OpenAI
   mirror in `crates/model-runtime-openai/tests/loopback.rs`.)
 - **No live calls / no real credential.** A `FixedKey` implementing
@@ -373,17 +365,17 @@ crate's `tests/loopback.rs`.
 ### Minimum test matrix every adapter must cover
 
 Cases are grouped by the evidence taxonomy of
-[Terminal evidence](../spec/runtime-substrate.md#terminal-evidence), which owns
-each case's expected terminal variant:
+[Terminal evidence](../spec/runtime-substrate.md), which owns each case's
+expected terminal variant:
 
 - Completion: buffered end-to-end; streamed end-to-end; tool-call proposal
   (buffered and streamed) with verbatim `arguments_json`; structured-output
   forced-tool decode.
 - Provider error: each `ProviderErrorKind` the adapter maps, including
   `CredentialRejected` via both the status route and the native-token route
-  (precedence rules:
-  [Provider adapters](../spec/runtime-substrate.md#provider-adapters)); refusal,
-  asserting the spec-owned downgrade rather than surfaced `Refused` evidence.
+  (precedence rules: [Terminal evidence](../spec/runtime-substrate.md)); refusal
+  without complete-upload proof, asserting the spec-owned downgrade rather than
+  surfaced `Refused` evidence.
 - Proven unsent: pre-send cancellation proving zero requests; connect refused
   (`ProvenUnsent(ConnectFailed)` — the refusal proves no request byte was
   written).

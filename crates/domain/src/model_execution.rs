@@ -1080,7 +1080,7 @@ impl ModelCallExecution {
     /// attempt without terminalizing the logical turn.
     ///
     /// The caller must first validate the call-pinned credential-pool policy
-    /// and select a different admitted member. This aggregate transition owns
+    /// and authorize either retry or rotation. This aggregate transition owns
     /// only the lifecycle proof required by
     /// `docs/spec/model-call-execution.md`: the
     /// predecessor remains `KnownFailed`, one authorization is never reused,
@@ -1109,6 +1109,7 @@ impl ModelCallExecution {
                     ProviderModelCallFailureCause::RateLimited
                         | ProviderModelCallFailureCause::QuotaExhausted
                         | ProviderModelCallFailureCause::Overloaded
+                        | ProviderModelCallFailureCause::ProviderInternal
                 )
             )
             || self.current_attempt.state() != &CurrentTurnAttemptState::Running

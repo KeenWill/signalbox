@@ -113,13 +113,9 @@ jobs:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
     steps:
-      # Full history also fetches `refs/remotes/origin/*`, which the docs
-      # checker reads verification provenance from: the first-parent history of
-      # `origin/main`, never a merge the branch under review contributes.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
       - name: Install Markdown toolchain
         run: |

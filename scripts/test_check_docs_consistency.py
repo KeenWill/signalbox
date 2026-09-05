@@ -74,6 +74,15 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
         self.assertTrue(any("escapes" in failure.message for failure in failures))
 
+    def test_links_report_their_own_lines_in_multiline_paragraphs(self) -> None:
+        self.write_and_track(
+            "docs/multiline.md",
+            "An introductory line\n[First](first.md) and\n"
+            "![Second](second.png)\n[Reference][ref]\n\n[ref]: third.md\n",
+        )
+        failures = run_checks(self.root)
+        self.assertEqual([failure.line for failure in failures], [2, 3, 4])
+
     def test_missing_heading_fragment_fails(self) -> None:
         self.write_and_track("docs/bad-anchor.md", "[Bad](spec/example.md#absent)\n")
         failures = run_checks(self.root)
