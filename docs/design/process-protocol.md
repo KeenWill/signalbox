@@ -93,21 +93,21 @@ its runner, the refused operation's correlation, one closed daemon-actionable
 `category`, and the runner-authored `detail` object with its bounded `code`,
 `message`, and structured `payload`. The category set is exactly the closed
 daemon-actionable set the runner wire carries, member for member, so every
-retained failure is serializable. The daemon bounds the detail and reproduces it
-without interpretation, following the `operation_failed` contract in
+retained failure is serializable. The daemon bounds the detail and retains the
+runner's text unchanged, following the `operation_failed` contract in
 [runner-protocol.md](../spec/runner-protocol.md). The detail is untrusted
-runner-authored text, and the projection applies the diagnostic-evidence
-redaction in [process-protocol.md](../spec/process-protocol.md), removing host
-and credential paths, before exposing it. The event notifies a follower of each
-live runner transition above its snapshot cursor; the snapshot's runner
-projection carries the current state on reconnect. The event family is the
-extension point for later runner facts: a new fact adds a state and its members
-to this event kind, never a second kind. A snapshot's session summary carries
-the same runner object, with connection health present exactly for a pinned
-placement. `replace_lost_runner`, `abandon_lost_runner`, and
-`promote_pending_runner` are planned wire commands whose durable request,
-replay, and recovery semantics stay in
-[identity-and-commands.md](../spec/identity-and-commands.md) and
+runner-authored text, so the status projection is a transformed view of that
+retained record: it applies the diagnostic-evidence redaction in
+[process-protocol.md](../spec/process-protocol.md), removing host and credential
+paths, before exposing it. The event notifies a follower of each live runner
+transition above its snapshot cursor; the snapshot's runner projection carries
+the current state on reconnect. The event family is the extension point for
+later runner facts: a new fact adds a state and its members to this event kind,
+never a second kind. A snapshot's session summary carries the same runner
+object, with connection health present exactly for a pinned placement.
+`replace_lost_runner`, `abandon_lost_runner`, and `promote_pending_runner` are
+planned wire commands whose durable request, replay, and recovery semantics stay
+in [identity-and-commands.md](../spec/identity-and-commands.md) and
 [runner-protocol.md](../spec/runner-protocol.md).
 
 `spawn_session` carries a bounded `task` and the closed relationship object and
