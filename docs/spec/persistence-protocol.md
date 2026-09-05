@@ -173,7 +173,8 @@ the selected imported aggregate is immutable and append-only.
 
 Approval-judge completion takes the session row FOR NO KEY UPDATE before the
 scheduler row so a goal-closing transition and the completion recheck exclude
-each other.
+each other. Every goal transition takes that same session lock before it reads
+the goal's event stream and before any scheduler lock.
 
 Input submitted to a delegated child locks both endpoint session rows FOR NO KEY
 UPDATE in identity order before the child's scheduler row, because processing
@@ -416,6 +417,10 @@ Replacing session metadata locks the target session row FOR NO KEY UPDATE so
 concurrent writers serialize, samples the Postgres statement time once, and
 writes that exact value to both the current root and the applied receipt.
 
+A session-plan append locks the session row FOR NO KEY UPDATE before allocating
+the ordinal, holds it through the insert, and then locks the authorizing tool
+attempt FOR SHARE.
+
 Graceful shutdown closes the pool and waits for every outstanding checkout
 before closing the guard session; a shutdown that is omitted or cancelled
 retains the guard session until process exit.
@@ -487,12 +492,14 @@ resolved by the next locked cursor read.
 
 Dispatch validates each record against durable state: an activation against the
 turn's attempt, a call transition against monotonic call state, and a terminal
-record against its turn and frontier. A context-compaction event whose
-compaction, producing call, summary, and result frontier do not correlate fails
-the dispatch. A tool-batch transition fails the dispatch unless its round,
-frontier, and attempt correlate: a proposed frontier is the round boundary, a
-projected frontier contains every result of the round, and a recovery attempt
-belongs to a request the named call produced.
+record against its turn and frontier. A terminal record naming a transcript
+entry must name that frontier's last member, and a reconciliation-required
+record must name the turn's own ambiguous call or tool attempt. A
+context-compaction event whose compaction, producing call, summary, and result
+frontier do not correlate fails the dispatch. A tool-batch transition fails the
+dispatch unless its round, frontier, and attempt correlate: a proposed frontier
+is the round boundary, a projected frontier contains every result of the round,
+and a recovery attempt belongs to a request the named call produced.
 
 An applied submit-input that creates a turn origin appends an input-accepted
 event; pending steering appends nothing until terminal reclassification mints
