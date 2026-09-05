@@ -80,17 +80,18 @@ Anthropic ordinary calls enable provider-default server-side compaction only for
 provider-model identifiers in the closed adapter mapping: the `claude-fable-5`,
 `claude-mythos-5`, `claude-mythos-preview`, `claude-opus-5`, `claude-opus-4-6`,
 `claude-opus-4-7`, `claude-opus-4-8`, `claude-sonnet-5`, and `claude-sonnet-4-6`
-family stems, including their dated suffixes. Each returned compaction block is
-an opaque ordered semantic entry replayed unchanged as Anthropic assistant
-content; unsupported Anthropic targets and other adapters reject it, and earlier
-semantic entries remain append-only. The block's durable nullable `content` fact
-separately classifies its input as replaced or retained for later headroom
-accounting: non-null replaces the pre-compaction input and null is a replayable
-no-op. This classification does not rewrite billing evidence. Anthropic
-iteration usage remains the sum of every reported iteration on the call's four
-usage axes, and an iteration missing required input or output usage is invalid
-response material. The tool-continuation guard likewise excludes replaced
-pre-compaction input from its retained-context baseline.
+family stems, including numeric release suffixes such as `claude-fable-5-1` and
+dated suffixes. Each returned compaction block is an opaque ordered semantic
+entry replayed unchanged as Anthropic assistant content; unsupported Anthropic
+targets and other adapters reject it, and earlier semantic entries remain
+append-only. The block's durable nullable `content` fact separately classifies
+its input as replaced or retained for later headroom accounting: non-null
+replaces the pre-compaction input and null is a replayable no-op. This
+classification does not rewrite billing evidence. Anthropic iteration usage
+remains the sum of every reported iteration on the call's four usage axes, and
+an iteration missing required input or output usage is invalid response
+material. The tool-continuation guard likewise excludes replaced pre-compaction
+input from its retained-context baseline.
 
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
