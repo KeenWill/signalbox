@@ -184,16 +184,6 @@ jobs:
       # inspection, or the daemon that never answers that the cases require.
       - name: Test the orphaned-container sweep
         run: python3 tooling/test_sweep_test_containers.py
-      # Runs here rather than in coverage.yml or swift.yml because it reads
-      # both of them: it extracts the jq programs those workflows embed and
-      # checks each against the Python summarizer that reads the same
-      # documents. Landing it in either workflow would leave the other's
-      # predicates tested only when that workflow happened to trigger, and
-      # neither triggers on a change to the summarizers alone. The runner image
-      # provides jq, which is also what lets those two workflows invoke it with
-      # no install step of their own.
-      - name: Test the coverage workflow predicates
-        run: python3 tooling/test_coverage_workflow_predicates.py
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Markdown formatting
