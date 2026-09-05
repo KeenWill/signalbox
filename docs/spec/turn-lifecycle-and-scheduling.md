@@ -164,8 +164,8 @@ outcome.
 Order comes from commit-ordered sequences, never from comparing wall-clock
 times. A liveness check that cannot query some kind of evidence skips the turn
 instead of ending it, and any event it does not recognize counts as progress.
-When a lifecycle guard trips, the daemon waits, asks, or parks the session; it
-never ends work on staleness evidence alone.
+When a lifecycle guard trips on an admitted session, the daemon waits, asks, or
+parks the session; it never ends work on staleness evidence alone.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
