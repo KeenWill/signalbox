@@ -5,13 +5,15 @@ use std::{collections::HashMap, path::PathBuf};
 
 /// Configuration for [`crate::CodexCliRuntime`].
 ///
-/// It carries paths, bounds, and a non-secret credential reference only. The
-/// CLI resolves its own subscription login; the adapter never receives a
-/// credential value.
+/// It carries model controls, paths, bounds, and a non-secret credential
+/// reference only. The CLI resolves its own subscription login; the adapter
+/// never receives a credential value.
 #[derive(Debug, Clone)]
 pub struct CodexCliConfig {
     /// Exact per-model reasoning, fast-mode, and service-tier capabilities.
     pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
+    /// Exact provider-model names whose Codex context window is overridden.
+    pub model_context_window_overrides: HashMap<String, u32>,
     /// Absolute path to the locally installed Codex executable.
     pub executable: PathBuf,
     /// Absolute existing directory used as the CLI's working root.
@@ -22,7 +24,7 @@ pub struct CodexCliConfig {
     pub credential_reference: signalbox_model_runtime::CredentialReference,
     /// Per-profile login homes. Values are path references only; the adapter
     /// never reads their auth material. See
-    /// `docs/spec/configuration-and-credentials.md#the-codex_home-delivery`.
+    /// `docs/spec/configuration-and-credentials.md`.
     pub credential_homes: HashMap<signalbox_model_runtime::CredentialReference, PathBuf>,
     /// Optional positive whole-process timeout representable by the runtime clock.
     pub exchange_timeout: Option<Duration>,
@@ -47,6 +49,7 @@ impl CodexCliConfig {
     ) -> Self {
         Self {
             model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
+            model_context_window_overrides: HashMap::new(),
             executable: executable.into(),
             working_directory: working_directory.into(),
             credential_reference,

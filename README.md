@@ -86,23 +86,21 @@ with `rm -rf .devenv/state`, or reseed one catalog by deleting its file under
 The seeded model catalog is a copy of the checked-in example, so it carries that
 file's undated family names such as `claude-haiku-4-5`. The spelling a
 `provider_model` must take is stated in
-[configuration and credentials](docs/spec/configuration-and-credentials.md#the-static-model-and-alias-catalog),
-and how a reported identity is related back to it, including the dated snapshot
-a family name resolves to, in
-[provider-target identity](docs/spec/model-call-execution.md#provider-target-identity).
+[configuration and credentials](docs/spec/configuration-and-credentials.md), and
+how a reported identity is related back to it, including the dated snapshot a
+family name resolves to, in
+[provider-target identity](docs/spec/model-call-execution.md).
 
 The process socket is `$DEVENV_RUNTIME/signalbox/signalboxd.sock`, because the
 daemon accepts only a socket parent meeting the ownership and permission rules
-the
-[process protocol](docs/spec/process-protocol.md#transport-and-trust-boundary)
-states; the dev-instance launcher creates that directory with mode `0700` before
-starting the daemon. The devenv shell exports the path as
-`SIGNALBOX_SOCKET_PATH` and provides a `signalbox <verb>` wrapper that execs
-Cargo's resolved binary directly rather than through `cargo run`. Under an
-ambient `-C prefer-dynamic` (in `RUSTFLAGS` or inherited Cargo configuration)
-that executable needs Cargo's runtime library search path, which the direct
-`exec` does not set, and the command exits `127` naming the missing shared
-object. This is a known limitation.
+the [process protocol](docs/spec/process-protocol.md) states; the dev-instance
+launcher creates that directory with mode `0700` before starting the daemon. The
+devenv shell exports the path as `SIGNALBOX_SOCKET_PATH` and provides a
+`signalbox <verb>` wrapper that execs Cargo's resolved binary directly rather
+than through `cargo run`. Under an ambient `-C prefer-dynamic` (in `RUSTFLAGS`
+or inherited Cargo configuration) that executable needs Cargo's runtime library
+search path, which the direct `exec` does not set, and the command exits `127`
+naming the missing shared object. This is a known limitation.
 
 The daemon's default Anthropic key path is
 `$HOME/.config/signalbox/anthropic-api-key`, written into the seeded model
@@ -114,10 +112,10 @@ code-host token path is `$HOME/.config/signalbox/github-token`, overridable with
 `$DEVENV_STATE/dev-instance/brave-api-key` and is overridable with
 `SIGNALBOX_DEV_BRAVE_API_KEY_FILE`. No credential material is committed or
 generated. The
-[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle)
-states when those files are read, what their bytes mean, and how absence is
-handled. These commands write the code-host token from the GitHub CLI and open
-the Anthropic and Brave key files for editing:
+[credential lifecycle](docs/spec/configuration-and-credentials.md) states when
+those files are read, what their bytes mean, and how absence is handled. These
+commands write the code-host token from the GitHub CLI and open the Anthropic
+and Brave key files for editing:
 
 ```console
 install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/github-token"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; gh auth token >"$temporary" && mv "$temporary" "$destination" && trap - EXIT)
@@ -126,7 +124,7 @@ install -d -m 700 "$DEVENV_STATE/dev-instance" && (umask 077; destination="$DEVE
 ```
 
 `devenv.nix` handles the ambient-configuration refusals that
-[configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration)
+[configuration and credentials](docs/spec/configuration-and-credentials.md)
 specifies: the `PG*` and `SSL_CERT_*` scrub, the process-scoped home the
 passfile check reads, the generated authority that lets a loopback cluster pass
 full verification, and a fully stated `DATABASE_URL` exported to the daemon

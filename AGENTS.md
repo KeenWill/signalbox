@@ -10,7 +10,8 @@ owner-approved plans. Do not add speculative product behavior.
 - Public API of the domain and application crates: `docs/domain-spine.md`,
   checked by CI against source.
 - Invariants: INV-tagged tests. `docs/invariants.md` is their generated index.
-- Deferred or undecided design: `docs/open-questions.md`.
+- Committed but unbuilt design: `docs/design/`; undecided items:
+  `docs/open-questions.md`.
 - Test style: `docs/agents/testing-style.md`. Literal-provenance and label rules
   for production and test code: `docs/style.md`.
 - Rules for autonomous milestone runs: `docs/agents/goal-mode.md`.
