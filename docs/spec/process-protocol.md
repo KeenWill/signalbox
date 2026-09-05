@@ -71,14 +71,16 @@ cascade rules are owned by
 
 Durable events reach followers through the dispatcher. It reads the
 transactional outbox owned by [persistence-protocol.md](persistence-protocol.md)
-one sequence at a time and offers each session event that has a wire projection
-to two process-local fan-outs: one durable-only and one composite that also
-admits deltas; a sessionless receipt or an event kind with no projection
-advances the cursor and reaches no follower. A database-scoped advisory guard
-and a generation fence in `crates/persistence/src/hub_fence.rs` enforce one
-active daemon process per database, and therefore one dispatcher and its
-fan-outs. The guard is taken on a dedicated connection before migrations run and
-held until shutdown.
+one sequence at a time through the `process_protocol` consumer cursor and offers
+each session event that has a wire projection to two process-local fan-outs: one
+durable-only and one composite that also admits deltas; a sessionless receipt or
+an event kind with no projection advances that cursor and reaches no follower.
+The compiled-in repository-watch consumer reads the same typed events through
+its independent `repo_watch` cursor. A database-scoped advisory guard and a
+generation fence in `crates/persistence/src/hub_fence.rs` enforce one active
+daemon process per database, and therefore one dispatcher and its fan-outs. The
+guard is taken on a dedicated connection before migrations run and held until
+shutdown.
 
 ## Design decisions
 
