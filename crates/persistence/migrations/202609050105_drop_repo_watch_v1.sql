@@ -76,6 +76,10 @@ BEGIN
             ON namespace.oid = procedure.pronamespace
          WHERE namespace.nspname = 'public'
            AND procedure.proname LIKE '%repo_watch%'
+           AND procedure.proname NOT IN (
+                'repo_watch_branch_is_valid',
+                'repo_watch_repository_is_valid'
+           )
     LOOP
         EXECUTE format('DROP FUNCTION %s CASCADE', function_signature);
     END LOOP;

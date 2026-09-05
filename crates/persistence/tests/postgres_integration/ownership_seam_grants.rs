@@ -129,3 +129,49 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
     drop(container);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn v1_retirement_preserves_commissioned_dispatch_validation() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT conname
+           FROM pg_constraint
+          WHERE conrelid = 'commissioned_dispatch'::regclass
+            AND conname IN (
+                'commissioned_dispatch_base_branch_check',
+                'commissioned_dispatch_branch_check',
+                'commissioned_dispatch_head_branch_check',
+                'commissioned_dispatch_head_repository_check',
+                'commissioned_dispatch_repository_check'
+            )
+          ORDER BY conname",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        constraints,
+        [
+            "commissioned_dispatch_base_branch_check",
+            "commissioned_dispatch_branch_check",
+            "commissioned_dispatch_head_branch_check",
+            "commissioned_dispatch_head_repository_check",
+            "commissioned_dispatch_repository_check",
+        ]
+    );
+
+    let validation: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT repo_watch_repository_is_valid('owner/repository'),
+                repo_watch_repository_is_valid('invalid'),
+                repo_watch_branch_is_valid('main'),
+                repo_watch_branch_is_valid('')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(validation, (true, false, true, false));
+
+    drop(pool);
+    drop(container);
+    Ok(())
+}
