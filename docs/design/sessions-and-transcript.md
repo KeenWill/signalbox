@@ -6,20 +6,18 @@ when the work lands.
 
 ## Goal
 
-Eleven capabilities extend the session and transcript subsystem.
-Instruction-aware defaults replacement keeps a session's model selection
-compatible with its admitted workspace instructions. Program creation causes let
-registered programs create sessions under the
-[program substrate](../spec/program-substrate.md). The browser follow route is
-used only by the open workspace. The timeline reports referenced blob facts from
-a durable relation. Search producers publish attachment and derived-text classes
-through the projection-writer port. A relocation boundary entry records every
-session move in the transcript. Delegation result sealing consumes a durable
-reconstituted terminal result. A spawned child defaults into its parent's
-directory. A static eligible-failure producer terminalizes a turn at
-eligibility, and a wait-transition failure producer terminalizes a turn whose
-predecessor model call already issued. Further semantic entry variants cover
-refusal, reconciliation, mismatch, accepted risk, and approval events.
+Ten capabilities extend the session and transcript subsystem. Instruction-aware
+defaults replacement keeps a session's model selection compatible with its
+admitted workspace instructions. Program creation causes let registered programs
+create sessions under the [program substrate](../spec/program-substrate.md). The
+browser follow route is used only by the open workspace. The timeline reports
+referenced blob facts from a durable relation. Search producers publish
+attachment and derived-text classes through the projection-writer port. A
+relocation boundary entry records every session move in the transcript.
+Delegation result sealing consumes a durable reconstituted terminal result. A
+spawned child defaults into its parent's directory. A static eligible-failure
+producer terminalizes a turn at eligibility, and a wait-transition failure
+producer terminalizes a turn whose predecessor model call already issued.
 
 ## Design
 
@@ -105,10 +103,6 @@ terminalizing and cannot serve a transition happening now. The release and
 exhaustion conditions belong to
 [credential-availability](../spec/credential-availability.md).
 
-Further entry variants. Refusal, reconciliation, mismatch, accepted-risk, and
-approval-event entries join the closed payload set as reference-bearing facts,
-each naming the durable record that owns its content.
-
 ## Compatibility constraints
 
 Creation-cause readers do not assume the present vocabulary is final, and the
@@ -138,18 +132,18 @@ program-created session stores a workflow or eval cause naming its program run
 and, for eval, its trial; the three present spellings decode unchanged, and no
 surface outside the host-side capability can construct the new causes. Exactly
 one follow subscription exists per browser, for the open workspace. The session
-summary read reports nonzero referenced blob count and byte length from the
-relation, and no detail read fetches blob bytes. Attachment filename, media
-metadata, and derived-text classes appear in search results with reveal
-addresses only after their source committed. Every successor placement
-installation appends exactly one relocation entry, the next model call reads a
-frontier containing it, each fail-closed case is rejected, and the entry carries
-no runner, workspace, credential, or tool content. Delegation result sealing
-reads one sealed projection and has no raw-identity path. A spawned child sits
-in its parent's directory and copies no other placement axis. A turn that fails
-at eligibility carries one origin entry and one failed marker committed together
-with a turn-failed event and no attempt row. A turn released from a wait with an
+summary read reports referenced blob count and byte length equal to the
+relation's totals, nonzero for a session whose timeline references blobs, and no
+detail read fetches blob bytes. Attachment filename, media metadata, and
+derived-text classes appear in search results with reveal addresses only after
+their source committed. Every successor placement installation appends exactly
+one relocation entry, the next model call reads a frontier containing it, each
+fail-closed case is rejected, and the entry carries no runner, workspace,
+credential, or tool content. Delegation result sealing reads one sealed
+projection and has no raw-identity path. A spawned child sits in its parent's
+directory and copies no other placement axis. A turn that fails at eligibility
+carries one origin entry and one failed marker committed together with a
+turn-failed event and no attempt row. A turn released from a wait with an
 exhausted pool and an already-issued predecessor call carries one failed marker
 committed with a fresh call-free ended attempt, a turn-failed event, and no
-terminal model call. Every new entry variant references its owning record and
-decodes fail-closed under the existing corruption rule.
+terminal model call.

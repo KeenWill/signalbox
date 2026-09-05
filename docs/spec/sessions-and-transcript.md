@@ -585,5 +585,3 @@ may return after the parent has stopped or cancelled.
   an attempt ([design](../design/sessions-and-transcript.md)).
 - Wait-transition failed-turn producer for a turn whose predecessor model call
   already issued ([design](../design/sessions-and-transcript.md)).
-- Semantic entry variants for refusal, reconciliation, mismatch, accepted risk,
-  and approval events ([design](../design/sessions-and-transcript.md)).
