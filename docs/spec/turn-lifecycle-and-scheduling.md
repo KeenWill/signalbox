@@ -110,9 +110,9 @@ The progress scope is written as exclusions rather than as the kinds that count,
 because counting an unrelated event only delays ending a wedged turn while
 missing a real one ends a working turn.
 
-An abandoned tenure fails, because it has no completion, refusal, or
-confirmed-interrupt evidence and no path retries a call automatically
-([model-call-execution](model-call-execution.md)).
+An abandoned tenure with no outstanding operation fails, because it has no
+completion, refusal, or confirmed-interrupt evidence and no path retries a call
+automatically ([model-call-execution](model-call-execution.md)).
 
 There is no process-incarnation column and no lease: under the single-daemon
 contract every nonterminal attempt observed at startup is a prior-process
