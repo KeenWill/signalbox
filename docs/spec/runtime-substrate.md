@@ -206,11 +206,12 @@ dependency on any runtime crate, and no runtime type appears in a domain or
 application signature.
 
 `prepare` performs all validation, translation, serialization, credential access
-and request construction with no provider traffic. `execute` consumes the
-capability, performs at most one provider interaction, emits observations
-synchronously and in order, and always returns a terminal report. Nothing in
-this layer retries, falls back, or repeats its unit of dispatch after the
-provider could have accepted it; the attempt-level retry rule is
+and request construction with no provider traffic, rejecting duplicate ordinary
+tool names and a named choice of an undeclared tool before any send. `execute`
+consumes the capability, performs at most one provider interaction, emits
+observations synchronously and in order, and always returns a terminal report.
+Nothing in this layer retries, falls back, or repeats its unit of dispatch after
+the provider could have accepted it; the attempt-level retry rule is
 [model-call-execution](model-call-execution.md)'s. In a subprocess adapter the
 send-commenced fact immediately precedes spawn, a spawn failure is proven
 unsent, and after a successful spawn no path respawns the CLI.
@@ -290,14 +291,17 @@ loss in both HTTP adapters. A stream that ends in any way other than its
 protocol's terminal marker is incomplete-stream evidence, never silent success:
 a Codex CLI exit of zero without the turn-completed event is boundary loss, and
 under the Claude Code CLI only a terminal result event establishes success or
-refusal, never prose. A Codex turn that completes without a streamed agent
-message takes its response from the CLI's separately written final-message file
-under the same size and redaction checks, and a streamed message outranks it. A
-finish reason observed before a stream loss is retained as a reported finish but
-is not completion or refusal evidence. Within one adapter the buffered and
-streamed decoders never disagree about the same response; an output-ceiling
-finish inside accumulated tool content is an observed fact in both, not an
-envelope defect.
+refusal, never prose; in a subprocess adapter that loss follows a zero exit,
+while a nonzero exit is definitive provider-error evidence classified from
+bounded stderr. A Codex turn that completes without a streamed agent message
+takes its response from the CLI's separately written final-message file under
+the same size and redaction checks, and a streamed message outranks it. A finish
+reason observed before a stream loss is retained as a reported finish but is not
+completion or refusal evidence; an unrecognized finish reported before the
+envelope is validated is an envelope violation instead, and no finish is
+retained. Within one adapter the buffered and streamed decoders never disagree
+about the same response; an output-ceiling finish inside accumulated tool
+content is an observed fact in both, not an envelope defect.
 
 The tool-calls-at-loss fact reports the decoded prefix and nothing beyond it:
 none-opened says no tool call opened in what the adapter decoded, never that the
