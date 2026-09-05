@@ -181,7 +181,20 @@ impl ReportedUsageCompaction {
         session: SessionId,
         observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
     ) -> Result<(), ReportedUsageCompactionError> {
-        let Some(candidate) = self.compaction_candidate(session).await? else {
+        self.compact_if_needed_for(session, observe_prepared, false)
+            .await
+    }
+
+    async fn compact_if_needed_for(
+        &self,
+        session: SessionId,
+        observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
+        include_anthropic: bool,
+    ) -> Result<(), ReportedUsageCompactionError> {
+        let Some(candidate) = self
+            .compaction_candidate(session, include_anthropic)
+            .await?
+        else {
             return Ok(());
         };
         let ReportedUsageCompactionCandidate { preview, turn } = candidate;
@@ -261,7 +274,10 @@ impl ReportedUsageCompaction {
             context_compaction_id = %applied.compaction.into_uuid(),
             "provider-reported usage exhausted reserved context headroom; queued turn compacted before activation"
         );
-        let Some(remaining) = self.compaction_candidate(session).await? else {
+        let Some(remaining) = self
+            .compaction_candidate(session, include_anthropic)
+            .await?
+        else {
             return Ok(());
         };
         let remaining_turn = remaining.turn;
@@ -299,6 +315,7 @@ impl ReportedUsageCompaction {
     async fn compaction_candidate(
         &self,
         session: SessionId,
+        include_anthropic: bool,
     ) -> Result<Option<ReportedUsageCompactionCandidate>, ReportedUsageCompactionError> {
         let Some(preview) = self
             .activation
@@ -335,10 +352,11 @@ impl ReportedUsageCompaction {
                 operation.request().model_settings().effective().fast_mode(),
             )
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
-        if self
-            .model_configuration
-            .adapter_for_provider_model(definition.provider_model())
-            == Some(ModelAdapter::Anthropic)
+        if !include_anthropic
+            && self
+                .model_configuration
+                .adapter_for_provider_model(definition.provider_model())
+                == Some(ModelAdapter::Anthropic)
         {
             return Ok(None);
         }
@@ -703,7 +721,23 @@ where
                 turn: Execution::active_resume_failure_turn(&source),
                 source,
             })?;
-            if let Some(compaction) = reported_usage_compaction {
+            if let Some(compaction) = &reported_usage_compaction {
+                if dispatch_start {
+                    match compaction.compaction_candidate(session, false).await {
+                        Ok(Some(_)) => {
+                            // A provider exchange cannot occupy the reserved
+                            // start lane. The unchanged queued turn remains
+                            // eligible for an ordinary pass to compact.
+                            return Ok(());
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let error = ContextGuardedTurnPassError::ReportedUsageCompaction(error);
+                            report_guarded_ambiguity(&execution, &error);
+                            return Err(error);
+                        }
+                    }
+                }
                 let compaction_window = occupancy_recovery
                     .as_ref()
                     .map(|recovery| recovery.compaction_window(session));
@@ -812,6 +846,38 @@ where
                             return Ok(());
                         }
                         ModelCallInputTokenCount::Unavailable => {
+                            if let Some(compaction) = &reported_usage_compaction
+                                && compaction
+                                    .compaction_candidate(session, true)
+                                    .await
+                                    .map_err(ContextGuardedTurnPassError::ReportedUsageCompaction)?
+                                    .is_some()
+                            {
+                                if dispatch_start {
+                                    // Preserve the queued preview and release
+                                    // the reserved lane. An ordinary pass will
+                                    // compact before falling through to send.
+                                    return Ok(());
+                                }
+                                let compaction_window = occupancy_recovery
+                                    .as_ref()
+                                    .map(|recovery| recovery.compaction_window(session));
+                                let observe_prepared = compaction_window
+                                    .as_ref()
+                                    .map(|(_, observer)| Arc::clone(observer));
+                                let compacted = compaction
+                                    .compact_if_needed_for(
+                                        session,
+                                        observe_prepared.as_deref(),
+                                        true,
+                                    )
+                                    .await;
+                                drop(compaction_window);
+                                compacted.map_err(
+                                    ContextGuardedTurnPassError::ReportedUsageCompaction,
+                                )?;
+                                continue;
+                            }
                             let committed = activation
                                 .commit_preview(preview)
                                 .await
@@ -854,6 +920,12 @@ where
                         .checked_add(u64::from(model.max_output_tokens()))
                         .ok_or(ContextGuardedTurnPassError::ContextStillExceeded(turn))?;
                     if requested_tokens > u64::from(model.context_window_tokens()) {
+                        if dispatch_start {
+                            // The estimate is advisory and creates no durable
+                            // state. Leave the turn queued so an ordinary pass
+                            // can recount and perform the provider compaction.
+                            return Ok(());
+                        }
                         if compacted_turn == Some(turn) {
                             match close_failed_compaction_turn(
                                 &activation,
