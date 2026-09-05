@@ -6,10 +6,10 @@ to keep. The [testing section of CONTRIBUTING.md](../../CONTRIBUTING.md#testing)
 covers test categories and coverage; test naming is in
 [AGENTS.md](../../AGENTS.md).
 
-The numbered rules apply to new and modified tests; cite them by number in
-review. Apply them to existing tests only when already changing those tests for
-another reason. Each bad→good rewrite below is condensed from a real diff in
-this repository, with identifiers shortened.
+The numbered rules apply to new and modified tests. Apply them to existing tests
+only when already changing those tests for another reason. Each bad→good rewrite
+below is condensed from a real diff in this repository, with identifiers
+shortened.
 
 ## Fixtures and assertions
 
