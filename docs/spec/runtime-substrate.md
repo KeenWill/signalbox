@@ -340,11 +340,12 @@ byte and nesting limits as known ones. The HTTP and Codex CLI decoders also
 tolerate an unknown event name and discard its bounded payload without typed
 parsing; the Claude Code CLI decoder rejects an unrecognized top-level event
 type as a stream protocol violation. Malformed or over-depth JSON in a success
-body is unintelligible-response boundary loss; over-depth streamed material and
-malformed known-event JSON are stream protocol violations. A malformed or
-over-depth body attached to a definitive error status cannot erase that
-exchange: the adapter falls back to status classification with bounded sanitized
-native material.
+body is unintelligible-response boundary loss. In the HTTP and Claude Code CLI
+decoders, over-depth streamed material and malformed known-event JSON are stream
+protocol violations; the Codex CLI decoder fails both closed as an unrecognized
+provider error. A malformed or over-depth body attached to a definitive error
+status cannot erase that exchange: the adapter falls back to status
+classification with bounded sanitized native material.
 
 Each CLI adapter mechanically disables every native facility of the pinned CLI
 that could add a model-visible tool, an instruction source, an external
