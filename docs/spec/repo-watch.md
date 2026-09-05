@@ -63,7 +63,9 @@ batch. Each dispatch record links the triggering event, rule identity and
 version, singleton key, action ordinal, session-template provenance, and the new
 session. A durable delivery intent records the reserved submit-command,
 accepted-input, turn, and cancellation candidates beside the applied link, so
-equal recovery reuses the committed batch. An obligation records exactly one
+equal recovery reuses the committed batch. A batch delivers its originating
+event when admission dispatched that event, and the target's collapsed current
+state when admission settled an obligation. An obligation records exactly one
 blocker: the occupying repository-watch dispatch or an external commissioned
 session. Every park and release of an obligation appends a journal row naming
 the count at the transition and, for a release, its operator or the causing
