@@ -6,17 +6,22 @@
 
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
+use signalbox_domain::{
+    DirectModelSelection, ModelSelectionRequest, ModuleDispatch, SessionConfigurationDefaults,
+    SessionCreationProvenance,
+};
 use signalbox_module_repo_watch_v2::{
-    EventAdmission, PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryState,
-    RuleAdmission, WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules,
+    CreateSessionCommandFactory, DispatchAdmission, DispatchReferenceGenerator, EventAdmission,
+    PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryState, RuleAdmission,
+    WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules, plan_repository_event,
 };
 use signalbox_ownership_seam::{
-    BranchName, CommitSha, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventContentIdentityV1, RepoWatchEventId,
-    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
-    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
-    RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope, RepositorySlug,
-    SessionTemplateName, WorkflowName,
+    BranchName, CommitSha, CreateSession, DurableCommandId, OffsetDateTime, PullRequestBody,
+    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventContentIdentityV1, RepoWatchEventId, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventKindNameV1, RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepositorySlug, SessionTemplateName, StartGate, WorkflowName,
 };
 use signalbox_persistence::{
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
@@ -33,6 +38,37 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_repo_watch_v2";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+struct FixedDispatchIds;
+
+impl DispatchReferenceGenerator for FixedDispatchIds {
+    fn next_dispatch(&mut self) -> RepoWatchDispatchId {
+        RepoWatchDispatchId::from_uuid(Uuid::from_u128(16))
+    }
+}
+
+struct FixtureSessionFactory;
+
+impl CreateSessionCommandFactory for FixtureSessionFactory {
+    type Error = std::convert::Infallible;
+
+    fn create_session(
+        &mut self,
+        dispatch: RepoWatchDispatchId,
+        _template: &SessionTemplateName,
+        _event: &RepoWatchEvent,
+    ) -> Result<CreateSession, Self::Error> {
+        Ok(CreateSession::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(17)),
+            SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+                dispatch,
+            }),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(Uuid::from_u128(18)),
+            )),
+        ))
+    }
+}
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
     let container = Postgres::default()
@@ -172,6 +208,24 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .append_event(&event, identity, observed_at, retain_until)
             .await?,
         EventAdmission::Replayed
+    );
+    let mut ids = FixedDispatchIds;
+    let mut factory = FixtureSessionFactory;
+    let plans = plan_repository_event(std::slice::from_ref(&rule), &event, &mut ids, &mut factory)?;
+    assert_eq!(plans.len(), 1);
+    let signalbox_ownership_seam::SessionCommandPayload::CreateSession(created) =
+        plans[0].command().clone().into_payload()
+    else {
+        panic!("matching dispatch action must produce create_session");
+    };
+    assert_eq!(created.start_gate(), StartGate::Held);
+    assert_eq!(
+        store.record_command(&plans[0], observed_at).await?,
+        DispatchAdmission::Inserted
+    );
+    assert_eq!(
+        store.record_command(&plans[0], observed_at).await?,
+        DispatchAdmission::Replayed
     );
 
     let body = br#"{"action":"opened"}"#;

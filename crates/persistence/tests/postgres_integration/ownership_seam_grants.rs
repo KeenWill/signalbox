@@ -51,6 +51,7 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
         module_tables,
         [
             "core_event_cursor",
+            "dispatch_ledger",
             "frontier",
             "gh_event",
             "pr_state",

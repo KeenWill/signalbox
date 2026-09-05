@@ -12,14 +12,15 @@ pub use signalbox_application::{
     RepoWatchEventOccurrenceV1, derive_repo_watch_events,
 };
 pub use signalbox_domain::{
-    BranchName, CheckConclusion, CommitSha, CreateSession, DurableCommandId, GoalUserAction,
-    GoalUserCommand, PullRequestBody, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
-    RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
-    RepoWatchEventTarget, RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
-    RepoWatchRuleVersion, RepoWatchSingletonScope, RepositorySlug, SessionId,
-    SessionLifecycleCommand, SessionLifecycleOperation, SessionTemplateName, SubmitInput,
-    WorkflowName,
+    BranchName, CheckConclusion, CommitSha, CreateSession, DescendantTerminationScope,
+    DurableCommandId, FinishCondition, GoalUserAction, GoalUserCommand, PullRequestBody,
+    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
+    RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepositorySlug, SessionId, SessionLifecycleCommand,
+    SessionLifecycleOperation, SessionOwnership, SessionTemplateName, StartGate, StopStickiness,
+    SubmitInput, WorkflowName,
 };
 pub use signalbox_persistence::mapping::GoalEventDiscriminator as GoalEventKind;
 pub use signalbox_persistence::outbox::{
@@ -203,6 +204,19 @@ pub struct SessionCommand {
     payload: SessionCommandPayload,
 }
 
+/// Stable discriminator stored in a module's dispatch ledger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionCommandKind {
+    /// Create one session.
+    CreateSession,
+    /// Submit one input.
+    SubmitInput,
+    /// Mutate one goal lineage.
+    Goal,
+    /// Mutate session lifecycle or ownership.
+    Lifecycle,
+}
+
 impl SessionCommand {
     /// Admits an existing typed create-session command.
     pub const fn create_session(command: CreateSession) -> Self {
@@ -247,6 +261,26 @@ impl SessionCommand {
     /// Consumes the wrapper and returns the existing typed core command.
     pub fn into_payload(self) -> SessionCommandPayload {
         self.payload
+    }
+
+    /// Returns the durable command identity claimed by the checked payload.
+    pub const fn command_id(&self) -> DurableCommandId {
+        match &self.payload {
+            SessionCommandPayload::CreateSession(command) => command.command_id(),
+            SessionCommandPayload::SubmitInput(command) => command.command_id(),
+            SessionCommandPayload::Goal(command) => command.command_id(),
+            SessionCommandPayload::Lifecycle(command) => command.command_id(),
+        }
+    }
+
+    /// Returns the ledger discriminator for the checked payload family.
+    pub const fn kind(&self) -> SessionCommandKind {
+        match self.payload {
+            SessionCommandPayload::CreateSession(_) => SessionCommandKind::CreateSession,
+            SessionCommandPayload::SubmitInput(_) => SessionCommandKind::SubmitInput,
+            SessionCommandPayload::Goal(_) => SessionCommandKind::Goal,
+            SessionCommandPayload::Lifecycle(_) => SessionCommandKind::Lifecycle,
+        }
     }
 }
 
