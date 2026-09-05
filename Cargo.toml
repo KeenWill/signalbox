@@ -9,6 +9,7 @@ members = [
     "crates/blob-store",
     "crates/blob-store-filesystem",
     "crates/blob-store-s3",
+    "crates/cargo-bin-resolver",
     "crates/egress-transport",
     "crates/conversation-import-claude-code",
     "crates/conversation-import-codex",

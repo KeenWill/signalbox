@@ -196,9 +196,8 @@ in
   # hard-coded target/debug path would then either fail outright or silently
   # exec a stale binary left over from an earlier build. Resolution and the
   # matching refusal for a target this host cannot run follow the same
-  # approach as the dev-instance daemon launcher below, factored into
-  # tooling/resolve-cargo-bin.sh so it has its own regression coverage
-  # (tooling/test_resolve_cargo_bin.py).
+  # approach as the dev-instance daemon launcher below, factored into the
+  # signalbox-cargo-bin-resolver crate.
   #
   # Known limitation, recorded rather than handled: the final `exec` below
   # runs the resolved binary directly, not through `cargo run`, so it does not
@@ -215,8 +214,8 @@ in
       executable="$(
         cd "$DEVENV_ROOT" || exit $?
         env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
-          "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
-            "$DEVENV_ROOT/Cargo.toml" "$DEVENV_ROOT/target" \
+          cargo run --quiet -p signalbox-cargo-bin-resolver -- \
+            "$DEVENV_ROOT/Cargo.toml" \
             signalbox-client signalbox
       )" || exit $?
       exec "$executable" "$@"
@@ -538,28 +537,23 @@ in
       # registry and the ambient certificate variables to reach crates.io.
       # Only the daemon itself runs scrubbed.
       #
-      target_directory="$(
-        cargo metadata --no-deps --format-version 1 |
-          python3 -c "import json, sys; print(json.load(sys.stdin)['target_directory'])"
-      )"
-
       # Resolve each separately packaged executable through Cargo's artifact
       # stream. The shared resolver also refuses a configured foreign target
       # rather than letting a later exec fail or select a stale host artifact
       # from an assumed target/debug layout.
       daemon_executable="$(
-        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
-          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+        cargo run --quiet -p signalbox-cargo-bin-resolver -- \
+          "$DEVENV_ROOT/Cargo.toml" \
           signalboxd signalboxd
       )"
       supervisor_executable="$(
-        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
-          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+        cargo run --quiet -p signalbox-cargo-bin-resolver -- \
+          "$DEVENV_ROOT/Cargo.toml" \
           signalbox-tools-exec signalbox-exec-supervisor
       )"
       bridge_executable="$(
-        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
-          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+        cargo run --quiet -p signalbox-cargo-bin-resolver -- \
+          "$DEVENV_ROOT/Cargo.toml" \
           signalbox-model-runtime-claude-cli signalbox-claude-mcp-bridge
       )"
 
