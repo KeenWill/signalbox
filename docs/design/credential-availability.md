@@ -153,8 +153,10 @@ spec page states.
   call exists; a wait is selected from that revision's exhaustion value, never
   from live configuration, and the wait row carries that revision as its frozen
   policy identity. A prepared call pins the same revision.
-- The attempt disposition WithoutStop(YieldedToDurableWait) exists in the domain
-  and has no writer. Nothing writes it for any purpose other than a parked wait.
+- A parked wait reuses the WithoutStop(YieldedToDurableWait) disposition that
+  completed tool-bearing calls and runner-recovery waits already write; the wait
+  row, not the disposition, identifies a credential-availability park, and no
+  reader may infer one from the disposition alone.
 - The pre-call exhaustion header row keeps its present shape; member evidence
   rows attach to it in a new table rather than replacing it.
 - The pre-call producer's commit shape, a `TurnFailed` appended after the ended
