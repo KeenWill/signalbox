@@ -32,17 +32,24 @@ provider-reported model is a third fact, which the adapter surfaces through an
 observation and the terminal evidence.
 
 `ModelRuntime` has two stages. `prepare` does all work that needs no provider
-traffic and returns an opaque one-shot capability or a typed failure. `execute`
-consumes that capability, performs at most one provider interaction and returns
-a terminal report. The unit of irrevocable dispatch is one HTTPS request for a
-direct adapter and one process spawn for a subprocess adapter. The caller side
-of that boundary is [model-call-execution](model-call-execution.md) scope.
+traffic and returns an opaque one-shot capability or a typed failure.
+Preparation distinguishes a trustworthy failure, an unsupported operation or an
+unusable or unavailable credential, from a construction defect; the bridge maps
+only the trustworthy failure to a known failure and fails closed on a defect.
+`execute` consumes that capability, performs at most one provider interaction
+and returns a terminal report. The unit of irrevocable dispatch is one HTTPS
+request for a direct adapter and one process spawn for a subprocess adapter. The
+caller side of that boundary is [model-call-execution](model-call-execution.md)
+scope.
 
 Observations are transient progress facts emitted during execute: the request
 about to reach the transport, the correlated exchange opening, the
 provider-reported model, text, thinking and tool-argument deltas, tool
-proposals, usage and the finish reason. The send-commenced fact marks the
-acceptance boundary: from that point the provider may have accepted the request.
+proposals, usage and the finish reason. An adapter puts the provider's request
+or session identifier, and the HTTP status where there is one, in the exchange
+facts it reports when the exchange opens and retains in terminal evidence. The
+send-commenced fact marks the acceptance boundary: from that point the provider
+may have accepted the request.
 
 Terminal evidence divides three ways. Definitive evidence is a completed
 response, a provider refusal, a classified provider error with its native facts
@@ -207,7 +214,8 @@ application signature.
 
 `prepare` performs all validation, translation, serialization, credential access
 and request construction with no provider traffic, rejecting duplicate ordinary
-tool names and a named choice of an undeclared tool before any send. `execute`
+tool names, an ordinary tool whose name equals the structured-output contract
+name, and a named choice of an undeclared tool before any send. `execute`
 consumes the capability, performs at most one provider interaction, emits
 observations synchronously and in order, and always returns a terminal report.
 Nothing in this layer retries, falls back, or repeats its unit of dispatch after
@@ -300,8 +308,10 @@ reason observed before a stream loss is retained as a reported finish but is not
 completion or refusal evidence; an unrecognized finish reported before the
 envelope is validated is an envelope violation instead, and no finish is
 retained. Within one adapter the buffered and streamed decoders never disagree
-about the same response; an output-ceiling finish inside accumulated tool
-content is an observed fact in both, not an envelope defect.
+about an output-ceiling finish inside accumulated tool content, which is an
+observed fact in both and not an envelope defect; an unrequested Anthropic
+fallback block is the exception, unintelligible-response loss in the buffered
+decoder and a stream protocol violation in the streamed one.
 
 The tool-calls-at-loss fact reports the decoded prefix and nothing beyond it:
 none-opened says no tool call opened in what the adapter decoded, never that the
@@ -316,12 +326,17 @@ protocol violation, and a conflict stays one on a mid-stream error record. An
 error record that reports no completion id is definitive provider-error
 evidence. Under the Claude Code CLI the first assistant event may name the
 provider-resolved model and every later assistant event must repeat that value.
+Claude events stay bound to the initialized exchange: a result carrying a
+different session id, or an assistant event carrying a different first message
+id, is a protocol violation.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
 zero, a total-only report records nothing because no adapter distributes a
 total, and no cache-creation count is fabricated. A later usage report replaces
-the fields it carries and preserves the fields it omits.
+the fields it carries and preserves the fields it omits. OpenAI streamed success
+requires the final usage chunk before the stream ends, and Anthropic requires
+input usage at message start and final output usage before message stop.
 
 The shared framer bounds every line and each record's retained content, makes a
 framing failure terminal for the stream, and distinguishes a truncated final
@@ -469,10 +484,14 @@ materialized when the job ends.
 
 `OperatorFailureClass` states only a failure's severity and carries no user
 content, so shared telemetry may emit it while the underlying error keeps its
-diagnostic detail internally. The sanitized cause code stating what happened is
-owned by the page that owns the behavior raising it:
-[model-call-execution](model-call-execution.md) for provider and model-call
-causes, [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) for
+diagnostic detail internally. The class is one of infrastructure, which states
+whether the commit is ambiguous, fail-closed corruption, identity collision, or
+a caller or hub defect; the daemon treats corruption and caller defects as fatal
+and distinguishes an ambiguous infrastructure failure from a nonambiguous one.
+The sanitized cause code stating what happened is owned by the page that owns
+the behavior raising it: [model-call-execution](model-call-execution.md) for
+provider and model-call causes,
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) for
 turn-liveness causes.
 
 ## Planned
