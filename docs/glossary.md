@@ -30,13 +30,13 @@ The caller-supplied immutable content value owned by one accepted input. See
 
 One user-global idempotency identity for a durably handled caller command, whose
 claimed canonical payload and terminal result make replay deterministic. See
-[durable command records](spec/identity-and-commands.md#durable-command-records).
+[durable command records](spec/identity-and-commands.md).
 
 ## Actor
 
 The typed provenance fact recording which kind of agency initiated a durable
 command or recorded transition. See
-[actor attribution](spec/identity-and-commands.md#actor-attribution).
+[actor attribution](spec/identity-and-commands.md).
 
 ## Turn
 
