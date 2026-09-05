@@ -50,10 +50,10 @@ once every blocked finding has been reconciled to a fixed or surviving state,
 and publication becomes eligible against the inventory that reconciliation
 leaves.
 
-After publication completes, a continuation records the external state of the
-posted objects through an external-context-import pass. Each report appends the
-next observation or binds a no-change result; the continuation never infers
-external state from the publication result.
+After publication completes, a continuation runs one external-context-import
+pass per posted object. Each pass reports that object's state against its
+reservation and appends the next observation or binds a no-change result; the
+continuation never infers external state from the publication result.
 
 ## Constraints on present code
 
@@ -93,5 +93,5 @@ canonical key.
 A blocked repair, once its findings are reconciled, reaches publication without
 a new attempt.
 
-A completed publication is followed by an import pass whose observations or
-no-change results cover every posted object.
+A completed publication is followed by one import pass per posted object, and
+each pass binds that object's observation or no-change result.
