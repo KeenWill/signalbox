@@ -33,9 +33,12 @@ The planner in `apps/signalboxd/src/goal_mode.rs` resumes an execution-failure
 block on an owned session automatically and within bounds. It derives from the
 event history how many attempts the current run has spent, schedules one resume
 after a backoff, and writes into each block's need text either the scheduled
-resumption or the operator repair. At startup the daemon finds execution-failure
-blocks whose need promises resumption and treats their lost timers as
-immediately due.
+resumption or the operator repair. When a block's commit acknowledgement is
+lost, the daemon re-reads the lineage with bounded retries and arms the
+execution-failure block it finds there. A resume attempt the database leaves
+unsettled is retried within the same bound. Startup repairs the rest: the daemon
+finds execution-failure blocks whose need promises resumption and treats their
+lost timers as immediately due.
 
 Command identity and replay are owned by
 [identity and commands](identity-and-commands.md), turn execution by
@@ -45,9 +48,6 @@ by [tool loop](tool-loop.md), session state and the parked rule by
 [process protocol](process-protocol.md).
 
 ## Decisions
-
-Goal mode is reserved for long-horizon work of hours or days; routine dispatch
-uses plain sessions with vendor compaction.
 
 A statement is immutable after admission and no edit operation exists; a change
 of scope is a supersede, which commissions a new generation and leaves the old
@@ -83,7 +83,8 @@ events and commands reserve no delegation variant.
 ## Contracts
 
 When an execution failure blocks a session that has an owner, the daemon
-automatically resumes the session within a bound. The daemon derives the command
+automatically resumes the session within a bound. The two execution-failure
+classes that require an operator are excluded. The daemon derives the command
 identity of that resumption from the session and the blocked event it responds
 to; it never generates a new identity. A retry therefore cannot resume the
 session twice.
@@ -91,9 +92,10 @@ session twice.
 The current state is derived only by replaying the session's append-only goal
 event stream; no mutable goal-state column is authoritative.
 
-On an unmonitored session an execution-failure block names no resumption; when
-the session is adopted, the daemon replaces that need with the
-scheduled-resumption need under the session lock and then arms it.
+On an unmonitored session an execution-failure block names no resumption. When
+the session is adopted, the daemon appends an effective-need overlay naming the
+scheduled resumption under the session lock and arms it; the blocked event
+itself is unchanged.
 
 The automatic-resumption run is the trailing alternation of execution-failure
 blocks and the resumptions that answered them; every other event ends it, and a
