@@ -34,9 +34,10 @@ delegation spawn creates a child session from inside one. `CreateSession`
 creates a session with no ancestry, from explicit defaults or from a named
 session template. `CreateSessionFromImportedFrontier` creates a session seeded
 with the semantic entries of an imported prefix and links it to that seed
-frontier through an `ImportedSessionSeed`. Either family may carry a path-scoped
-placement, which bounds which other sessions' transcripts the session may read,
-and a runner placement, which [runner-protocol](runner-protocol.md) owns.
+frontier through an `ImportedSessionSeed`. `CreateSession` may carry a
+path-scoped placement, which bounds which other sessions' transcripts the
+session may read; an imported-frontier session is created pathless. Runner
+placement belongs to [runner-protocol](runner-protocol.md).
 
 Session configuration defaults are immutable numbered epochs holding the model
 selection, the dangerous-tool blanket, and an optional system prompt. A session
@@ -55,8 +56,9 @@ its dedicated call produced and the inclusive range it stands for. An imported
 entry carries one normalized imported content value with its speaker
 attestation. A model-identity entry marks where executed history crossed to a
 different frozen model selection. Delegation entries record a delegated task, a
-delegation message, and a delivered result. Each turn ends with exactly one
-terminal marker: completed, cancelled, or failed.
+delegation message, and a delivered result. A completed, cancelled, or failed
+turn ends with exactly one terminal marker; refused, reconciliation-required,
+and retired turns have none.
 
 A `ContextCompaction` has five correlated immutable facts: its identity and
 optional predecessor, the source frontier, a dedicated model call, the
@@ -202,11 +204,12 @@ content, never transcript access.
 
 ## Contracts
 
-A session that is waiting on a human is in the parked state and no other. When a
-module parks a thing that is or contains a session, the module also moves that
-session to parked. One classifier derives the attention states shown to
-operators from durable facts. A read that encounters a state it does not
-recognize returns an error rather than a guess.
+An owned session that waits for an operator is in the parked state and no other;
+a pending tool-approval decision is the separate waiting state. A module that
+parks something wrapping a session drives the session itself to parked.
+Attention states shown to operators are derived from durable facts by one
+classifier, and a read that encounters a state it does not recognize returns an
+error rather than a guess.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
@@ -217,7 +220,7 @@ exchange it covers.
 
 A turn binds its configuration when its origin is accepted. Replacing defaults
 later never rebinds it, whether the turn is queued, running, or finished. A
-delegated child copies the parent turn's frozen configuration, never the
+delegated child copies the parent turn's frozen defaults epoch, never the
 parent's current defaults pointer.
 
 The application's `CreateSession` request has no cause or ancestry input and
@@ -226,28 +229,28 @@ records the interactive cause as well. A command naming a source-session
 ancestry is well formed but fails preparation with a nonterminal error that
 claims no command identifier.
 
-Replay equality for explicit creation compares provenance, the complete
-defaults, and the placement. Template-derived creation compares provenance,
-placement, and the caller-supplied template name and ignores the daemon-resolved
-bundle, so the same command and name return the first session after a template
-edit. The two modes are never equal under one command identity. First handling
-still stores and cross-checks the complete resolved defaults and digest,
-establishes defaults version one from that copy, and seals the template name and
-digest alongside the session.
+Replay equality in both modes compares provenance, placement, start gate,
+ownership, and finish condition. Explicit creation also compares the complete
+defaults; template-derived creation compares the caller-supplied template name
+instead and ignores the daemon-resolved bundle, so the same command and name
+return the first session after a template edit. The two modes are never equal
+under one command identity. First handling still stores and cross-checks the
+complete resolved defaults and digest, establishes defaults version one from
+that copy, and seals the template name and digest alongside the session.
 
-Placement participates in replay equality in both modes; replaying one command
-identity under a different placement, including where the first handling had
-none, is conflicting reuse. Equal replay returns the recorded receipt, which may
-name a different session than the freshly minted candidate, and the unused
-candidate is discarded.
+Replaying one command identity under a different placement, including where the
+first handling had none, is conflicting reuse. Equal replay returns the recorded
+receipt, which may name a different session than the freshly minted candidate,
+and the unused candidate is discarded.
 
 The committing transaction of either family inserts the session row, its
-scheduler registration, defaults version one, the current-defaults pointer, the
-typed command record, the registry claim, any initial placement record, and the
-session-created outbox event together. A visible session never names a placement
-its creation command did not carry, and a carried placement is never dropped
-between the claim and the session. Every table in this set is append-only except
-the current-defaults pointer.
+lifecycle satellite carrying the start gate, ownership, and finish condition,
+its scheduler registration, defaults version one, the current-defaults pointer,
+the typed command record, the registry claim, any initial placement record, and
+the session-created outbox event together. A visible session never names a
+placement its creation command did not carry, and a carried placement is never
+dropped between the claim and the session. Every table in this set is
+append-only except the current-defaults pointer.
 
 The daemon resolves the addressed imported aggregate to its canonical sealed
 frontier before constructing the command; the frontier names its own imported
