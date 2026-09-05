@@ -4,7 +4,7 @@ This subsystem gives each identity-bearing durable fact an opaque identity,
 records every caller command once so replay is deterministic, and records who
 issued a command without granting that record any authority.
 
-## Map
+## Overview
 
 Signalbox names each identity-bearing durable fact with a UUID-backed identity
 type and each caller command with one durable command identifier. Rows keyed by
@@ -51,7 +51,7 @@ command; a session's creation cause, owned by
 [sessions-and-transcript](sessions-and-transcript.md), answers why the session
 exists, and neither fact substitutes for the other.
 
-## Decisions
+## Design decisions
 
 The daemon accepts any non-sentinel RFC 9562 UUID as a `DurableCommandId`
 without checking its version bits. Why: idempotency comes from the user-global
@@ -82,7 +82,7 @@ Typed error `Debug` and `Display` output may contain a raw command identifier
 and is an internal value; telemetry logs classification fields, never a
 formatted error.
 
-## Contracts
+## Boundary contracts
 
 Every command handler inspects the registry for the command identifier before it
 validates anything against current state. Replaying the same command with the
@@ -180,7 +180,7 @@ content-derived identifier, reader identity, bytes, extracted text, filename,
 declared type, parser message, stderr, path, or credential. The general rule for
 what errors and logs may contain is in [process-protocol](process-protocol.md).
 
-## Not built
+## Planned
 
 - Registry kinds and typed records for the runner recovery commands (replace,
   abandon, promote): [design](../design/identity-and-commands.md).

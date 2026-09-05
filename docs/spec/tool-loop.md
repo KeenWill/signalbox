@@ -667,7 +667,7 @@ nothing here; ambiguity is carried by the recovery wait above. Preflight
 failures that never reach admission — unknown names and argument-decode failures
 — are likewise silent, being model-authored rather than deployment facts.
 Telemetry field rules are owned by
-[identity-and-commands](identity-and-commands.md#contracts).
+[identity-and-commands](identity-and-commands.md#boundary-contracts).
 
 An interrupt against a tool recovery wait does not reinterpret or erase the
 ambiguous attempt. It materializes exactly one reference-only result per request

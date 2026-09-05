@@ -13,7 +13,7 @@ replace-session-defaults gains an actor field, and create-session adoption stays
 an explicit maintainer choice, so a program-driven turn is never recorded as
 user-issued.
 
-## Shape
+## Design
 
 Three runner recovery command kinds join the registry and its closed kind
 constraint: replace a lost runner, abandon a lost runner, and promote a pending
@@ -74,7 +74,7 @@ a maintainer choice made explicitly; every existing version carries no actor and
 reconstitutes without one, and a version that adds the field states how each
 earlier version reconstitutes.
 
-## Constraints on present code
+## Compatibility constraints
 
 - The actor storage convention stays extensible to a program arm, and nothing
   assumes the submit-input actor is always the user.
@@ -83,7 +83,7 @@ earlier version reconstitutes.
 - Runner replacement is the only new kind that spans more than one transaction;
   every other new kind is one claim-and-terminal-result transaction.
 
-## Acceptance
+## Acceptance criteria
 
 - Each new command kind has a registry kind, a typed record family under the
   deferred typed-record trigger and the append-only trigger, a hand-written
