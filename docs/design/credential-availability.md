@@ -120,11 +120,12 @@ conflated: the admission that finds every candidate at its bound and inserts the
 wait; the reservation completion that publishes its wake; the evidence rewrite
 by which a woken transaction that still finds every candidate at its bound
 replaces the wait's reservation identities and stays parked; and the release
-that consumes the wait and prepares a call. An exhausted wait has four: the
-admission; the rewrite from a contended wait; the evidence rewrite by which a
-woken transaction that reruns admission and still selects an exhausted wait
-replaces the wait's exclusion evidence and deadline from current state and stays
-parked, so a past deadline never wakes it again; and the release. Lock order is
+that consumes the wait and creates a fresh Prepared successor attempt. An
+exhausted wait has four: the admission; the rewrite from a contended wait; the
+evidence rewrite by which a woken transaction that reruns admission and still
+selects an exhausted wait replaces the wait's exclusion evidence and deadline
+from current state and stays parked, so a past deadline never wakes it again;
+and the release. Lock order is
 [persistence protocol](../spec/persistence-protocol.md)'s.
 
 Wire: a parked turn projects an active transcript turn state that retains the
@@ -189,9 +190,9 @@ spec page states.
 - A wake that reruns admission and still selects an exhausted wait rewrites the
   wait in place with current evidence and deadline; the turn stays parked and
   opens no attempt.
-- A contended wait is released by a durable member-availability update or an
-  operator clear that readmits an excluded member it records, and the released
-  chain admits that member.
+- A durable member-availability update or an operator clear that readmits an
+  excluded member a contended wait records makes that wait eligible to admit the
+  member; the wake grants eligibility, not release.
 - An accepted stop against a parked wait terminalizes Cancelled with
   `TurnCancelled`, never Failed.
 - A restart alone releases no wait; retained contended waits are re-evaluated

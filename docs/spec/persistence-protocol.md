@@ -2127,23 +2127,24 @@ the pool it atomically rewrites its own wait's evidence to the live reservation
 identities now holding the bound and stays parked; where every formerly bounded
 member has become durably excluded, contention is over and the machine's
 wait-selection rule decides, so the wait is rewritten to the exhausted form
-exactly where an exclusion a wake can clear remains and **no wait is stored at
-all otherwise**, which instead terminalizes the turn with the cause that table
-gives its row. Deriving it from the surviving exclusions rather than from the
-configured value is what stops a `park` pool whose members are all excluded by
-this turn's own chain exclusions from being rewritten into a wait no wake could
-ever release. Storage never keeps a turn parked under a policy that says to fail
-it, and never parks one nothing could wake. Because the rewrite holds the
-capacity rows of every bounded member it names, a concurrent completion cannot
-release one of them between the read and the commit. A deferred constraint
-therefore never has to reject a losing waiter's call, and no stored wait names a
-released reservation or misses the only wake that concerned it. Entering either
-wait ends the call-free current attempt as `WithoutStop(YieldedToDurableWait)`
-in the same transaction. Release atomically consumes the wait and creates its
-fresh `Prepared` successor attempt; `stop_turn` instead atomically consumes it,
-creates the fresh immediate-successor attempt, applies the interrupt proof, ends
-that attempt `AfterCancellation(Cancelled)`, and terminalizes the turn. Each
-reservation has a closed `pending_spawn` state with no process identity and a
+exactly where some member's every active exclusion is one a wake can clear and
+**no wait is stored at all otherwise**, which instead terminalizes the turn with
+the cause that table gives its row. Deriving it from the surviving exclusions
+rather than from the configured value is what stops a `park` pool whose members
+are all excluded by this turn's own chain exclusions from being rewritten into a
+wait no wake could ever release. Storage never keeps a turn parked under a
+policy that says to fail it, and never parks one nothing could wake. Because the
+rewrite holds the capacity rows of every bounded member it names, a concurrent
+completion cannot release one of them between the read and the commit. A
+deferred constraint therefore never has to reject a losing waiter's call, and no
+stored wait names a released reservation or misses the only wake that concerned
+it. Entering either wait ends the call-free current attempt as
+`WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
+consumes the wait and creates its fresh `Prepared` successor attempt;
+`stop_turn` instead atomically consumes it, creates the fresh
+immediate-successor attempt, applies the interrupt proof, ends that attempt
+`AfterCancellation(Cancelled)`, and terminalizes the turn. Each reservation has
+a closed `pending_spawn` state with no process identity and a
 `spawned { process_group_identity }` state carrying the child process group's
 reuse-safe host identity. Successful spawn replaces `pending_spawn` with
 `spawned` immediately, and that attach is guarded on the reservation still being
