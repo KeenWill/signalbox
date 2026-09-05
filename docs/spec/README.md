@@ -12,12 +12,11 @@ the conventions the pages follow.
 A normative claim about a subsystem lives in exactly one of three places;
 [architecture.md](../architecture.md) and [target-model.md](../target-model.md)
 are orientation documents outside that rule. `docs/spec/` states built behavior
-only. `docs/design/` holds one document per subsystem with committed but unbuilt
-design, written for the agent that will build it; landed material is removed as
-it lands, and the document is deleted when no planned capability remains.
-[open-questions.md](../open-questions.md) holds undecided items. Nothing on a
-spec page describes behavior the code lacks except the lines under Planned. Two
-normative surfaces sit outside those homes:
+only, except for the lines under Planned. `docs/design/` holds one document per
+subsystem with committed but unbuilt design, written for the agent that will
+build it; landed material is removed as it lands, and the document is deleted
+when no planned capability remains. [open-questions.md](../open-questions.md)
+holds undecided items. Two normative surfaces sit outside those homes:
 [domain-spine.md](../domain-spine.md) mirrors the public API shapes of the
 domain and application crates.
 
@@ -68,11 +67,11 @@ number stays when it defines a wire or storage contract, and goes when it only
 records when behavior changed. A page says what the system does, not what a
 reader should do. Code identifiers appear only where the map names a core
 mechanism, a decision names the thing it decides, or a contract names its
-enforcer. A contract also names an identifier that is itself contract data, such
-as a field name, a discriminator, or a preimage. A contract names its enforcer
-by source path, crate, type, or function. Pages have no Open edges section and
-no paragraph labelled as committed but unimplemented. Every link targets a page,
-never an anchor, unless the anchor is a heading on the linking page.
+enforcer or an identifier that is itself contract data, such as a field name, a
+discriminator, or a preimage. A contract names its enforcer by source path,
+crate, type, or function. Pages have no Open edges section and no paragraph
+labelled as committed but unimplemented. Every link targets a page, never an
+anchor, unless the anchor is a heading on the linking page.
 
 ## Pages
 

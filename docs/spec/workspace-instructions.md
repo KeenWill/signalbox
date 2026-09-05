@@ -13,8 +13,8 @@ a model-runtime adapter, finds them, records them, and proves per turn what a
 model could see. Model-runtime adapters run with their native document, rules,
 and skill loaders disabled ([runtime-substrate.md](runtime-substrate.md)).
 
-There are four stages. Discovery finds candidates. Registration validates a
-candidate and gives it a typed identity and a source hash. Both are built.
+There are four stages. Discovery finds candidates, and registration validates a
+candidate and gives it a typed identity and a source hash; both are built.
 Planned eligibility decides which registered bundles one session may use, and
 planned admission places a bundle's rendered text in one turn's model input;
 both exist only as the empty per-turn record described below.
@@ -26,9 +26,9 @@ two kinds of root: the session's daemon-local resolved workspace, and each
 instruction directory that configuration registers
 ([configuration-and-credentials.md](configuration-and-credentials.md)). Under
 both kinds of root it skips version-control metadata and build or dependency
-outputs; under the workspace root it also skips nested repositories. It stops at
-fixed safety limits. One scan produces a discovery snapshot: the roots it
-walked, the candidates it found, a typed finding for every entry it could not
+outputs, under the workspace root it also skips nested repositories, and it
+stops at fixed safety limits. One scan produces a discovery snapshot: the roots
+it walked, the candidates it found, a typed finding for every entry it could not
 read or classify, and whether the scan was complete.
 
 Registration turns each candidate into an `InstructionBundleRegistration`
@@ -39,9 +39,9 @@ source content is the exact bytes of the agent document or the skill's
 to the session. A skill's frontmatter is parsed for its name and description.
 
 The per-turn record is the `TurnInstructionManifest`. A turn that reaches
-preparation owns one turn-start manifest, which names the turn's discovery and
-carries the hashes of the turn's eligibility set and admitted set, both empty.
-It is the only manifest the daemon stores. Two paths record it
+preparation owns one turn-start manifest, the only manifest the daemon stores;
+it names the turn's discovery and carries the hashes of the turn's eligibility
+set and admitted set, both empty. Two paths record it
 ([turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md)). On the
 ordinary path the daemon scans after activation and records the manifest in a
 transaction of its own while the turn is still active; a turn that stops being

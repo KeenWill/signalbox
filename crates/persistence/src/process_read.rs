@@ -1698,7 +1698,7 @@ impl ProcessReadRepository {
         // An existing session must carry a current pointer that resolves to
         // an installed epoch even when a named historical epoch is selected:
         // a missing pointer or a dangling pointer is corruption, not a
-        // servable read ().
+        // servable read.
         let current_version: Option<Decimal> = row.try_get("current_version")?;
         if current_version.is_none() {
             return Err(ProcessReadCorruption::Missing("current defaults pointer").into());

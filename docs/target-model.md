@@ -37,9 +37,9 @@ approvals, delegated sub-agent sessions, forking from any earlier point,
 artifacts with provenance, and live reconnect that never lies about what is
 final — while keeping the properties those products rarely guarantee: sessions
 and accepted work survive process restarts and client disconnects
-([recovery posture](architecture.md#recovery-posture), , ), every external
-effect is honestly classified including ambiguity (), and provenance for who or
-what caused each change is reconstructible after the fact.
+([recovery posture](architecture.md#recovery-posture)), every external effect is
+honestly classified including ambiguity, and provenance for who or what caused
+each change is reconstructible after the fact.
 
 ## Concept catalog
 
@@ -134,15 +134,15 @@ Dispatching -> Succeeded | KnownFailed | Ambiguous
 ```
 
 Accepted rules that already shape this design: a denied request can never create
-an authorized physical attempt (); terminal outcomes never reopen (); turn
+an authorized physical attempt; terminal outcomes never reopen; turn
 terminalization must close every authorized-but-undispatched request so nothing
 can dispatch it after the slot is released, and an interrupt that closes an
 approval wait terminally cancels the owned request. The request belongs to its
 turn, not to one attempt, so it survives approval pauses, client reconnects,
 daemon restarts, and replacement turn attempts. Changed arguments or a changed
 tool revision are a new request, never a mutation. Request-level `Ambiguous`
-derives from attempt evidence: physical ambiguity is recorded on the attempt ()
-and effect policy decides whether another attempt is ever permitted ().
+derives from attempt evidence: physical ambiguity is recorded on the attempt and
+effect policy decides whether another attempt is ever permitted.
 
 ### Physical tool attempts (target)
 
@@ -154,9 +154,9 @@ Prepared -> CancelledBeforeExecution
 Each attempt records its executor placement, dispatch identity, timing, output,
 and outcome classification. Dispatch and result acceptance are fenced by the
 attempt-plus-generation pair, so a stale attempt or superseded dispatch cannot
-advance current state (, ). An external write whose acknowledgement is lost ends
-`Ambiguous` and is never blindly repeated (, ); a second attempt for the same
-request exists only where effect policy proves repetition safe.
+advance current state. An external write whose acknowledgement is lost ends
+`Ambiguous` and is never blindly repeated; a second attempt for the same request
+exists only where effect policy proves repetition safe.
 
 ### Approval algebra (target)
 
@@ -169,7 +169,7 @@ transactional: `AwaitingApproval` plus a matching unexpired approval becomes
 `Ready` in the same transaction that closes the turn's approval wait and creates
 its continuing attempt. A stale, expired, or mismatched decision has no effect
 on current state and is retained as history. A model or automated-judge
-recommendation is a distinct actor and never masquerades as human approval ().
+recommendation is a distinct actor and never masquerades as human approval.
 Expiry, revocation, and scoped standing grants remain open.
 
 ### Cancellation of tool work (target)
@@ -210,7 +210,7 @@ session slot, and the startup recovery scan — is owned by
 model-call semantics, retry and continuation identity, and provider failure
 classification by [model-call-execution](spec/model-call-execution.md). Two
 consequences worth repeating only as orientation: retry intent is always
-expressed as a new `TurnAttempt` — a terminal state never reopens () — and
+expressed as a new `TurnAttempt` — a terminal state never reopens — and
 unresolved ambiguity holds the turn in its recovery-decision wait until evidence
 or an explicit user decision resolves it, rather than being coerced into failure
 or silently retried.
@@ -247,7 +247,7 @@ treats stronger sandboxes as an extension point, not a baseline assumption.
 The target reconnect semantics: a client reconstructs authoritative durable
 state from a snapshot with an observation cursor, resumes strictly ordered
 durable-transition events after that cursor, and treats streamed drafts as
-replaceable transient content (). The publication mechanism inside the daemon is
+replaceable transient content. The publication mechanism inside the daemon is
 the transactional outbox; its implemented storage foundation and
 same-transaction appends are owned by
 [persistence-protocol](spec/persistence-protocol.md). The local version-one
@@ -290,7 +290,7 @@ Delivery and queueing reuse the implemented treatments
 ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)): a
 session-sent message arrives under the same explicit delivery requests and
 durable queue order as user input, never through a parallel channel. The
-baseline `Interrupt` treatment remains user-only (); session-issued interruption
+baseline `Interrupt` treatment remains user-only; session-issued interruption
 requires a foundation decision extending that cancellation authority. The
 client-facing surface is a planned
 [session-management tool family](#the-tool-system-as-the-load-bearing-layer):
@@ -323,7 +323,7 @@ frozen effective configuration does not change. Affecting an in-flight tool
 request would instead require an explicit policy-reevaluation and
 approval-invalidation decision. No configuration grants unlimited permission.
 Visibility and approval authority is owned by the future tool-policy and
-approval decisions, constrained by the accepted binding and honesty rules (, );
+approval decisions, constrained by the accepted binding and honesty rules;
 per-session configurability lands through new configuration categories,
 extending the request, default, override, and effective-value algebras together.
 Independent-session linking remains blocked on the separate foundation decision

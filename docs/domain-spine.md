@@ -2961,7 +2961,7 @@ impl AcceptedInputQueueOrder {
     ) -> Self;
     // accessors: acceptance_position(), priority()
 }
-// no form can carry a direct starting predecessor ()
+// no form can carry a direct starting predecessor
 
 pub struct AcceptedInputQueueWork { /* private */ }
 impl AcceptedInputQueueWork {

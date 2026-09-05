@@ -491,7 +491,7 @@ model_call_cause_tokens! {
 ///
 /// A projection of the runtime's `LossCause` down to a stable token: the
 /// runtime's own variants retain provider-controlled transport and parser
-/// text, which never reaches operator telemetry ().
+/// text, which never reaches operator telemetry.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BoundaryLossCode {
     /// Cancellation fired after send commenced.
@@ -555,7 +555,7 @@ impl BoundaryLossCode {
 ///
 /// Every value renders as a fixed operator-facing token
 /// ([`as_str`](Self::as_str)); no provider response text, request or response
-/// body, credential material, or user content can reach it (). The
+/// body, credential material, or user content can reach it. The
 /// runtime's own exhaustive `ProviderErrorKind` classification is carried
 /// verbatim rather than restated, so the adapter taxonomy of
 /// docs/spec/runtime-substrate.md and this operator vocabulary cannot drift

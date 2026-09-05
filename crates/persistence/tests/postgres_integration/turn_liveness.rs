@@ -411,7 +411,7 @@ async fn checkpoint_model_call(
 
 /// An active turn with no operation outstanding reaches the inventory, and the
 /// shared failed-turn transition ends it without any new terminal machinery,
-/// recording the watchdog's own cause rather than the startup scan's ().
+/// recording the watchdog's own cause rather than the startup scan's.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn Error>> {

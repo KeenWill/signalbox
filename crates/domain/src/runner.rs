@@ -2987,7 +2987,7 @@ fn validate_dispatch(
 /// recorded against the delegate denial the request re-proposes. Both are
 /// per-request user agency exercised before dispatch. The frozen session
 /// blanket is excluded: it is standing daemon-local automation and never
-/// runner-dispatch authority (, ).
+/// runner-dispatch authority.
 const fn confirmed_by_user(source: ToolDecisionSource) -> bool {
     matches!(
         source,

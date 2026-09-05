@@ -7,8 +7,8 @@
 #   * `.github/workflows/rust.yml` builds one nextest archive per suite from
 #     `package`/`features`, and derives its run matrix from `shards`/`skip`,
 #     through `scripts/postgres_integration_suites.py`.
-#   * `scripts/postgres_integration_suites.py --check` validates the rows against
-#     the workspace and documented local commands.
+#   * `python3 scripts/check_docs_consistency.py` validates agreement with
+#     the workspace, workflow, and documented local commands.
 #
 # The checker used to recover this by regex-parsing the workflow's `cargo test`
 # shell commands. That coupling broke the moment the workflow moved to nextest:

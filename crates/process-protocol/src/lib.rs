@@ -4120,7 +4120,7 @@ pub enum ClientRequest {
     /// its stop is durably requested and terminalization flows through the
     /// existing lifecycle, while `content` becomes the immediate-successor
     /// origin the session continues with. No standalone cancellation command
-    /// exists; this verb is the interrupt treatment on the wire ().
+    /// exists; this verb is the interrupt treatment on the wire.
     StopTurn {
         /// Durable mutation identity.
         command_id: CommandId,

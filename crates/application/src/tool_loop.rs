@@ -2127,7 +2127,7 @@ fn report_tool_turn_terminalization(failed: &FailedModelCallTurn, terminal_outco
 /// Sanitized by construction: the daemon-authored catalog name, two
 /// daemon-minted aggregate identifiers, and the closed error kind are the only
 /// fields, so no credential material, response body, tool argument, or
-/// conversation content can reach telemetry (). The bounded error
+/// conversation content can reach telemetry. The bounded error
 /// detail is deliberately omitted — executors alone decide what it says.
 fn report_tool_attempt(name: &ToolName, observation: &CorrelatedToolAttemptObservation) {
     let ToolAttemptSignal::Failed(error_kind) = tool_attempt_signal(observation.observation())
