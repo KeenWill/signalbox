@@ -107,14 +107,15 @@ parks the session; it never ends work on staleness evidence alone.
 
 An owned session that waits for an operator is parked, or blocked on a goal that
 no automatic resumption will lift; a pending tool-approval decision is the
-separate waiting state. An ambiguous model call or external-effect tool attempt
-whose automatic reconciliation budget is exhausted is a further operator wait
-until the operator reconciles the turn. A turn awaiting runner recovery is an
-operator wait too, and only replacement or abandonment leaves the lost state. A
-module that parks something wrapping a session drives the session itself to
-parked. Attention states shown to operators are derived from durable facts by
-one classifier, and a read that encounters a state it does not recognize returns
-an error rather than a guess.
+separate waiting state. An ambiguous model call whose automatic reconciliation
+budget is exhausted is a further operator wait until the operator reconciles the
+turn; an ambiguous external-effect tool attempt whose budget is exhausted parks
+until the deferred tool-recovery surface exists. A turn awaiting runner recovery
+is an operator wait too, and only replacement or abandonment leaves the lost
+state. A module that parks something wrapping a session drives the session
+itself to parked. Attention states shown to operators are derived from durable
+facts by one classifier, and a read that encounters a state it does not
+recognize returns an error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
 daemon core; no module implements any of them. A dispatched
