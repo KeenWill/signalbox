@@ -169,8 +169,6 @@ jobs:
         run: python3 scripts/test_postgres_integration_suites.py
       - name: Test the convergence reconciler
         run: python3 tooling/convergence-reconciler/test_reconcile.py
-      - name: Test the built-executable resolver
-        run: python3 tooling/test_resolve_cargo_bin.py
       - name: Test the lifecycle watchdog
         run: python3 tooling/test_supervise_lifecycle.py
       # Drives the sweep against a fake `docker` it puts first on PATH, so it

@@ -213,8 +213,10 @@ in
     exec = ''
       executable="$(
         cd "$DEVENV_ROOT" || exit $?
+        host_target="$(env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
+          rustc -vV | sed -n 's/^host: //p')"
         env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
-          cargo run --quiet -p signalbox-cargo-bin-resolver -- \
+          cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
             "$DEVENV_ROOT/Cargo.toml" \
             signalbox-client signalbox
       )" || exit $?
@@ -541,18 +543,19 @@ in
       # stream. The shared resolver also refuses a configured foreign target
       # rather than letting a later exec fail or select a stale host artifact
       # from an assumed target/debug layout.
+      host_target="$(rustc -vV | sed -n 's/^host: //p')"
       daemon_executable="$(
-        cargo run --quiet -p signalbox-cargo-bin-resolver -- \
+        cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
           "$DEVENV_ROOT/Cargo.toml" \
           signalboxd signalboxd
       )"
       supervisor_executable="$(
-        cargo run --quiet -p signalbox-cargo-bin-resolver -- \
+        cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
           "$DEVENV_ROOT/Cargo.toml" \
           signalbox-tools-exec signalbox-exec-supervisor
       )"
       bridge_executable="$(
-        cargo run --quiet -p signalbox-cargo-bin-resolver -- \
+        cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
           "$DEVENV_ROOT/Cargo.toml" \
           signalbox-model-runtime-claude-cli signalbox-claude-mcp-bridge
       )"
