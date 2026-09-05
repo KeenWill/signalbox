@@ -15,14 +15,16 @@ Transaction mechanics, locking, and reconstitution belong to
 [persistence-protocol](persistence-protocol.md); what each command does belongs
 to the page for its subsystem.
 
-Identities come from three sources. The caller supplies exactly one, the
-`DurableCommandId` that every application request constructor accepts as its
-idempotency key. The daemon mints the identity of every identity-bearing fact it
-records. Configuration reference keys are the third source: a direct model
-selection or a model alias arrives inside a command payload and names an
-operator-configured selection. `ProviderModelIdentity` is a normalized
-provider-and-model value the operator configures. It is stored on turn and
-model-call rows and is neither minted nor a command key.
+Identities come from three sources. The caller supplies the `DurableCommandId`
+that every application request constructor accepts as its idempotency key. A
+caller also passes through a replay identity minted outside the daemon, such as
+the webhook delivery key [repo-watch](repo-watch.md) records. The daemon mints
+the identity of every other identity-bearing fact it records. Configuration
+reference keys are the third source: a direct model selection or a model alias
+arrives inside a command payload and names an operator-configured selection.
+`ProviderModelIdentity` is a normalized provider-and-model value the operator
+configures. It is stored on turn and model-call rows and is neither minted nor a
+command key.
 
 The identity types are built by the `define_identity!` macro in `crates/domain`.
 Generation is an application-layer effect: `crates/domain` depends on `uuid`
@@ -71,9 +73,8 @@ Each command's comparison payload and result live in typed relational records,
 so they stay reviewable and constraint-checked; there is no universal JSONB or
 byte-blob payload.
 
-A caller retries a failed command by retransmitting under the same identifier.
-Why: a failed transaction claims nothing, so the retry replays or claims
-cleanly.
+A same-identifier retry is admitted only after a transaction that left no claim;
+a recorded failure replays as failed.
 
 The repository reconstructs the recorded payload before comparing it, so a
 change of storage representation can never turn an equal command into
@@ -198,6 +199,4 @@ what errors and logs may contain is in [process-protocol](process-protocol.md).
 - A program arm of `Actor` and a program admissibility path for submit-input:
   [design](../design/identity-and-commands.md).
 - A non-user actor for module-composed initial inputs:
-  [design](../design/identity-and-commands.md).
-- Actor adoption on create-session records:
   [design](../design/identity-and-commands.md).
