@@ -12,7 +12,7 @@ records; the instruction admitted set; credential-pool state and availability
 waits; a producer for the session-state-changed event; and daemon-owned OAuth
 material.
 
-## Shape
+## Design
 
 Runner replacement and abandonment are each one orchestration transaction that
 holds authority outside the placement aggregate, moves the placement, and
@@ -55,7 +55,7 @@ mixing tokens from different exchanges. Delivery of OAuth material to a model
 call is owned by
 [configuration-and-credentials](../spec/configuration-and-credentials.md).
 
-## Constraints on present code
+## Compatibility constraints
 
 The placement snapshot writer keeps refusing loss, replacement, and abandonment;
 the new transactions gain that authority elsewhere.
@@ -75,7 +75,7 @@ Every new table follows the spec page: typed records with kind-scoped storage
 versions, append-only facts under triggers, events appended in the committing
 transaction, and every explicit row lock recorded in the inventory.
 
-## Acceptance
+## Acceptance criteria
 
 Replacement and abandonment each commit in one transaction with one
 runner-state-transition event per affected session, and the placement snapshot

@@ -4,7 +4,7 @@ The persistence protocol is how the daemon keeps its state in Postgres: the
 schema and its migrations, durable command storage, row locking, reconstitution
 of stored rows into domain values, and the transactional outbox.
 
-## Map
+## Overview
 
 `crates/persistence` holds the Postgres representation. It uses SQLx on Tokio:
 the Postgres driver, one `PgPool`, and an embedded migrator. Domain types live
@@ -64,7 +64,7 @@ delegation kinds, feed one delivery sequence, and each event kind has a typed
 record table. `OutboxDispatcher` is the single consumer; it hands one event at a
 time to a synchronous consumer.
 
-## Decisions
+## Design decisions
 
 One driver, pool, and migration stack, and no ORM: the module boundary, not the
 driver, enforces the split between stored records and domain values, and one
@@ -219,7 +219,7 @@ would let a later transition block that event and every event after it.
 Database-role separation is a deployment choice; migration invocation is wired
 in `apps/signalboxd`, not in the crate.
 
-## Contracts
+## Boundary contracts
 
 No database transaction stays open during I/O with a provider, a credential
 source, the blob store, or a runner. The daemon reads what it needs, commits,
@@ -477,7 +477,7 @@ tool-loop continuation origin, and stores its predecessor call, qualifying
 cause, and non-acceptance evidence atomically. What these rows mean is owned by
 [credential-availability](credential-availability.md).
 
-## Not built
+## Planned
 
 - Runner replacement and abandonment transactions:
   [persistence-protocol design](../design/persistence-protocol.md).
