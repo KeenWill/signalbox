@@ -11,13 +11,12 @@ together with the model-runtime crates it composes
 (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
 `crates/model-runtime-anthropic/src/runtime.rs`), and the database-channel
 refusals in [process configuration](#process-configuration) under
-`production_connection_options` in `crates/persistence/src/lib.rs`. Invariant
-law lives in [docs/invariants.md](../invariants.md), cited here by tag. The
-runner credential use during provisioning or execution remains committed
-unimplemented functionality as labeled below. The credential-profile and
-credential-pool grammar, its fail-closed admission, the deliveries this build
-supplies, the fail-closed rejection of reserved Codex deliveries, and the
-operator-chosen model-provider profile names are implemented in
+`production_connection_options` in `crates/persistence/src/lib.rs`. The runner
+credential use during provisioning or execution remains committed unimplemented
+functionality as labeled below. The credential-profile and credential-pool
+grammar, its fail-closed admission, the deliveries this build supplies, the
+fail-closed rejection of reserved Codex deliveries, and the operator-chosen
+model-provider profile names are implemented in
 `apps/signalboxd/src/credential_pools.rs` and
 `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, durable
 trigger actions and chain exclusions, the availability successor calls owned by

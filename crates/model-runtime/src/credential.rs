@@ -109,9 +109,9 @@ mod tests {
         CredentialAccessError, CredentialAccessFailure, CredentialReference, CredentialValue,
     };
 
-    /// INV-035: credential boundary values have a redacted diagnostic shape.
+    /// credential boundary values have a redacted diagnostic shape.
     #[test]
-    fn inv_035_credential_value_debug_is_redacted() {
+    fn credential_value_debug_is_redacted() {
         let secret = CredentialValue::new(b"do-not-print".to_vec());
 
         let diagnostic = format!("{secret:?}");
@@ -119,9 +119,9 @@ mod tests {
         assert_eq!(diagnostic, "CredentialValue([REDACTED])");
     }
 
-    /// INV-035: access errors carry only the safe reference and failure class.
+    /// access errors carry only the safe reference and failure class.
     #[test]
-    fn inv_035_access_error_is_reference_only() {
+    fn access_error_is_reference_only() {
         let reference = CredentialReference::new("anthropic-primary");
         let error =
             CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unavailable);

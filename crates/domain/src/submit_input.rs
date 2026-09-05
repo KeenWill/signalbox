@@ -4708,11 +4708,11 @@ mod tests {
         );
     }
 
-    /// S01 / INV-012: comparison excludes only command identity and
+    /// S01: comparison excludes only command identity and
     /// includes the fixed user actor, session, exact content, delivery
     /// discriminator, and every delivery field.
     #[test]
-    fn s01_inv012_comparison_payload_is_structural() {
+    fn s01_comparison_payload_is_structural() {
         let baseline = start_command(1, "hello", 1);
         let parent_alone_interrupt = SubmitInput::new(
             command_id(1),
@@ -4774,10 +4774,10 @@ mod tests {
         assert_ne!(parent_alone_interrupt, conflicting_interrupt_replay);
     }
 
-    /// S01 / INV-007 / INV-008 / INV-028: start preparation creates exact
+    /// S01: start preparation creates exact
     /// queued-origin disposition, ordinary position, and frozen provenance.
     #[test]
-    fn s01_inv007_inv008_inv028_start_prepares_complete_queued_work() {
+    fn s01_start_prepares_complete_queued_work() {
         let command = start_command(1, "hello", 1);
         let prepared = command
             .clone()
@@ -4818,10 +4818,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-051 / INV-053: per-call settings participate in authoritative
+    /// S37: per-call settings participate in authoritative
     /// origin derivation and remain explicit in the frozen request.
     #[test]
-    fn s37_inv051_inv053_per_call_settings_are_frozen_for_the_origin() {
+    fn s37_per_call_settings_are_frozen_for_the_origin() {
         let selection = direct(2);
         let per_call = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
@@ -4882,10 +4882,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-051: the legacy preparation path fails closed when a caller
+    /// S37: the legacy preparation path fails closed when a caller
     /// supplies settings that require a capability record.
     #[test]
-    fn s37_inv051_legacy_preparation_rejects_unvalidated_per_call_settings() {
+    fn s37_legacy_preparation_rejects_unvalidated_per_call_settings() {
         let selection = direct(2);
         let per_call = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
@@ -4912,10 +4912,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-051 / INV-053: catalog-free preparation cannot carry settings
+    /// S37: catalog-free preparation cannot carry settings
     /// validated for an alias's prior direct target across a retarget.
     #[test]
-    fn s37_inv051_inv053_legacy_preparation_rejects_alias_retarget_settings() {
+    fn s37_legacy_preparation_rejects_alias_retarget_settings() {
         let prior_selection = direct(2);
         let installed_selection = direct(3);
         let stored = ModelCapabilities::new(
@@ -4971,10 +4971,10 @@ mod tests {
         );
     }
 
-    /// INV-051: a legacy origin row cannot omit settings evidence while the
+    /// a legacy origin row cannot omit settings evidence while the
     /// caller contributes an explicit per-call setting.
     #[test]
-    fn inv051_legacy_reconstitution_rejects_explicit_per_call_settings() {
+    fn legacy_reconstitution_rejects_explicit_per_call_settings() {
         let selection = direct(2);
         let per_call = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
@@ -5000,10 +5000,10 @@ mod tests {
         );
     }
 
-    /// INV-051 / INV-053: a legacy origin row cannot carry defaults settings
+    /// a legacy origin row cannot carry defaults settings
     /// validated for an alias's prior direct selection across a retarget.
     #[test]
-    fn inv051_inv053_legacy_reconstitution_rejects_alias_retarget_settings() {
+    fn legacy_reconstitution_rejects_alias_retarget_settings() {
         let requested_alias = alias(1);
         let prior_selection = direct(2);
         let installed_selection = direct(3);
@@ -5055,10 +5055,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-008: explicit alias requests freeze the supplied immutable
+    /// S01: explicit alias requests freeze the supplied immutable
     /// definition, while a missing definition is a typed recorded rejection.
     #[test]
-    fn s01_inv008_alias_definition_is_frozen_or_rejected() {
+    fn s01_alias_definition_is_frozen_or_rejected() {
         let command = SubmitInput::new(
             command_id(1),
             session_id(1),
@@ -5137,10 +5137,10 @@ mod tests {
         assert_eq!(prepared.result(), &SubmitInputResult::Rejected(expected));
     }
 
-    /// S01 / INV-012 / INV-028: active-work variants record the exact
+    /// S01: active-work variants record the exact
     /// expected turn in a no-active-turn rejection.
     #[test]
-    fn s01_inv012_inv028_active_modes_reject_when_no_turn_is_active() {
+    fn s01_active_modes_reject_when_no_turn_is_active() {
         assert_vacant_slot_records_rejection(
             interrupt_command(1, turn_id(7)),
             Some(turn_id(4)),
@@ -5182,11 +5182,11 @@ mod tests {
         );
     }
 
-    /// S09 / INV-007 / INV-008 / INV-028: matching after-current input
+    /// S09: matching after-current input
     /// creates ordinary queued origin work with the next acceptance position
     /// and exact frozen configuration.
     #[test]
-    fn s09_inv007_inv008_inv028_matching_after_current_prepares_ordinary_turn_origin() {
+    fn s09_matching_after_current_prepares_ordinary_turn_origin() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
         let active_turn = active
@@ -5224,11 +5224,11 @@ mod tests {
         );
     }
 
-    /// S08 / INV-007 / INV-016 / INV-028: matching safe-point input creates
+    /// S08: matching safe-point input creates
     /// pending steering bound to the exact active turn and carries no
     /// turn-origin fields.
     #[test]
-    fn s08_inv007_inv016_inv028_matching_next_safe_point_prepares_pending_steering() {
+    fn s08_matching_next_safe_point_prepares_pending_steering() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
         let active_turn = active
@@ -5260,10 +5260,10 @@ mod tests {
         assert_eq!(steering.binding().source_turn(), active_turn);
     }
 
-    /// S01 / INV-012 / INV-028: a vacant-slot start submitted while the slot
+    /// S01: a vacant-slot start submitted while the slot
     /// is occupied records the exact authoritative active turn.
     #[test]
-    fn s01_inv012_inv028_occupied_slot_start_records_active_turn_presence() {
+    fn s01_occupied_slot_start_records_active_turn_presence() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
         let active_turn = active
@@ -5380,10 +5380,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-051: delegation-origin slot ownership cannot bypass the
+    /// S37: delegation-origin slot ownership cannot bypass the
     /// capability evidence required by an explicit per-call setting.
     #[test]
-    fn s37_inv051_delegated_successor_rejects_unvalidated_per_call_settings() {
+    fn s37_delegated_successor_rejects_unvalidated_per_call_settings() {
         let selection = direct(2);
         let current = session(1, 1, ModelSelectionRequest::Direct(selection));
         let delegated_turn = turn_id(7);
@@ -5427,10 +5427,10 @@ mod tests {
         );
     }
 
-    /// S07 / S08 / S09 / INV-012 / INV-028: every active-work delivery mode
+    /// S07 / S08 / S09: every active-work delivery mode
     /// records its stale target against the exact authoritative active turn.
     #[test]
-    fn s07_s08_s09_inv012_inv028_occupied_slot_active_work_records_stale_target() {
+    fn s07_s08_s09_occupied_slot_active_work_records_stale_target() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
         let actual_active_turn = active
@@ -5481,10 +5481,10 @@ mod tests {
         ));
     }
 
-    /// S07 / INV-012 / INV-029 / INV-037: matching interrupt preparation
+    /// S07: matching interrupt preparation
     /// creates the exact immediate successor and sole cancellation proof.
     #[test]
-    fn s07_inv012_inv029_inv037_occupied_slot_matching_interrupt_applies() {
+    fn s07_occupied_slot_matching_interrupt_applies() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
         let active_turn = active
@@ -5517,10 +5517,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-029 / INV-044: runner recovery does not invent a new
+    /// S07: runner recovery does not invent a new
     /// non-consuming rejection that would foreclose stop-before-abandonment.
     #[test]
-    fn s07_inv029_inv044_runner_recovery_preserves_interrupt_authority() {
+    fn s07_runner_recovery_preserves_interrupt_authority() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = runner_recovery_turn(&current);
         let interrupted_turn = active
@@ -5693,12 +5693,12 @@ mod tests {
         .expect("the parked approval-wait scheduling facts are complete")
     }
 
-    /// S07 / S10 / INV-012 / INV-028: an interrupt against a parked approval
+    /// S07 / S10: an interrupt against a parked approval
     /// wait records the typed rejection instead of accepting a successor; the
     /// wait remains parked until its canonical decision command resolves the
     /// approval obligation.
     #[test]
-    fn s07_s10_inv012_inv028_interrupt_against_parked_approval_wait_is_rejected() {
+    fn s07_s10_interrupt_against_parked_approval_wait_is_rejected() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = approval_wait_turn(&current);
         let parked_turn = active
@@ -5733,10 +5733,10 @@ mod tests {
         );
     }
 
-    /// S07 / S10 / INV-012 / INV-028: the recorded parked-approval interrupt
+    /// S07 / S10: the recorded parked-approval interrupt
     /// rejection reconstructs exactly.
     #[test]
-    fn s07_s10_inv012_inv028_parked_approval_interrupt_rejection_reconstitutes_exactly() {
+    fn s07_s10_parked_approval_interrupt_rejection_reconstitutes_exactly() {
         let session = session_id(1);
         let active_turn = turn_id(7);
 
@@ -5757,11 +5757,11 @@ mod tests {
         );
     }
 
-    /// S07 / S10 / INV-012 / INV-028: parked-approval interrupt rejection
+    /// S07 / S10: parked-approval interrupt rejection
     /// replay fails closed when the command's delivery or expected active turn
     /// is cross-wired against the recorded rejection.
     #[test]
-    fn s07_s10_inv012_inv028_parked_approval_interrupt_rejection_evidence_is_exact() {
+    fn s07_s10_parked_approval_interrupt_rejection_evidence_is_exact() {
         let session = session_id(1);
         let active_turn = turn_id(7);
         let other_turn = turn_id(9);
@@ -5792,10 +5792,10 @@ mod tests {
         );
     }
 
-    /// S09 / INV-008 / INV-012 / INV-028: after-current preparation records
+    /// S09: after-current preparation records
     /// the exact stale session-defaults version.
     #[test]
-    fn s09_inv008_inv012_inv028_occupied_slot_after_current_records_stale_defaults_version() {
+    fn s09_occupied_slot_after_current_records_stale_defaults_version() {
         let stale_session = session(1, 2, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&stale_session);
         let active_turn = active
@@ -5821,10 +5821,10 @@ mod tests {
         ));
     }
 
-    /// S09 / INV-008 / INV-012: after-current preparation records the exact
+    /// S09: after-current preparation records the exact
     /// unresolved model alias.
     #[test]
-    fn s09_inv008_inv012_occupied_slot_after_current_records_unknown_alias() {
+    fn s09_occupied_slot_after_current_records_unknown_alias() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
         let active_turn = active
@@ -5860,10 +5860,10 @@ mod tests {
         ));
     }
 
-    /// S08 / S09 / INV-012 / INV-028: both occupied-slot acceptance paths
+    /// S08 / S09: both occupied-slot acceptance paths
     /// record exhaustion of the validated session acceptance tail.
     #[test]
-    fn s08_s09_inv012_inv028_occupied_slot_acceptance_records_position_exhaustion() {
+    fn s08_s09_occupied_slot_acceptance_records_position_exhaustion() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let maximum = SessionInputPosition::try_from_u64(u64::MAX).expect("positive maximum");
         let active = active_turn_at_position(&current, maximum);
@@ -5895,10 +5895,10 @@ mod tests {
         ));
     }
 
-    /// S09 / INV-002 / INV-012: occupied-slot preparation rejects a scheduling
+    /// S09: occupied-slot preparation rejects a scheduling
     /// projection from another session without claiming the command.
     #[test]
-    fn s09_inv002_inv012_occupied_slot_preparation_rejects_cross_session_projection() {
+    fn s09_occupied_slot_preparation_rejects_cross_session_projection() {
         let wrong_session = session(2, 1, ModelSelectionRequest::Direct(direct(2)));
         let wrong_projection = active_turn(&wrong_session);
         let projected_active_turn = wrong_projection
@@ -5926,10 +5926,10 @@ mod tests {
         assert_eq!(wrong_active_session.command(), &command);
     }
 
-    /// S09 / INV-002 / INV-012: a queued projection cannot stand in for the
+    /// S09: a queued projection cannot stand in for the
     /// authoritative active turn.
     #[test]
-    fn s09_inv002_inv012_occupied_slot_preparation_requires_active_projection() {
+    fn s09_occupied_slot_preparation_requires_active_projection() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let queued = queued_turn(&current);
         let projected_turn = queued
@@ -5951,10 +5951,10 @@ mod tests {
         assert_eq!(not_active.command(), &command);
     }
 
-    /// S08 / S09 / INV-012: each occupied-slot delivery mode requires the
+    /// S08 / S09: each occupied-slot delivery mode requires the
     /// exact candidate shape it can apply.
     #[test]
-    fn s08_s09_inv012_occupied_slot_preparation_rejects_mismatched_turn_candidate_shape() {
+    fn s08_s09_occupied_slot_preparation_rejects_mismatched_turn_candidate_shape() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
         let active_turn = active
@@ -5989,10 +5989,10 @@ mod tests {
         );
     }
 
-    /// S08 / S09 / INV-001 / INV-012: no occupied-slot acceptance path can
+    /// S08 / S09: no occupied-slot acceptance path can
     /// reuse the active turn's canonical origin identity.
     #[test]
-    fn s08_s09_inv001_inv012_occupied_slot_preparation_rejects_active_origin_identity_reuse() {
+    fn s08_s09_occupied_slot_preparation_rejects_active_origin_identity_reuse() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
         let active_turn = active
@@ -6029,10 +6029,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-008 / INV-012: missing sessions, stale defaults, unknown
+    /// S01: missing sessions, stale defaults, unknown
     /// aliases, and exhausted positions remain distinct terminal results.
     #[test]
-    fn s01_inv008_inv012_authoritative_rejections_are_typed() {
+    fn s01_authoritative_rejections_are_typed() {
         let command = start_command(1, "hello", 1);
         assert!(matches!(
             command.clone().prepare_session_not_found().result(),
@@ -6144,10 +6144,10 @@ mod tests {
         );
     }
 
-    /// INV-002 / INV-012: complete applied facts reconstruct the canonical
+    /// complete applied facts reconstruct the canonical
     /// result, while a cross-wired content fact fails closed.
     #[test]
-    fn inv002_inv012_applied_reconstitution_checks_complete_correlations() {
+    fn applied_reconstitution_checks_complete_correlations() {
         let reconstructed = applied_input()
             .reconstitute()
             .expect("complete matching facts reconstruct");
@@ -6169,7 +6169,7 @@ mod tests {
         );
     }
 
-    /// S08 / S09 / INV-002 / INV-012 / INV-016: both occupied applied
+    /// S08 / S09: both occupied applied
     /// shapes reconstruct only from exact treatment and source correlations.
     #[test]
     fn occupied_applied_shapes_reconstitute_exactly() {
@@ -6223,7 +6223,7 @@ mod tests {
         ));
     }
 
-    /// S08 / INV-012 / INV-016: replay reconstructs the immutable original
+    /// S08: replay reconstructs the immutable original
     /// pending-steering receipt independently of its mutable lifecycle.
     #[test]
     fn pending_steering_replay_survives_lifecycle_progress() {
@@ -6258,11 +6258,11 @@ mod tests {
         }
     }
 
-    /// S08 / S09 / INV-009 / INV-012: a canonical turn origin can come from
+    /// S08 / S09: a canonical turn origin can come from
     /// either an original turn-producing receipt or a later visible
     /// reclassification of immutable pending steering.
     #[test]
-    fn s08_s09_inv009_inv012_reclassified_turn_origins_support_replay() {
+    fn s08_s09_reclassified_turn_origins_support_replay() {
         let predecessor_position = SessionInputPosition::first()
             .checked_next()
             .expect("the reclassified origin follows its source");
@@ -6361,10 +6361,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-005 / INV-016: model rendering recovers the final accepted
+    /// S08: model rendering recovers the final accepted
     /// input's exact user content from a fully checked reclassification chain.
     #[test]
-    fn s08_inv005_inv016_reclassified_origin_preserves_renderable_user_content() {
+    fn s08_reclassified_origin_preserves_renderable_user_content() {
         let origin = reclassified_turn_origin();
         let content = crate::ModelCallOriginContent::from_reconstituted_turn_origin(&origin)
             .expect("the canonical reclassified origin has exact accepted content");
@@ -6397,11 +6397,11 @@ mod tests {
         .expect("every terminal source disposition authenticates reclassification");
     }
 
-    /// S08 / INV-009 / INV-012: reclassification replay admits every
+    /// S08: reclassification replay admits every
     /// terminal disposition and recursively validates a source turn that was
     /// itself created by steering reclassification.
     #[test]
-    fn s08_inv009_inv012_reclassification_accepts_all_terminal_sources_and_chains() {
+    fn s08_reclassification_accepts_all_terminal_sources_and_chains() {
         assert_terminal_source_authenticates_reclassification(TurnDisposition::Completed);
         assert_terminal_source_authenticates_reclassification(TurnDisposition::Refused);
         assert_terminal_source_authenticates_reclassification(TurnDisposition::Failed);
@@ -6518,11 +6518,11 @@ mod tests {
         );
     }
 
-    /// S08 / INV-009 / INV-012: a pending receipt becomes canonical origin
+    /// S08: a pending receipt becomes canonical origin
     /// evidence only with its exact reclassified lifecycle, queue facts, and
     /// earlier distinct terminal source origin.
     #[test]
-    fn s08_inv009_inv012_reclassified_turn_origin_rejects_cross_wired_facts() {
+    fn s08_reclassified_turn_origin_rejects_cross_wired_facts() {
         let mut wrong_lifecycle = reclassified_turn_origin();
         turn_origin_facts(&mut wrong_lifecycle).lifecycle = AcceptedInputLifecycle::new(
             accepted_input_id(0x73),
@@ -6614,10 +6614,10 @@ mod tests {
         origin
     }
 
-    /// S08 / INV-009 / INV-012: validation remains bounded by heap-backed
+    /// S08: validation remains bounded by heap-backed
     /// input size rather than call-stack depth.
     #[test]
-    fn s08_inv009_inv012_reclassified_origin_validation_is_iterative() {
+    fn s08_reclassified_origin_validation_is_iterative() {
         let origin = reclassified_origin_chain_ending_at(16_384);
 
         let validated = super::validate_turn_origin_reconstitution_input(&origin)
@@ -6625,11 +6625,11 @@ mod tests {
         assert_eq!(validated.turn, turn_id(16_390));
     }
 
-    /// S08 / INV-001 / INV-012: command, accepted-input, and turn identities
+    /// S08: command, accepted-input, and turn identities
     /// remain unique across the complete reclassification chain, not only
     /// adjacent source/origin pairs.
     #[test]
-    fn s08_inv001_inv012_reclassified_origin_rejects_ancestor_identity_reuse() {
+    fn s08_reclassified_origin_rejects_ancestor_identity_reuse() {
         let command_reuse = append_unchecked_reclassified_origin(
             append_unchecked_reclassified_origin(source_turn_origin(), 2, 0x102, 0x202),
             3,
@@ -6681,10 +6681,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-001 / INV-012: the user-global command identity set includes
+    /// S08: the user-global command identity set includes
     /// every command carried by terminal authority in the origin chain.
     #[test]
-    fn s08_inv001_inv012_reclassified_origin_tracks_terminal_proof_commands() {
+    fn s08_reclassified_origin_tracks_terminal_proof_commands() {
         let proof_command = command_id(0x90);
         assert_terminal_proof_command_is_tracked(
             TurnDisposition::Cancelled {
@@ -6777,10 +6777,10 @@ mod tests {
         );
     }
 
-    /// S09 / INV-012: after-current replay carries the active predecessor's
+    /// S09: after-current replay carries the active predecessor's
     /// canonical origin and must follow it in session acceptance order.
     #[test]
-    fn s09_inv012_after_reconstitution_requires_predecessor_chronology() {
+    fn s09_after_reconstitution_requires_predecessor_chronology() {
         let mut missing_predecessor = after_applied_input();
         applied_facts(&mut missing_predecessor).predecessor_origin = None;
         assert_eq!(
@@ -6815,10 +6815,10 @@ mod tests {
         );
     }
 
-    /// S32 / INV-044: an interrupt origin may follow the exact terminal
+    /// S32: an interrupt origin may follow the exact terminal
     /// delegated predecessor even though that turn has no accepted input.
     #[test]
-    fn s32_inv044_interrupt_reconstitution_admits_exact_non_accepted_predecessor() {
+    fn s32_interrupt_reconstitution_admits_exact_non_accepted_predecessor() {
         let input =
             interrupt_applied_input_with_non_accepted_predecessor(session_id(1), turn_id(7));
 
@@ -6827,10 +6827,10 @@ mod tests {
             .expect("the exact non-accepted interrupt predecessor is admitted");
     }
 
-    /// S32 / INV-044: non-accepted predecessor evidence remains scoped to the
+    /// S32: non-accepted predecessor evidence remains scoped to the
     /// command's exact session.
     #[test]
-    fn s32_inv044_interrupt_reconstitution_rejects_cross_session_non_accepted_predecessor() {
+    fn s32_interrupt_reconstitution_rejects_cross_session_non_accepted_predecessor() {
         let input =
             interrupt_applied_input_with_non_accepted_predecessor(session_id(2), turn_id(7));
 
@@ -6843,10 +6843,10 @@ mod tests {
         );
     }
 
-    /// S32 / INV-044: non-accepted predecessor evidence must name the exact
+    /// S32: non-accepted predecessor evidence must name the exact
     /// turn targeted by the interrupt command.
     #[test]
-    fn s32_inv044_interrupt_reconstitution_rejects_cross_wired_non_accepted_predecessor() {
+    fn s32_interrupt_reconstitution_rejects_cross_wired_non_accepted_predecessor() {
         let input =
             interrupt_applied_input_with_non_accepted_predecessor(session_id(1), turn_id(6));
 
@@ -6859,10 +6859,10 @@ mod tests {
         );
     }
 
-    /// S32 / INV-044: non-accepted predecessor evidence cannot weaken the
+    /// S32: non-accepted predecessor evidence cannot weaken the
     /// accepted-origin chronology required by after-current delivery.
     #[test]
-    fn s32_inv044_after_current_rejects_non_accepted_predecessor() {
+    fn s32_after_current_rejects_non_accepted_predecessor() {
         let mut input = after_applied_input();
         let facts = applied_facts(&mut input);
         facts.predecessor_origin = None;
@@ -6880,10 +6880,10 @@ mod tests {
         );
     }
 
-    /// S09 / INV-012: after-current replay cannot reuse any identity from its
+    /// S09: after-current replay cannot reuse any identity from its
     /// active predecessor origin.
     #[test]
-    fn s09_inv012_after_reconstitution_rejects_predecessor_identity_reuse() {
+    fn s09_after_reconstitution_rejects_predecessor_identity_reuse() {
         let mut turn_reuse = after_applied_input();
         let facts = applied_facts(&mut turn_reuse);
         facts.result_turn = turn_id(7);
@@ -6942,10 +6942,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-012: pending-steering replay cannot reuse either user-global
+    /// S08: pending-steering replay cannot reuse either user-global
     /// identity from its canonical source origin.
     #[test]
-    fn s08_inv012_pending_steering_rejects_source_identity_reuse() {
+    fn s08_pending_steering_rejects_source_identity_reuse() {
         let mut accepted_input_reuse = pending_steering_input();
         pending_facts(&mut accepted_input_reuse).source_turn_origin =
             source_turn_origin_with_identities(0x70, 3);
@@ -7003,7 +7003,7 @@ mod tests {
         );
     }
 
-    /// S08 / INV-002 / INV-012: every independent pending-steering fact is
+    /// S08: every independent pending-steering fact is
     /// checked before the immutable receipt is reconstructed.
     #[test]
     fn pending_steering_reconstitution_rejects_cross_wired_facts() {
@@ -7086,11 +7086,11 @@ mod tests {
         );
     }
 
-    /// INV-002 / INV-012: every applied-path reconstitution failure variant
+    /// every applied-path reconstitution failure variant
     /// is reachable from exactly one cross-wired fact and fails closed
     /// instead of constructing authority.
     #[test]
-    fn inv002_inv012_applied_reconstitution_rejects_every_cross_wired_fact() {
+    fn applied_reconstitution_rejects_every_cross_wired_fact() {
         assert_applied_fact_fails_closed(
             |input| input.stored_actor = Actor::Recovery,
             SubmitInputReconstitutionFailure::StoredActorMismatch,
@@ -7192,10 +7192,10 @@ mod tests {
         );
     }
 
-    /// INV-012: each rejected receipt reconstructs only from a matching
+    /// each rejected receipt reconstructs only from a matching
     /// command-specific typed projection.
     #[test]
-    fn inv012_rejected_reconstitution_is_checked() {
+    fn rejected_reconstitution_is_checked() {
         let command = start_command(1, "hello", 1);
         let ReconstitutedSubmitInput { .. } =
             SubmitInputReconstitutionInput::rejected_session_not_found(
@@ -7226,11 +7226,11 @@ mod tests {
         );
     }
 
-    /// INV-012: the baseline rejected-result projections fail closed for
+    /// the baseline rejected-result projections fail closed for
     /// independently cross-wired actor, session, delivery, configuration,
     /// alias, and position facts.
     #[test]
-    fn inv012_rejected_reconstitution_rejects_every_cross_wired_fact() {
+    fn rejected_reconstitution_rejects_every_cross_wired_fact() {
         let start = start_command(1, "hello", 1);
         let safe_point = SubmitInput::new(
             command_id(1),
@@ -7493,10 +7493,10 @@ mod tests {
         );
     }
 
-    /// S01 / S08 / S09 / INV-012 / INV-028: every rejection that records an
+    /// S01 / S08 / S09: every rejection that records an
     /// authoritative active turn carries that turn's exact canonical origin.
     #[test]
-    fn inv012_inv028_active_state_rejections_reconstruct_from_canonical_origins() {
+    fn active_state_rejections_reconstruct_from_canonical_origins() {
         assert_reconstitutes_rejection(
             SubmitInputReconstitutionInput::rejected_active_turn_present(
                 SubmitInputRejectedActiveTurnPresentReconstitutionInput {
@@ -7566,11 +7566,11 @@ mod tests {
         );
     }
 
-    /// S01 / S08 / S09 / INV-012 / INV-028: configuration and position
+    /// S01 / S08 / S09: configuration and position
     /// rejections reconstruct only for delivery modes that can record them,
     /// with occupied modes carrying their exact active origin.
     #[test]
-    fn inv012_inv028_configuration_and_position_rejections_follow_delivery() {
+    fn configuration_and_position_rejections_follow_delivery() {
         let maximum = SessionInputPosition::try_from_u64(u64::MAX).expect("positive maximum");
         assert_reconstitutes_rejection(
             SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
@@ -7715,11 +7715,11 @@ mod tests {
         );
     }
 
-    /// S08 / S09 / INV-012: rejection replay fails closed when required
+    /// S08 / S09: rejection replay fails closed when required
     /// active-origin evidence is omitted, extra, cross-wired, or command-ID
     /// aliased.
     #[test]
-    fn inv012_rejected_active_origin_evidence_is_exact() {
+    fn rejected_active_origin_evidence_is_exact() {
         assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
                 SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput {
@@ -7833,10 +7833,10 @@ mod tests {
         );
     }
 
-    /// S01 / S08 / S09 / INV-012 / INV-028: state-carrying rejection replay
+    /// S01 / S08 / S09: state-carrying rejection replay
     /// validates the delivery discriminator and both expected/actual turns.
     #[test]
-    fn inv012_inv028_state_rejections_validate_delivery_and_turns() {
+    fn state_rejections_validate_delivery_and_turns() {
         assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_active_turn_present(
                 SubmitInputRejectedActiveTurnPresentReconstitutionInput {
@@ -7877,11 +7877,11 @@ mod tests {
         );
     }
 
-    /// S07 / S08 / INV-012 / INV-028: interrupt replay admits the same
+    /// S07 / S08: interrupt replay admits the same
     /// configuration and position rejections as preparation, while a
     /// safe-point request still carries no configurable model choice.
     #[test]
-    fn inv012_inv028_interrupt_rejections_reconstitute_exactly() {
+    fn interrupt_rejections_reconstitute_exactly() {
         SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
             SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput {
                 command: interrupt_command(1, turn_id(7)),
@@ -7967,10 +7967,10 @@ mod tests {
         .expect("an interrupt position-exhaustion rejection reconstructs");
     }
 
-    /// S01 / INV-012: preparation against another command's session is a
+    /// S01: preparation against another command's session is a
     /// nonterminal correlation failure retaining the unchanged command.
     #[test]
-    fn s01_inv012_preparation_rejects_a_cross_wired_session() {
+    fn s01_preparation_rejects_a_cross_wired_session() {
         let command = start_command(1, "hello", 1);
         let error = command
             .clone()

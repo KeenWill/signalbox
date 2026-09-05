@@ -2,12 +2,11 @@
 
 use crate::*;
 
-/// S01 / INV-009: scheduler-row locking serializes concurrent passes for one
+/// S01: scheduler-row locking serializes concurrent passes for one
 /// session so exactly one service activates and the other observes the winner.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv009_concurrent_start_eligible_turn_passes_activate_once()
--> Result<(), Box<dyn Error>> {
+async fn s01_concurrent_start_eligible_turn_passes_activate_once() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x391, 0x791, direct(0x891)))
@@ -208,7 +207,7 @@ async fn blocked_backends_poll_returns_to_zero_after_release() -> Result<(), Box
     Ok(())
 }
 
-/// INV-007 / INV-008 / INV-009 / INV-012: submit orders the session row
+/// submit orders the session row
 /// (`FOR NO KEY UPDATE`) before the scheduler row (`FOR UPDATE`), while
 /// activation orders the scheduler row first and then requests `FOR KEY
 /// SHARE` on the session row through its inserts' session foreign keys. The
@@ -225,8 +224,7 @@ async fn blocked_backends_poll_returns_to_zero_after_release() -> Result<(), Box
 /// submission ahead and pins the applied arm.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv008_inv009_inv012_submit_and_activation_interleave_without_deadlock()
--> Result<(), Box<dyn Error>> {
+async fn submit_and_activation_interleave_without_deadlock() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x4b1, 0x8b1, direct(0xcb1)))
@@ -375,7 +373,7 @@ async fn inv007_inv008_inv009_inv012_submit_and_activation_interleave_without_de
     Ok(())
 }
 
-/// INV-007 / INV-008 / INV-009 / INV-012: the opposite scheduler queue order
+/// the opposite scheduler queue order
 /// to the sibling interleave test — the submission holds its session row and
 /// the first place in the scheduler queue while the activation waits behind
 /// it. Postgres grants a contended row to its first queued waiter, so the
@@ -385,8 +383,7 @@ async fn inv007_inv008_inv009_inv012_submit_and_activation_interleave_without_de
 /// with exactly one active turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv008_inv009_inv012_submit_queued_ahead_of_activation_interleaves()
--> Result<(), Box<dyn Error>> {
+async fn submit_queued_ahead_of_activation_interleaves() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x4d1, 0x8d1, direct(0xcd1)))
@@ -532,11 +529,11 @@ async fn inv007_inv008_inv009_inv012_submit_queued_ahead_of_activation_interleav
     Ok(())
 }
 
-/// S03 / INV-009: nonexistent and empty sessions are false wake-ups that
+/// S03: nonexistent and empty sessions are false wake-ups that
 /// return `NoEligibleTurn` and create no lifecycle effects.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_inv009_start_eligible_turn_false_wakeups_are_noops() -> Result<(), Box<dyn Error>> {
+async fn s03_start_eligible_turn_false_wakeups_are_noops() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let missing = SessionId::from_uuid(Uuid::from_u128(0x7a0));
     let empty = SessionId::from_uuid(Uuid::from_u128(0x7a1));
@@ -585,13 +582,12 @@ async fn s03_inv009_start_eligible_turn_false_wakeups_are_noops() -> Result<(), 
     Ok(())
 }
 
-/// S01 / INV-009: once the scheduler lock admits and prepares one exact
+/// S01: once the scheduler lock admits and prepares one exact
 /// queued candidate, a guarded activation that matches no row is durable
 /// divergence, not a stale wake-up, and rolls back every preceding write.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv009_start_eligible_turn_zero_row_guard_is_inconsistent()
--> Result<(), Box<dyn Error>> {
+async fn s01_start_eligible_turn_zero_row_guard_is_inconsistent() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3a2, 0x7a2, direct(0x8a2)))
@@ -679,12 +675,11 @@ async fn s01_inv009_start_eligible_turn_zero_row_guard_is_inconsistent()
     Ok(())
 }
 
-/// INV-001 / INV-009: each durable candidate-identity collision is
+/// each durable candidate-identity collision is
 /// typed and rolls back all earlier activation writes.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv001_inv009_start_eligible_turn_identity_collisions_roll_back()
--> Result<(), Box<dyn Error>> {
+async fn start_eligible_turn_identity_collisions_roll_back() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3b1, 0x7b1, direct(0x8b1)))
@@ -805,12 +800,11 @@ async fn inv001_inv009_start_eligible_turn_identity_collisions_roll_back()
     Ok(())
 }
 
-/// INV-002 / INV-009: an incomplete scheduling inventory fails closed before
+/// an incomplete scheduling inventory fails closed before
 /// any origin entry, frontier, attempt, or lifecycle transition is written.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_inv009_start_eligible_turn_corrupt_projection_fails_closed()
--> Result<(), Box<dyn Error>> {
+async fn start_eligible_turn_corrupt_projection_fails_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3c1, 0x7c1, direct(0x8c1)))
@@ -889,13 +883,13 @@ async fn inv002_inv009_start_eligible_turn_corrupt_projection_fails_closed()
     Ok(())
 }
 
-/// S09 / INV-009 / INV-015: after the first queued turn fails, the adapter
+/// S09: after the first queued turn fails, the adapter
 /// activates the next turn with exact predecessor lineage and a
 /// prefix-preserving starting frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s09_inv009_inv015_start_eligible_turn_preserves_failed_predecessor_prefix()
--> Result<(), Box<dyn Error>> {
+async fn s09_start_eligible_turn_preserves_failed_predecessor_prefix() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x3d1, 0x7d1, direct(0x8d1)))
@@ -1042,13 +1036,12 @@ async fn s09_inv009_inv015_start_eligible_turn_preserves_failed_predecessor_pref
     Ok(())
 }
 
-/// S01 / INV-006 / INV-009 / INV-015: one complete schema-level eligibility
+/// S01: one complete schema-level eligibility
 /// transaction can bind the exact origin frontier and prepared attempt, while
 /// the database independently rejects contradictory lifecycle histories.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
--> Result<(), Box<dyn Error>> {
+async fn s01_turn_storage_enforces_lifecycle_consistency() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x401, 0x801, direct(0xc01)))
@@ -1617,7 +1610,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
     Ok(())
 }
 
-/// S01 / S03 / S08 / S09 / INV-002 / INV-007 / INV-008 / INV-009 / INV-012:
+/// S01 / S03 / S08 / S09:
 /// occupied-slot After and NextSafePoint handling commits the exact distinct
 /// effects, checked replay survives a pool/repository restart, and the
 /// restarted adapter advances from the complete validated acceptance tail
@@ -1884,7 +1877,7 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
     Ok(())
 }
 
-/// S01 / S03 / S08 / INV-008 / INV-009 / INV-012: the composed production
+/// S01 / S03 / S08: the composed production
 /// chain — CreateSession service, accepted start submission, and
 /// StartEligibleTurn service activation — produces the occupied slot the
 /// seeded occupied-slot tests assume: a matching After request queues at the
@@ -2097,7 +2090,7 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
     Ok(())
 }
 
-/// S01 / S08 / S09 / INV-008 / INV-009 / INV-012: after the production chain
+/// S01 / S08 / S09: after the production chain
 /// activates the first turn and terminal facts close it, the production
 /// activation service commits the After-lineage successor, and occupied-slot
 /// handling against that successor matches the first-in-session pass: After
@@ -2400,7 +2393,7 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
     Ok(())
 }
 
-/// INV-007 / INV-008 / INV-012: the session-before-scheduler lock order
+/// the session-before-scheduler lock order
 /// serializes mixed occupied-slot acceptances into one gap-free order while
 /// preserving each delivery's distinct atomic effect shape.
 #[tokio::test(flavor = "multi_thread")]
@@ -2503,7 +2496,7 @@ async fn assert_rejected_source_origin(
     );
 }
 
-/// INV-002 / INV-005 / INV-008 / INV-012 / INV-016: occupied-slot result
+/// occupied-slot result
 /// shapes and correlations are database-enforced, pending steering keeps its
 /// source active and cannot become semantic origin, and its immutable receipt
 /// survives a later current-disposition change.

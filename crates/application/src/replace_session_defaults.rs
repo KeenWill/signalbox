@@ -397,10 +397,10 @@ mod tests {
         }
     }
 
-    /// S01 / INV-001 / INV-012: reserved command identities fail before
+    /// S01: reserved command identities fail before
     /// canonical command construction or any transaction call.
     #[test]
-    fn s01_inv001_inv012_sentinel_rejection_calls_no_transaction() {
+    fn s01_sentinel_rejection_calls_no_transaction() {
         let target = session_id(1);
 
         assert_eq!(
@@ -428,10 +428,10 @@ mod tests {
         assert!(service.into_transaction().observed.is_empty());
     }
 
-    /// S01 / INV-002 / INV-008 / INV-012: orchestration forwards exactly the
+    /// S01: orchestration forwards exactly the
     /// four-field canonical command and calls the atomic port once.
     #[test]
-    fn s01_inv002_inv008_inv012_forwards_exact_command_once() {
+    fn s01_forwards_exact_command_once() {
         let request = ReplaceSessionDefaultsRequest::try_new(
             command_id(1),
             session_id(2),
@@ -467,10 +467,10 @@ mod tests {
         assert_eq!(observed.replacement(), request.replacement());
     }
 
-    /// S01 / INV-008 / INV-012: a recorded applied replay result passes
+    /// S01: a recorded applied replay result passes
     /// through without recomputation or reshaping.
     #[test]
-    fn s01_inv008_inv012_recorded_applied_result_passes_through() {
+    fn s01_recorded_applied_result_passes_through() {
         let command = DomainReplaceSessionDefaults::new(
             command_id(1),
             session_id(1),
@@ -498,10 +498,10 @@ mod tests {
         assert_eq!(service.into_transaction().observed, [command]);
     }
 
-    /// S01 / INV-008 / INV-012: a recorded authoritative-rejected replay
+    /// S01: a recorded authoritative-rejected replay
     /// result passes through without recomputation or reshaping.
     #[test]
-    fn s01_inv008_inv012_recorded_rejected_result_passes_through() {
+    fn s01_recorded_rejected_result_passes_through() {
         let command = DomainReplaceSessionDefaults::new(
             command_id(2),
             session_id(1),
@@ -534,10 +534,10 @@ mod tests {
         assert_eq!(service.into_transaction().observed, [command]);
     }
 
-    /// S01 / INV-012: conflicting user-global reuse is returned unchanged and
+    /// S01: conflicting user-global reuse is returned unchanged and
     /// does not acquire a replacement meaning in application code.
     #[test]
-    fn s01_inv012_conflicting_reuse_is_returned_unchanged() {
+    fn s01_conflicting_reuse_is_returned_unchanged() {
         let request = ReplaceSessionDefaultsRequest::try_new(
             command_id(1),
             session_id(2),
@@ -558,10 +558,10 @@ mod tests {
         assert_eq!(service.into_transaction().observed.len(), 1);
     }
 
-    /// S01 / INV-012: a transaction failure is returned after one call; the
+    /// S01: a transaction failure is returned after one call; the
     /// application does not retry or reinterpret it as a terminal result.
     #[test]
-    fn s01_inv012_transaction_failure_is_returned_without_retry() {
+    fn s01_transaction_failure_is_returned_without_retry() {
         let request = ReplaceSessionDefaultsRequest::try_new(
             command_id(1),
             session_id(2),

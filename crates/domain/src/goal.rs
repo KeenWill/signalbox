@@ -1025,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn inv048_scheduler_block_reports_event_ordinal_exhaustion() {
+    fn scheduler_block_reports_event_ordinal_exhaustion() {
         let mut goal = Goal::commission(
             session(),
             statement("exhaust the event ordinal"),
@@ -1053,7 +1053,7 @@ mod tests {
         );
     }
 
-    /// INV-048: supersession preserves immutable lineage while commissioning one successor.
+    /// supersession preserves immutable lineage while commissioning one successor.
     #[test]
     fn supersession_preserves_old_statement_and_commissions_successor() {
         let first_statement = statement("ship the first scope");
@@ -1075,7 +1075,7 @@ mod tests {
         assert_eq!(superseded.current().state(), &GoalState::Pursuing);
     }
 
-    /// INV-048: execution failure is a scheduler-only block and never a retry.
+    /// execution failure is a scheduler-only block and never a retry.
     #[test]
     fn execution_failure_blocks_without_model_selectable_provenance() {
         let failed_turn = TurnId::from_uuid(Uuid::from_u128(INVOKING_TURN));
@@ -1095,7 +1095,7 @@ mod tests {
         );
     }
 
-    /// INV-048: achievement points at the exact correlated report declaration.
+    /// achievement points at the exact correlated report declaration.
     #[test]
     fn achieved_state_references_exact_report_tool_invocation() {
         let provenance = model();
@@ -1121,10 +1121,10 @@ mod tests {
         );
     }
 
-    /// INV-048: pursuing is the sole scheduler-continuing state; every other
+    /// pursuing is the sole scheduler-continuing state; every other
     /// lifecycle state stops that generation.
     #[test]
-    fn inv048_only_pursuing_state_continues_scheduler_turns() {
+    fn only_pursuing_state_continues_scheduler_turns() {
         let blocked = GoalState::Blocked {
             reason: GoalBlockedReasonKind::AuthorizationRequired,
             need: need("authorization for the deployment"),
@@ -1146,7 +1146,7 @@ mod tests {
         assert!(!superseded.is_pursuing());
     }
 
-    /// INV-048: the complete event history replays to the identical aggregate.
+    /// the complete event history replays to the identical aggregate.
     #[test]
     fn event_history_round_trips_through_checked_reconstitution() {
         let guidance = GoalGuidance::try_new(String::from("use the newly supplied key"))

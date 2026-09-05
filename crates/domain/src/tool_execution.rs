@@ -2268,10 +2268,10 @@ mod tests {
         .expect("the first undecided request is exact")
     }
 
-    /// S10 / INV-010 / INV-012 / INV-020: user decisions advance exactly one
+    /// S10: user decisions advance exactly one
     /// earliest wait and retain explicit user provenance.
     #[test]
-    fn s10_inv010_inv012_inv020_user_decision_advances_to_next_wait() {
+    fn s10_user_decision_advances_to_next_wait() {
         let batch = awaiting_batch();
         let current_request = batch
             .requests()
@@ -2308,10 +2308,10 @@ mod tests {
         assert_eq!(*next_request, expected_next_request);
     }
 
-    /// S10 / INV-010: durable approval history is exactly a proposal-order
+    /// S10: durable approval history is exactly a proposal-order
     /// prefix and cannot skip the current wait.
     #[test]
-    fn s10_inv010_reconstitution_rejects_nonprefix_approval_inventory() {
+    fn s10_reconstitution_rejects_nonprefix_approval_inventory() {
         let first = request(10, 0);
         let second = request(11, 1);
         let input = ToolBatchReconstitutionInput::new(
@@ -2336,10 +2336,10 @@ mod tests {
         );
     }
 
-    /// INV-049: stored delegate evidence cannot be cross-wired to a request
+    /// stored delegate evidence cannot be cross-wired to a request
     /// whose frozen posture reserves the decision for a human.
     #[test]
-    fn inv049_reconstitution_rejects_delegate_resolution_for_human_request() {
+    fn reconstitution_rejects_delegate_resolution_for_human_request() {
         const SUBJECT_REQUEST_SEED: u128 = 10;
         const SUBJECT_SESSION_SEED: u128 = 1;
         const SUBJECT_TURN_SEED: u128 = 2;
@@ -2415,11 +2415,11 @@ mod tests {
         );
     }
 
-    /// S10 / INV-019: reconstitution enforces the same 32-request bound as
+    /// S10: reconstitution enforces the same 32-request bound as
     /// provider-response admission instead of granting authority to oversized
     /// stored batches.
     #[test]
-    fn s10_inv019_reconstitution_rejects_oversized_request_batch() {
+    fn s10_reconstitution_rejects_oversized_request_batch() {
         let requests = (0..33)
             .map(|ordinal| request(u128::from(ordinal) + 10, ordinal))
             .collect();
@@ -2445,10 +2445,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-010 / INV-020: model-call completion may freeze automatic
+    /// S10: model-call completion may freeze automatic
     /// approval for a later request while an earlier confirmation still waits.
     #[test]
-    fn s10_inv010_inv020_later_automatic_approval_survives_reconstitution() {
+    fn s10_later_automatic_approval_survives_reconstitution() {
         let first = request(10, 0);
         let second = request(11, 1);
         let batch = ToolBatchReconstitutionInput::new(
@@ -2474,10 +2474,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-010: a user decision is admissible only at the exact
+    /// S10: a user decision is admissible only at the exact
     /// durable approval wait and cannot manufacture a wait from execution.
     #[test]
-    fn s10_inv010_user_decision_rejects_nonwaiting_batch_unchanged() {
+    fn s10_user_decision_rejects_nonwaiting_batch_unchanged() {
         let only = request(10, 0);
         let batch = ToolBatchReconstitutionInput::new(
             session_id(1),
@@ -2514,10 +2514,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-012: one active batch cannot turn an existing request from a
+    /// S10: one active batch cannot turn an existing request from a
     /// different aggregate into a user-global not-found result.
     #[test]
-    fn s10_inv012_out_of_batch_decision_is_a_correlation_error() {
+    fn s10_out_of_batch_decision_is_a_correlation_error() {
         let command = DecideToolRequest::new(
             DurableCommandId::from_uuid(uuid::Uuid::from_u128(20)),
             tool_request_id(99),
@@ -2540,10 +2540,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-019 / INV-024: serialized execution prepares only the first
+    /// S10: serialized execution prepares only the first
     /// approved request without terminal attempt evidence.
     #[test]
-    fn s10_inv019_inv024_execution_prepares_first_unattempted_request() {
+    fn s10_execution_prepares_first_unattempted_request() {
         let first = request(10, 0);
         let second = request(11, 1);
         let batch = ToolBatchReconstitutionInput::new(
@@ -2574,10 +2574,10 @@ mod tests {
         );
     }
 
-    /// S06 / INV-025 / INV-026: only a completely reconstituted ambiguous
+    /// S06: only a completely reconstituted ambiguous
     /// batch can expose the exact tool recovery-wait subject.
     #[test]
-    fn s06_inv025_inv026_ambiguous_batch_exposes_opaque_recovery_wait() {
+    fn s06_ambiguous_batch_exposes_opaque_recovery_wait() {
         let only = request(10, 0);
         let attempt = ToolAttemptReconstitutionInput::new(
             tool_attempt_id(13),
@@ -2615,10 +2615,10 @@ mod tests {
         assert_eq!(wait.attempt(), tool_attempt_id(13));
     }
 
-    /// S06 / INV-025 / INV-026: impossible effect-free ambiguity cannot
+    /// S06: impossible effect-free ambiguity cannot
     /// manufacture recovery-wait authority during checked reconstitution.
     #[test]
-    fn s06_inv025_inv026_effect_free_ambiguous_history_fails_closed() {
+    fn s06_effect_free_ambiguous_history_fails_closed() {
         let only = request(10, 0);
         let attempt = ToolAttemptReconstitutionInput::new(
             tool_attempt_id(13),
@@ -2653,10 +2653,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-006 / INV-011: a live serialized attempt is the last
+    /// S10: a live serialized attempt is the last
     /// attempt that can exist in proposal order.
     #[test]
-    fn s10_inv006_inv011_reconstitution_rejects_attempt_after_live_attempt() {
+    fn s10_reconstitution_rejects_attempt_after_live_attempt() {
         let first = request(10, 0);
         let second = request(11, 1);
         let current = ToolAttemptReconstitutionInput::new(
@@ -2712,10 +2712,10 @@ mod tests {
         );
     }
 
-    /// S06 / INV-004 / INV-006: recovery evidence belongs to one issuing
+    /// S06: recovery evidence belongs to one issuing
     /// continuation tenure throughout the complete batch.
     #[test]
-    fn s06_inv004_inv006_recovery_rejects_mixed_issuing_attempts() {
+    fn s06_recovery_rejects_mixed_issuing_attempts() {
         let first = request(10, 0);
         let second = request(11, 1);
         let completed = ToolAttemptReconstitutionInput::new(
@@ -2770,10 +2770,10 @@ mod tests {
         );
     }
 
-    /// S05 / INV-019 / INV-026: crash-lost evidence is a turn-level blocker,
+    /// S05: crash-lost evidence is a turn-level blocker,
     /// so no later approved request can be prepared or already attempted.
     #[test]
-    fn s05_inv019_inv026_crash_loss_stops_serial_batch_execution() {
+    fn s05_crash_loss_stops_serial_batch_execution() {
         let first = request(10, 0);
         let second = request(11, 1);
         let crash_lost = ToolAttemptReconstitutionInput::new(
@@ -2874,10 +2874,10 @@ mod tests {
         );
     }
 
-    /// S11 / INV-005 / INV-027: result projection uses only attempt/request
+    /// S11: result projection uses only attempt/request
     /// references and preserves proposal order.
     #[test]
-    fn s11_inv005_inv027_result_projection_is_reference_only_and_ordered() {
+    fn s11_result_projection_is_reference_only_and_ordered() {
         let executed = request(10, 0);
         let denied = request(11, 1);
         let success = ToolAttemptEnd::Completed {
@@ -2941,10 +2941,10 @@ mod tests {
         );
     }
 
-    /// S17 / INV-005 / INV-032: a delivered foreground child wait reopens the
+    /// S17: a delivered foreground child wait reopens the
     /// batch under a fresh turn attempt and projects the typed result once.
     #[test]
-    fn s17_inv005_inv032_foreground_child_wait_resumes_and_projects_typed_result() {
+    fn s17_foreground_child_wait_resumes_and_projects_typed_result() {
         let awaited = request(10, 0);
         let spawning_request = tool_request_id(11);
         let child = session_id(9);
@@ -3048,10 +3048,10 @@ mod tests {
         );
     }
 
-    /// S06 / INV-005 / INV-006 / INV-025: terminal recovery closes every
+    /// S06: terminal recovery closes every
     /// logical request in proposal order without rewriting physical ambiguity.
     #[test]
-    fn s06_inv005_inv006_inv025_reconciliation_projection_closes_ambiguity() {
+    fn s06_reconciliation_projection_closes_ambiguity() {
         let ambiguous = request(10, 0);
         let unresolved = request(11, 1);
         let attempt = ToolAttemptReconstitutionInput::new(
@@ -3110,10 +3110,10 @@ mod tests {
         );
         assert_eq!(projection.snapshot().entry_count(), 2);
     }
-    /// S31 / INV-004 / INV-043: every clone of one checked batch shares one
+    /// S31: every clone of one checked batch shares one
     /// runner-authorization issuance capability.
     #[test]
-    fn s31_inv004_inv043_runner_authorization_is_single_use_across_batch_clones() {
+    fn s31_runner_authorization_is_single_use_across_batch_clones() {
         let only = request(10, 0);
         let attempt_id = tool_attempt_id(12);
         let attempt = ToolAttemptReconstitutionInput::new(
@@ -3157,10 +3157,10 @@ mod tests {
         );
     }
 
-    /// S31 / INV-004 / INV-043: restored in-flight authority is also
+    /// S31: restored in-flight authority is also
     /// single-use for runner conversion across clones of one checked batch.
     #[test]
-    fn s31_inv004_inv043_in_flight_runner_authorization_is_single_use_across_clones() {
+    fn s31_in_flight_runner_authorization_is_single_use_across_clones() {
         let only = request(10, 0);
         let attempt_id = tool_attempt_id(12);
         let approval = approval(only.id(), ToolApprovalDecision::Approve);
@@ -3233,10 +3233,10 @@ mod tests {
         );
     }
 
-    /// S31 / INV-004 / INV-043: reconstitution restores every retired
+    /// S31: reconstitution restores every retired
     /// identity and rejects it as a later claimed-attempt replacement.
     #[test]
-    fn s31_inv004_inv043_reconstituted_batch_rejects_retired_identity_reuse() {
+    fn s31_reconstituted_batch_rejects_retired_identity_reuse() {
         let only = request(10, 0);
         let current_id = tool_attempt_id(12);
         let retired_id = tool_attempt_id(11);
@@ -3282,9 +3282,9 @@ mod tests {
         );
     }
 
-    /// S31 / INV-004: ordinary preparation rejects every durably retired identity.
+    /// S31: ordinary preparation rejects every durably retired identity.
     #[test]
-    fn s31_inv004_ordinary_preparation_rejects_retired_identity_reuse() {
+    fn s31_ordinary_preparation_rejects_retired_identity_reuse() {
         let first = request(10, 0);
         let second = request(11, 1);
         let ended_id = tool_attempt_id(13);
@@ -3334,9 +3334,9 @@ mod tests {
         );
     }
 
-    /// S31 / INV-004: retired and current inventories must be disjoint.
+    /// S31: retired and current inventories must be disjoint.
     #[test]
-    fn s31_inv004_reconstitution_rejects_current_identity_as_retired() {
+    fn s31_reconstitution_rejects_current_identity_as_retired() {
         let only = request(10, 0);
         let current_id = tool_attempt_id(12);
         let current = ToolAttemptReconstitutionInput::new(

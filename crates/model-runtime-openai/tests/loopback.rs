@@ -922,7 +922,7 @@ impl CredentialAccess for RotatingKey {
 }
 
 #[tokio::test]
-async fn inv_035_api_key_rotation_is_visible_to_the_next_preparation() {
+async fn api_key_rotation_is_visible_to_the_next_preparation() {
     let server = CannedServer::serving(vec![
         http_response("200 OK", &[], b"{}"),
         http_response("200 OK", &[], b"{}"),

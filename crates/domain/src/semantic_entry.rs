@@ -284,7 +284,7 @@ mod tests {
         )
     }
 
-    /// INV-001 / INV-005 / INV-036: the semantic projection remains a closed
+    /// the semantic projection remains a closed
     /// typed reference to its distinct accepted-input, source-turn, terminal
     /// turn, or tool subject.
     #[test]
@@ -334,10 +334,10 @@ mod tests {
         ));
     }
 
-    /// INV-005: assistant text stays exact, remains distinct from user
+    /// assistant text stays exact, remains distinct from user
     /// content, and retains producing-call provenance.
     #[test]
-    fn adr0042_inv005_assistant_text_is_exact_and_call_correlated() {
+    fn adr0042_assistant_text_is_exact_and_call_correlated() {
         let producing_call = crate::test_support::model_call_id(7);
         let exact = String::from(" \tline one\r\ncafe\u{301}\n ");
         let entry = semantic_entry(SemanticTranscriptEntryPayload::AssistantText {
@@ -362,10 +362,10 @@ mod tests {
         );
     }
 
-    /// INV-006: completion is an explicit turn marker distinct from every
+    /// completion is an explicit turn marker distinct from every
     /// physical model-call outcome.
     #[test]
-    fn adr0042_inv006_completion_marker_names_the_exact_turn() {
+    fn adr0042_completion_marker_names_the_exact_turn() {
         let turn = turn_id(9);
         let entry = semantic_entry(SemanticTranscriptEntryPayload::TurnCompleted { turn });
 

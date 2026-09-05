@@ -1,6 +1,6 @@
 use super::property_support::*;
 
-/// INV-035: grammar-generated credentials in URL user information, query
+/// grammar-generated credentials in URL user information, query
 /// components, and fragments are absent from parsed result output without
 /// relying on credential scrubbing.
 #[test]

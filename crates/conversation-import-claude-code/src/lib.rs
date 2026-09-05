@@ -712,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_maximum_fidelity_converter_declares_version_two() {
+    fn s28_maximum_fidelity_converter_declares_version_two() {
         assert_eq!(
             ClaudeCodeJsonlConverter.format(),
             ImportedConversationFormat::ClaudeCodeSessionJsonlV2
@@ -720,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_crlf_delimiter_is_not_raw_record_content() {
+    fn s28_crlf_delimiter_is_not_raw_record_content() {
         let imported =
             convert_synthetic("{\"type\":\"system\"}\r\n{\"type\":\"system\",\"value\":1}");
 
@@ -728,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_each_entry_boundary_resolves_its_exact_prefix() {
+    fn s28_each_entry_boundary_resolves_its_exact_prefix() {
         let imported = convert_synthetic(
             "{\"type\":\"user\",\"message\":{\"content\":[\
              {\"type\":\"text\",\"text\":\"one\"},\
@@ -744,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_within_record_positions_follow_exact_sequence() {
+    fn s28_within_record_positions_follow_exact_sequence() {
         let imported = convert_synthetic(
             "{\"type\":\"user\",\"message\":{\"content\":[\
              {\"type\":\"text\",\"text\":\"one\"},\
@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_maps_non_message_records_to_source_events() {
+    fn s28_maps_non_message_records_to_source_events() {
         let imported = convert_synthetic("{\"type\":\"system\",\"subtype\":\"init\"}");
 
         assert!(matches!(
@@ -770,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_attests_message_speaker_from_top_level_type() {
+    fn s28_attests_message_speaker_from_top_level_type() {
         let imported = convert_synthetic("{\"type\":\"user\",\"message\":{\"content\":\"ask\"}}");
 
         assert!(matches!(
@@ -780,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_absent_text_inside_tool_result_blocks() {
+    fn s28_preserves_absent_text_inside_tool_result_blocks() {
         let imported = convert_synthetic(
             "{\"type\":\"user\",\"message\":{\"content\":[\
              {\"type\":\"tool_result\",\"content\":[\
@@ -804,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_maps_source_defined_tool_result_blocks_without_dropping_the_result() {
+    fn s28_maps_source_defined_tool_result_blocks_without_dropping_the_result() {
         let imported = convert_synthetic(
             "{\"type\":\"user\",\"message\":{\"content\":[\
              {\"type\":\"tool_result\",\"tool_use_id\":\"call\",\
@@ -828,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_null_typed_result_block_retains_explicit_absence() {
+    fn s28_null_typed_result_block_retains_explicit_absence() {
         let imported = convert_synthetic(
             "{\"type\":\"user\",\"message\":{\"content\":[\
              {\"type\":\"tool_result\",\"content\":[{\"type\":null}]}]}}",
@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_untyped_source_message_block_retains_typed_absence() {
+    fn s28_untyped_source_message_block_retains_typed_absence() {
         let imported = convert_synthetic(
             "{\"type\":\"assistant\",\"message\":{\"content\":[\
              {\"payload\":{\"exact\":1}}]}}",
@@ -866,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_maps_tool_call_fields_together() {
+    fn s28_maps_tool_call_fields_together() {
         let imported = convert_synthetic(
             "{\"type\":\"assistant\",\"message\":{\"content\":[\
              {\"type\":\"tool_use\",\"id\":\"call\",\"name\":\"lookup\",\
@@ -893,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_maps_thinking_and_signature_together() {
+    fn s28_maps_thinking_and_signature_together() {
         let imported = convert_synthetic(
             "{\"type\":\"assistant\",\"message\":{\"content\":[\
              {\"type\":\"thinking\",\"thinking\":\"private\",\
@@ -916,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_maps_redacted_thinking_data() {
+    fn s28_maps_redacted_thinking_data() {
         let imported = convert_synthetic(
             "{\"type\":\"assistant\",\"message\":{\"content\":[\
              {\"type\":\"redacted_thinking\",\"data\":\"sealed\"}]}}",
@@ -931,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_maps_document_media_source_fields_together() {
+    fn s28_maps_document_media_source_fields_together() {
         let imported = convert_synthetic(
             "{\"type\":\"assistant\",\"message\":{\"content\":[\
              {\"type\":\"document\",\"source\":{\"type\":\"base64\",\
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_rejects_unpaired_unicode_surrogates() {
+    fn s28_rejects_unpaired_unicode_surrogates() {
         let error = ClaudeCodeJsonlConverter
             .convert(
                 conversation(),
@@ -972,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_each_distinct_message_absence() {
+    fn s28_preserves_each_distinct_message_absence() {
         let source = concat!(
             "{\"type\":\"user\"}\n",
             "{\"type\":\"user\",\"message\":null}\n",
@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_empty_and_absent_text_attestations() {
+    fn s28_preserves_empty_and_absent_text_attestations() {
         let source = concat!(
             "{\"type\":\"user\",\"message\":{\"content\":[",
             "{\"type\":\"text\"},{\"type\":\"text\",\"text\":null},",
@@ -1041,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_source_only_records() {
+    fn s28_preserves_source_only_records() {
         let source_only = ClaudeCodeJsonlConverter
             .convert(
                 conversation(),
@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_unknown_content_block_is_normalized_without_omission() {
+    fn s28_unknown_content_block_is_normalized_without_omission() {
         let source = concat!(
             "{\"type\":\"user\",\"message\":{\"content\":\"secret-before\"}}\n",
             "{\"type\":\"assistant\",\"message\":{\"content\":[",
@@ -1075,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_conversion_error_rendering_is_content_silent() {
+    fn s28_conversion_error_rendering_is_content_silent() {
         let source = concat!(
             "{\"type\":\"user\",\"message\":{\"content\":\"secret-before\"}}\n",
             "{\"type\":\"assistant\",\"message\":{\"content\":[",
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_terminal_lone_carriage_return_as_raw_content() {
+    fn s28_preserves_terminal_lone_carriage_return_as_raw_content() {
         let source = b"{\"type\":\"system\"}\r";
         let imported = ClaudeCodeJsonlConverter
             .convert(conversation(), source, || {
@@ -1109,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_terminal_lf_does_not_create_an_empty_record() {
+    fn s28_terminal_lf_does_not_create_an_empty_record() {
         let imported = ClaudeCodeJsonlConverter
             .convert(conversation(), b"{\"type\":\"system\"}\n", || {
                 ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
@@ -1121,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_rejects_blank_lines() {
+    fn s28_rejects_blank_lines() {
         let error = ClaudeCodeJsonlConverter
             .convert(conversation(), b"{\"type\":\"system\"}\n\n", || {
                 ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
@@ -1134,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_rejects_utf8_bom_at_record_start() {
+    fn s28_rejects_utf8_bom_at_record_start() {
         let error = ClaudeCodeJsonlConverter
             .convert(conversation(), b"\xef\xbb\xbf{\"type\":\"system\"}", || {
                 ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_rejects_duplicate_modeled_members() {
+    fn s28_rejects_duplicate_modeled_members() {
         let error = ClaudeCodeJsonlConverter
             .convert(
                 conversation(),
@@ -1164,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_rejects_message_role_conflicts() {
+    fn s28_rejects_message_role_conflicts() {
         let error = ClaudeCodeJsonlConverter
             .convert(
                 conversation(),
@@ -1179,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv001_inv038_rejects_duplicate_entry_identities() {
+    fn s28_rejects_duplicate_entry_identities() {
         let error = ClaudeCodeJsonlConverter
             .convert(
                 conversation(),
@@ -1196,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_resilient_conversion_reports_every_distinct_skipped_record() {
+    fn s28_resilient_conversion_reports_every_distinct_skipped_record() {
         const FIRST: &[u8] = br#"{"type":"system","subtype":"first"}"#;
         const FIFTH: &[u8] = br#"{"type":"assistant","message":{"content":"kept"}}"#;
         let source = [
@@ -1260,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_resilient_conversion_reports_when_no_record_is_valid() {
+    fn s28_resilient_conversion_reports_when_no_record_is_valid() {
         let report = ClaudeCodeJsonlConverter
             .convert_resilient(conversation(), b"\n{", || {
                 panic!("rejected records must not consume an entry identity")
@@ -1285,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_resilient_empty_source_remains_a_fatal_error() {
+    fn s28_resilient_empty_source_remains_a_fatal_error() {
         let error = ClaudeCodeJsonlConverter
             .convert_resilient(conversation(), b"", || {
                 panic!("empty source must not consume an entry identity")
@@ -1299,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_strict_conversion_preserves_blank_line_error_precedence() {
+    fn s28_strict_conversion_preserves_blank_line_error_precedence() {
         let error = ClaudeCodeJsonlConverter
             .convert(conversation(), b"not-json\n\n{\"type\":\"system\"}", || {
                 panic!("strict parse rejection must not consume an entry identity")

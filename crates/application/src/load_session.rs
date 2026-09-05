@@ -166,10 +166,10 @@ mod tests {
         }
     }
 
-    /// S01 / INV-002 / INV-008: application orchestration returns the exact
+    /// S01: application orchestration returns the exact
     /// complete domain snapshot supplied by the current-session port.
     #[test]
-    fn s01_inv002_inv008_complete_current_session_is_returned_unchanged() {
+    fn s01_complete_current_session_is_returned_unchanged() {
         let requested = session_id(1);
         let current = current_session(requested, 4);
         let service =
@@ -201,10 +201,10 @@ mod tests {
         assert_eq!(service.into_reader().observed(), [requested]);
     }
 
-    /// S01 / INV-012: loading by semantic session identity is a single query;
+    /// S01: loading by semantic session identity is a single query;
     /// an adapter failure is returned without retry or command handling.
     #[test]
-    fn s01_inv012_reader_failure_is_returned_without_retry() {
+    fn s01_reader_failure_is_returned_without_retry() {
         let requested = session_id(1);
         let service = LoadSessionService::new(FakeSessionReader::returning(Err(
             FakeReaderError::Unavailable,

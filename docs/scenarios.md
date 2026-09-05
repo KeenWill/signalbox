@@ -3,7 +3,7 @@
 These scenarios test architectural boundaries; quoted commands and state names
 are descriptive pseudocode, not final APIs. “Durable commands” means user intent
 the daemon must commit before acknowledging, not a prescribed event-sourcing
-design. Invariant identifiers link to [the catalog](invariants.md).
+design.
 
 The scenarios are frozen design fixtures. New or changed normative behavior
 belongs in the record that owns it (the owning [spec page](spec/README.md) or
@@ -12,9 +12,7 @@ alongside the maintainer-accepted change that motivates it, and a change
 introducing a new lifecycle edge adds or amends its scenario fixture in the same
 change. Test coverage is recorded outside this document: tests name the scenario
 identifiers they enforce under the rules in [AGENTS.md](../AGENTS.md) and
-[testing-style.md](agents/testing-style.md). The
-[invariant test index](invariants.md) is generated separately from corresponding
-INV-tagged test names and attached doc comments.
+[testing-style.md](agents/testing-style.md).
 
 ## S01 — Create a new interactive session
 

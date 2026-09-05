@@ -1184,11 +1184,11 @@ mod tests {
         }
     }
 
-    /// S03 / INV-034: the production guarded pass replaced the activated pass,
+    /// S03: the production guarded pass replaced the activated pass,
     /// so an unprovable guarded activation commit must still raise the fatal
     /// recovery signal — every turn depends on it, not only compacted ones.
     #[test]
-    fn s03_inv034_ambiguous_guarded_activation_commit_reports_post_activation_failure() {
+    fn s03_ambiguous_guarded_activation_commit_reports_post_activation_failure() {
         let (execution, signal) = supervised();
 
         report_guarded_ambiguity(&execution, &ambiguous_activation());
@@ -1196,11 +1196,11 @@ mod tests {
         assert!(signal.is_triggered());
     }
 
-    /// S03 / INV-034: an automatic compaction whose durable preparation cannot
+    /// S03: an automatic compaction whose durable preparation cannot
     /// be proven committed reports the same outcome as an ambiguous activation
     /// commit, rather than failing silently on the compaction path.
     #[test]
-    fn s03_inv034_ambiguous_compaction_preparation_reports_post_activation_failure() {
+    fn s03_ambiguous_compaction_preparation_reports_post_activation_failure() {
         let (execution, signal) = supervised();
 
         let error = ambiguous_compaction();
@@ -1213,10 +1213,10 @@ mod tests {
         assert!(signal.is_triggered());
     }
 
-    /// S03 / INV-034: a database failure before any commit boundary is ordinary
+    /// S03: a database failure before any commit boundary is ordinary
     /// scheduler retry work and raises no recovery signal.
     #[test]
-    fn s03_inv034_activation_failure_before_the_commit_boundary_reports_nothing() {
+    fn s03_activation_failure_before_the_commit_boundary_reports_nothing() {
         let (execution, signal) = supervised();
 
         let error: GuardedFailure = ContextGuardedTurnPassError::Activation {
@@ -1232,10 +1232,10 @@ mod tests {
         assert!(!signal.is_triggered());
     }
 
-    /// S03 / INV-034: execution failures keep their own supervision rule, so
+    /// S03: execution failures keep their own supervision rule, so
     /// the guarded pass adds no second reaction to them.
     #[test]
-    fn s03_inv034_execution_failure_keeps_its_own_supervision_rule() {
+    fn s03_execution_failure_keeps_its_own_supervision_rule() {
         let (execution, signal) = supervised();
 
         let error: GuardedFailure = ContextGuardedTurnPassError::Execution {

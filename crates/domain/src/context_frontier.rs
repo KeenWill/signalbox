@@ -903,10 +903,10 @@ mod tests {
         .expect("test snapshot entries are ordered and distinct")
     }
 
-    /// INV-001: even equal UUID bytes retain distinct semantic identity kinds,
+    /// even equal UUID bytes retain distinct semantic identity kinds,
     /// and a complete context-frontier identity includes its owning session.
     #[test]
-    fn inv001_frontier_and_entry_identity_kinds_remain_distinct() {
+    fn frontier_and_entry_identity_kinds_remain_distinct() {
         let frontier_id = context_frontier_id(1);
         let entry_id = semantic_transcript_entry_id(1);
         assert_eq!(frontier_id.as_uuid(), entry_id.as_uuid());
@@ -924,11 +924,11 @@ mod tests {
         assert_eq!(first.frontier().snapshot(), frontier_id);
     }
 
-    /// INV-015: ordinary frontier identity and explicit complete semantic
+    /// ordinary frontier identity and explicit complete semantic
     /// content equality remain separate comparisons; independently identified
     /// equal-content snapshots are legal.
     #[test]
-    fn inv015_identity_and_semantic_content_equality_are_explicitly_distinct() {
+    fn identity_and_semantic_content_equality_are_explicitly_distinct() {
         let owner = session_id(1);
         let entries = [entry(1), entry(2)];
         let first = snapshot(owner, 1, entries);
@@ -946,11 +946,11 @@ mod tests {
         assert_eq!(first.entry_count(), entries.len());
     }
 
-    /// INV-015 / INV-030: exact duplicate references are rejected unchanged,
+    /// exact duplicate references are rejected unchanged,
     /// while matching entry identifiers from distinct source sessions remain
     /// distinct semantic references.
     #[test]
-    fn inv015_inv030_resolved_contents_are_ordered_and_exactly_distinct() {
+    fn resolved_contents_are_ordered_and_exactly_distinct() {
         let first_source = session_id(1);
         let first = entry_from(first_source, 1);
         let same_entry_other_source = entry_from(session_id(2), 1);
@@ -987,11 +987,11 @@ mod tests {
         assert_eq!(first.entry(), semantic_transcript_entry_id(1));
     }
 
-    /// INV-015: the persistence-facing seam admits complete distinct
+    /// the persistence-facing seam admits complete distinct
     /// membership and rejects an exact duplicate without exposing unchecked
     /// snapshot construction.
     #[test]
-    fn inv015_reconstitution_input_checks_complete_snapshot_shape() {
+    fn reconstitution_input_checks_complete_snapshot_shape() {
         let owner = session_id(1);
         let first = entry(1);
         let second = entry(2);
@@ -1018,10 +1018,10 @@ mod tests {
         );
     }
 
-    /// INV-015: complete reconstitution preserves the exact order of a
+    /// complete reconstitution preserves the exact order of a
     /// frontier large enough to exercise structurally shared tree nodes.
     #[test]
-    fn inv015_long_frontier_reconstitution_preserves_complete_order() {
+    fn long_frontier_reconstitution_preserves_complete_order() {
         let ordered_entries = distinct_entries(512);
         let input = ResolvedContextFrontierReconstitutionInput::new(
             session_id(1),
@@ -1040,10 +1040,10 @@ mod tests {
         );
     }
 
-    /// S09 / INV-015: long-frontier derivation shares the exact source prefix,
+    /// S09: long-frontier derivation shares the exact source prefix,
     /// appends only the stated suffix, and leaves the source unchanged.
     #[test]
-    fn s09_inv015_long_frontier_derivation_preserves_source_prefix() {
+    fn s09_long_frontier_derivation_preserves_source_prefix() {
         let source_entries = distinct_entries(512);
         let appended_entries = vec![entry(513), entry(514)];
         let source = snapshot(session_id(1), 1, source_entries.clone());
@@ -1061,10 +1061,10 @@ mod tests {
         assert_eq!(derived.entry_count(), 514);
     }
 
-    /// S09 / INV-015: hundreds of one-entry derivations retain one exact
+    /// S09: hundreds of one-entry derivations retain one exact
     /// ordered frontier without rebuilding or mutating any semantic prefix.
     #[test]
-    fn s09_inv015_long_frontier_chain_preserves_every_append() {
+    fn s09_long_frontier_chain_preserves_every_append() {
         let root = snapshot(session_id(1), 1, vec![entry(1)]);
         let terminal = (2..=512).fold(root, |source, index| {
             source
@@ -1079,10 +1079,10 @@ mod tests {
         );
     }
 
-    /// INV-015: scheduling validation traverses a shared 512-entry chain once
+    /// scheduling validation traverses a shared 512-entry chain once
     /// even when the complete descendant is presented before its root.
     #[test]
-    fn inv015_long_shared_reconstitution_validates_each_entry_once() {
+    fn long_shared_reconstitution_validates_each_entry_once() {
         let root = ResolvedContextFrontierReconstitutionInput::new(
             session_id(1),
             context_frontier_id(1),
@@ -1111,10 +1111,10 @@ mod tests {
         assert_eq!(visits, 512);
     }
 
-    /// INV-015: a duplicate late in a long retained prefix is still rejected
+    /// a duplicate late in a long retained prefix is still rejected
     /// with the complete source and append inputs unchanged.
     #[test]
-    fn inv015_long_frontier_derivation_rejects_retained_duplicate_unchanged() {
+    fn long_frontier_derivation_rejects_retained_duplicate_unchanged() {
         let source = snapshot(session_id(1), 1, distinct_entries(512));
         let appended_entries = vec![entry(513), entry(512)];
 
@@ -1126,10 +1126,10 @@ mod tests {
         );
     }
 
-    /// S09 / INV-015: later candidate derivation retains the complete earlier
+    /// S09: later candidate derivation retains the complete earlier
     /// prefix in order and only appends exact new semantic entries.
     #[test]
-    fn s09_inv015_derivation_is_prefix_preserving_and_append_only() {
+    fn s09_derivation_is_prefix_preserving_and_append_only() {
         let owner = session_id(1);
         let first = entry(1);
         let second = entry(2);
@@ -1162,11 +1162,11 @@ mod tests {
         assert!(source.same_semantic_content(&equal_content));
     }
 
-    /// INV-015: derivation cannot reinterpret the source snapshot identity or
+    /// derivation cannot reinterpret the source snapshot identity or
     /// duplicate an exact reference from either the retained prefix or the
     /// same append batch; every rejected append input is returned unchanged.
     #[test]
-    fn inv015_invalid_derivations_preserve_source_and_inputs() {
+    fn invalid_derivations_preserve_source_and_inputs() {
         let source = snapshot(session_id(1), 1, [entry(1)]);
 
         assert_derivation_rejects_unchanged(
@@ -1215,11 +1215,11 @@ mod tests {
         );
     }
 
-    /// S17 / INV-030: a new consuming session owns its own frontier while
+    /// S17: a new consuming session owns its own frontier while
     /// preserving inherited source-session and semantic-entry identities
     /// before appending its own origin entry.
     #[test]
-    fn s17_inv030_inherited_entry_references_are_preserved_without_reminting() {
+    fn s17_inherited_entry_references_are_preserved_without_reminting() {
         let source_session = session_id(1);
         let consuming_session = session_id(2);
         let inherited = [entry_from(source_session, 1), entry_from(source_session, 2)];

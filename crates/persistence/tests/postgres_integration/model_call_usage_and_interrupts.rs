@@ -11,11 +11,11 @@ fn expect_ready_model_call(
     }
 }
 
-/// INV-014: the credential-reference column is total; the migrated schema
+/// the credential-reference column is total; the migrated schema
 /// rejects a NULL stored reference.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv014_model_call_credential_reference_is_total() -> Result<(), Box<dyn Error>> {
+async fn model_call_credential_reference_is_total() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
     let is_nullable: String = sqlx::query_scalar(
@@ -709,11 +709,11 @@ async fn request_too_large_failure_forces_one_successor_compaction() -> Result<(
     Ok(())
 }
 
-/// INV-006: cancellation evidence cannot carry provider usage because neither
+/// cancellation evidence cannot carry provider usage because neither
 /// cancellation-confirmed nor pre-send cancellation reports token evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_cancelled_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
+async fn cancelled_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0x6d80, true).await?;
     let reported_output_tokens = Decimal::from(1_u64);
@@ -742,11 +742,11 @@ async fn inv006_cancelled_model_call_usage_is_unreported() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-006: a call terminalized directly from Prepared cannot carry usage because
+/// a call terminalized directly from Prepared cannot carry usage because
 /// no provider send was authorized.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_unsent_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
+async fn unsent_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0x6e00, false).await?;
     let reported_input_tokens = Decimal::from(1_u64);
@@ -775,11 +775,11 @@ async fn inv006_unsent_model_call_usage_is_unreported() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// INV-006: a call terminalized directly from Prepared cannot carry a
+/// a call terminalized directly from Prepared cannot carry a
 /// provider-failure cause because no provider send was authorized.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_unsent_model_call_provider_failure_cause_is_absent() -> Result<(), Box<dyn Error>> {
+async fn unsent_model_call_provider_failure_cause_is_absent() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0x6e80, false).await?;
 
@@ -806,11 +806,11 @@ async fn inv006_unsent_model_call_provider_failure_cause_is_absent() -> Result<(
     Ok(())
 }
 
-/// INV-014: a reference pinned on a new model call cannot be replaced or
+/// a reference pinned on a new model call cannot be replaced or
 /// cleared.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv014_model_call_credential_reference_is_immutable() -> Result<(), Box<dyn Error>> {
+async fn model_call_credential_reference_is_immutable() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0x6f00, false).await?;
 
@@ -991,12 +991,12 @@ async fn definitive_attachment_failure_closes_its_call_with_a_durable_cause()
     Ok(())
 }
 
-/// INV-006: an uncertain capability-failure closure is reconciled from exact
+/// an uncertain capability-failure closure is reconciled from exact
 /// durable Prepared or complete known-failure state, including its terminal
 /// attempt and call provenance, before any resubmission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_committed()
+async fn model_call_prepared_failure_reread_distinguishes_pending_and_committed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7000;
@@ -1181,14 +1181,13 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
     Ok(())
 }
 
-/// INV-006 / INV-014 / INV-037: retained prepared failure and ambiguous
+/// retained prepared failure and ambiguous
 /// authorization rereads accept an exact interrupt-caused cancellation of the
 /// still-Prepared call as authoritative no-work, and reject an incomplete
 /// cancellation closure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
--> Result<(), Box<dyn Error>> {
+async fn failure_rereads_accept_prepared_cancellation() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7580;
     let fixture = checkpoint_restart_model_call(&pool, seed, false).await?;
@@ -1527,7 +1526,7 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     Ok(())
 }
 
-/// S03 / S09 / INV-006 / INV-008 / INV-012 / INV-014 / INV-015: interrupting
+/// S03 / S09: interrupting
 /// an issued call atomically records its stop proof and cancellation request;
 /// the durable signal resolves, physical cancellation closes the turn with its
 /// exact attempt history, and both command and observation replays converge on
@@ -1773,7 +1772,7 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
     Ok(())
 }
 
-/// S04 / S07 / INV-025 / INV-029 / INV-032 / INV-037: ambiguity observed
+/// S04 / S07: ambiguity observed
 /// before or after an applied interrupt terminalizes as exact proof-bearing
 /// reconciliation, and retained observation and origin rereads recognize the
 /// committed closure.
@@ -2249,7 +2248,7 @@ async fn provider_failure_cause_round_trips_through_persistence_and_process_read
     Ok(())
 }
 
-/// S07 / S08 / INV-006 / INV-012 / INV-037: the stop-request migration keeps
+/// S07 / S08: the stop-request migration keeps
 /// each stopping rejection paired with its immutable delivery and admits only
 /// a known-failed call as failed post-cancellation provenance.
 #[tokio::test(flavor = "multi_thread")]
@@ -2390,7 +2389,7 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
     Ok(())
 }
 
-/// S03 / S04 / S07 / INV-006 / INV-012 / INV-029: completion and restart can
+/// S03 / S04 / S07: completion and restart can
 /// win after a durable stop request without erasing the applied interrupt.
 /// Terminal reload accepts the completion race, while restart retains an
 /// ambiguous call in proof-bearing terminal reconciliation.

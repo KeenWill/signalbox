@@ -5,10 +5,9 @@ creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
 long-lived session aggregate, semantic transcript entries, accepted-input user
 content, and actor attribution. The imported-conversation record and converter
-are owned by [conversation-import](conversation-import.md). Where a law is cited
-as `INV-NNN`, the generated [invariant test index](../invariants.md) resolves
-it; where mechanics owned by another contract are summarized, the owning sibling
-page is linked inline.
+are owned by [conversation-import](conversation-import.md). Where mechanics
+owned by another contract are summarized, the owning sibling page is linked
+inline.
 
 ## Session identity and creation provenance
 

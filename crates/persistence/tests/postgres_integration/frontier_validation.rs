@@ -413,11 +413,11 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-015: compaction validates a successor from its immutable predecessor
+/// compaction validates a successor from its immutable predecessor
 /// and bounded typed suffix while retaining root/import compatibility replay.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv015_context_compaction_validation_is_current_and_typed() -> Result<(), Box<dyn Error>> {
+async fn context_compaction_validation_is_current_and_typed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let validator_shape: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT

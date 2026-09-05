@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(lifecycle.disposition(), &disposition);
     }
 
-    /// INV-004: accepted steering remains separately identified; typed
+    /// accepted steering remains separately identified; typed
     /// transitions preserve the accepted-input identity.
     #[test]
     fn lifecycle_consumption_preserves_accepted_input_identity() {
@@ -401,7 +401,7 @@ mod tests {
         );
     }
 
-    /// INV-004: accepted steering remains separately identified; typed
+    /// accepted steering remains separately identified; typed
     /// transitions preserve the accepted-input identity.
     #[test]
     fn lifecycle_reclassification_preserves_accepted_input_identity() {
@@ -419,7 +419,7 @@ mod tests {
         );
     }
 
-    /// INV-006: a transition is valid only from explicitly permitted prior
+    /// a transition is valid only from explicitly permitted prior
     /// states, and a rejection leaves the current state unchanged.
     #[test]
     fn lifecycle_consumption_rejections_return_the_unchanged_identity_and_disposition() {
@@ -431,7 +431,7 @@ mod tests {
         );
     }
 
-    /// INV-006: a transition is valid only from explicitly permitted prior
+    /// a transition is valid only from explicitly permitted prior
     /// states, and a rejection leaves the current state unchanged.
     #[test]
     fn lifecycle_reclassification_rejections_return_the_unchanged_identity_and_disposition() {
@@ -443,7 +443,7 @@ mod tests {
         );
     }
 
-    /// INV-004: closure preserves the accepted-input identity.
+    /// closure preserves the accepted-input identity.
     #[test]
     fn lifecycle_closure_preserves_accepted_input_identity() {
         let id = accepted_input_id(1);
@@ -457,7 +457,7 @@ mod tests {
         );
     }
 
-    /// INV-006: closure is valid only from pending steering, and a rejection
+    /// closure is valid only from pending steering, and a rejection
     /// leaves the current state unchanged.
     #[test]
     fn lifecycle_closure_rejections_return_the_unchanged_identity_and_disposition() {
@@ -467,7 +467,7 @@ mod tests {
         assert_lifecycle_closure_rejects_unchanged(AcceptedInputDisposition::ClosedNotDelivered);
     }
 
-    /// INV-006: a transition is valid only from explicitly permitted prior
+    /// a transition is valid only from explicitly permitted prior
     /// states.
     #[test]
     fn internal_consumption_rejects_every_non_pending_disposition_with_the_current_value() {
@@ -479,7 +479,7 @@ mod tests {
         );
     }
 
-    /// INV-006: a transition is valid only from explicitly permitted prior
+    /// a transition is valid only from explicitly permitted prior
     /// states.
     #[test]
     fn internal_reclassification_rejects_every_non_pending_disposition_with_the_current_value() {

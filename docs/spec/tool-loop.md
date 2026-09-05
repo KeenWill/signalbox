@@ -18,8 +18,7 @@ entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
 [model-call-execution](model-call-execution.md); durable-command identity in
 [identity-and-commands](identity-and-commands.md); and relational mechanics in
-[persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant test index](../invariants.md).
+[persistence-protocol](persistence-protocol.md).
 
 ## Intra-turn rounds and request batches
 

@@ -19,13 +19,12 @@ fn attachment_content(digest: BlobDigest) -> UserContent {
         .expect("the fixture attachment content is canonical")
 }
 
-/// S01 / INV-002 / INV-008 / INV-012: the Postgres adapters preserve
+/// S01: the Postgres adapters preserve
 /// application command outcomes, return the complete current session
 /// projection, and keep infrastructure failure nonterminal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv002_inv008_inv012_application_session_services_use_postgres_adapters()
--> Result<(), Box<dyn Error>> {
+async fn s01_application_session_services_use_postgres_adapters() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x601));
     let request = CreateSessionRequest::try_new(
@@ -106,12 +105,12 @@ async fn s01_inv002_inv008_inv012_application_session_services_use_postgres_adap
     Ok(())
 }
 
-/// S01 / INV-003: both ordinary creation replay and current-session loading
+/// S01: both ordinary creation replay and current-session loading
 /// reject a user-initiated row carrying a contradictory spawning request.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv003_creation_readers_reject_spawning_request_on_user_session()
--> Result<(), Box<dyn Error>> {
+async fn s01_creation_readers_reject_spawning_request_on_user_session() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let command = DurableCommandId::from_uuid(Uuid::from_u128(0x0016_0001));
     let session = SessionId::from_uuid(Uuid::from_u128(0x0017_0001));
@@ -163,12 +162,11 @@ async fn s01_inv003_creation_readers_reject_spawning_request_on_user_session()
     Ok(())
 }
 
-/// INV-047: template creation durably copies the original bundle and its
+/// template creation durably copies the original bundle and its
 /// provenance; a same-command replay after a catalog edit returns that winner.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Result<(), Box<dyn Error>>
-{
+async fn template_creation_persists_copy_and_name_keyed_replay() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x1601));
     let winner = SessionId::from_uuid(Uuid::from_u128(0x1701));
@@ -402,8 +400,7 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
--> Result<(), Box<dyn Error>> {
+async fn s01_create_session_schema_preserves_typed_facts() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
 
@@ -536,7 +533,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicting_records()
+async fn registry_and_create_session_constraints_reject_torn_or_conflicting_records()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
@@ -869,12 +866,12 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
     Ok(())
 }
 
-/// S01 / INV-012: first handling commits the complete typed creation, equal
+/// S01: first handling commits the complete typed creation, equal
 /// replay returns the recorded identity, and structural conflict changes
 /// nothing. Direct and alias defaults round-trip through reconstitution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<(), Box<dyn Error>> {
+async fn s01_transaction_apply_replay_conflict_and_restart() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let first = prepared(0x101, 0x701, direct(0x801));
@@ -950,13 +947,13 @@ async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<()
     Ok(())
 }
 
-/// S01 / INV-012: the user-global primary key is the concurrency boundary.
+/// S01: the user-global primary key is the concurrency boundary.
 /// Equal duplicates return one winner; unequal duplicates retain that winner
 /// and report one typed conflict.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv012_concurrent_duplicates_converge_on_the_committed_winner()
--> Result<(), Box<dyn Error>> {
+async fn s01_concurrent_duplicates_converge_on_the_committed_winner() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
 
@@ -1029,12 +1026,11 @@ async fn s01_inv012_concurrent_duplicates_converge_on_the_committed_winner()
     Ok(())
 }
 
-/// S01 / INV-012: a later write failure rolls back the provisional registry
+/// S01: a later write failure rolls back the provisional registry
 /// insert, so the same command ID remains available for a valid retry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_infrastructure_failure_leaves_the_command_unclaimed() -> Result<(), Box<dyn Error>>
-{
+async fn infrastructure_failure_leaves_the_command_unclaimed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let existing = prepared(0x121, 0x721, direct(0x821));
@@ -1064,12 +1060,11 @@ async fn inv012_infrastructure_failure_leaves_the_command_unclaimed() -> Result<
     Ok(())
 }
 
-/// INV-012: an observed user-global claim is never treated as unseen merely
+/// an observed user-global claim is never treated as unseen merely
 /// because its typed record is missing or its storage version is unknown.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
--> Result<(), Box<dyn Error>> {
+async fn incomplete_or_unknown_claims_fail_closed_as_corruption() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
     let input_repository = SubmitInputRepository::new(pool.clone());
@@ -1219,13 +1214,12 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
     Ok(())
 }
 
-/// INV-002 / INV-008 / INV-012: the second admitted command kind retains a
+/// the second admitted command kind retains a
 /// complete typed record, while the user-global registry and append-only
 /// constraints reject torn, malformed, or mutable receipts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_inv008_inv012_defaults_schema_enforces_typed_receipts() -> Result<(), Box<dyn Error>>
-{
+async fn defaults_schema_enforces_typed_receipts() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
     let mut registry_only = pool.begin().await?;
@@ -1411,13 +1405,12 @@ async fn inv002_inv008_inv012_defaults_schema_enforces_typed_receipts() -> Resul
     Ok(())
 }
 
-/// S01 / INV-002 / INV-008 / INV-012: the application service through the
+/// S01: the application service through the
 /// Postgres adapter records applied and stale outcomes, replays historical
 /// receipts, and leaves creation history distinct from current Session.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
--> Result<(), Box<dyn Error>> {
+async fn s01_defaults_apply_replay_stale_and_history() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -1614,13 +1607,12 @@ async fn future_defaults_epoch_records_mismatch_without_applying_placeholder()
     Ok(())
 }
 
-/// S33 / INV-008 / INV-015 / INV-046: replacing defaults while a turn is
+/// S33: replacing defaults while a turn is
 /// active leaves that turn bound to its accepted epoch, while the next origin
 /// freezes the successor and starts behind an injected model-identity entry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s33_inv008_inv015_inv046_mid_session_model_switch_is_forward_only()
--> Result<(), Box<dyn Error>> {
+async fn s33_mid_session_model_switch_is_forward_only() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x731));
     let first_selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x831));
@@ -1935,12 +1927,11 @@ async fn compact_session_command_id_reuse_is_a_client_conflict() -> Result<(), B
     Ok(())
 }
 
-/// INV-012: registry dispatch remains user-global across command kinds while
+/// registry dispatch remains user-global across command kinds while
 /// purpose-specific loads distinguish a valid other-kind claim from absence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
--> Result<(), Box<dyn Error>> {
+async fn cross_kind_reuse_is_conflict_not_corruption_or_absence() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -2050,13 +2041,12 @@ async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
     Ok(())
 }
 
-/// INV-008 / INV-012: two application-service calls expecting one version use
+/// two application-service calls expecting one version use
 /// the adapter's pointer CAS as their linearization boundary. Exactly one
 /// installs the successor and the loser records the winner's version as stale.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv008_inv012_concurrent_defaults_replacements_have_one_winner()
--> Result<(), Box<dyn Error>> {
+async fn concurrent_defaults_replacements_have_one_winner() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -2124,13 +2114,12 @@ async fn inv008_inv012_concurrent_defaults_replacements_have_one_winner()
     Ok(())
 }
 
-/// INV-008 / INV-012: exhausted versions are recorded rejections, while an
+/// exhausted versions are recorded rejections, while an
 /// infrastructure failure after provisional claim rolls back both the claim
 /// and the attempted pointer change.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv008_inv012_exhaustion_and_precommit_failure_are_distinct() -> Result<(), Box<dyn Error>>
-{
+async fn exhaustion_and_precommit_failure_are_distinct() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -2214,13 +2203,13 @@ async fn inv008_inv012_exhaustion_and_precommit_failure_are_distinct() -> Result
     Ok(())
 }
 
-/// S01 / INV-003 / INV-008 / INV-012: load-by-session identity returns the
+/// S01: load-by-session identity returns the
 /// complete version selected by the current pointer, while creation receipt
 /// replay remains pinned to the immutable creation-time version.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain_distinct()
--> Result<(), Box<dyn Error>> {
+async fn s01_current_session_load_and_receipt_replay_remain_distinct() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -2341,14 +2330,13 @@ async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain
     Ok(())
 }
 
-/// INV-002 / INV-003 / INV-008: once the session row exists, absent,
+/// once the session row exists, absent,
 /// malformed, unknown, undecodable, or non-unique current projection facts fail
 /// closed as typed corruption rather than becoming `None` or nearby valid
 /// defaults.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Result<(), Box<dyn Error>>
-{
+async fn current_session_corruption_fails_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -2538,13 +2526,12 @@ async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Resul
     Ok(())
 }
 
-/// INV-002 / INV-007 / INV-008 / INV-012: the third command family is a
+/// the third command family is a
 /// normalized closed schema whose deferred reverse and effect constraints
 /// reject a claim without its typed terminal record.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
--> Result<(), Box<dyn Error>> {
+async fn submit_schema_is_closed_and_normalized() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT table_name
@@ -3167,11 +3154,11 @@ async fn multipart_replay_fixture(
     })
 }
 
-/// INV-012: equal multipart replay returns the original durable acceptance.
+/// equal multipart replay returns the original durable acceptance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
--> Result<(), Box<dyn Error>> {
+async fn equal_multipart_submit_replay_returns_the_original_receipt() -> Result<(), Box<dyn Error>>
+{
     let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
@@ -3213,11 +3200,10 @@ async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
     Ok(())
 }
 
-/// INV-012: loading a durable multipart command reconstructs its exact value.
+/// loading a durable multipart command reconstructs its exact value.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_durable_multipart_command_reconstructs_the_original_value()
--> Result<(), Box<dyn Error>> {
+async fn durable_multipart_command_reconstructs_the_original_value() -> Result<(), Box<dyn Error>> {
     let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
@@ -3257,10 +3243,10 @@ async fn inv012_durable_multipart_command_reconstructs_the_original_value()
     Ok(())
 }
 
-/// INV-012: multipart part order participates in durable replay equality.
+/// multipart part order participates in durable replay equality.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+async fn reordered_multipart_submit_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
     let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
@@ -3313,11 +3299,11 @@ async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), 
     Ok(())
 }
 
-/// INV-012: attachment display metadata participates in durable replay
+/// attachment display metadata participates in durable replay
 /// equality.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+async fn changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
     let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
@@ -3380,12 +3366,11 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
     Ok(())
 }
 
-/// INV-012: the command and accepted-input satellites mirror the exact ordered
+/// the command and accepted-input satellites mirror the exact ordered
 /// multipart projection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_multipart_command_and_accepted_satellites_are_identical()
--> Result<(), Box<dyn Error>> {
+async fn multipart_command_and_accepted_satellites_are_identical() -> Result<(), Box<dyn Error>> {
     let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
@@ -3527,7 +3512,7 @@ async fn unknown_attachment_fixture() -> Result<UnknownAttachmentFixture, Box<dy
     })
 }
 
-/// INV-012 / INV-089: an attachment with no catalogued blob identity is
+/// an attachment with no catalogued blob identity is
 /// rejected only after the durable command identity is claimed, and the
 /// unavailable digest is the recorded evidence. A committed catalogued
 /// identity always carries a verified replica, because the deferred
@@ -3536,8 +3521,7 @@ async fn unknown_attachment_fixture() -> Result<UnknownAttachmentFixture, Box<dy
 /// unavailability an admission check can observe.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_inv089_unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Error>>
-{
+async fn unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Error>> {
     let fixture = unknown_attachment_fixture().await?;
     assert_eq!(
         fixture
@@ -3569,12 +3553,12 @@ async fn inv012_inv089_unknown_attachment_is_a_post_claim_rejection() -> Result<
     Ok(())
 }
 
-/// INV-012: an unknown-attachment rejection replays exactly. The digest is
+/// an unknown-attachment rejection replays exactly. The digest is
 /// catalogued with a verified replica between the two calls, so revalidation
 /// would now admit the command and only durable replay returns the rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_unknown_attachment_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+async fn unknown_attachment_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
     let fixture = unknown_attachment_fixture().await?;
     let first = fixture
         .repository
@@ -3612,10 +3596,10 @@ async fn inv012_unknown_attachment_rejection_replays_exactly() -> Result<(), Box
     Ok(())
 }
 
-/// INV-012: the durable unknown-attachment rejection reconstitutes exactly.
+/// the durable unknown-attachment rejection reconstitutes exactly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_unknown_attachment_rejection_reconstitutes_exactly() -> Result<(), Box<dyn Error>> {
+async fn unknown_attachment_rejection_reconstitutes_exactly() -> Result<(), Box<dyn Error>> {
     let fixture = unknown_attachment_fixture().await?;
     assert_eq!(
         fixture
@@ -3641,11 +3625,11 @@ async fn inv012_unknown_attachment_rejection_reconstitutes_exactly() -> Result<(
     Ok(())
 }
 
-/// INV-012: correcting an unknown attachment to a catalogued one under the
+/// correcting an unknown attachment to a catalogued one under the
 /// claimed identity is conflicting reuse, not a second admission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_changed_unknown_attachment_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+async fn changed_unknown_attachment_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
     let fixture = unknown_attachment_fixture().await?;
     assert_eq!(
         fixture
@@ -3823,12 +3807,12 @@ fn repeated_attachment_command(
     )
 }
 
-/// INV-089: the digest is the accounting key, so two metadata-distinct parts
+/// the digest is the accounting key, so two metadata-distinct parts
 /// naming one catalogued digest consume its length only once and reach session
 /// lookup rather than the byte-budget rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
+async fn attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let repeated = repeated_attachment_command(
         &fixture,
@@ -3853,13 +3837,13 @@ async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(
     Ok(())
 }
 
-/// INV-089: a repeated digest is charged once rather than not at all, so the
+/// a repeated digest is charged once rather than not at all, so the
 /// same two metadata-distinct parts are rejected under a maximum below their
 /// one catalogued length.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_attachment_admission_charges_a_repeated_digest_at_least_once()
--> Result<(), Box<dyn Error>> {
+async fn attachment_admission_charges_a_repeated_digest_at_least_once() -> Result<(), Box<dyn Error>>
+{
     let fixture = attachment_budget_fixture().await?;
     let narrow_maximum = fixture.first_length - 1;
     let narrow = SubmitInputRepository::new(fixture.pool.clone())
@@ -3886,11 +3870,11 @@ async fn inv089_attachment_admission_charges_a_repeated_digest_at_least_once()
     Ok(())
 }
 
-/// INV-089: the bound is "must not exceed", so distinct catalogued digests
+/// the bound is "must not exceed", so distinct catalogued digests
 /// summing to exactly the maximum are admitted and reach session lookup.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_attachment_bytes_equal_to_the_maximum_are_admitted() -> Result<(), Box<dyn Error>> {
+async fn attachment_bytes_equal_to_the_maximum_are_admitted() -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let exact = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb32d)),
@@ -3921,13 +3905,12 @@ async fn inv089_attachment_bytes_equal_to_the_maximum_are_admitted() -> Result<(
     Ok(())
 }
 
-/// INV-089: distinct catalogued digests, each admissible alone, are rejected
+/// distinct catalogued digests, each admissible alone, are rejected
 /// once their summed lengths pass the deployment maximum, and that maximum is
 /// the durable evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_distinct_attachment_bytes_above_the_maximum_are_rejected()
--> Result<(), Box<dyn Error>> {
+async fn distinct_attachment_bytes_above_the_maximum_are_rejected() -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let distinct_command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb325));
     let distinct = distinct_attachment_command(&fixture, distinct_command_id);
@@ -3958,12 +3941,12 @@ async fn inv089_distinct_attachment_bytes_above_the_maximum_are_rejected()
     Ok(())
 }
 
-/// INV-012: the attachment-byte-bound rejection replays exactly. The replay
+/// the attachment-byte-bound rejection replays exactly. The replay
 /// runs under a maximum that now admits the same aggregate, so revalidation
 /// would return acceptance and only durable replay returns the first maximum.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_attachment_byte_bound_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+async fn attachment_byte_bound_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let distinct = distinct_attachment_command(
         &fixture,
@@ -4064,12 +4047,12 @@ async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Erro
     })
 }
 
-/// INV-089: a newly queued input is rejected when the complete prospective
+/// a newly queued input is rejected when the complete prospective
 /// rendered frontier, rather than either input alone, exceeds the attachment
 /// verification bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier()
+async fn queued_input_checks_the_complete_prospective_attachment_frontier()
 -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
@@ -4123,10 +4106,10 @@ async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier
     Ok(())
 }
 
-/// INV-012: a prospective queued-frontier rejection replays exactly.
+/// a prospective queued-frontier rejection replays exactly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+async fn queued_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
         configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
@@ -4181,13 +4164,13 @@ async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-089: the frontier sum is over distinct digests, so one digest referenced
+/// the frontier sum is over distinct digests, so one digest referenced
 /// by both the rendered origin and a newly queued input is charged once and the
 /// queued input is admitted, even though doubling that length would exceed the
 /// bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_prospective_frontier_charges_a_shared_digest_once() -> Result<(), Box<dyn Error>> {
+async fn prospective_frontier_charges_a_shared_digest_once() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let shared_digest = BlobDigest::digest(b"shared prospective attachment");
     let shared_length = 7_u64;
@@ -4265,15 +4248,14 @@ async fn inv089_prospective_frontier_charges_a_shared_digest_once() -> Result<()
     Ok(())
 }
 
-/// INV-012: retained attachment evidence never outlives the rejection that
+/// retained attachment evidence never outlives the rejection that
 /// authorizes it. Dropping the rejection kind while the maximum stands leaves
 /// both named-rejection comparisons null, so the shape is asserted with
 /// `IS TRUE` and rejects the row rather than admitting an unreadable one. The
 /// append-only guard is suspended inside a transaction this test rolls back.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_retained_attachment_maximum_requires_its_rejection_kind()
--> Result<(), Box<dyn Error>> {
+async fn retained_attachment_maximum_requires_its_rejection_kind() -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let rejected_command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb325));
     assert_eq!(
@@ -4315,12 +4297,11 @@ async fn inv012_retained_attachment_maximum_requires_its_rejection_kind()
     Ok(())
 }
 
-/// INV-089: a rejected queued frontier rolls back every provisional accepted
+/// a rejected queued frontier rolls back every provisional accepted
 /// input and queue-origin effect.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_queued_frontier_rejection_rolls_back_provisional_effects()
--> Result<(), Box<dyn Error>> {
+async fn queued_frontier_rejection_rolls_back_provisional_effects() -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
         configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
@@ -4471,7 +4452,7 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
     })
 }
 
-/// INV-089: pending steering is rejected when it would make a queued
+/// pending steering is rejected when it would make a queued
 /// successor's eventual rendered frontier exceed the attachment bound. Two
 /// successors are queued in canonical order: after the steering transition the
 /// earlier one's prospective frontier still fits and only the later one
@@ -4479,7 +4460,7 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
 /// rather than just the first.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
+async fn pending_steering_rechecks_affected_queued_attachment_frontiers()
 -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
     let queued = SubmitInput::new(
@@ -4560,10 +4541,10 @@ async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
     Ok(())
 }
 
-/// INV-012: a prospective steering-frontier rejection replays exactly.
+/// a prospective steering-frontier rejection replays exactly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+async fn steering_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
     fixture
         .repository
@@ -4636,12 +4617,12 @@ async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-089: a rejected steering frontier rolls back the provisional pending
+/// a rejected steering frontier rolls back the provisional pending
 /// steering while preserving the active and queued origins.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_steering_frontier_rejection_rolls_back_provisional_effects()
--> Result<(), Box<dyn Error>> {
+async fn steering_frontier_rejection_rolls_back_provisional_effects() -> Result<(), Box<dyn Error>>
+{
     let fixture = steering_frontier_fixture().await?;
     fixture
         .repository
@@ -4744,14 +4725,13 @@ const CONTINUATION_ATTEMPT: u128 = 0x20c;
 const RETAINED_ATTACHMENT_LENGTH: u64 = 7;
 const TOOL_BATCH_ATTACHMENT_MAXIMUM: u64 = 10;
 
-/// INV-089: a turn executing a tool batch keeps the `running` phase while the
+/// a turn executing a tool batch keeps the `running` phase while the
 /// call that produced the batch is already terminal, so prospective
 /// attachment accounting reads the batch's yielded frontier instead of
 /// rejecting the submission it cannot reconstitute.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_executing_tool_batch_admits_a_bounded_attachment_queue()
--> Result<(), Box<dyn Error>> {
+async fn executing_tool_batch_admits_a_bounded_attachment_queue() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (fixture, _, _, _) = checkpoint_tool_batch_with_approval(
         &pool,
@@ -4806,7 +4786,7 @@ async fn inv089_executing_tool_batch_admits_a_bounded_attachment_queue()
     Ok(())
 }
 
-/// INV-089: a delegated turn executing a tool batch keeps the `running` phase
+/// a delegated turn executing a tool batch keeps the `running` phase
 /// with no cancellation-requested call, and a delegation origin owns no
 /// accepted-input turn in the scheduling projection. The batch's yielded
 /// frontier and the steering pending against that turn are still retained
@@ -4814,7 +4794,7 @@ async fn inv089_executing_tool_batch_admits_a_bounded_attachment_queue()
 /// being replaced by the earliest queued base.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_delegated_executing_tool_batch_charges_its_retained_attachment()
+async fn delegated_executing_tool_batch_charges_its_retained_attachment()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture =
@@ -4947,14 +4927,13 @@ async fn inv089_delegated_executing_tool_batch_charges_its_retained_attachment()
     Ok(())
 }
 
-/// S01 / INV-005 / INV-008 / INV-010 / INV-012 / INV-028: first acceptance
+/// S01: first acceptance
 /// commits the complete exact receipt and immutable queued origin; equal
 /// replay and a restarted adapter return that receipt without consulting new
 /// candidates.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and_restart()
--> Result<(), Box<dyn Error>> {
+async fn s01_submit_apply_replay_conflict_and_restart() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x301, 0x701, direct(0x801)))
@@ -5100,13 +5079,12 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     Ok(())
 }
 
-/// S01 / S03 / INV-002 / INV-009 / INV-015: the real application service
+/// S01 / S03: the real application service
 /// commits one complete activation, and a fresh repository and pool observe
 /// the same occupied slot after restart without activating it again.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s03_inv002_inv009_inv015_start_eligible_turn_survives_restart()
--> Result<(), Box<dyn Error>> {
+async fn s01_s03_start_eligible_turn_survives_restart() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x381, 0x781, direct(0x881)))

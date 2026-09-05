@@ -7,7 +7,7 @@ use super::{
     test_telemetry_support::*, text_decoding::*, transport_failure::*,
 };
 
-/// INV-035: credential-resolution telemetry carries only its safe closed
+/// credential-resolution telemetry carries only its safe closed
 /// classification and request correlation.
 #[test]
 fn credential_failure_diagnostic_preserves_safe_classification() {
@@ -25,7 +25,7 @@ fn credential_failure_diagnostic_preserves_safe_classification() {
     assert!(!diagnostic.contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: credential-resolution telemetry cannot inherit credential
+/// credential-resolution telemetry cannot inherit credential
 /// bytes from an entered caller span.
 #[test]
 fn credential_failure_diagnostic_ignores_credential_bearing_caller_span() {
@@ -44,7 +44,7 @@ fn credential_failure_diagnostic_ignores_credential_bearing_caller_span() {
     assert!(!diagnostic.contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: unusable-credential telemetry cannot retain the resolved
+/// unusable-credential telemetry cannot retain the resolved
 /// credential bytes.
 #[test]
 fn unusable_credential_value_diagnostic_preserves_safe_classification() {
@@ -60,7 +60,7 @@ fn unusable_credential_value_diagnostic_preserves_safe_classification() {
     assert!(!diagnostic.contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: unusable-credential telemetry cannot inherit resolved
+/// unusable-credential telemetry cannot inherit resolved
 /// credential bytes from an entered caller span.
 #[test]
 fn unusable_credential_value_diagnostic_ignores_credential_bearing_caller_span() {
@@ -77,7 +77,7 @@ fn unusable_credential_value_diagnostic_ignores_credential_bearing_caller_span()
     assert!(!diagnostic.contains(LEADING_HEADER_WHITESPACE_KEY));
 }
 
-/// INV-035: an unusable one-byte credential suppresses colliding telemetry
+/// an unusable one-byte credential suppresses colliding telemetry
 /// and cannot form a colliding public bound result.
 #[tokio::test]
 async fn unusable_short_credential_value_diagnostic_is_suppressed() {
@@ -101,7 +101,7 @@ async fn unusable_short_credential_value_diagnostic_is_suppressed() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: transport-failure telemetry cannot retain the request
+/// transport-failure telemetry cannot retain the request
 /// credential.
 #[test]
 fn transport_failure_diagnostic_preserves_safe_classification() {
@@ -118,7 +118,7 @@ fn transport_failure_diagnostic_preserves_safe_classification() {
     assert!(!diagnostic.contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: an incomplete provider-rejection body emits its retained safe
+/// an incomplete provider-rejection body emits its retained safe
 /// failure class before the definitive rejection is coarsened.
 #[test]
 fn provider_rejection_body_failure_reports_safe_classification() {
@@ -138,7 +138,7 @@ fn provider_rejection_body_failure_reports_safe_classification() {
     assert!(!diagnostic.contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: post-response sanitization reports a credential-safe closed
+/// post-response sanitization reports a credential-safe closed
 /// discriminant before its typed error becomes invalid-response evidence.
 #[test]
 fn response_sanitization_failure_reports_safe_classification() {
@@ -154,7 +154,7 @@ fn response_sanitization_failure_reports_safe_classification() {
     assert!(!diagnostic.contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: a case-normalized credential collision in the controlled
+/// a case-normalized credential collision in the controlled
 /// response-sanitization event suppresses telemetry and stays opaque.
 #[test]
 fn response_sanitization_failure_omits_case_normalized_credential_collision() {
@@ -182,7 +182,7 @@ fn response_sanitization_failure_omits_case_normalized_credential_collision() {
     ));
 }
 
-/// INV-035: compact formatter timestamps and ANSI metadata are accounted
+/// compact formatter timestamps and ANSI metadata are accounted
 /// for before a post-credential transport event can be emitted.
 #[test]
 fn web_search_transport_event_omits_timestamp_credential_collision() {
@@ -198,7 +198,7 @@ fn web_search_transport_event_omits_timestamp_credential_collision() {
     assert!(!error.to_string().contains(TIMESTAMP_COLLISION_KEY));
 }
 
-/// INV-035: a credential spanning compact formatter metadata and event
+/// a credential spanning compact formatter metadata and event
 /// text suppresses the complete daemon-shaped event.
 #[test]
 fn web_search_transport_event_omits_formatter_boundary_collision() {

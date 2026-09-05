@@ -609,8 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn s36_inv050_prefix_rule_allows_siblings_and_descendants_but_not_ancestors_or_disjoint_paths()
-    {
+    fn s36_prefix_rule_allows_siblings_and_descendants_but_not_ancestors_or_disjoint_paths() {
         let requester = scoped("projects.foo.reviews.pr123");
         let requesting_directory = requester.path().unwrap().parent_directory();
         let refusal = SessionReadScopeDecision::Refused(SessionReadScopeRefusal {
@@ -730,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn inv012_placement_update_applied_evidence_rejects_foreign_command_provenance() {
+    fn placement_update_applied_evidence_rejects_foreign_command_provenance() {
         let fixture = placement_update_fixture();
         let foreign = SessionPlacementEvent::updated(
             fixture.session,

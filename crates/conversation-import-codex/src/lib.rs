@@ -987,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_converter_declares_codex_rollout_version_one() {
+    fn s28_converter_declares_codex_rollout_version_one() {
         assert_eq!(
             CodexRolloutJsonlConverter.format(),
             ImportedConversationFormat::CodexRolloutJsonlV1
@@ -995,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_normalizes_complete_rollout_vocabulary() {
+    fn s28_normalizes_complete_rollout_vocabulary() {
         let imported = convert_synthetic(
             "{\"timestamp\":\"t0\",\"type\":\"session_meta\",\"payload\":{\"id\":\"session-item\",\"session_id\":\"session\"}}\n\
              {\"timestamp\":\"t1\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"question\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,AA\",\"detail\":\"high\"}]}}\n\
@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_event_mirror_and_developer_message_remain_source_events() {
+    fn s28_event_mirror_and_developer_message_remain_source_events() {
         let imported = convert_synthetic(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"context\"}]}}\n\
              {\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"mirrored\"}}",
@@ -1111,7 +1111,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_typed_absence_without_placeholders() {
+    fn s28_preserves_typed_absence_without_placeholders() {
         let imported = convert_synthetic(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\"}}\n\
              {\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":null,\"output\":null}}\n\
@@ -1141,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_crlf_delimiter_is_not_raw_record_content() {
+    fn s28_crlf_delimiter_is_not_raw_record_content() {
         let imported = convert_synthetic(
             "{\"type\":\"session_meta\",\"payload\":{}}\r\n{\"type\":\"event_msg\",\"payload\":{}}",
         );
@@ -1153,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_rejects_duplicate_consulted_members_content_silently() {
+    fn s28_rejects_duplicate_consulted_members_content_silently() {
         let error = CodexRolloutJsonlConverter
             .convert(
                 conversation(),
@@ -1192,10 +1192,10 @@ mod tests {
         )
     }
 
-    /// S28 / INV-038: a `tool_search_call` maps its exact `call_id` and its
+    /// S28: a `tool_search_call` maps its exact `call_id` and its
     /// structured `arguments` value, fabricating no tool name.
     #[test]
-    fn s28_inv038_normalizes_tool_search_call_structured_arguments() {
+    fn s28_normalizes_tool_search_call_structured_arguments() {
         let imported = convert_synthetic(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"tool_search_call\",\"call_id\":\"call-search\",\"arguments\":{\"query\":\"read_file\"}}}",
         );
@@ -1215,10 +1215,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: a `local_shell_call` maps its structured `action` value
+    /// S28: a `local_shell_call` maps its structured `action` value
     /// as tool input, fabricating no tool name.
     #[test]
-    fn s28_inv038_normalizes_local_shell_call_structured_action() {
+    fn s28_normalizes_local_shell_call_structured_action() {
         let imported = convert_synthetic(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"local_shell_call\",\"call_id\":\"call-shell\",\"action\":{\"command\":[\"list\"]}}}",
         );
@@ -1240,11 +1240,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: a `web_search_call` takes its call identity from the item
+    /// S28: a `web_search_call` takes its call identity from the item
     /// `id`. The fixture also states a competing `call_id`, which the mapping
     /// must not read.
     #[test]
-    fn s28_inv038_normalizes_web_search_call_item_id_as_call_identity() {
+    fn s28_normalizes_web_search_call_item_id_as_call_identity() {
         let imported = convert_synthetic(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"web_search_call\",\"id\":\"item-web\",\"call_id\":\"unread-call-id\",\"action\":{\"query\":\"invariant catalog\"}}}",
         );
@@ -1264,10 +1264,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: a `custom_tool_call` maps its exact `name` and reads its
+    /// S28: a `custom_tool_call` maps its exact `name` and reads its
     /// input from `input` rather than `arguments`, keeping the lexical string.
     #[test]
-    fn s28_inv038_normalizes_custom_tool_call_string_input() {
+    fn s28_normalizes_custom_tool_call_string_input() {
         let imported = convert_synthetic(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call-custom\",\"name\":\"apply_patch\",\"input\":\"*** Begin Patch\"}}",
         );
@@ -1284,10 +1284,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: a `custom_tool_call_output` maps its exact `call_id` and
+    /// S28: a `custom_tool_call_output` maps its exact `call_id` and
     /// string `output` as an exact-text tool result with no error attestation.
     #[test]
-    fn s28_inv038_normalizes_custom_tool_call_output_as_exact_text_result() {
+    fn s28_normalizes_custom_tool_call_output_as_exact_text_result() {
         let imported = convert_synthetic(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call-custom\",\"output\":\"applied\"}}",
         );
@@ -1305,11 +1305,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: a `tool_search_output` emits one ordered source result
+    /// S28: a `tool_search_output` emits one ordered source result
     /// block per `tools` element, retaining an object element's exact type
     /// attestation and leaving a non-object element unattested.
     #[test]
-    fn s28_inv038_normalizes_tool_search_output_tools_as_ordered_source_blocks() {
+    fn s28_normalizes_tool_search_output_tools_as_ordered_source_blocks() {
         let imported = convert_synthetic(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"tool_search_output\",\"call_id\":\"call-search\",\"tools\":[{\"type\":\"function\",\"name\":\"read_file\"},\"bare\"]}}",
         );
@@ -1336,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_rejects_non_string_named_tool_inputs() {
+    fn s28_rejects_non_string_named_tool_inputs() {
         for source in [
             br#"{"type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"lookup","arguments":{"key":"value"}}}"#
                 .as_slice(),
@@ -1357,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_resilient_conversion_reports_every_distinct_skipped_record() {
+    fn s28_resilient_conversion_reports_every_distinct_skipped_record() {
         const FIRST: &[u8] = br#"{"type":"session_meta","payload":{"id":"first"}}"#;
         const FIFTH: &[u8] = br#"{"type":"event_msg","payload":{"type":"notice"}}"#;
         let source = [
@@ -1421,7 +1421,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_resilient_conversion_reports_when_no_record_is_valid() {
+    fn s28_resilient_conversion_reports_when_no_record_is_valid() {
         let report = CodexRolloutJsonlConverter
             .convert_resilient(conversation(), b"\n{", || {
                 panic!("rejected records must not consume an entry identity")
@@ -1446,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_resilient_empty_source_remains_a_fatal_error() {
+    fn s28_resilient_empty_source_remains_a_fatal_error() {
         let error = CodexRolloutJsonlConverter
             .convert_resilient(conversation(), b"", || {
                 panic!("empty source must not consume an entry identity")
@@ -1460,7 +1460,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_strict_conversion_preserves_blank_line_error_precedence() {
+    fn s28_strict_conversion_preserves_blank_line_error_precedence() {
         let error = CodexRolloutJsonlConverter
             .convert(
                 conversation(),

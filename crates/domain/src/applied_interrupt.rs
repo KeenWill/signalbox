@@ -18,7 +18,7 @@ use crate::{
 /// The field shape is the accepted algebra in
 /// docs/spec/turn-lifecycle-and-scheduling.md. Both fields are private, and
 /// no raw constructor or conversion from [`DurableCommandId`] exists:
-/// INV-001 / INV-029 construction proofs:
+/// construction proofs:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{AppliedInterruptProof, DurableCommandId, TurnId};
@@ -543,10 +543,10 @@ mod tests {
         )
     }
 
-    /// S07 / INV-001 / INV-029: the exact applied interrupt result alone
+    /// S07: the exact applied interrupt result alone
     /// supplies proof tied to its command, predecessor, input, and successor.
     #[test]
-    fn s07_inv001_inv029_exact_applied_interrupt_constructs_correlated_authority() {
+    fn s07_exact_applied_interrupt_constructs_correlated_authority() {
         let predecessor = accepted_ordinary(1);
         let waiting = accepted_ordinary(2);
         let facts = AppliedFacts::matching(3, predecessor);
@@ -563,10 +563,10 @@ mod tests {
         assert_eq!(result.successor_order(), facts.successor.order());
     }
 
-    /// S07 / INV-001 / INV-029: nested applications produce structurally
+    /// S07: nested applications produce structurally
     /// exact proof values for their distinct commands and active predecessors.
     #[test]
-    fn s07_inv001_inv029_nested_interrupt_proofs_preserve_exact_identity() {
+    fn s07_nested_interrupt_proofs_preserve_exact_identity() {
         let root = accepted_ordinary(1);
         let first_facts = AppliedFacts::matching(2, root);
         let nested_facts = AppliedFacts::matching(3, first_facts.successor);
@@ -582,10 +582,10 @@ mod tests {
         assert_ne!(first.proof(), nested.proof());
     }
 
-    /// S07 / INV-001 / INV-029: an authoritative rejection contains no
+    /// S07: an authoritative rejection contains no
     /// applied work facts and cannot supply cancellation authority.
     #[test]
-    fn s07_inv001_inv029_rejected_command_cannot_construct_proof() {
+    fn s07_rejected_command_cannot_construct_proof() {
         let no_known_work: [AcceptedInputQueueWork; 0] = [];
         let rejected_command = command_id(10);
         let command_session = session_id(100);
@@ -604,10 +604,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-001 / INV-029: no other delivery discriminator can be
+    /// S07: no other delivery discriminator can be
     /// cross-wired to applied interrupt work and acquire authority.
     #[test]
-    fn s07_inv001_inv029_non_interrupt_commands_cannot_construct_proof() {
+    fn s07_non_interrupt_commands_cannot_construct_proof() {
         assert_non_interrupt_delivery_rejected(DeliveryRequest::StartWhenNoActiveTurn {
             configuration: choices(),
         });
@@ -635,10 +635,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-001 / INV-029: the stored accepted treatment and exact
+    /// S07: the stored accepted treatment and exact
     /// authoritative predecessor must match the applied command payload.
     #[test]
-    fn s07_inv001_inv029_cross_wired_delivery_or_target_is_rejected() {
+    fn s07_cross_wired_delivery_or_target_is_rejected() {
         let predecessor = accepted_ordinary(1);
         let unrelated = accepted_ordinary(9);
         let known_work = [predecessor];
@@ -666,10 +666,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-029: predecessor, accepted input, and successor associations
+    /// S07: predecessor, accepted input, and successor associations
     /// must all remain in the command's session.
     #[test]
-    fn s07_inv029_every_cross_session_association_is_rejected() {
+    fn s07_every_cross_session_association_is_rejected() {
         let predecessor_work = accepted_ordinary(1);
         let other_session = session_id(200);
         let base = AppliedFacts::matching(2, predecessor_work);
@@ -721,9 +721,9 @@ mod tests {
         );
     }
 
-    /// S07 / INV-029: interrupt work must create a distinct successor turn.
+    /// S07: interrupt work must create a distinct successor turn.
     #[test]
-    fn s07_inv029_predecessor_cannot_be_its_own_successor() {
+    fn s07_predecessor_cannot_be_its_own_successor() {
         let predecessor = accepted_ordinary(1);
         let mut facts = AppliedFacts::matching(2, predecessor);
         facts.accepted_input = AcceptedInputLifecycle::new(
@@ -749,10 +749,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-029: the newly accepted input must be the exact successor's
+    /// S07: the newly accepted input must be the exact successor's
     /// origin, never steering or another turn's origin.
     #[test]
-    fn s07_inv029_non_origin_and_wrong_origin_dispositions_are_rejected() {
+    fn s07_non_origin_and_wrong_origin_dispositions_are_rejected() {
         assert_non_origin_disposition_rejected(AcceptedInputDisposition::OriginOf(turn_id(9)));
         assert_non_origin_disposition_rejected(AcceptedInputDisposition::PendingSteering {
             binding: SteeringBinding::new(turn_id(1)),
@@ -786,10 +786,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-029: the accepted position and typed successor priority must
+    /// S07: the accepted position and typed successor priority must
     /// describe the same exact interrupt-created work.
     #[test]
-    fn s07_inv029_cross_wired_position_or_priority_is_rejected() {
+    fn s07_cross_wired_position_or_priority_is_rejected() {
         let predecessor = accepted_ordinary(1);
         let unrelated = accepted_ordinary(9);
         let known_work = [predecessor];
@@ -836,10 +836,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-009 / INV-029: the successor must be new and its target must
+    /// S07: the successor must be new and its target must
     /// exist in the complete pre-application queue projection.
     #[test]
-    fn s07_inv009_inv029_preexisting_successor_or_missing_predecessor_is_rejected() {
+    fn s07_preexisting_successor_or_missing_predecessor_is_rejected() {
         let predecessor = accepted_ordinary(1);
         let facts = AppliedFacts::matching(2, predecessor);
         let no_known_work: [AcceptedInputQueueWork; 0] = [];
@@ -861,10 +861,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-009 / INV-029: existing priority facts cannot already claim
+    /// S07: existing priority facts cannot already claim
     /// another immediate interrupt successor for the same predecessor.
     #[test]
-    fn s07_inv009_inv029_competing_interrupt_successor_is_rejected() {
+    fn s07_competing_interrupt_successor_is_rejected() {
         let predecessor = accepted_ordinary(1);
         let existing_successor = accepted_interrupt(2, predecessor);
         let facts = AppliedFacts::matching(3, predecessor);
@@ -881,10 +881,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-009 / INV-029: priority cannot move an input ahead of a
+    /// S07: priority cannot move an input ahead of a
     /// predecessor that was accepted later.
     #[test]
-    fn s07_inv009_inv029_time_inverted_interrupt_successor_is_rejected() {
+    fn s07_time_inverted_interrupt_successor_is_rejected() {
         let predecessor = accepted_ordinary(2);
         let facts = AppliedFacts::matching(1, predecessor);
 

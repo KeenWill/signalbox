@@ -868,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_split_json_escaped_credentials_are_redacted_before_tool_deltas_leave() {
+    fn split_json_escaped_credentials_are_redacted_before_tool_deltas_leave() {
         let credential = CredentialValue::new(b"key_loop".to_vec());
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &credential);

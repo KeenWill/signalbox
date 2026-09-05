@@ -7684,7 +7684,7 @@ finally:
         }
     }
 
-    /// INV-055: every schema the daemon advertises satisfies the function-tool
+    /// every schema the daemon advertises satisfies the function-tool
     /// wire's root constraint, so no single declaration can fail whole
     /// exchanges.
     ///

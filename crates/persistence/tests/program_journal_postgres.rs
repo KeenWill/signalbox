@@ -79,11 +79,10 @@ fn assert_trigger_error(error: sqlx::Error, expected_message: &str) {
     assert_eq!(database.message(), expected_message);
 }
 
-/// INV-064: durable request and delivery projections retain one exact interleaving.
+/// durable request and delivery projections retain one exact interleaving.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv064_journal_round_trip_preserves_concurrent_delivery_order()
--> Result<(), Box<dyn Error>> {
+async fn journal_round_trip_preserves_concurrent_delivery_order() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = ProgramJournalRepository::new(pool.clone());
     let run = run_id();
@@ -144,10 +143,10 @@ async fn inv064_journal_round_trip_preserves_concurrent_delivery_order()
     Ok(())
 }
 
-/// INV-065: persisted nondeterminism evidence retains both complete request frames.
+/// persisted nondeterminism evidence retains both complete request frames.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv065_nondeterminism_fault_round_trips_both_frames() -> Result<(), Box<dyn Error>> {
+async fn nondeterminism_fault_round_trips_both_frames() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = ProgramJournalRepository::new(pool.clone());
     let run = run_id();
@@ -244,10 +243,10 @@ async fn outstanding_requests_reject_requires_terminal_request() -> Result<(), B
     Ok(())
 }
 
-/// INV-066: committed journal frames cannot be updated or deleted.
+/// committed journal frames cannot be updated or deleted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv066_journal_frames_are_append_only() -> Result<(), Box<dyn Error>> {
+async fn journal_frames_are_append_only() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = ProgramJournalRepository::new(pool.clone());
     let run = run_id();

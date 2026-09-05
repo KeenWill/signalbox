@@ -544,7 +544,7 @@ fn s28_conformance_renderer_reports_each_raw_record_and_entry_boundary() {
 }
 
 #[test]
-fn s28_inv038_stored_claude_code_v1_tool_round_matches_golden() {
+fn s28_stored_claude_code_v1_tool_round_matches_golden() {
     let imported = reconstitute_stored_claude_v1(CLAUDE_V1_TOOL_ROUND);
 
     assert_eq!(
@@ -570,7 +570,7 @@ fn s28_inv038_stored_claude_code_v1_tool_round_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_claude_code_v2_boundary_losses_match_golden() {
+fn s28_claude_code_v2_boundary_losses_match_golden() {
     let imported = convert_claude(CLAUDE_V2_BOUNDARY_LOSSES);
 
     assert_eq!(
@@ -599,7 +599,7 @@ fn s28_inv038_claude_code_v2_boundary_losses_match_golden() {
 }
 
 #[test]
-fn s28_inv038_codex_rollout_v1_tool_round_matches_golden() {
+fn s28_codex_rollout_v1_tool_round_matches_golden() {
     let imported = convert_codex(CODEX_V1_TOOL_ROUND);
 
     assert_eq!(
@@ -640,14 +640,14 @@ fn assert_entry_maps(
     assert_eq!(entry.content(), &expected);
 }
 
-/// S28 / INV-038: the Codex era's structured tool vocabulary — tool search
+/// S28: the Codex era's structured tool vocabulary — tool search
 /// call and output, local shell call, web search call, and the custom tool call
 /// and its output — retains each call identity, structured argument or action
 /// value, and result content in converted order. The targeted asserts below
 /// carry that enforcement (testing-style rule 10); the golden supplements them
 /// with the full raw-record, source-metadata, and frontier shape.
 #[test]
-fn s28_inv038_codex_rollout_v1_structured_tools_match_golden() {
+fn s28_codex_rollout_v1_structured_tools_match_golden() {
     let imported = convert_codex(CODEX_V1_STRUCTURED_TOOLS);
     let session_meta = imported.raw_records()[0].normalized();
     let search_call = fixture_object_member(imported.raw_records()[1].normalized(), "payload");
@@ -771,7 +771,7 @@ fn s28_inv038_codex_rollout_v1_structured_tools_match_golden() {
 }
 
 #[test]
-fn s28_inv038_claude_code_v2_depth_128_matches_golden() {
+fn s28_claude_code_v2_depth_128_matches_golden() {
     let imported = convert_claude(CLAUDE_V2_DEPTH_128);
 
     assert_eq!(imported.raw_records().len(), 1);
@@ -785,7 +785,7 @@ fn s28_inv038_claude_code_v2_depth_128_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_claude_code_v2_depth_129_rejection_matches_golden() {
+fn s28_claude_code_v2_depth_129_rejection_matches_golden() {
     let mut identity_calls = 0_u64;
     let error = ClaudeCodeJsonlConverter
         .convert(conversation_id(0x900), CLAUDE_V2_DEPTH_129, || {
@@ -807,7 +807,7 @@ fn s28_inv038_claude_code_v2_depth_129_rejection_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_claude_code_undecodable_fragment_rejection_matches_golden() {
+fn s28_claude_code_undecodable_fragment_rejection_matches_golden() {
     let mut identity_calls = 0_u64;
     let error = ClaudeCodeJsonlConverter
         .convert(
@@ -833,7 +833,7 @@ fn s28_inv038_claude_code_undecodable_fragment_rejection_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_codex_truncated_fragment_rejection_matches_golden() {
+fn s28_codex_truncated_fragment_rejection_matches_golden() {
     let mut identity_calls = 0_u64;
     let error = CodexRolloutJsonlConverter
         .convert(conversation_id(0xd00), CODEX_V1_TRUNCATED_FRAGMENT, || {
@@ -855,7 +855,7 @@ fn s28_inv038_codex_truncated_fragment_rejection_matches_golden() {
 }
 
 #[test]
-fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
+fn s28_import_only_resume_and_fork_match_golden() {
     let imported = convert_claude(CLAUDE_V2_BOUNDARY_LOSSES);
     let selected = imported
         .frontiers()

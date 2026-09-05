@@ -3738,7 +3738,7 @@ mod tests {
     }
 
     #[test]
-    fn inv072_current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
+    fn current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
         let assessment = convergence_assessment(ConvergenceFacts {
             base_branch: BASE_BRANCH,
             mergeable_state: MergeableState::Mergeable,

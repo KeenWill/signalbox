@@ -20,8 +20,8 @@
   adapter-PR versus wiring-PR split, and the loopback test pattern with a
   minimum test matrix. Per the one-owning-source rule in
   [AGENTS.md](../../AGENTS.md), the checklist names each obligation and cites
-  its owning spec section or INV-tagged test instead of restating the
-  requirement, so reuse of this page cannot age into a divergent second contract
+  its owning spec section instead of restating the requirement, so reuse of this
+  page cannot age into a divergent second contract
 - Intended use: reusable body for the subscription-runtime tracks in the
   [backlog](../agents/backlog.md), with one scoping caveat: the stability
   verdict (§1), the PR split (§3), and the test-matrix obligations apply to any
@@ -114,11 +114,10 @@ At the study date the runtime layer was about three days old (first
 ## 2. Adapter-author checklist (build order)
 
 Everything a conforming adapter must satisfy is owned by the
-[runtime-substrate spec](../spec/runtime-substrate.md) and the
-[invariant test index](../invariants.md); this checklist restates none of it.
-What the study adds is the build order — which file to write first, what each
-file's single job is, and which exemplar to copy — with each step citing the
-owning section for its rules.
+[runtime-substrate spec](../spec/runtime-substrate.md); this checklist restates
+none of it. What the study adds is the build order — which file to write first,
+what each file's single job is, and which exemplar to copy — with each step
+citing the owning section for its rules.
 
 Build a new adapter as a self-contained crate
 `crates/model-runtime-<provider>/`. Its `[dependencies]` are
@@ -212,12 +211,12 @@ unless noted.
     typing, the work-first cancellation race — is owned by
     [Two-stage execution](../spec/runtime-substrate.md#two-stage-execution) and
     the
-    [credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary)
-    (INV-035 in the [invariant test index](../invariants.md)). The exemplar's
-    internal order (clone correlation → `build_request` → serialize → resolve
-    the credential raced work-first against cancellation → sensitivity-marked
-    header → build the `reqwest::Request`) is a faithful sequencing of those
-    rules to copy: `src/runtime.rs` (`prepare_request`, `with_cancellation`).
+    [credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary).
+    The exemplar's internal order (clone correlation → `build_request` →
+    serialize → resolve the credential raced work-first against cancellation →
+    sensitivity-marked header → build the `reqwest::Request`) is a faithful
+    sequencing of those rules to copy: `src/runtime.rs` (`prepare_request`,
+    `with_cancellation`).
 10. **`execute`** — consumes the capability; at most one provider interaction.
     Its obligations — observation emission and ordering, classifying send
     failures into proven-unsent versus boundary loss, the work-first
@@ -238,10 +237,9 @@ unless noted.
 one-operation-one-physical-request rule and typed-evidence-never-exceptions
 ([Two-stage execution](../spec/runtime-substrate.md#two-stage-execution)); the
 credential-hygiene rules (the
-[credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary);
-INV-035 in the [invariant test index](../invariants.md)). A goal prompt built
-from this page should cite those sections rather than copy them: the copies age,
-the sections do not.
+[credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary)).
+A goal prompt built from this page should cite those sections rather than copy
+them: the copies age, the sections do not.
 
 ## 3. Clean split — adapter PR vs. wiring PR
 
@@ -257,10 +255,8 @@ the sections do not.
 - The owning-spec update: [runtime-substrate](../spec/runtime-substrate.md)
   describes the implemented adapters, so the same PR updates its adapter
   coverage — or the bottom specification diff of the PR's stack supplies it —
-  per the living-specification rule in [AGENTS.md](../../AGENTS.md). Enforcement
-  generated [invariant test index](../invariants.md) is updated in the same
-  change after adding the new crate's tests (INV-035 lists each existing
-  adapter's loopback suite).
+  per the living-specification rule in [AGENTS.md](../../AGENTS.md). Add the new
+  crate's focused behavioral tests in the same change.
 
 It does **NOT** touch: `model-provider-runtime` (the bridge is generic),
 `crates/application` (the `ModelCallProvider` port is provider-agnostic),

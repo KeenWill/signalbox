@@ -1447,7 +1447,7 @@ mod tests {
     }
 
     #[test]
-    fn inv012_replay_terminal_shapes_reject_every_stray_result_field() {
+    fn replay_terminal_shapes_reject_every_stray_result_field() {
         assert_terminal_field_corruption(validate_terminal_field_shape(
             SessionPlacementResultStorageKind::Applied,
             None,
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn inv002_placement_history_rejects_each_sentinel_command_provenance() {
+    fn placement_history_rejects_each_sentinel_command_provenance() {
         assert_provenance_command_identity_corruption(sqlx::types::Uuid::nil());
         assert_provenance_command_identity_corruption(sqlx::types::Uuid::max());
     }

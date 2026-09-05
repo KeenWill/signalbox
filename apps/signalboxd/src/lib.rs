@@ -4416,7 +4416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv034_commit_ambiguous_activation_raises_the_fatal_recovery_signal() {
+    async fn commit_ambiguous_activation_raises_the_fatal_recovery_signal() {
         let (execution, signal) = FatalExecutionSupervisor::new(NoopExecution);
         let mut pass = ActivatedTurnPass::new(
             StartEligibleTurnService::new(AdvancingIds::new(), CommitAmbiguousTransaction),
@@ -4461,7 +4461,7 @@ mod tests {
     }
 
     #[test]
-    fn inv034_ambiguous_reported_usage_failure_closure_raises_the_fatal_recovery_signal() {
+    fn ambiguous_reported_usage_failure_closure_raises_the_fatal_recovery_signal() {
         let (execution, signal) = FatalExecutionSupervisor::new(NoopExecution);
         let source =
             CommitActivationPreviewError::Activation(StartEligibleTurnRepositoryError::Database {

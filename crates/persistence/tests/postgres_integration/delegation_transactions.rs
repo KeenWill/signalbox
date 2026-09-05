@@ -2,13 +2,13 @@
 
 use crate::*;
 
-/// S17 / INV-032: a background wait, its completed receipt, and its update are
+/// S17: a background wait, its completed receipt, and its update are
 /// one replay-idempotent commit.
-/// S18 / INV-010 / INV-012: equal replay still requires its exact dispatch.
+/// S18: equal replay still requires its exact dispatch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
--> Result<(), Box<dyn Error>> {
+async fn s17_delegation_repository_commits_background_wait_atomically() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -122,12 +122,12 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
     Ok(())
 }
 
-/// S18 / INV-010: a reconstituted process request observes a prepared
+/// S18: a reconstituted process request observes a prepared
 /// physical attempt as nonterminal rather than claiming terminal evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_process_wait_reports_prepared_attempt_without_ending_it()
--> Result<(), Box<dyn Error>> {
+async fn s18_process_wait_reports_prepared_attempt_without_ending_it() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_PREPARED_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -173,12 +173,12 @@ async fn s18_inv010_process_wait_reports_prepared_attempt_without_ending_it()
     Ok(())
 }
 
-/// S17 / INV-005 / INV-010: a background process wait reserves its future
+/// S17: a background process wait reserves its future
 /// result delivery or terminalizes the executable attempt with typed evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv005_inv010_background_wait_delivery_exhaustion_terminalizes_attempt()
--> Result<(), Box<dyn Error>> {
+async fn s17_background_wait_delivery_exhaustion_terminalizes_attempt() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -259,12 +259,11 @@ async fn s17_inv005_inv010_background_wait_delivery_exhaustion_terminalizes_atte
     Ok(())
 }
 
-/// S18 / INV-010: an approved proposal-ordered request remains nonterminal
+/// S18: an approved proposal-ordered request remains nonterminal
 /// before the tool loop prepares its physical attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_process_wait_reports_approved_request_before_attempt()
--> Result<(), Box<dyn Error>> {
+async fn s18_process_wait_reports_approved_request_before_attempt() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_APPROVED_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -293,12 +292,11 @@ async fn s18_inv010_process_wait_reports_approved_request_before_attempt()
     Ok(())
 }
 
-/// S18 / INV-010: process delegation validates the named session before the
+/// S18: process delegation validates the named session before the
 /// request identity for both await and message operations.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_process_delegation_rejects_absent_session_first() -> Result<(), Box<dyn Error>>
-{
+async fn s18_process_delegation_rejects_absent_session_first() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = SessionDelegationRepository::new(pool.clone());
     let session = SessionId::from_uuid(Uuid::from_u128(0xd7f1));
@@ -333,12 +331,11 @@ async fn s18_inv010_process_delegation_rejects_absent_session_first() -> Result<
     Ok(())
 }
 
-/// S17 / INV-010 / INV-012: replay validates every immutable wait-row
+/// S17: replay validates every immutable wait-row
 /// correlation instead of deriving over malformed stored endpoint facts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv012_wait_replay_rejects_cross_wired_stored_turn()
--> Result<(), Box<dyn Error>> {
+async fn s17_wait_replay_rejects_cross_wired_stored_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -389,12 +386,11 @@ async fn s17_inv010_inv012_wait_replay_rejects_cross_wired_stored_turn()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: relationship reconstitution rejects stored spawn
+/// S18: relationship reconstitution rejects stored spawn
 /// provenance carrying a field outside the tool-request variant.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_spawn_reconstitution_rejects_contradictory_provenance()
--> Result<(), Box<dyn Error>> {
+async fn s18_spawn_reconstitution_rejects_contradictory_provenance() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -441,12 +437,11 @@ async fn s18_inv010_inv012_spawn_reconstitution_rejects_contradictory_provenance
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: a spawn event cannot carry a child-result
+/// S18: a spawn event cannot carry a child-result
 /// satellite belonging only to a terminal outcome event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_spawn_reconstitution_rejects_result_satellite()
--> Result<(), Box<dyn Error>> {
+async fn s18_spawn_reconstitution_rejects_result_satellite() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -486,12 +481,12 @@ async fn s18_inv010_inv012_spawn_reconstitution_rejects_result_satellite()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: relationship reconstitution rejects stored outcome
+/// S18: relationship reconstitution rejects stored outcome
 /// provenance carrying a field outside the selected provenance variant.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_outcome_reconstitution_rejects_contradictory_provenance()
--> Result<(), Box<dyn Error>> {
+async fn s18_outcome_reconstitution_rejects_contradictory_provenance() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -560,12 +555,12 @@ async fn s18_inv010_inv012_outcome_reconstitution_rejects_contradictory_provenan
     Ok(())
 }
 
-/// S17 / INV-010 / INV-012: background-wait replay authenticates the exact
+/// S17: background-wait replay authenticates the exact
 /// completed effect-free attempt and normalized registration receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv012_background_wait_replay_requires_exact_terminal_attempt()
--> Result<(), Box<dyn Error>> {
+async fn s17_background_wait_replay_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -612,12 +607,11 @@ async fn s17_inv010_inv012_background_wait_replay_requires_exact_terminal_attemp
     Ok(())
 }
 
-/// S17 / INV-010 / INV-012: equal wait replay requires the durable parent
+/// S17: equal wait replay requires the durable parent
 /// update emitted with the original registration.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv012_wait_replay_requires_update_outbox_satellite()
--> Result<(), Box<dyn Error>> {
+async fn s17_wait_replay_requires_update_outbox_satellite() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -655,12 +649,11 @@ async fn s17_inv010_inv012_wait_replay_requires_update_outbox_satellite()
     Ok(())
 }
 
-/// S17 / INV-010 / INV-012: equal wait replay authenticates the global outbox
+/// S17: equal wait replay authenticates the global outbox
 /// header paired with its durable parent update.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv012_wait_replay_requires_update_outbox_header() -> Result<(), Box<dyn Error>>
-{
+async fn s17_wait_replay_requires_update_outbox_header() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -702,12 +695,11 @@ async fn s17_inv010_inv012_wait_replay_requires_update_outbox_header() -> Result
     Ok(())
 }
 
-/// S17 / INV-010 / INV-012: equal wait replay rejects subject payloads that do
+/// S17: equal wait replay rejects subject payloads that do
 /// not belong to a child-waiting update.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv012_wait_replay_rejects_unused_update_payload() -> Result<(), Box<dyn Error>>
-{
+async fn s17_wait_replay_rejects_unused_update_payload() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -755,12 +747,12 @@ async fn s17_inv010_inv012_wait_replay_rejects_unused_update_payload() -> Result
     Ok(())
 }
 
-/// S17 / INV-010 / INV-012: foreground-wait replay authenticates the exact
+/// S17: foreground-wait replay authenticates the exact
 /// effect-free attempt's typed child-wait terminal evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv012_foreground_wait_replay_requires_exact_terminal_attempt()
--> Result<(), Box<dyn Error>> {
+async fn s17_foreground_wait_replay_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "foreground").await?;
@@ -811,12 +803,11 @@ async fn s17_inv010_inv012_foreground_wait_replay_requires_exact_terminal_attemp
     Ok(())
 }
 
-/// S17 / INV-010 / INV-012: foreground-wait replay authenticates the delivery
+/// S17: foreground-wait replay authenticates the delivery
 /// satellite required by an already-recorded child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv012_foreground_wait_replay_requires_result_delivery()
--> Result<(), Box<dyn Error>> {
+async fn s17_foreground_wait_replay_requires_result_delivery() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "foreground").await?;
@@ -877,12 +868,11 @@ async fn s17_inv010_inv012_foreground_wait_replay_requires_result_delivery()
     Ok(())
 }
 
-/// S17 / INV-010 / INV-012: background-wait replay rejects a delivery
+/// S17: background-wait replay rejects a delivery
 /// satellite cross-wired to a different recipient and missing its pending row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv012_background_wait_replay_requires_exact_result_delivery()
--> Result<(), Box<dyn Error>> {
+async fn s17_background_wait_replay_requires_exact_result_delivery() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -951,12 +941,12 @@ async fn s17_inv010_inv012_background_wait_replay_requires_exact_result_delivery
     Ok(())
 }
 
-/// S18 / INV-010: relationship reconstitution rejects action payloads that a
+/// S18: relationship reconstitution rejects action payloads that a
 /// stored background policy is not permitted to carry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_background_policy_reconstitution_rejects_action_payloads()
--> Result<(), Box<dyn Error>> {
+async fn s18_background_policy_reconstitution_rejects_action_payloads() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -995,12 +985,12 @@ async fn s18_inv010_background_policy_reconstitution_rejects_action_payloads()
     Ok(())
 }
 
-/// S17 / INV-005 / INV-032: foreground registration ends the physical await
+/// S17: foreground registration ends the physical await
 /// attempt and parks the same turn without retaining a live attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv005_inv032_delegation_repository_parks_foreground_wait_atomically()
--> Result<(), Box<dyn Error>> {
+async fn s17_delegation_repository_parks_foreground_wait_atomically() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "foreground").await?;
@@ -1055,12 +1045,12 @@ async fn s17_inv005_inv032_delegation_repository_parks_foreground_wait_atomicall
     Ok(())
 }
 
-/// S17 / INV-032: a message, recipient delivery, completed receipt, update,
+/// S17: a message, recipient delivery, completed receipt, update,
 /// and wake are committed once, while physical replay returns the stored ID.
-/// S18 / INV-010 / INV-012: equal replay still requires its exact dispatch.
+/// S18: equal replay still requires its exact dispatch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
+async fn s17_delegation_repository_commits_message_and_wake_atomically()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
@@ -1204,12 +1194,11 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
     Ok(())
 }
 
-/// S17 / INV-010 / INV-012: message replay validates the direction-derived
+/// S17: message replay validates the direction-derived
 /// recipient and its pending-delivery correlation before returning a receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv012_message_replay_rejects_cross_wired_recipient()
--> Result<(), Box<dyn Error>> {
+async fn s17_message_replay_rejects_cross_wired_recipient() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1262,12 +1251,11 @@ async fn s17_inv010_inv012_message_replay_rejects_cross_wired_recipient()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: message replay authenticates the exact completed
+/// S18: message replay authenticates the exact completed
 /// external-effect attempt and normalized durable receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_message_replay_requires_exact_terminal_attempt()
--> Result<(), Box<dyn Error>> {
+async fn s18_message_replay_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1321,12 +1309,11 @@ async fn s18_inv010_inv012_message_replay_requires_exact_terminal_attempt()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: message replay authenticates the complete stored
+/// S18: message replay authenticates the complete stored
 /// tool-request provenance instead of trusting the request identifier alone.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_message_replay_requires_complete_tool_provenance()
--> Result<(), Box<dyn Error>> {
+async fn s18_message_replay_requires_complete_tool_provenance() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1378,12 +1365,11 @@ async fn s18_inv010_inv012_message_replay_requires_complete_tool_provenance()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: a message event cannot authenticate a cross-kind
+/// S18: a message event cannot authenticate a cross-kind
 /// child-result satellite attached to its ordinal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_message_event_rejects_child_result_satellite()
--> Result<(), Box<dyn Error>> {
+async fn s18_message_event_rejects_child_result_satellite() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1434,12 +1420,11 @@ async fn s18_inv010_inv012_message_event_rejects_child_result_satellite()
     Ok(())
 }
 
-/// S18 / INV-010: reciprocal relationship rows cannot make peer lookup choose
+/// S18: reciprocal relationship rows cannot make peer lookup choose
 /// one direction nondeterministically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_message_lookup_rejects_reciprocal_relationships() -> Result<(), Box<dyn Error>>
-{
+async fn s18_message_lookup_rejects_reciprocal_relationships() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1483,12 +1468,11 @@ async fn s18_inv010_message_lookup_rejects_reciprocal_relationships() -> Result<
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: equal message replay requires the durable update
+/// S18: equal message replay requires the durable update
 /// satellite emitted by the original transaction.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_message_replay_requires_update_outbox_satellite()
--> Result<(), Box<dyn Error>> {
+async fn s18_message_replay_requires_update_outbox_satellite() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1532,12 +1516,11 @@ async fn s18_inv010_inv012_message_replay_requires_update_outbox_satellite()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: equal message replay authenticates the global
+/// S18: equal message replay authenticates the global
 /// outbox header paired with its recipient update.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_message_replay_requires_update_outbox_header()
--> Result<(), Box<dyn Error>> {
+async fn s18_message_replay_requires_update_outbox_header() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1589,12 +1572,11 @@ async fn s18_inv010_inv012_message_replay_requires_update_outbox_header()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: equal message replay requires the durable wake
+/// S18: equal message replay requires the durable wake
 /// satellite emitted by the original transaction.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_message_replay_requires_wake_outbox_satellite()
--> Result<(), Box<dyn Error>> {
+async fn s18_message_replay_requires_wake_outbox_satellite() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1638,12 +1620,11 @@ async fn s18_inv010_inv012_message_replay_requires_wake_outbox_satellite()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: equal message replay authenticates the global
+/// S18: equal message replay authenticates the global
 /// outbox header paired with its recipient wake.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_message_replay_requires_wake_outbox_header() -> Result<(), Box<dyn Error>>
-{
+async fn s18_message_replay_requires_wake_outbox_header() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1695,12 +1676,11 @@ async fn s18_inv010_inv012_message_replay_requires_wake_outbox_header() -> Resul
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: concurrent relationships cannot claim one global
+/// S18: concurrent relationships cannot claim one global
 /// message identity; exactly one records and the loser is a typed rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_concurrent_message_identity_collision_is_typed()
--> Result<(), Box<dyn Error>> {
+async fn s18_concurrent_message_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let second_seed = DELEGATION_REPOSITORY_MESSAGE_RACE_SECOND_SEED;
@@ -1766,13 +1746,12 @@ async fn s18_inv010_inv012_concurrent_message_identity_collision_is_typed()
     Ok(())
 }
 
-/// S18 / INV-005 / INV-010 / INV-012: a definitive process-message collision
+/// S18: a definitive process-message collision
 /// retains the exact minted identity, terminalizes its executable attempt as
 /// known failed, and replays the typed rejection from durable evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv005_inv010_inv012_process_message_collision_replays_typed_rejection()
--> Result<(), Box<dyn Error>> {
+async fn s18_process_message_collision_replays_typed_rejection() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let second_seed = DELEGATION_REPOSITORY_MESSAGE_RACE_SECOND_SEED;
@@ -1842,12 +1821,11 @@ async fn s18_inv005_inv010_inv012_process_message_collision_replays_typed_reject
     Ok(())
 }
 
-/// S18 / INV-005 / INV-010: an executable process message naming an absent
+/// S18: an executable process message naming an absent
 /// peer terminalizes its attempt with the typed relationship rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv005_inv010_process_message_absent_peer_terminalizes_attempt()
--> Result<(), Box<dyn Error>> {
+async fn s18_process_message_absent_peer_terminalizes_attempt() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
@@ -1925,8 +1903,7 @@ async fn s18_inv005_inv010_process_message_absent_peer_terminalizes_attempt()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_outbox_records_exact_update_and_wake_inventory()
--> Result<(), Box<dyn Error>> {
+async fn delegation_outbox_records_exact_update_and_wake_inventory() -> Result<(), Box<dyn Error>> {
     let (container, pool, _fixture) =
         prepared_complete_delegation_outbox(DELEGATION_OUTBOX_FIXTURE_SEED).await?;
     let update_count: i64 =
@@ -1947,7 +1924,7 @@ async fn inv032_delegation_outbox_records_exact_update_and_wake_inventory()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_result_update_requires_its_subject() -> Result<(), Box<dyn Error>> {
+async fn delegation_result_update_requires_its_subject() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_complete_delegation_outbox(DELEGATION_OUTBOX_FIXTURE_SEED).await?;
     let mut forged = pool.begin().await?;
@@ -1980,7 +1957,7 @@ async fn inv032_delegation_result_update_requires_its_subject() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_result_update_rejects_a_duplicate() -> Result<(), Box<dyn Error>> {
+async fn delegation_result_update_rejects_a_duplicate() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_complete_delegation_outbox(DELEGATION_OUTBOX_FIXTURE_SEED).await?;
     let mut duplicate = pool.begin().await?;
@@ -2013,7 +1990,7 @@ async fn inv032_delegation_result_update_rejects_a_duplicate() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_relation_requires_spawn_update() -> Result<(), Box<dyn Error>> {
+async fn delegation_relation_requires_spawn_update() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = prepare_canonical_raw_delegation(&pool, DELEGATION_RELATION_FIXTURE_SEED).await?;
     let mut relation_only = pool.begin().await?;
@@ -2035,7 +2012,7 @@ async fn inv032_delegation_relation_requires_spawn_update() -> Result<(), Box<dy
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_wait_requires_parent_update() -> Result<(), Box<dyn Error>> {
+async fn delegation_wait_requires_parent_update() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_WAIT_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2069,7 +2046,7 @@ async fn inv032_delegation_wait_requires_parent_update() -> Result<(), Box<dyn E
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_parent_lifecycle_requires_update() -> Result<(), Box<dyn Error>> {
+async fn delegation_parent_lifecycle_requires_update() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_LIFECYCLE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2102,7 +2079,7 @@ async fn inv032_delegation_parent_lifecycle_requires_update() -> Result<(), Box<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_message_requires_recipient_update() -> Result<(), Box<dyn Error>> {
+async fn delegation_message_requires_recipient_update() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_MESSAGE_UPDATE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2125,7 +2102,7 @@ async fn inv032_delegation_message_requires_recipient_update() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_result_requires_parent_update() -> Result<(), Box<dyn Error>> {
+async fn delegation_result_requires_parent_update() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_RESULT_UPDATE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2161,7 +2138,7 @@ async fn inv032_delegation_result_requires_parent_update() -> Result<(), Box<dyn
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_message_requires_recipient_wake() -> Result<(), Box<dyn Error>> {
+async fn delegation_message_requires_recipient_wake() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_MESSAGE_WAKE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2193,7 +2170,7 @@ async fn inv032_delegation_message_requires_recipient_wake() -> Result<(), Box<d
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_result_requires_parent_wake() -> Result<(), Box<dyn Error>> {
+async fn delegation_result_requires_parent_wake() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_RESULT_WAKE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2242,7 +2219,7 @@ async fn inv032_delegation_result_requires_parent_wake() -> Result<(), Box<dyn E
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_parent_to_child_update_requires_child_stream() -> Result<(), Box<dyn Error>> {
+async fn parent_to_child_update_requires_child_stream() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_CHILD_STREAM_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2273,7 +2250,7 @@ async fn inv032_parent_to_child_update_requires_child_stream() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_child_to_parent_update_requires_parent_stream() -> Result<(), Box<dyn Error>> {
+async fn child_to_parent_update_requires_parent_stream() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_PARENT_STREAM_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2310,7 +2287,7 @@ async fn inv032_child_to_parent_update_requires_parent_stream() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_message_update_rejects_cross_endpoint_duplicate() -> Result<(), Box<dyn Error>> {
+async fn message_update_rejects_cross_endpoint_duplicate() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_DUPLICATE_MESSAGE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2350,7 +2327,7 @@ async fn inv032_message_update_rejects_cross_endpoint_duplicate() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_message_delivery_admits_reverse_insert_order() -> Result<(), Box<dyn Error>> {
+async fn message_delivery_admits_reverse_insert_order() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_REVERSE_INSERT_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
@@ -2375,8 +2352,7 @@ async fn inv032_message_delivery_admits_reverse_insert_order() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv003_inv010_delegation_history_rejects_initial_task_deletion()
--> Result<(), Box<dyn Error>> {
+async fn s18_delegation_history_rejects_initial_task_deletion() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let mut history = pool.begin().await?;
@@ -2423,7 +2399,7 @@ async fn s18_inv003_inv010_delegation_history_rejects_initial_task_deletion()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_delegation_outcome_rejects_a_later_child_turn() -> Result<(), Box<dyn Error>> {
+async fn s18_delegation_outcome_rejects_a_later_child_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_delegation_with_wait(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let later_turn = TurnId::from_uuid(Uuid::from_u128(DELEGATION_HISTORY_FIXTURE_SEED + 0x500));
@@ -2471,7 +2447,7 @@ async fn s18_inv010_delegation_outcome_rejects_a_later_child_turn() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_result_wake_requires_its_subject_shape() -> Result<(), Box<dyn Error>> {
+async fn delegation_result_wake_requires_its_subject_shape() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_recipient_delivery_fixture(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let wake_error = sqlx::query(
@@ -2505,8 +2481,7 @@ async fn inv032_delegation_result_wake_requires_its_subject_shape() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv003_inv010_delegation_spawn_purpose_requires_exact_json()
--> Result<(), Box<dyn Error>> {
+async fn s18_delegation_spawn_purpose_requires_exact_json() -> Result<(), Box<dyn Error>> {
     let extra_spawn = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
@@ -2551,7 +2526,7 @@ async fn s18_inv003_inv010_delegation_spawn_purpose_requires_exact_json()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_delegation_message_purpose_requires_exact_json() -> Result<(), Box<dyn Error>> {
+async fn s18_delegation_message_purpose_requires_exact_json() -> Result<(), Box<dyn Error>> {
     let canonical_spawn = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
@@ -2597,8 +2572,8 @@ async fn s18_inv010_delegation_message_purpose_requires_exact_json() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_delegation_cascade_rejects_unrelated_disposition_source()
--> Result<(), Box<dyn Error>> {
+async fn s19_delegation_cascade_rejects_unrelated_disposition_source() -> Result<(), Box<dyn Error>>
+{
     let spawn_arguments = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,

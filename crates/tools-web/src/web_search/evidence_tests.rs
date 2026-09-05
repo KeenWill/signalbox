@@ -15,7 +15,7 @@ fn web_search_rejects_encoded_output_over_tool_result_bound() {
     );
 }
 
-/// INV-035: fixed JSON member names cannot collide with the credential in
+/// fixed JSON member names cannot collide with the credential in
 /// completed evidence, even when provider fields contain no credential.
 #[test]
 fn web_search_final_success_payload_rejects_credential_collision() {
@@ -30,7 +30,7 @@ fn web_search_final_success_payload_rejects_credential_collision() {
     );
 }
 
-/// INV-035: a credential spanning completed JSON and the enclosing successful
+/// a credential spanning completed JSON and the enclosing successful
 /// evidence `Debug` suffix is rejected before that result can be returned.
 #[test]
 fn web_search_rejects_populated_success_result_suffix_collision() {
@@ -47,7 +47,7 @@ fn web_search_rejects_populated_success_result_suffix_collision() {
     );
 }
 
-/// INV-035: a credential spanning a populated failure detail and its enclosing
+/// a credential spanning a populated failure detail and its enclosing
 /// `Debug` suffix is rejected before that result can be returned.
 #[test]
 fn web_search_rejects_populated_failure_result_suffix_collision() {
@@ -66,7 +66,7 @@ fn web_search_rejects_populated_failure_result_suffix_collision() {
     );
 }
 
-/// INV-035: typed error parsing retains only the detail component and exact
+/// typed error parsing retains only the detail component and exact
 /// credential scrubbing runs before provider detail enters durable evidence.
 #[test]
 fn web_search_error_body_redacts_exact_credential() {
@@ -83,7 +83,7 @@ fn web_search_error_body_redacts_exact_credential() {
     assert!(!detail.as_str().contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: only Brave's known nested error-detail component can become
+/// only Brave's known nested error-detail component can become
 /// entity-escaped provider text in failure evidence.
 #[test]
 fn web_search_error_body_reads_nested_typed_detail() {
@@ -106,7 +106,7 @@ fn web_search_error_body_reads_nested_typed_detail() {
     assert!(!detail.as_str().contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: credential removal cannot turn an entity-escaped provider
+/// credential removal cannot turn an entity-escaped provider
 /// rejection detail into markup-bearing failure evidence.
 #[test]
 fn web_search_rejects_error_detail_collision_with_entity_escape_syntax() {
@@ -124,7 +124,7 @@ fn web_search_rejects_error_detail_collision_with_entity_escape_syntax() {
     assert_eq!(provider_error_detail(error, &scrubber), Ok(None));
 }
 
-/// INV-035: an unparsed provider error body contributes no text to failure
+/// an unparsed provider error body contributes no text to failure
 /// evidence, independently of whether it collides with the credential.
 #[test]
 fn web_search_unparsed_error_body_never_enters_evidence() {
@@ -140,7 +140,7 @@ fn web_search_unparsed_error_body_never_enters_evidence() {
     assert!(!detail.as_str().contains(FIXTURE_UNPARSED_PROVIDER_ERROR));
 }
 
-/// INV-035: error redaction precedes evidence truncation, so a credential
+/// error redaction precedes evidence truncation, so a credential
 /// crossing the retained prefix is replaced before the suffix is added.
 #[test]
 fn web_search_error_body_is_redacted_before_truncation() {
@@ -172,7 +172,7 @@ fn web_search_truncates_expanded_error_detail_at_utf8_boundary() {
     assert!(detail.as_str().ends_with(TRUNCATION_SUFFIX));
 }
 
-/// INV-035: fixed provider-error prose cannot collide with the credential
+/// fixed provider-error prose cannot collide with the credential
 /// after the provider body has been sanitized.
 #[test]
 fn web_search_final_error_detail_rejects_credential_collision() {

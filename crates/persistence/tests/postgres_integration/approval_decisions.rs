@@ -1295,12 +1295,11 @@ async fn automatic_policy_decision_requires_no_explicit_event_effect() -> Result
     Ok(())
 }
 
-/// S10 / INV-020 / INV-035: a credential-suppressed proposal commits as an
+/// S10: a credential-suppressed proposal commits as an
 /// inert request plus a fixed runtime-safety denial and leaves the turn running.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv020_inv035_suppressed_tool_request_is_denied_and_continues()
--> Result<(), Box<dyn Error>> {
+async fn s10_suppressed_tool_request_is_denied_and_continues() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (fixture, request) =
         checkpoint_suppressed_tool_round(&pool, APPROVAL_FIXTURE_SEED + 0x90, APPROVAL_TOOL_NAME)
@@ -1338,12 +1337,11 @@ async fn s10_inv020_inv035_suppressed_tool_request_is_denied_and_continues()
     Ok(())
 }
 
-/// S10 / INV-020: runtime-safety provenance cannot be attached to ordinary
+/// S10: runtime-safety provenance cannot be attached to ordinary
 /// provider arguments or a request that retained human approval posture.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv020_runtime_safety_denial_requires_suppressed_arguments()
--> Result<(), Box<dyn Error>> {
+async fn s10_runtime_safety_denial_requires_suppressed_arguments() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (_fixture, _repository, _observation, request) = checkpoint_confirmed_tool_round(
         &pool,
@@ -1589,12 +1587,11 @@ async fn approval_guard_user_decision_requires_event_and_lifecycle_effect()
     Ok(())
 }
 
-/// S10 / INV-019: a later request cannot gain a decision while an earlier
+/// S10: a later request cannot gain a decision while an earlier
 /// request in the same proposal batch still owns the approval wait.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv019_approval_guard_rejects_decision_for_later_request() -> Result<(), Box<dyn Error>>
-{
+async fn s10_approval_guard_rejects_decision_for_later_request() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = APPROVAL_FIXTURE_SEED + 0x100;
     let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
@@ -1684,11 +1681,11 @@ async fn s10_inv019_approval_guard_rejects_decision_for_later_request() -> Resul
     Ok(())
 }
 
-/// S10 / INV-019: one transaction cannot collapse multiple explicit approval
+/// S10: one transaction cannot collapse multiple explicit approval
 /// waits from the same proposal into a single final continuation transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv019_approval_guard_rejects_multiple_decisions_in_one_transaction()
+async fn s10_approval_guard_rejects_multiple_decisions_in_one_transaction()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = APPROVAL_FIXTURE_SEED + 0x300;
@@ -1770,13 +1767,12 @@ async fn s10_inv019_approval_guard_rejects_multiple_decisions_in_one_transaction
     Ok(())
 }
 
-/// S10 / INV-019: recovery remains the sole active gate after an earlier
+/// S10: recovery remains the sole active gate after an earlier
 /// automatic request becomes ambiguous; a later human request cannot acquire
 /// a decision and event while that recovery wait owns the turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv019_approval_guard_rejects_decision_during_recovery() -> Result<(), Box<dyn Error>>
-{
+async fn s10_approval_guard_rejects_decision_during_recovery() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = APPROVAL_FIXTURE_SEED + 0x200;
     let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
@@ -1969,10 +1965,10 @@ async fn approval_guard_unsent_judge_call_rejects_usage() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-006: cancelled approval-judge calls never retain provider usage.
+/// cancelled approval-judge calls never retain provider usage.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_cancelled_approval_judge_usage_is_unreported() -> Result<(), Box<dyn Error>> {
+async fn cancelled_approval_judge_usage_is_unreported() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
         &pool,
@@ -2417,13 +2413,12 @@ async fn override_command_records_only_a_terminal_delegate_denial() -> Result<()
     Ok(())
 }
 
-/// INV-012: an equal override replay returns the recorded receipt, and a
+/// an equal override replay returns the recorded receipt, and a
 /// distinct fresh command against the same denial records the
 /// already-overridden rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_override_command_replay_returns_the_recorded_receipt() -> Result<(), Box<dyn Error>>
-{
+async fn override_command_replay_returns_the_recorded_receipt() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8e40;
     let (fixture, model_repository, request, _, _) = terminal_delegate_denial(&pool, seed).await?;
@@ -2640,7 +2635,7 @@ async fn recorded_override_before_a_fresh_call(
     ))
 }
 
-/// S10 / INV-020: an override recorded before a call is checkpointed is frozen
+/// S10: an override recorded before a call is checkpointed is frozen
 /// into that call, the consuming proposal records approval under
 /// `user_override` provenance naming the overridden denial, and the
 /// consumption dispatches one decided event carrying that provenance.

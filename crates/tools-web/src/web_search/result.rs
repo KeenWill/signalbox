@@ -40,7 +40,7 @@ pub(super) struct EscapedSnippet(String);
 
 /// One checked provider result.
 ///
-/// INV-035: provider-controlled components remain opaque outside this crate;
+/// provider-controlled components remain opaque outside this crate;
 /// only request-scoped evidence construction may render them.
 ///
 /// ```compile_fail

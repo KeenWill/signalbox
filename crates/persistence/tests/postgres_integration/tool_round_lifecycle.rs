@@ -87,12 +87,11 @@ impl StoredBlobReadCharge {
     }
 }
 
-/// INV-091: blob-read visibility and decoded-byte charges commit before
+/// blob-read visibility and decoded-byte charges commit before
 /// dispatch authority.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv091_blob_read_preauthorization_is_visible_bounded_and_durable()
--> Result<(), Box<dyn Error>> {
+async fn blob_read_preauthorization_is_visible_bounded_and_durable() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let visible_seed = 0xd000;
     let visible_digest = BlobDigest::digest(b"visible");
@@ -146,11 +145,11 @@ async fn inv091_blob_read_preauthorization_is_visible_bounded_and_durable()
     Ok(())
 }
 
-/// INV-091: an unattached blob-read digest is rejected before dispatch and
+/// an unattached blob-read digest is rejected before dispatch and
 /// leaves the durable attempt Prepared.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv091_unattached_blob_read_is_rejected_before_dispatch() -> Result<(), Box<dyn Error>> {
+async fn unattached_blob_read_is_rejected_before_dispatch() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
 
@@ -253,7 +252,7 @@ struct ReclassifiedSteeringFacts {
     origin: TurnOriginPresence,
 }
 
-/// INV-007 / INV-009 / INV-012: a tool-result continuation materializes and
+/// a tool-result continuation materializes and
 /// reconstructs its transaction-local results before taking the shared
 /// model-call ordering guard, then takes that guard before its results-projected
 /// outbox append can wait on the allocator. This excludes both long reads from
@@ -261,8 +260,7 @@ struct ReclassifiedSteeringFacts {
 /// would deadlock against counted activation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv009_inv012_tool_continuation_guards_before_result_outbox()
--> Result<(), Box<dyn Error>> {
+async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7ef8;
     let (fixture, _, _, request) =
@@ -397,14 +395,13 @@ async fn deferred_turn_validation_skips_immutable_tool_round_frontiers()
     Ok(())
 }
 
-/// INV-014: provider usage plus newly projected result content that exhausts
+/// provider usage plus newly projected result content that exhausts
 /// configured headroom preserves the results, closes the turn with typed
 /// evidence, and prepares no oversized continuation call. The daemon-owned
 /// closure is budget-neutral for goals.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Result<(), Box<dyn Error>>
-{
+async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7ef9;
     let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_usage(
@@ -647,15 +644,14 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
     Ok(())
 }
 
-/// INV-014: a returning foreground delegation result is model-visible
+/// a returning foreground delegation result is model-visible
 /// continuation content. The same-turn headroom bound counts its delivered
 /// child-result bytes alongside executed tool results, so a round whose child
 /// returned a large result takes the compaction boundary instead of preparing
 /// the oversized continuation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv014_tool_continuation_headroom_counts_delegation_results() -> Result<(), Box<dyn Error>>
-{
+async fn tool_continuation_headroom_counts_delegation_results() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8900;
     let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval_and_usage(
@@ -912,15 +908,15 @@ async fn inv014_tool_continuation_headroom_counts_delegation_results() -> Result
     Ok(())
 }
 
-/// S02 / S08 / INV-016 / INV-036: a NextSafePoint input accepted while a tool
+/// S02 / S08: a NextSafePoint input accepted while a tool
 /// round executes is consumed by the same-turn continuation call, and the
 /// committed continuation shape reloads through the scheduling projection —
 /// the next submit is accepted and the startup scan classifies the prepared
 /// call instead of leaving the session permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s08_inv016_inv036_steering_consumed_at_continuation_reloads_and_scans()
--> Result<(), Box<dyn Error>> {
+async fn s02_s08_steering_consumed_at_continuation_reloads_and_scans() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7f00;
     let (fixture, _, _, request) =
@@ -1141,14 +1137,14 @@ async fn s02_s08_inv016_inv036_steering_consumed_at_continuation_reloads_and_sca
     Ok(())
 }
 
-/// S02 / S07 / S10 / INV-006 / INV-037: an interrupt applied while the
+/// S02 / S07 / S10: an interrupt applied while the
 /// prepared continuation call of a completed tool round awaits send cancels
 /// the turn naming that call, and the committed terminal shape reloads
 /// through the scheduling projection — the interrupt successor activates
 /// instead of leaving the session permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s07_s10_inv006_inv037_interrupted_continuation_call_reloads_and_activates_successor()
+async fn s02_s07_s10_interrupted_continuation_call_reloads_and_activates_successor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8100;
@@ -1391,15 +1387,15 @@ fn announcement_for_classifies_each_outcome() {
     );
 }
 
-/// S06 / INV-025 / INV-026: an executor that cannot establish whether its
+/// S06: an executor that cannot establish whether its
 /// external effect happened terminalizes the attempt ambiguous and parks the
 /// turn on a durable recovery wait naming that exact attempt, so the effect is
 /// never silently repeated and the batch is never reported definitively
 /// failed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s06_inv025_inv026_ambiguous_external_effect_parks_a_durable_recovery_wait()
--> Result<(), Box<dyn Error>> {
+async fn s06_ambiguous_external_effect_parks_a_durable_recovery_wait() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8180;
     // The proposal must name an external-effect tool. An effect-free request
@@ -1505,15 +1501,14 @@ async fn s06_inv025_inv026_ambiguous_external_effect_parks_a_durable_recovery_wa
     Ok(())
 }
 
-/// S02 / S10 / INV-006: a provider refusal on the continuation model call of
+/// S02 / S10: a provider refusal on the continuation model call of
 /// a completed tool round terminalizes the turn naming that call, and the
 /// committed refused terminal shape reloads through the scheduling
 /// projection — the startup scan completes and the next submit is accepted
 /// instead of the session becoming permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s10_inv006_refused_continuation_call_reloads_and_scans() -> Result<(), Box<dyn Error>>
-{
+async fn s02_s10_refused_continuation_call_reloads_and_scans() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8300;
     let (fixture, model_repository, continuation_call, authorized) =
@@ -1611,7 +1606,7 @@ async fn s02_s10_inv006_refused_continuation_call_reloads_and_scans() -> Result<
     Ok(())
 }
 
-/// S04 / INV-006 / INV-025: a daemon restart with the continuation model call
+/// S04: a daemon restart with the continuation model call
 /// of a completed tool round in flight classifies the call as ambiguous and
 /// parks the turn awaiting a user recovery decision — the committed
 /// recovery wait reloads through the scheduling projection, the reconcile
@@ -1619,8 +1614,7 @@ async fn s02_s10_inv006_refused_continuation_call_reloads_and_scans() -> Result<
 /// interrupt terminalizes the turn naming that call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_inv006_inv025_in_flight_continuation_call_restart_parks_recovery()
--> Result<(), Box<dyn Error>> {
+async fn s04_in_flight_continuation_call_restart_parks_recovery() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8500;
     let (fixture, _, continuation_call, _) =
@@ -1735,15 +1729,15 @@ async fn s04_inv006_inv025_in_flight_continuation_call_restart_parks_recovery()
     Ok(())
 }
 
-/// S04 / S07 / INV-006 / INV-037: a daemon restart with a stop-requested
+/// S04 / S07: a daemon restart with a stop-requested
 /// continuation call classifies it as ambiguous under its applied interrupt
 /// and terminalizes the turn as reconciliation-required naming that call —
 /// the committed terminal shape reloads through the scheduling projection
 /// instead of leaving the session permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_s07_inv006_inv037_stop_requested_continuation_call_restart_reconciles()
--> Result<(), Box<dyn Error>> {
+async fn s04_s07_stop_requested_continuation_call_restart_reconciles() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8700;
     let (fixture, _, continuation_call, _) =
@@ -1836,13 +1830,12 @@ async fn s04_s07_inv006_inv037_stop_requested_continuation_call_restart_reconcil
     Ok(())
 }
 
-/// INV-006 / INV-011 / INV-037: an immediate interrupt after an approved
+/// an immediate interrupt after an approved
 /// attempt checkpoint classifies the unsent attempt, closes its logical
 /// request, and terminalizes through the applied interrupt atomically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
--> Result<(), Box<dyn Error>> {
+async fn interrupt_closes_checkpointed_tool_execution() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7480;
     let (fixture, _, _, request) =
@@ -2029,14 +2022,13 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
     Ok(())
 }
 
-/// S07 / S10 / INV-012 / INV-028: an interrupt against a parked approval wait
+/// S07 / S10: an interrupt against a parked approval wait
 /// records the authoritative typed rejection instead of failing the submit
 /// transaction, the wait remains durably parked with no accepted input, and
 /// equal replay returns the recorded rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection()
--> Result<(), Box<dyn Error>> {
+async fn s07_s10_parked_approval_interrupt_records_typed_rejection() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7e00;
     let (fixture, _, _, request) =
@@ -2150,7 +2142,7 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
     Ok(())
 }
 
-/// S07 / S10 / INV-012 / INV-028: a parked-approval interrupt rejection is
+/// S07 / S10: a parked-approval interrupt rejection is
 /// authoritative only against a turn the database still records as active on
 /// its approval wait. The row shape proves only that the receipt names the
 /// turn the command expected, so the deferred correlation trigger proves the
@@ -2158,7 +2150,7 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
 /// cannot commit and therefore never replays as authoritative.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s07_s10_inv012_inv028_parked_approval_rejection_requires_a_recorded_approval_wait()
+async fn s07_s10_parked_approval_rejection_requires_a_recorded_approval_wait()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
@@ -2273,13 +2265,12 @@ async fn s07_s10_inv012_inv028_parked_approval_rejection_requires_a_recorded_app
     Ok(())
 }
 
-/// INV-006 / INV-025 / INV-029 / INV-037: an interrupt against an external
+/// an interrupt against an external
 /// tool recovery wait releases the slot as reconciliation-required while
 /// retaining the exact ambiguous tool attempt and closing its logical request.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity()
--> Result<(), Box<dyn Error>> {
+async fn interrupt_preserves_tool_recovery_ambiguity() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x74c0;
     let (fixture, _, _, request) =
@@ -2419,13 +2410,12 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     Ok(())
 }
 
-/// INV-006 / INV-025 / INV-029 / INV-037: the daemon's bounded recovery
+/// the daemon's bounded recovery
 /// ledger terminalizes an exact tool ambiguity without inventing a user
 /// interrupt or erasing the physical outcome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_inv025_inv029_inv037_automatic_tool_reconciliation_releases_the_slot()
--> Result<(), Box<dyn Error>> {
+async fn automatic_tool_reconciliation_releases_the_slot() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x74d0;
     let (fixture, _, _, request) =
@@ -2519,13 +2509,12 @@ async fn inv006_inv025_inv029_inv037_automatic_tool_reconciliation_releases_the_
     Ok(())
 }
 
-/// INV-006 / INV-025 / INV-029 / INV-037: eligibility replays pending
+/// eligibility replays pending
 /// steering reclassified behind an interrupted ambiguous tool attempt without
 /// requiring that reconciliation predecessor to own a model call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_inv025_inv029_inv037_replays_reclassified_tool_reconciliation_predecessor()
--> Result<(), Box<dyn Error>> {
+async fn replays_reclassified_tool_reconciliation_predecessor() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x74e0;
     let (fixture, _, _, request) =
@@ -2701,14 +2690,13 @@ async fn move_delta_member(
     Ok(())
 }
 
-/// S05 / S10 / S11 / INV-006 / INV-019 / INV-027: denial never dispatches,
+/// S05 / S10 / S11: denial never dispatches,
 /// schema failure is durable result evidence, external-effect crash loss parks
 /// on exact recovery authority, and effect-free loss closes every request
 /// before the turn fails.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Result<(), Box<dyn Error>>
-{
+async fn s05_s10_s11_tool_failures_close_durably() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
 
@@ -3305,11 +3293,11 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     Ok(())
 }
 
-/// INV-012: concurrent user-global command claims serialize before either
+/// concurrent user-global command claims serialize before either
 /// request-local decision can commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(), Box<dyn Error>> {
+async fn tool_decision_command_race_has_one_global_winner() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_seed = 0x7900;
     let second_seed = 0x7a00;
@@ -3355,13 +3343,12 @@ async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(),
     Ok(())
 }
 
-/// INV-006 / INV-012: an applied interrupt racing a tool-using response closes
+/// an applied interrupt racing a tool-using response closes
 /// every request in proposal order, binds those facts into the terminal
 /// frontier, and makes a later user decision canonically AlreadyResolved.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
--> Result<(), Box<dyn Error>> {
+async fn stopped_tool_round_closes_requests_and_decision_replay() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7c00;
     let (fixture, model_repository, _prepared, authorized) =
@@ -3678,13 +3665,13 @@ async fn commit_stopped_tool_round(
     Ok((fixture, cancellation_entry, terminal_frontier, successor))
 }
 
-/// S02 / S07 / S11 / INV-006 / INV-037: the terminal shape committed when a
+/// S02 / S07 / S11: the terminal shape committed when a
 /// stop request races a tool-using response reloads through the scheduling
 /// projection, so the interrupt successor activates instead of leaving the
 /// session permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_successor()
+async fn s02_s07_s11_stopped_tool_round_reloads_and_activates_successor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7d00;
@@ -3713,12 +3700,11 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
     Ok(())
 }
 
-/// S02 / S07 / S11 / INV-032 / INV-037: a stopped tool response's cancellation
+/// S02 / S07 / S11: a stopped tool response's cancellation
 /// remains dispatchable when its correlated producing call completed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s07_s11_inv032_inv037_stopped_tool_round_cancellation_dispatches()
--> Result<(), Box<dyn Error>> {
+async fn s02_s07_s11_stopped_tool_round_cancellation_dispatches() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7d80;
     let (fixture, cancellation_entry, terminal_frontier, _successor) =
@@ -3750,11 +3736,11 @@ async fn s02_s07_s11_inv032_inv037_stopped_tool_round_cancellation_dispatches()
     Ok(())
 }
 
-/// S02 / S07 / S11 / INV-032: a cancellation naming a completed terminal call
+/// S02 / S07 / S11: a cancellation naming a completed terminal call
 /// is dispatchable only with the correlated closed-by-turn-end tool round.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s07_s11_inv032_completed_cancellation_requires_closed_tool_round()
+async fn s02_s07_s11_completed_cancellation_requires_closed_tool_round()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7e00;

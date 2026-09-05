@@ -11910,7 +11910,7 @@ mod tests {
         Ok(())
     }
 
-    /// INV-074: deadline cancellation preserves durable webhook work for retry.
+    /// deadline cancellation preserves durable webhook work for retry.
     #[tokio::test(start_paused = true)]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn a_webhook_drain_deadline_cancels_and_retries_durable_work()
@@ -12461,7 +12461,7 @@ mod tests {
     }
 
     #[test]
-    fn inv069_non_enqueued_repo_watch_nudges_are_recorded() -> Result<(), Box<dyn Error>> {
+    fn non_enqueued_repo_watch_nudges_are_recorded() -> Result<(), Box<dyn Error>> {
         let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
         let session = signalbox_domain::SessionId::from_uuid(Uuid::from_u128(0x69));
         let captured = CapturedLog::default();
@@ -12763,7 +12763,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv072_current_head_review_is_not_a_clearance_candidate() {
+    async fn current_head_review_is_not_a_clearance_candidate() {
         let response = ScriptedResponse::post(
             RequestTarget(String::from(THREADS_TARGET)),
             ResponseBody(blocking_reviews(HEAD_SHA)),

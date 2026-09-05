@@ -18,8 +18,7 @@ in [runtime-substrate](runtime-substrate.md); daemon startup, scheduling, and
 shutdown composition in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); and model
 configuration and credentials in
-[configuration-and-credentials](configuration-and-credentials.md). Invariant
-tags cite [docs/invariants.md](../invariants.md).
+[configuration-and-credentials](configuration-and-credentials.md).
 
 Multipart attachment rendering is proposed and not implemented. The
 runner-placement rendering and executable session-tool snapshot paragraphs below

@@ -5670,10 +5670,10 @@ mod tests {
         TurnId::from_uuid(Uuid::from_u128(value))
     }
 
-    /// S24 / INV-032: acceptance order A, B, C may execute as A, C, B; the
+    /// S24: acceptance order A, B, C may execute as A, C, B; the
     /// database lineage diagnostic selects B as the one complete-chain tip.
     #[test]
-    fn s24_inv032_latest_tip_follows_execution_lineage() {
+    fn s24_latest_tip_follows_execution_lineage() {
         let second = turn(2);
 
         assert_eq!(
@@ -5683,10 +5683,10 @@ mod tests {
         );
     }
 
-    /// INV-032: a branched persisted execution lineage cannot choose one
+    /// a branched persisted execution lineage cannot choose one
     /// authoritative snapshot frontier and therefore fails closed.
     #[test]
-    fn inv032_latest_frontier_rejects_branched_execution_lineage() {
+    fn latest_frontier_rejects_branched_execution_lineage() {
         assert!(decode_execution_lineage_tip(3, 1, 3, 2, true, false, Some(turn(2))).is_err());
     }
 

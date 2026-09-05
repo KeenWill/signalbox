@@ -7,8 +7,7 @@ implying that undecided implementation choices are settled.
 ## Before proposing a change
 
 Read the [vision](docs/vision.md), [architecture](docs/architecture.md),
-[living specification](docs/spec/README.md),
-[invariant test index](docs/invariants.md), and
+[living specification](docs/spec/README.md) and
 [open questions](docs/open-questions.md). Check the specification and git
 history before revisiting a decision. Ordinary decisions, including closing an
 ordinary open question, are made and recorded in the pull request. A
@@ -98,10 +97,9 @@ covers:
   merges, and one narrow deterministic end-to-end slice per major capability
   covering its defining failure/restart path.
 
-Test names or metadata should reference scenario and invariant identifiers when
-the connection is meaningful, for example `S12_INV011_rejects_stale_generation`.
-The concrete required cases for each slice live with the decision that
-authorizes it and in the tests themselves.
+Test names or metadata should reference scenario identifiers when the connection
+is meaningful. The concrete required cases for each slice live with the decision
+that authorizes it and in the tests themselves.
 
 ## Validation
 
@@ -111,8 +109,7 @@ the root [AGENTS.md](AGENTS.md). For documentation changes, also:
 1. Check Markdown links and headings. Markdown prose is machine-wrapped at 80
    columns; `mdformat --check *.md docs/` (see [AGENTS.md](AGENTS.md)) must
    pass.
-2. Check changed contracts against INV-tagged tests and the owning
-   specification.
+2. Check changed contracts against their tests and owning specification.
 3. Confirm that examples do not present provisional terminology or behavior as
    stable API.
 4. Review `git diff --check` and the complete diff.

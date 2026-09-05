@@ -668,9 +668,9 @@ mod tests {
             .expect("fixture journal is valid")
     }
 
-    /// INV-062: replay delivers concurrent answers in durable delivery order.
+    /// replay delivers concurrent answers in durable delivery order.
     #[test]
-    fn inv062_replay_preserves_delivery_order_for_concurrent_requests() {
+    fn replay_preserves_delivery_order_for_concurrent_requests() {
         let first_request = request(1, b"first");
         let second_request = request(2, b"second");
         let second_answer = delivery(1, 2, b"second-answer");
@@ -703,9 +703,9 @@ mod tests {
         assert_eq!(replay.next_instruction(), ReplayInstruction::Live);
     }
 
-    /// INV-063: replay switches to live execution exactly at a partial journal tail.
+    /// replay switches to live execution exactly at a partial journal tail.
     #[test]
-    fn inv063_partial_journal_resumes_then_switches_to_live_execution() {
+    fn partial_journal_resumes_then_switches_to_live_execution() {
         let recorded = request(1, b"recorded");
         let live = request(2, b"new");
         let mut replay = ReplayCursor::new(journal(vec![entry(
@@ -770,9 +770,9 @@ mod tests {
         assert_eq!(running.terminal_delivery(), None);
     }
 
-    /// INV-061: a replay mismatch is a typed failure carrying both frames.
+    /// a replay mismatch is a typed failure carrying both frames.
     #[test]
-    fn inv061_replay_divergence_carries_expected_and_observed_frames() {
+    fn replay_divergence_carries_expected_and_observed_frames() {
         let expected = request(1, b"recorded");
         let observed = request(1, b"different");
         let mut replay = ReplayCursor::new(journal(vec![entry(

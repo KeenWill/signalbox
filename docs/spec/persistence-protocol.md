@@ -9,9 +9,7 @@ transactional outbox. Session aggregate semantics live in
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
-[runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
-INV-tagged tests; this page cites tags resolved through the generated
-[invariant index](../invariants.md).
+[runtime-substrate](runtime-substrate.md).
 
 ## Stack and boundaries
 

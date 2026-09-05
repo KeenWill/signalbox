@@ -27,7 +27,7 @@ enum RealRolloutValidationFailure {
 
 #[test]
 #[ignore = "requires explicit local real-rollout opt-in"]
-fn s28_inv038_opt_in_real_rollouts_convert_without_content_output() {
+fn s28_opt_in_real_rollouts_convert_without_content_output() {
     assert_eq!(validate_opt_in_real_rollouts(), Ok(()));
 }
 

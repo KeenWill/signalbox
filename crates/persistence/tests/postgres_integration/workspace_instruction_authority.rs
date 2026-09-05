@@ -2,11 +2,11 @@
 
 use crate::*;
 
-/// INV-061: a live runner-placement head owns workspace discovery, while its
+/// a live runner-placement head owns workspace discovery, while its
 /// abandoned successor explicitly returns that authority to the daemon.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_current_runner_placement_is_detected_as_external_workspace_authority()
+async fn current_runner_placement_is_detected_as_external_workspace_authority()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x6840));
@@ -110,12 +110,11 @@ async fn inv061_current_runner_placement_is_detected_as_external_workspace_autho
     Ok(())
 }
 
-/// INV-061: a placement-head change after discovery is rejected under the
+/// a placement-head change after discovery is rejected under the
 /// scheduler lock before any instruction evidence is retained.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_changed_runner_placement_rejects_the_scanned_snapshot() -> Result<(), Box<dyn Error>>
-{
+async fn changed_runner_placement_rejects_the_scanned_snapshot() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x6860));
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x6861));
@@ -208,11 +207,11 @@ async fn inv061_changed_runner_placement_rejects_the_scanned_snapshot() -> Resul
     Ok(())
 }
 
-/// INV-061: storage preserves the separately bounded root and root-relative
+/// storage preserves the separately bounded root and root-relative
 /// source path instead of applying the root bound to their concatenation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_registered_source_path_retains_its_independent_relative_budget()
+async fn registered_source_path_retains_its_independent_relative_budget()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let root_path = format!("/{}\\b", "a".repeat(4092));
@@ -249,11 +248,11 @@ async fn inv061_registered_source_path_retains_its_independent_relative_budget()
     Ok(())
 }
 
-/// INV-061: the registered source path prefix is measured in characters, so a
+/// the registered source path prefix is measured in characters, so a
 /// non-ASCII root still admits its direct descendants.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_registered_source_path_accepts_a_unicode_root() -> Result<(), Box<dyn Error>> {
+async fn registered_source_path_accepts_a_unicode_root() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let root_path = "/workspace/资料";
     let source_path = "/workspace/资料/AGENTS.md";
@@ -289,12 +288,11 @@ async fn inv061_registered_source_path_accepts_a_unicode_root() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-061: append-only registration evidence enforces the filename implied by
+/// append-only registration evidence enforces the filename implied by
 /// its closed bundle kind.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_registered_agent_document_requires_the_agents_filename()
--> Result<(), Box<dyn Error>> {
+async fn registered_agent_document_requires_the_agents_filename() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query(
         "INSERT INTO registered_instruction_bundle

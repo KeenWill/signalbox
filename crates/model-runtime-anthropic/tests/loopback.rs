@@ -1165,7 +1165,7 @@ impl CredentialAccess for RotatingKey {
 }
 
 #[tokio::test]
-async fn inv_035_api_key_rotation_is_visible_to_the_next_preparation() {
+async fn api_key_rotation_is_visible_to_the_next_preparation() {
     // `docs/spec/configuration-and-credentials.md`: the credential is read
     // during send preparation of each physical request; a rotated value must
     // reach the next request without reconstructing the runtime.
@@ -1261,7 +1261,7 @@ async fn a_401_with_an_unrecognized_error_token_still_classifies_by_status() {
 }
 
 #[tokio::test]
-async fn inv_035_provider_error_text_reflecting_the_key_is_redacted() {
+async fn provider_error_text_reflecting_the_key_is_redacted() {
     // Per `docs/spec/runtime-substrate.md`, evidence carries typed classes
     // and rendered detail, never credential values — even when an endpoint
     // reflects the key.
@@ -1319,7 +1319,7 @@ async fn json_escaped_credential_in_fallback_error_body_is_redacted() {
 }
 
 #[tokio::test]
-async fn inv_035_success_content_reflecting_the_key_is_redacted() {
+async fn success_content_reflecting_the_key_is_redacted() {
     let body = br#"{
         "id": "msg_key_loop",
         "type": "message",
@@ -1358,7 +1358,7 @@ async fn inv_035_success_content_reflecting_the_key_is_redacted() {
 }
 
 #[tokio::test]
-async fn inv_035_streamed_delta_reflecting_the_key_is_redacted_before_observation() {
+async fn streamed_delta_reflecting_the_key_is_redacted_before_observation() {
     let sse: &[u8] = b"event: message_start\n\
         data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
         \"role\":\"assistant\",\"id\":\"msg_1\",\"model\":\"model-exact-1\",\

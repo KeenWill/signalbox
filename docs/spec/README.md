@@ -1,7 +1,6 @@
 # Living specification
 
-These pages, together with INV-tagged tests indexed in
-[invariants.md](../invariants.md) and public API shapes in
+These pages, together with public API shapes in
 [domain-spine.md](../domain-spine.md), are the normative specification of
 Signalbox's implemented cross-component and wire behavior. `AGENTS.md` is the
 guidance for agents working on the repository; this README owns the conventions
@@ -25,11 +24,10 @@ defect:
 Conventions: pages state implemented behavior, plus the committed unimplemented
 functionality that constrains it, per the three categories above; pages state
 behavior, not rationale — a load-bearing choice may carry one "Why:" sentence;
-invariant references use INV tags resolved through the generated
-[invariants.md](../invariants.md) index; deferred or undecided items are
-recorded in [open-questions.md](../open-questions.md) and surfaced as pointers
-in each page's "Open edges" section; a topic normatively owned by a sibling page
-is linked, never restated.
+deferred or undecided items are recorded in
+[open-questions.md](../open-questions.md) and surfaced as pointers in each
+page's "Open edges" section; a topic normatively owned by a sibling page is
+linked, never restated.
 
 ## Pages
 

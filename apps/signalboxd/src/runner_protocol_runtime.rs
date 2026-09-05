@@ -3249,7 +3249,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn s32_inv044_terminal_connection_transition_propagates_loss_to_placed_sessions() {
+    async fn s32_terminal_connection_transition_propagates_loss_to_placed_sessions() {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let enrolled = service
@@ -3294,7 +3294,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn s32_inv044_terminal_connection_replay_resumes_its_pending_loss_cursor() {
+    async fn s32_terminal_connection_replay_resumes_its_pending_loss_cursor() {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let enrolled = service
@@ -3360,7 +3360,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn s32_inv044_startup_resumes_a_previously_committed_loss_cursor() {
+    async fn s32_startup_resumes_a_previously_committed_loss_cursor() {
         let (_container, database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let enrolled = service

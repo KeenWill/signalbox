@@ -956,9 +956,9 @@ fn streaming_text_validation_no_match_becomes_unknown() {
     };
 }
 
-/// INV-075: byte signatures, not caller metadata, select one reader.
+/// byte signatures, not caller metadata, select one reader.
 #[test]
-fn inv075_synthetic_signature_produces_validated_detection() {
+fn synthetic_signature_produces_validated_detection() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
 
@@ -981,9 +981,9 @@ fn inv075_synthetic_signature_produces_validated_detection() {
     assert_eq!(validated.source().digest(), source.digest());
 }
 
-/// INV-075: a caller declaration cannot override byte-derived detection.
+/// a caller declaration cannot override byte-derived detection.
 #[test]
-fn inv075_declared_type_disagreement_is_reported_without_fallback() {
+fn declared_type_disagreement_is_reported_without_fallback() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
 
@@ -1005,9 +1005,9 @@ fn inv075_declared_type_disagreement_is_reported_without_fallback() {
     );
 }
 
-/// INV-076: oversized processor metadata never crosses the registry boundary.
+/// oversized processor metadata never crosses the registry boundary.
 #[test]
-fn inv076_oversized_processor_metadata_is_sanitized_to_failure() {
+fn oversized_processor_metadata_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -1020,9 +1020,9 @@ fn inv076_oversized_processor_metadata_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-076: malformed injection-shaped processor metadata never propagates.
+/// malformed injection-shaped processor metadata never propagates.
 #[test]
-fn inv076_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
+fn malformed_injection_shaped_metadata_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -1035,9 +1035,9 @@ fn inv076_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-076: an oversized processor text body never becomes a typed read result.
+/// an oversized processor text body never becomes a typed read result.
 #[test]
-fn inv076_oversized_processor_text_is_sanitized_to_failure() {
+fn oversized_processor_text_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -1057,9 +1057,9 @@ fn inv076_oversized_processor_text_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-076: malformed structured output carrying injection-shaped text is discarded.
+/// malformed structured output carrying injection-shaped text is discarded.
 #[test]
-fn inv076_malformed_injection_shaped_structure_is_sanitized_to_failure() {
+fn malformed_injection_shaped_structure_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(structured_view());
     let processor = SyntheticProcessor {
@@ -1079,9 +1079,9 @@ fn inv076_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-076: duplicate structured members never cross the processor boundary.
+/// duplicate structured members never cross the processor boundary.
 #[test]
-fn inv076_duplicate_structured_member_is_sanitized_to_failure() {
+fn duplicate_structured_member_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(structured_view());
     let processor = SyntheticProcessor {
@@ -1101,9 +1101,9 @@ fn inv076_duplicate_structured_member_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-076: canonicalization cannot expand structured output past its declared bound.
+/// canonicalization cannot expand structured output past its declared bound.
 #[test]
-fn inv076_canonicalized_structured_bytes_are_rechecked() {
+fn canonicalized_structured_bytes_are_rechecked() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(structured_view_with_output_bytes(5));
     let processor = SyntheticProcessor {
@@ -1123,9 +1123,9 @@ fn inv076_canonicalized_structured_bytes_are_rechecked() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-076: structured output cannot exceed its provider's declared container inventory.
+/// structured output cannot exceed its provider's declared container inventory.
 #[test]
-fn inv076_provider_container_entry_bound_is_enforced_on_read() {
+fn provider_container_entry_bound_is_enforced_on_read() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view_and_container_entries(structured_view(), Some(1))
         .expect("fixture registry is conflict-free");
@@ -1161,10 +1161,10 @@ fn structured_view_reserves_processor_frame_escaping_space() {
     );
 }
 
-/// INV-076: contradictory continuation facts from a processor do not enter the
+/// contradictory continuation facts from a processor do not enter the
 /// sanitized read-result type.
 #[test]
-fn inv076_contradictory_processor_continuation_is_sanitized_to_failure() {
+fn contradictory_processor_continuation_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -1184,10 +1184,10 @@ fn inv076_contradictory_processor_continuation_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-076: a processor cannot relabel a continuation cursor as invalid
+/// a processor cannot relabel a continuation cursor as invalid
 /// model-supplied initial options.
 #[test]
-fn inv076_continuation_invalid_arguments_is_sanitized_to_failure() {
+fn continuation_invalid_arguments_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -1208,9 +1208,9 @@ fn inv076_continuation_invalid_arguments_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-076: a processor cannot report an authenticated in-bounds source as too large.
+/// a processor cannot report an authenticated in-bounds source as too large.
 #[test]
-fn inv076_false_source_too_large_is_sanitized_to_failure() {
+fn false_source_too_large_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
