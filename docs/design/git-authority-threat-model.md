@@ -14,7 +14,7 @@ identity and its grants.
 ## Shape
 
 Storage. The `workspace` table and the `configured_git_remote_mint` and
-`configured_git_remote_withdrawal` tables exist and are append-only; a trigger
+`configured_git_remote_withdrawal` tables exist and are append-only. A trigger
 maintains `configured_git_remote_live` as the mints without a withdrawal, keyed
 by workspace and remote name. `workspace_id` is the primary key and `root_path`
 is unique. An operator-registered row carries the `register_workspace` command
@@ -23,13 +23,13 @@ that created it; a daemon-derived row carries no command.
 Minting. Registration through the client resolves the root path once, following
 symbolic links and removing `.` and `..` components, and stores the canonical
 bytes. The store judges canonical form as bytes and cannot see the filesystem,
-so a canonical spelling whose components are symbolic links is admitted; the
+so a canonical spelling whose components are symbolic links is admitted. The
 minting boundary is the only place that resolves them. Two spellings of one
 directory are one key, so at most one live destination exists per workspace and
 name. The daemon inserts a daemon-derived row for each per-session root its
 derivation materializes
-([configuration-and-credentials.md](../spec/configuration-and-credentials.md));
-those rows are bookkeeping, and no path reads them to decide a binding.
+([configuration-and-credentials.md](../spec/configuration-and-credentials.md)).
+Those rows are bookkeeping, and no path reads them to decide a binding.
 
 Withdrawal. Retiring a destination inserts a withdrawal that retires exactly one
 mint and frees its name. A withdrawal and the replacement mint may commit in one

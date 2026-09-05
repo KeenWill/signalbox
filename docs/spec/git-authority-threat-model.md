@@ -7,12 +7,11 @@ goes.
 ## Map
 
 The Git tool family is a suite of typed operations constructed over one
-workspace root; `LocalGitTools` in `crates/tools-git` is that suite. The
-deployment injects the root when it constructs a suite, and the daemon composes
-one suite per root it serves;
-[configuration-and-credentials.md](configuration-and-credentials.md) states how
-a session's root is derived. A suite reaches a session through the tool loop
-([tool-loop.md](tool-loop.md)), which owns approval and dispatch.
+workspace root; `LocalGitTools` is that suite. The deployment injects the root
+when it constructs a suite, and the daemon composes one suite per root it
+serves; [configuration-and-credentials.md](configuration-and-credentials.md)
+states how a session's root is derived. A suite reaches a session through the
+tool loop ([tool-loop.md](tool-loop.md)), which owns approval and dispatch.
 
 Repository paths and repository data are untrusted input. The trusted computing
 base is the local process, the kernel, the filesystem, the cryptographic hash
@@ -33,7 +32,7 @@ The grant is keyed by the record's identity, not its path.
 the configuration snapshot, reading and writing private index snapshots, reading
 objects from the captured object database, and hashing or decoding objects. It
 never discovers a repository or opens the live administration tree by an ambient
-or caller-selected path, and the suite never searches the current directory,
+or caller-selected path. The suite never searches the current directory,
 ancestors, environment, home directory, or process-global Git state for a
 repository.
 
@@ -70,12 +69,12 @@ sandbox a hostile same-UID process, stop writes through pre-existing hard links
 or open descriptors, or survive a compromised kernel or library.
 
 Bounded scans and bounded content limit Signalbox's own work and do not
-guarantee repository availability; unsupported layouts and formats, exhausted
+guarantee repository availability. Unsupported layouts and formats, exhausted
 bounds, allocation failure, and host I/O failure are rejected, and the tool does
 not repair a corrupt repository.
 
 Repository semantics outside the direct main-worktree subset are unsupported,
-not partially trusted; linked worktrees, discovery, alternate object databases,
+not partially trusted. Linked worktrees, discovery, alternate object databases,
 replacement-object configuration, and other rejected extension surfaces need a
 separate user-approved contract before support.
 
@@ -90,7 +89,7 @@ demonstrates a violation is must-fix however many review waves have passed, and
 a newly found gap in a mechanism enforcing one of them is in-scope hardening
 fixed in the current pull request's disposition commit. A finding that violates
 no stated contract, names no in-scope enforcement gap, and contradicts no
-implemented contract is an accepted residual resolved without code change; that
+implemented contract is an accepted residual resolved without code change. That
 classification never covers a reproducing violation or a defect this subsystem
 introduced.
 
@@ -124,9 +123,9 @@ At its validation points the suite fails closed on observed concurrent
 replacement or in-place change and preserves entries it no longer owns.
 
 An external write names a branch and a minted remote, never a destination; the
-endpoint is durable authority recorded ahead of the call, and the push requires
-explicit approval that no policy overrides ([tool-loop.md](tool-loop.md) owns
-the approval mechanism).
+endpoint is durable authority recorded ahead of the call. The push requires
+explicit approval that no policy overrides; [tool-loop.md](tool-loop.md) owns
+the approval mechanism.
 
 Operator-registered minting is the only tier that widens what Signalbox may push
 from, so an operator-registered workspace record carries the durable command
