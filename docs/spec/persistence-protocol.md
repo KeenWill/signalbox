@@ -95,7 +95,10 @@ future installation.
 
 A collapse to a regenerated baseline is proved schema-equivalent first and cuts
 the deployed database over by replacing the `_sqlx_migrations` rows in one
-transaction; it changes bookkeeping, never schema or data.
+transaction; it changes bookkeeping, never schema or data. A collapse keeps a
+dump of the prior ledger, so a cutover whose verification fails is undone by
+restoring the previous `_sqlx_migrations` rows and redeploying the previous
+binary.
 
 Every planned schema improvement lands as an ordinary forward migration in its
 own campaign, never inside a collapse.
@@ -324,8 +327,11 @@ prefix block in its description, and sibling stacks pick disjoint blocks.
 A regenerated baseline omits `_sqlx_migrations`, which the migrator creates
 itself. It carries the seed rows a schema-only dump discards: the
 outbox-sequence, outbox-delivery, and hub-fence singletons and both
-automatic-reconciliation cursors. The old files are deleted in the same commit
-that adds it, because a tree carrying both chains would collide on every create.
+automatic-reconciliation cursors. It carries no schema qualifications, and
+fresh-apply equivalence is proved on the default schema and again with the
+role's `search_path` selecting a nondefault schema. The old files are deleted in
+the same commit that adds it, because a tree carrying both chains would collide
+on every create.
 
 Decode paths for stored row shapes, such as storage-version thresholds and
 legacy readers, stay until an authorized migration rewrites every row they
