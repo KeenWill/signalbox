@@ -7,12 +7,12 @@ items the built pre-call exhaustion ending owes.
 
 ## Goal
 
-A turn whose pool admits no member, and whose pool is configured to park, waits
-durably for a member to become admissible instead of failing, keeps its session
-slot, and resumes the chain that parked when a wake arrives. Capacity
-reservation bounds concurrent invocations per member and makes contention a wait
-distinct from exhaustion. The pre-call exhaustion ending gains a typed live
-event and per-member evidence rows.
+A turn whose pool admits no member and is configured to park waits durably for a
+member to become admissible instead of failing, keeps its session slot, and
+resumes the chain that parked when a wake arrives. Capacity reservation bounds
+concurrent invocations per member and makes contention a wait distinct from
+exhaustion. The pre-call exhaustion ending gains a typed live event and
+per-member evidence rows.
 
 ## Shape
 
@@ -74,7 +74,7 @@ cause only inside a nonnull terminal model call, so it cannot serve.
 Wait selection: `park` and `fail` act through one question, whether this
 exhaustion selects a wait. `fail` never selects one. `park` selects one only
 when at least one exclusion in the snapshot is one a wake can clear. Where every
-member is excluded solely by chain exclusions earned in this turn, no wait is
+member is excluded solely by chain exclusions written in this turn, no wait is
 selected and the exhaustion ends in a failure ending exactly as a `fail` pool
 would: post-failure fail at a fresh admission, wait-transition fail (after call)
 at a release.

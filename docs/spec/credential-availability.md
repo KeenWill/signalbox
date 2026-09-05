@@ -41,8 +41,8 @@ configures.
 
 A credential failure in the delivery layer, such as a rejected daemon-owned
 OAuth refresh or a credential-home identity that failed its walk, never enters
-this machine: it happens before any provider request, is typed as its own
-failure and quarantines the profile under
+this machine: it precedes any provider request, is typed as its own failure and
+quarantines the profile under
 [configuration and credentials](configuration-and-credentials.md). Why: a
 deployment misconfiguration is not a provider condition the pool's trigger
 policy routes around.
@@ -116,12 +116,12 @@ the provider's reported delay has passed, capped at five minutes
 successor after a quota failure is immediate.
 
 Terminal: a known failure no successor is authorized to follow terminalizes the
-turn Failed exactly as it would with no pool. Four ordered gates decide terminal
-rather than successor, and the first to fail decides: a stop was requested while
-the call was in flight; the cause is not one of the three qualifying causes; the
-pinned action for that cause is not `switch_now`; the adapter supplied no
-pre-stream proof. Why ordered: ordinary inputs fail several gates at once, and
-the first names the actionable reason.
+turn Failed exactly as it would with no pool. Four gates are checked in order,
+and the first to fail decides terminal rather than successor: a stop was
+requested while the call was in flight; the cause is not one of the three
+qualifying causes; the pinned action for that cause is not `switch_now`; the
+adapter supplied no pre-stream proof. Why ordered: ordinary inputs fail several
+gates at once, and the first names the actionable reason.
 
 ## Not built
 
