@@ -3,7 +3,7 @@
 Goal mode attaches one commissioned goal to a session and keeps the scheduler
 starting turns toward it until the goal's own state stops them.
 
-## Map
+## Overview
 
 A goal is one statement of work attached to a session. The domain type `Goal` in
 `crates/domain/src/goal.rs` holds the session's goal lineage as an append-only
@@ -47,7 +47,7 @@ by [tool loop](tool-loop.md), session state and the parked rule by
 [sessions and transcript](sessions-and-transcript.md), and wire framing by
 [process protocol](process-protocol.md).
 
-## Decisions
+## Design decisions
 
 A statement is immutable after admission and no edit operation exists; a change
 of scope is a supersede, which commissions a new generation and leaves the old
@@ -80,7 +80,7 @@ unchanged successor to the second would fail for the same cause.
 No goal-mode surface delegates work or creates child sessions, and the goal
 events and commands reserve no delegation variant.
 
-## Contracts
+## Boundary contracts
 
 When an execution failure blocks a session that has an owner, the daemon
 automatically resumes the session within a bound. The two execution-failure
@@ -142,7 +142,7 @@ The command claim and replay protocol and the attribution rule are stated on
 [persistence protocol](persistence-protocol.md), and the parked-state rule on
 [sessions and transcript](sessions-and-transcript.md).
 
-## Not built
+## Planned
 
 No committed unbuilt design is recorded for goal mode; undecided items are in
 [open questions](../open-questions.md).
