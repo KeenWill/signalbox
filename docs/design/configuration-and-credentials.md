@@ -96,12 +96,12 @@ this byte value. Every origin-creating acceptance transaction resolves the
 frozen selection against the live immutable catalog and rejects the origin,
 before freezing it, when the effective serving record lacks typed-system
 transport or byte capacity for the session's complete retained region. The check
-belongs to origin acceptance as such, not to `SubmitInput`: goal attach, goal
-resume, and scheduler continuation mint accepted origins too. When the frozen
-settings enable fast mode on a model whose `fast_mode` is `alternate_target`,
-the check applies to the `fast_target_id` serving record and its mapping; where
-the effective record is undetermined at acceptance, every record the selection
-may still pin must satisfy it. The typed rejection accepts no input, creates no
+belongs to origin acceptance, not to `SubmitInput`: goal attach, goal resume,
+and scheduler continuation mint accepted origins too. When the frozen settings
+enable fast mode on a model whose `fast_mode` is `alternate_target`, the check
+applies to the `fast_target_id` serving record and its mapping; where the
+effective record is undetermined at acceptance, every record the selection may
+still pin must satisfy it. The typed rejection accepts no input, creates no
 turn, and changes neither defaults nor admissions.
 
 The workspace table keys a workspace by an identity and the canonical root it

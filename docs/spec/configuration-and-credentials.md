@@ -19,18 +19,17 @@ The environment supplies a fixed set of deployment values: the database URL, the
 catalog paths, the socket paths, the paths of the two integration credential
 files, and the optional browser bind address. `DATABASE_URL` is the whole
 database channel, and a deployment carries every connection parameter in the
-URL. Model-provider credential paths are not process settings: each comes from a
-`file` profile in the catalog, and `ANTHROPIC_API_KEY_FILE` and
-`OPENAI_API_KEY_FILE` are not read. `SIGNALBOX_WEB_BIND` is optional; absence
-binds a loopback default, and an explicit socket must be a loopback address or
-configuration fails. The browser HTTP listener shares that bind with the static
-web build and the `/api` routes. The DTOs and schemas under
+URL. Model-provider credential paths come from `file` profiles in the catalog;
+`ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An absent
+`SIGNALBOX_WEB_BIND` binds a loopback default, and an explicit socket must be a
+loopback address or configuration fails. The browser HTTP listener shares that
+bind with the static web build and the `/api` routes. The DTOs and schemas under
 `crates/web-contract` are the authority for that surface, and the checked-in
 JavaScript decoders and TypeScript declarations are generated from them.
 
-Telemetry export is opt-in. Presence of `SIGNALBOX_OTLP_ENDPOINT` enables span
-export; its absence disables OTLP and makes every other OTLP setting inert. A
-separate bind setting enables a Prometheus listener.
+`SIGNALBOX_OTLP_ENDPOINT` enables span export; its absence disables OTLP and
+makes every other OTLP setting inert. A separate bind setting enables a
+Prometheus listener.
 
 `signalbox-runner` reads one strict versioned TOML file at startup, whose
 checked-in example is `config/signalbox-runner.example.toml`. Its
@@ -49,12 +48,12 @@ reservation, not the raw advertised window, and is not smaller than
 `claude_cli`, and `codex_cli` adapters; no adapter pins a profile name, and a
 pool may hold several profiles for one adapter. The required `[numeric_bounds]`
 table holds every deployment-owned numeric policy and the loader supplies no
-default for any member. Among them, `codex_cli_version_probe_bound` bounds a
-credential-free startup probe of the configured Codex executable, and a missing,
-malformed, zero, unsuccessful, or mismatched probe fails configuration before
-the socket opens. One valid document yields correlated immutable in-memory
-catalogs: the domain `ModelTargetCatalog` for execution-time target resolution
-and the `RuntimeModelCatalog` for the provider bridge.
+default for any member. `codex_cli_version_probe_bound` bounds a credential-free
+startup probe of the configured Codex executable, and a missing, malformed,
+zero, unsuccessful, or mismatched probe fails configuration before the socket
+opens. One valid document yields correlated immutable in-memory catalogs: the
+domain `ModelTargetCatalog` for execution-time target resolution and the
+`RuntimeModelCatalog` for the provider bridge.
 
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
 binds one configured workspace root. Each session's workspace root is derived
