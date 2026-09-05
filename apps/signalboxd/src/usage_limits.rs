@@ -184,7 +184,7 @@ impl ReportedInputCacheAxes {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReportedInputRetention {
     /// The next request resends the transcript prefix this input counted.
-    Retained,
+    Retained(Option<u64>),
     /// A summary replaced the source this input counted, so the next request
     /// carries that summary instead of the counted material.
     Replaced,
@@ -192,9 +192,9 @@ pub(crate) enum ReportedInputRetention {
 
 impl ReportedInputRetention {
     /// Names the axis the durable usage read answers as a stored boolean.
-    pub(crate) const fn from_retained(retained: bool) -> Self {
+    pub(crate) const fn from_retained(retained: bool, retained_input_tokens: Option<u64>) -> Self {
         if retained {
-            Self::Retained
+            Self::Retained(retained_input_tokens)
         } else {
             Self::Replaced
         }
@@ -253,7 +253,8 @@ pub(crate) fn reported_usage_requires_compaction(
             .saturating_add(usage.cache_read_input_tokens().unwrap_or(0)),
     };
     let input_tokens = match input {
-        ReportedInputRetention::Retained => input_tokens,
+        ReportedInputRetention::Retained(Some(retained_input_tokens)) => retained_input_tokens,
+        ReportedInputRetention::Retained(None) => input_tokens,
         ReportedInputRetention::Replaced => 0,
     };
     input_tokens
@@ -567,7 +568,7 @@ mod tests {
         assert!(reported_usage_requires_compaction(
             usage,
             ReportedInputCacheAxes::Included,
-            ReportedInputRetention::Retained,
+            ReportedInputRetention::Retained(None),
             ReportedOutputRetention::Retained,
             0,
             16,
@@ -585,7 +586,7 @@ mod tests {
         assert!(!reported_usage_requires_compaction(
             usage,
             ReportedInputCacheAxes::Included,
-            ReportedInputRetention::Retained,
+            ReportedInputRetention::Retained(None),
             ReportedOutputRetention::Retained,
             0,
             15,
@@ -594,7 +595,7 @@ mod tests {
         assert!(reported_usage_requires_compaction(
             usage,
             ReportedInputCacheAxes::Excluded,
-            ReportedInputRetention::Retained,
+            ReportedInputRetention::Retained(None),
             ReportedOutputRetention::Retained,
             0,
             16,
@@ -609,7 +610,7 @@ mod tests {
         assert!(!reported_usage_requires_compaction(
             usage,
             ReportedInputCacheAxes::Included,
-            ReportedInputRetention::Retained,
+            ReportedInputRetention::Retained(None),
             ReportedOutputRetention::Retained,
             0,
             100,
@@ -626,7 +627,7 @@ mod tests {
         assert!(!reported_usage_requires_compaction(
             usage,
             ReportedInputCacheAxes::Included,
-            ReportedInputRetention::Retained,
+            ReportedInputRetention::Retained(None),
             ReportedOutputRetention::Discarded,
             0,
             11,
@@ -635,7 +636,7 @@ mod tests {
         assert!(reported_usage_requires_compaction(
             usage,
             ReportedInputCacheAxes::Included,
-            ReportedInputRetention::Retained,
+            ReportedInputRetention::Retained(None),
             ReportedOutputRetention::Retained,
             0,
             11,
@@ -673,7 +674,7 @@ mod tests {
         assert!(!reported_usage_requires_compaction(
             usage,
             ReportedInputCacheAxes::Included,
-            ReportedInputRetention::Retained,
+            ReportedInputRetention::Retained(None),
             ReportedOutputRetention::Retained,
             0,
             10,
@@ -682,9 +683,26 @@ mod tests {
         assert!(reported_usage_requires_compaction(
             usage,
             ReportedInputCacheAxes::Included,
-            ReportedInputRetention::Retained,
+            ReportedInputRetention::Retained(None),
             ReportedOutputRetention::Retained,
             26,
+            10,
+            100
+        ));
+    }
+
+    #[test]
+    fn provider_compaction_headroom_uses_retained_input_not_billed_iterations() {
+        let billed = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(180))
+            .with_output_tokens(Some(5));
+
+        assert!(!reported_usage_requires_compaction(
+            billed,
+            ReportedInputCacheAxes::Excluded,
+            ReportedInputRetention::Retained(Some(40)),
+            ReportedOutputRetention::Retained,
+            0,
             10,
             100
         ));

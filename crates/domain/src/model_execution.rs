@@ -2070,7 +2070,7 @@ fn apply_terminal_observation(
             )?;
             Ok(ModelCallTerminalOutcome::Completed(completed))
         }
-        ModelCallTerminalObservation::CompletedWithProviderCompaction { response } => {
+        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
             let ModelCallTerminalIdentities::Completed(identities) = identities else {
                 return Err(ModelCallClosureError::IdentityShapeMismatch);
             };
@@ -2330,6 +2330,10 @@ pub enum ModelCallTerminalObservation {
     CompletedWithProviderCompaction {
         /// Exact text and provider compaction parts in provider order.
         response: Vec<AssistantResponsePart>,
+        /// Provider-reported input retained after its final compaction
+        /// iteration, including cache axes and excluding earlier billed
+        /// iterations.
+        retained_input_tokens: u64,
     },
     /// Definitive success whose ordered response contains tool proposals.
     CompletedWithTools {
@@ -2347,6 +2351,18 @@ pub enum ModelCallTerminalObservation {
 }
 
 impl ModelCallTerminalObservation {
+    /// Returns provider-reported retained input for a completed in-response
+    /// compaction, separate from billed physical-iteration usage.
+    pub const fn retained_input_tokens(&self) -> Option<u64> {
+        match self {
+            Self::CompletedWithProviderCompaction {
+                retained_input_tokens,
+                ..
+            } => Some(*retained_input_tokens),
+            _ => None,
+        }
+    }
+
     /// Returns the exact physical disposition declared by this observation.
     pub const fn disposition(&self) -> ModelCallDisposition {
         match self {
@@ -6058,6 +6074,7 @@ mod tests {
                             .expect("nonempty fixture text"),
                     ),
                 ],
+                retained_input_tokens: 23,
             },
         );
         let outcome = execution

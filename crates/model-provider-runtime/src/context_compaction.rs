@@ -155,6 +155,9 @@ where
             }
             let reported_model = match &report.evidence {
                 TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
+                TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+                    completion.reported_model.as_ref()
+                }
                 TerminalEvidence::Refused(evidence) => evidence.reported_model.as_ref(),
                 TerminalEvidence::ProviderError(evidence) => evidence.reported_model.as_ref(),
                 TerminalEvidence::CancellationConfirmed(evidence) => {
@@ -168,6 +171,9 @@ where
             }
             let completed = match report.evidence {
                 TerminalEvidence::Completed(completed) => completed,
+                TerminalEvidence::CompletedWithProviderCompaction { .. } => {
+                    return Err(ContextCompactionModelError::NonTextSummary);
+                }
                 TerminalEvidence::Refused(_) => {
                     return Err(ContextCompactionModelError::Refused);
                 }

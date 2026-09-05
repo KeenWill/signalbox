@@ -4570,7 +4570,10 @@ impl ContextHeadroomExhaustedModelCallTurn {
 
 pub enum ModelCallTerminalObservation {
     Completed { assistant_text: Vec<AssistantText> },
-    CompletedWithProviderCompaction { response: Vec<AssistantResponsePart> },
+    CompletedWithProviderCompaction {
+        response: Vec<AssistantResponsePart>,
+        retained_input_tokens: u64,
+    },
     CompletedWithTools { response: ToolUsingAssistantResponse },
     KnownFailed,
     Refused,
@@ -4578,7 +4581,7 @@ pub enum ModelCallTerminalObservation {
     Ambiguous,
 }
 impl ModelCallTerminalObservation {
-    // accessor: disposition()
+    // accessors: retained_input_tokens(), disposition()
 }
 pub struct PendingSteeringReclassificationIdentity { /* private */ }
 impl PendingSteeringReclassificationIdentity {

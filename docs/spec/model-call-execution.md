@@ -366,7 +366,12 @@ admit a successor, because the physical result has not proven cancellation.
 blocks are dropped, while thinking with text and redacted thinking fail the
 adapter stage closed as unsupported material, because no durable semantic
 representation exists for either. Tool content and a tool-use finish must agree;
-either one without the other is a known failure. The dedicated compaction call
+either one without the other is a known failure. An Anthropic completion that
+contains provider compaction carries the final physical iteration's retained
+input count, including cache axes, and persists it on the model call separately
+from the all-iteration usage retained for billing. The context guard uses that
+retained-input measure as its post-compaction baseline; it never treats billed
+iteration input as model-visible retained input. The dedicated compaction call
 rejects every tool and suppressed-tool part and accepts a summary only from a
 completion that ended by end turn or stop sequence, because its completion must
 be whole summary text. Classification is an adapter contract consuming the

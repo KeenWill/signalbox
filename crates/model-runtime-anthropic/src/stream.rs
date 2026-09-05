@@ -24,7 +24,9 @@ use signalbox_model_runtime::{
     ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
-use crate::response::{convert_usage, iteration_usage_is_complete, map_finish};
+use crate::response::{
+    convert_usage, iteration_usage_is_complete, map_finish, retained_input_tokens,
+};
 use crate::status::classify_error_token;
 use crate::wire::{
     ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent, ErrorEnvelope,
@@ -87,6 +89,7 @@ pub(crate) struct StreamDecoder {
     message_id: Option<ProviderMessageId>,
     reported_model: Option<ProviderReportedModel>,
     usage: TokenUsage,
+    retained_input_tokens: Option<u64>,
     input_usage_reported: bool,
     final_output_usage_reported: bool,
     finish: Option<FinishReason>,
@@ -111,6 +114,7 @@ impl StreamDecoder {
             message_id: None,
             reported_model: None,
             usage: TokenUsage::unreported(),
+            retained_input_tokens: None,
             input_usage_reported: false,
             final_output_usage_reported: false,
             finish: None,
@@ -435,6 +439,7 @@ impl StreamDecoder {
         self.started = true;
         self.input_usage_reported = true;
         self.message_id = Some(ProviderMessageId::new(id));
+        self.retained_input_tokens = retained_input_tokens(usage);
         let usage = convert_usage(usage);
         self.usage.absorb(usage);
         Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
@@ -844,6 +849,13 @@ impl StreamDecoder {
                             "message_delta carries incomplete required iteration usage",
                         );
                     }
+                    if usage
+                        .iterations
+                        .as_ref()
+                        .is_some_and(|items| !items.is_empty())
+                    {
+                        self.retained_input_tokens = retained_input_tokens(usage);
+                    }
                     let usage = convert_usage(usage);
                     if event
                         .usage
@@ -898,6 +910,13 @@ impl StreamDecoder {
             if !iteration_usage_is_complete(usage) {
                 return self.violation("message_delta carries incomplete required iteration usage");
             }
+            if usage
+                .iterations
+                .as_ref()
+                .is_some_and(|items| !items.is_empty())
+            {
+                self.retained_input_tokens = retained_input_tokens(usage);
+            }
             let usage = convert_usage(usage);
             if event
                 .usage
@@ -944,6 +963,15 @@ impl StreamDecoder {
         if matches!(finish, FinishReason::ToolUse) && !has_tool_calls {
             return self.violation("stream content contradicts its stop_reason");
         }
+        let has_provider_compaction = self
+            .closed
+            .values()
+            .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. }));
+        if has_provider_compaction && self.retained_input_tokens.is_none() {
+            return self.violation(
+                "provider compaction response omits final-iteration retained input usage",
+            );
+        }
         let evidence = match finish.completion_finish() {
             None => TerminalEvidence::Refused(RefusalEvidence {
                 exchange: self.exchange.clone(),
@@ -952,14 +980,25 @@ impl StreamDecoder {
                 content: std::mem::take(&mut self.closed).into_values().collect(),
                 usage: self.usage,
             }),
-            Some(finish) => TerminalEvidence::Completed(CompletionEvidence {
-                exchange: self.exchange.clone(),
-                message_id: self.message_id.clone(),
-                reported_model: self.reported_model.clone(),
-                finish,
-                content: std::mem::take(&mut self.closed).into_values().collect(),
-                usage: self.usage,
-            }),
+            Some(finish) => {
+                let completion = CompletionEvidence {
+                    exchange: self.exchange.clone(),
+                    message_id: self.message_id.clone(),
+                    reported_model: self.reported_model.clone(),
+                    finish,
+                    content: std::mem::take(&mut self.closed).into_values().collect(),
+                    usage: self.usage,
+                };
+                match self.retained_input_tokens {
+                    Some(retained_input_tokens) if has_provider_compaction => {
+                        TerminalEvidence::CompletedWithProviderCompaction {
+                            completion,
+                            retained_input_tokens,
+                        }
+                    }
+                    _ => TerminalEvidence::Completed(completion),
+                }
+            }
         };
         StreamStep::Terminal(Box::new(evidence))
     }
@@ -1219,7 +1258,7 @@ mod tests {
               data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             b"event: message_delta\n\
               data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\
-              \"usage\":{\"output_tokens\":7}}\n\n",
+              \"usage\":{\"output_tokens\":7,\"iterations\":[{\"input_tokens\":25,\"output_tokens\":7}]}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
@@ -1263,19 +1302,29 @@ mod tests {
               data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             b"event: message_delta\n\
               data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
-              \"usage\":{\"output_tokens\":7}}\n\n",
+              \"usage\":{\"output_tokens\":7,\"iterations\":[{\"input_tokens\":25,\"output_tokens\":7}]}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
-        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+        let Some(TerminalEvidence::CompletedWithProviderCompaction {
+            completion,
+            retained_input_tokens,
+        }) = terminal
+        else {
             panic!("compaction stream gated on message_stop must complete");
         };
+        assert_eq!(retained_input_tokens, 25);
+        let [AssistantPart::ProviderCompaction { block_json }] = completion.content.as_slice()
+        else {
+            panic!("compaction stream must retain exactly one opaque block");
+        };
         assert_eq!(
-            completion.content,
-            vec![AssistantPart::ProviderCompaction {
-                block_json:
-                    r#"{"content":"summary","encrypted_content":"opaque==","type":"compaction"}"#
-                        .to_string(),
-            }]
+            serde_json::from_str::<serde_json::Value>(block_json)
+                .expect("assembled compaction block is valid JSON"),
+            serde_json::json!({
+                "type": "compaction",
+                "content": "summary",
+                "encrypted_content": "opaque==",
+            })
         );
     }
 

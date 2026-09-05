@@ -397,7 +397,8 @@ mod tests {
                 | Some(signalbox_model_runtime::AssistantPart::SuppressedToolCall(_))
                 | None => None,
             },
-            TerminalEvidence::Refused(_)
+            TerminalEvidence::CompletedWithProviderCompaction { .. }
+            | TerminalEvidence::Refused(_)
             | TerminalEvidence::ProviderError(_)
             | TerminalEvidence::CancellationConfirmed(_)
             | TerminalEvidence::ProvenUnsent(_)

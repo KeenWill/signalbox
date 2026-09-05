@@ -75,6 +75,17 @@ pub(crate) fn convert_usage(wire: &WireUsage) -> TokenUsage {
     }
 }
 
+/// Returns the provider-reported input retained after the final physical
+/// iteration, including cache axes. Iteration aggregates remain billing usage;
+/// this final-iteration measure instead bounds the next request's headroom.
+pub(crate) fn retained_input_tokens(wire: &WireUsage) -> Option<u64> {
+    let final_iteration = wire.iterations.as_deref()?.last()?;
+    final_iteration
+        .input_tokens?
+        .checked_add(final_iteration.cache_creation_input_tokens.unwrap_or(0))?
+        .checked_add(final_iteration.cache_read_input_tokens.unwrap_or(0))
+}
+
 /// Whether every provider iteration carries both required token axes and all
 /// four aggregate axes fit the durable unsigned representation.
 pub(crate) fn iteration_usage_is_complete(wire: &WireUsage) -> bool {
@@ -307,6 +318,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         .as_ref()
         .map(convert_usage)
         .unwrap_or_default();
+    let retained_input_tokens = response.usage.as_ref().and_then(retained_input_tokens);
     let message_id = response.id.map(ProviderMessageId::new);
     if reported_model.is_none()
         || message_id.is_none()
@@ -561,14 +573,40 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             content,
             usage,
         }),
-        Some(finish) => TerminalEvidence::Completed(CompletionEvidence {
-            exchange,
-            message_id,
-            reported_model,
-            finish,
-            content,
-            usage,
-        }),
+        Some(finish) => {
+            let has_provider_compaction = content
+                .iter()
+                .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. }));
+            let completion = CompletionEvidence {
+                exchange,
+                message_id,
+                reported_model,
+                finish,
+                content,
+                usage,
+            };
+            if has_provider_compaction {
+                let Some(retained_input_tokens) = retained_input_tokens else {
+                    return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                        cause: LossCause::ResponseUnintelligible {
+                            detail: "provider compaction response omits final-iteration retained input usage"
+                                .to_string(),
+                        },
+                        exchange: completion.exchange,
+                        reported_model: completion.reported_model,
+                        finish_reported: Some(completion.finish.into()),
+                        tool_calls: classified_tool_calls(opened_tool_calls),
+                        usage: completion.usage,
+                    });
+                };
+                TerminalEvidence::CompletedWithProviderCompaction {
+                    completion,
+                    retained_input_tokens,
+                }
+            } else {
+                TerminalEvidence::Completed(completion)
+            }
+        }
     }
 }
 
@@ -702,9 +740,14 @@ mod tests {
             }}"#
         );
         let (evidence, _) = decode(&body);
-        let TerminalEvidence::Completed(completion) = evidence else {
+        let TerminalEvidence::CompletedWithProviderCompaction {
+            completion,
+            retained_input_tokens,
+        } = evidence
+        else {
             panic!("compaction response must be completion evidence");
         };
+        assert_eq!(retained_input_tokens, 7);
         assert_eq!(
             completion.content,
             vec![

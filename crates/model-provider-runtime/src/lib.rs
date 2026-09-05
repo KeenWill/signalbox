@@ -1984,6 +1984,16 @@ fn classify_terminal(
         })
     };
 
+    let (evidence, retained_input_tokens) = match evidence {
+        TerminalEvidence::CompletedWithProviderCompaction {
+            completion,
+            retained_input_tokens,
+        } => (
+            TerminalEvidence::Completed(completion),
+            Some(retained_input_tokens),
+        ),
+        evidence => (evidence, None),
+    };
     match evidence {
         TerminalEvidence::Completed(completion) => {
             let finish = completion.finish;
@@ -2073,9 +2083,15 @@ fn classify_terminal(
                     );
                 }
                 if has_provider_compaction {
+                    let Some(retained_input_tokens) = retained_input_tokens else {
+                        return Err(ClassificationFailure::bare(
+                            RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                        ));
+                    };
                     classify(
                         ModelCallTerminalObservation::CompletedWithProviderCompaction {
                             response: response_parts,
+                            retained_input_tokens,
                         },
                         ModelCallCauseCode::Completed,
                     )
@@ -2145,6 +2161,11 @@ fn classify_terminal(
             ModelCallTerminalObservation::Ambiguous,
             ModelCallCauseCode::BoundaryLoss(BoundaryLossCode::of(&loss.cause)),
         ),
+        TerminalEvidence::CompletedWithProviderCompaction { .. } => {
+            Err(ClassificationFailure::bare(
+                RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+            ))
+        }
     }
 }
 
@@ -2170,6 +2191,9 @@ fn reported_identities<'evidence>(
 fn reported_model(evidence: &TerminalEvidence) -> Option<&ProviderReportedModel> {
     match evidence {
         TerminalEvidence::Completed(value) => value.reported_model.as_ref(),
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            completion.reported_model.as_ref()
+        }
         TerminalEvidence::Refused(value) => value.reported_model.as_ref(),
         TerminalEvidence::ProviderError(value) => value.reported_model.as_ref(),
         TerminalEvidence::CancellationConfirmed(value) => value.reported_model.as_ref(),
@@ -2181,6 +2205,7 @@ fn reported_model(evidence: &TerminalEvidence) -> Option<&ProviderReportedModel>
 fn provider_reported_token_usage(evidence: &TerminalEvidence) -> ProviderReportedTokenUsage {
     let usage = match evidence {
         TerminalEvidence::Completed(value) => value.usage,
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => completion.usage,
         TerminalEvidence::Refused(value) => value.usage,
         TerminalEvidence::ProviderError(value) => value.usage,
         TerminalEvidence::BoundaryLoss(value) => value.usage,
@@ -2947,6 +2972,45 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn provider_compaction_completion_preserves_retained_input_measure() {
+        let completion = CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::ProviderCompaction {
+                block_json: String::from(
+                    r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                ),
+            }],
+            usage: TokenUsage {
+                input_tokens: Some(140),
+                output_tokens: Some(8),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            },
+        };
+
+        let classified = classify_terminal(
+            TerminalEvidence::CompletedWithProviderCompaction {
+                completion,
+                retained_input_tokens: 37,
+            },
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("provider compaction completion is representable");
+
+        assert!(matches!(
+            classified.observation,
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                retained_input_tokens: 37,
+                ..
+            }
+        ));
     }
 
     /// S10 / INV-002 / INV-005: runtime-native tool calls become ordered,

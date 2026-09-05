@@ -1,5 +1,38 @@
 -- Retain opaque provider-produced compaction blocks as ordered response parts.
 
+ALTER TABLE model_call
+    ADD COLUMN retained_input_tokens numeric(20,0),
+    ADD CONSTRAINT model_call_retained_input_tokens_u64
+        CHECK (retained_input_tokens IS NULL OR
+               retained_input_tokens BETWEEN 0 AND 18446744073709551615),
+    ADD CONSTRAINT model_call_retained_input_tokens_is_terminal_completion
+        CHECK (retained_input_tokens IS NULL OR
+               (state_kind = 'terminal' AND terminal_disposition_kind = 'completed'));
+
+CREATE OR REPLACE FUNCTION reject_model_call_unsent_usage() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.state_kind = 'prepared'
+       AND NEW.state_kind = 'terminal'
+       AND (
+           NEW.usage_input_tokens IS NOT NULL
+           OR NEW.usage_output_tokens IS NOT NULL
+           OR NEW.usage_cache_creation_input_tokens IS NOT NULL
+           OR NEW.usage_cache_read_input_tokens IS NOT NULL
+           OR NEW.retained_input_tokens IS NOT NULL
+       )
+    THEN
+        RAISE EXCEPTION 'an unsent call cannot carry provider-reported token usage'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT = 'model_call_unsent_usage_unreported';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
 DO $$
 DECLARE
     definition text;

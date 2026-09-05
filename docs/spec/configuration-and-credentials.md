@@ -71,7 +71,11 @@ family, provider spelling, and token ceilings. `provider_model` is nonempty and
 unpadded, and one spelling routes to exactly one adapter across the document.
 `context_window_tokens` is the usable ceiling after any provider or adapter
 reservation, not the raw advertised window, and is not smaller than
-`max_output_tokens`. `[model_settings]` is the deployment global default and
+`max_output_tokens`. The optional `provider_compaction` boolean is an exact
+per-target Anthropic capability on `[[models]]` and `[[serving_targets]]`;
+omission is false, another adapter cannot declare it true, and the effective
+target after fast-target resolution controls both compaction enablement and
+opaque-block replay. `[model_settings]` is the deployment global default and
 each `[[model_settings_profiles]]` entry is a named profile a model's optional
 `settings_profile` selects; a selected profile outranks the global default, and
 both sit below the session and per-call layers of

@@ -587,6 +587,10 @@ web_search = "human"
 # [approval_judge]
 # selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
 
+# `provider_compaction = true` is an exact per-target capability. Omission is
+# fail-closed: the adapter neither enables server compaction nor replays opaque
+# compaction blocks for that resolved target.
+#
 # Anthropic's most capable widely released model. Hard cap: 128000.
 #
 # This model rejects a forced tool choice, which is how the Anthropic adapter
@@ -602,6 +606,7 @@ selection_id = "3aa432ca-488e-4237-ac2b-7496a2ccc2b4"
 target_id = "ba705029-f367-4da8-a0bf-dbc6bf798e17"
 model_family = "anthropic"
 provider_model = "claude-fable-5-1"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -614,6 +619,7 @@ selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
 target_id = "c74d2c41-8c70-4537-ab5d-7bbeac25562a"
 model_family = "anthropic"
 provider_model = "claude-fable-5"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -632,6 +638,7 @@ selection_id = "2a7ae424-975b-423a-a050-c6699ef694cd"
 target_id = "cce0f90e-8420-4894-8850-eaf262e7c82a"
 model_family = "anthropic"
 provider_model = "claude-opus-5"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -644,6 +651,7 @@ selection_id = "4f809b2b-ca94-421a-8dd4-b8534d2c0b93"
 target_id = "ef1a6d7b-07dd-47ab-ac9b-321c8baa9b14"
 model_family = "anthropic"
 provider_model = "claude-opus-4-8"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -656,6 +664,7 @@ selection_id = "09570a21-e49a-4a9a-910b-b372bbd3cd03"
 target_id = "06e3f786-fb7d-4d03-842f-38091a01f094"
 model_family = "anthropic"
 provider_model = "claude-opus-4-7"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -667,6 +676,7 @@ selection_id = "954dba51-f084-4327-b7d9-d55cc2e96ba5"
 target_id = "ff1c508a-f0a8-4a60-bc41-8cb956486bc6"
 model_family = "anthropic"
 provider_model = "claude-opus-4-6"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "max"]
@@ -678,6 +688,7 @@ selection_id = "2669e033-22f8-4ea9-b046-cbf21fe8b2d7"
 target_id = "86a42a25-e050-4d38-b45b-fb3a13ae72f9"
 model_family = "anthropic"
 provider_model = "claude-sonnet-5"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
@@ -689,6 +700,7 @@ selection_id = "18e345d7-61a4-47f4-92af-93e3817a075a"
 target_id = "c1bd20ea-c5f4-407a-922f-206d6f3e02be"
 model_family = "anthropic"
 provider_model = "claude-sonnet-4-6"
+provider_compaction = true
 max_output_tokens = 8192
 context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "max"]

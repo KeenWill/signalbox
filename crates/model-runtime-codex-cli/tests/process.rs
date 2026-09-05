@@ -79,6 +79,13 @@ fn collect_terminal_evidence(evidence: &TerminalEvidence, material: &mut Vec<Str
             collect_completion_finish(&completed.finish, material);
             collect_assistant_parts(&completed.content, material);
         }
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            collect_exchange(&completion.exchange, material);
+            collect_message_id(completion.message_id.as_ref(), material);
+            collect_reported_model(completion.reported_model.as_ref(), material);
+            collect_completion_finish(&completion.finish, material);
+            collect_assistant_parts(&completion.content, material);
+        }
         TerminalEvidence::Refused(refused) => {
             collect_exchange(&refused.exchange, material);
             collect_message_id(refused.message_id.as_ref(), material);

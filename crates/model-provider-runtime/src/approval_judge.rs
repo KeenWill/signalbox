@@ -298,6 +298,9 @@ where
     }
     let reported_model = match &report.evidence {
         TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            completion.reported_model.as_ref()
+        }
         TerminalEvidence::Refused(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::ProviderError(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::CancellationConfirmed(evidence) => evidence.reported_model.as_ref(),
@@ -310,6 +313,9 @@ where
     }
     let completed = match report.evidence {
         TerminalEvidence::Completed(completed) => completed,
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            return Err(ApprovalJudgeModelError::InvalidDecision(completion.usage));
+        }
         TerminalEvidence::Refused(evidence) => {
             return Err(ApprovalJudgeModelError::Refused(evidence.usage));
         }
@@ -427,6 +433,7 @@ fn require_same_target(
 fn terminal_usage(evidence: &TerminalEvidence) -> TokenUsage {
     match evidence {
         TerminalEvidence::Completed(value) => value.usage,
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => completion.usage,
         TerminalEvidence::Refused(value) => value.usage,
         TerminalEvidence::ProviderError(value) => value.usage,
         TerminalEvidence::BoundaryLoss(value) => value.usage,

@@ -1,6 +1,9 @@
 //! The adapter runtime: one operation, at most one HTTP interaction.
 
-use std::time::{Duration, SystemTime};
+use std::{
+    collections::BTreeSet,
+    time::{Duration, SystemTime},
+};
 
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -32,7 +35,7 @@ use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
 use crate::status::{classify_error_status, classify_error_with_proof};
 use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
-use crate::translate::{build_request_with_fast_mode, server_compaction_supported};
+use crate::translate::build_request_with_fast_mode;
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
 
 const CONTEXT_MANAGEMENT_BETAS: &str = "context-management-2025-06-27,compact-2026-01-12";
@@ -67,6 +70,7 @@ pub struct AnthropicRuntime<A> {
     sse_record_limit: usize,
     native_message_limit: Option<usize>,
     model_capabilities: ModelCapabilityCatalog,
+    provider_compaction_targets: BTreeSet<String>,
 }
 
 /// An opaque, one-shot Anthropic request capability prepared per
@@ -107,6 +111,10 @@ impl<A> std::fmt::Debug for AnthropicRuntime<A> {
             .field("version_header", &"[sensitive]")
             .field("sse_record_limit", &self.sse_record_limit)
             .field("model_capabilities", &self.model_capabilities)
+            .field(
+                "provider_compaction_targets",
+                &self.provider_compaction_targets,
+            )
             .finish()
     }
 }
@@ -321,6 +329,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             sse_record_limit: config.sse_record_limit,
             native_message_limit: config.native_message_limit,
             model_capabilities: config.model_capabilities,
+            provider_compaction_targets: config.provider_compaction_targets,
         })
     }
 
@@ -341,7 +350,14 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                 };
             }
         };
-        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
+        let provider_compaction_supported = self
+            .provider_compaction_targets
+            .contains(operation.resolved_target.as_str());
+        let wire_request = match build_request_with_fast_mode(
+            &operation,
+            request_fast_mode,
+            provider_compaction_supported,
+        ) {
             Ok(request) => request,
             Err(failure) => {
                 return PreparationOutcome::Failed {
@@ -387,7 +403,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         };
         let delivery = operation.delivery;
         let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
-            && server_compaction_supported(operation.resolved_target.as_str());
+            && provider_compaction_supported;
         let stop_sequences = operation.settings.stop_sequences.clone();
         let mut builder = self
             .client
@@ -685,9 +701,16 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             Ok(request_fast_mode) => request_fast_mode,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
+        let provider_compaction_supported = self
+            .provider_compaction_targets
+            .contains(operation.resolved_target.as_str());
         let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
-            && server_compaction_supported(operation.resolved_target.as_str());
-        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
+            && provider_compaction_supported;
+        let wire_request = match build_request_with_fast_mode(
+            &operation,
+            request_fast_mode,
+            provider_compaction_supported,
+        ) {
             Ok(request) => CountTokensRequest::from(request),
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };

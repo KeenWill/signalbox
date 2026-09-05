@@ -52,6 +52,14 @@ pub enum TerminalEvidence {
     /// A complete, correlated provider response with a terminal success
     /// status and valid completion material.
     Completed(CompletionEvidence),
+    /// A completed response containing provider compaction, with the
+    /// provider-reported retained input that remains relevant to the next
+    /// request. This measure is distinct from the iteration-aggregated usage
+    /// retained on `completion` for billing.
+    CompletedWithProviderCompaction {
+        completion: CompletionEvidence,
+        retained_input_tokens: u64,
+    },
     /// A complete exchange whose response reports the provider's refusal
     /// outcome rather than completion material.
     Refused(RefusalEvidence),

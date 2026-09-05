@@ -1645,6 +1645,8 @@ async fn run_hub(
         .then(|| openai_model_credentials.clone());
     let credential_reference =
         ModelCallCredentialReference::new(model_configuration.fallback_credential_profile());
+    let anthropic_provider_compaction_targets =
+        model_configuration.anthropic_provider_compaction_targets();
     let code_host_credentials = FileCredentialAccess::new(
         configuration.github_token_file(),
         CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
@@ -1658,6 +1660,8 @@ async fn run_hub(
         .map(|credential_access| {
             let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
             adapter_configuration.exchange_timeout = model_exchange_timeout;
+            adapter_configuration.provider_compaction_targets =
+                anthropic_provider_compaction_targets.clone();
             AnthropicRuntime::new(adapter_configuration, credential_access)
         })
         .transpose()
@@ -1690,6 +1694,8 @@ async fn run_hub(
             let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
             adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities = anthropic_model_capabilities;
+            adapter_configuration.provider_compaction_targets =
+                anthropic_provider_compaction_targets;
             AnthropicRuntime::new(adapter_configuration, credential_access)
         })
         .transpose()

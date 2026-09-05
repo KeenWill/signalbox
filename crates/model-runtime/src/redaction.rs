@@ -521,6 +521,22 @@ pub fn redact_evidence(
             };
             TerminalEvidence::BoundaryLoss(loss)
         }
+        TerminalEvidence::CompletedWithProviderCompaction {
+            completion,
+            retained_input_tokens,
+        } => match redact_evidence(
+            TerminalEvidence::Completed(completion),
+            api_key,
+            native_message_limit,
+        ) {
+            TerminalEvidence::Completed(completion) => {
+                TerminalEvidence::CompletedWithProviderCompaction {
+                    completion,
+                    retained_input_tokens,
+                }
+            }
+            failed_closed => failed_closed,
+        },
         TerminalEvidence::Completed(mut completion) => {
             if provider_compaction_contains_credential(&completion.content, api_key) {
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
@@ -1540,18 +1556,21 @@ mod tests {
     #[test]
     fn credential_bearing_provider_compaction_is_rejected_without_rewriting_replay_bytes() {
         let key = credential("fixture_secret");
-        let evidence = TerminalEvidence::Completed(CompletionEvidence {
-            exchange: ExchangeFacts::default(),
-            message_id: None,
-            reported_model: None,
-            finish: CompletionFinish::EndTurn,
-            content: vec![AssistantPart::ProviderCompaction {
-                block_json:
-                    r#"{"type":"compaction","content":"fixture_secret","encrypted_content":"opaque"}"#
-                        .to_string(),
-            }],
-            usage: TokenUsage::unreported(),
-        });
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![AssistantPart::ProviderCompaction {
+                    block_json:
+                        r#"{"type":"compaction","content":"fixture_secret","encrypted_content":"opaque"}"#
+                            .to_string(),
+                }],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+        };
 
         let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
             panic!("credential-bearing opaque replay evidence is rejected");

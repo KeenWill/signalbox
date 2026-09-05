@@ -2544,7 +2544,7 @@ where
                     self.ids.next_context_frontier_id(),
                 ))
             }
-            ModelCallTerminalObservation::CompletedWithProviderCompaction { response } => {
+            ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
                 let assistant_entries = (0..response.len())
                     .map(|_| self.ids.next_semantic_entry_id())
                     .collect();

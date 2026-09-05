@@ -376,7 +376,10 @@ impl ReportedUsageCompaction {
                 ReportedInputCacheAxes::from_includes_cache_tokens(
                     reported.input_includes_cache_tokens(),
                 ),
-                ReportedInputRetention::from_retained(reported.input_is_retained()),
+                ReportedInputRetention::from_retained(
+                    reported.input_is_retained(),
+                    reported.retained_input_tokens(),
+                ),
                 ReportedOutputRetention::from_retained(reported.output_is_retained()),
                 reported.projected_unreported_content_bytes(),
                 u64::from(definition.max_output_tokens()),

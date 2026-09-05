@@ -27,12 +27,13 @@ use crate::wire::{
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
 ) -> Result<MessagesRequest, PreparationFailure> {
-    build_request_with_fast_mode(operation, operation.settings.fast_mode)
+    build_request_with_fast_mode(operation, operation.settings.fast_mode, false)
 }
 
 pub(crate) fn build_request_with_fast_mode<C>(
     operation: &ModelOperation<C>,
     request_fast_mode: FastMode,
+    provider_compaction_supported: bool,
 ) -> Result<MessagesRequest, PreparationFailure> {
     if let Err(error) = operation.validate() {
         return Err(PreparationFailure::UnsupportedOperation {
@@ -64,8 +65,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
         .map(anthropic_effort)
         .transpose()?;
     let service_tier = anthropic_service_tier(&operation.settings, request_fast_mode)?;
-    let replay_provider_compaction =
-        server_compaction_supported(operation.resolved_target.as_str());
+    let replay_provider_compaction = provider_compaction_supported;
     let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
         && replay_provider_compaction;
     let messages = operation
@@ -95,29 +95,6 @@ pub(crate) fn build_request_with_fast_mode<C>(
         tool_choice: plan.tool_choice,
         context_management: server_compaction.then_some(ContextManagement::compact()),
         stream: operation.delivery == DeliveryMode::Streamed,
-    })
-}
-
-pub(crate) fn server_compaction_supported(provider_model: &str) -> bool {
-    const SUPPORTED_FAMILIES: [&str; 9] = [
-        "claude-fable-5",
-        "claude-mythos-5",
-        "claude-mythos-preview",
-        "claude-opus-5",
-        "claude-opus-4-8",
-        "claude-opus-4-7",
-        "claude-opus-4-6",
-        "claude-sonnet-5",
-        "claude-sonnet-4-6",
-    ];
-
-    SUPPORTED_FAMILIES.iter().any(|family| {
-        provider_model == *family
-            || provider_model.strip_prefix(family).is_some_and(|suffix| {
-                suffix
-                    .strip_prefix('-')
-                    .is_some_and(|version| version.bytes().all(|byte| byte.is_ascii_digit()))
-            })
     })
 }
 
@@ -593,10 +570,7 @@ mod tests {
         ToolCallId, ToolCallProposal, ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
-    use super::{
-        build_request, build_request_with_fast_mode, server_compaction_supported,
-        validate_model_settings,
-    };
+    use super::{build_request, build_request_with_fast_mode, validate_model_settings};
 
     /// An operation whose correlation seed is the one knob; targets, one
     /// user-role message, and a 64-token ceiling are canonical.
@@ -842,7 +816,7 @@ mod tests {
         operation.settings.service_tier = Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto));
 
         assert!(matches!(
-            build_request_with_fast_mode(&operation, FastMode::Disabled),
+            build_request_with_fast_mode(&operation, FastMode::Disabled, true),
             Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }
@@ -1204,7 +1178,8 @@ mod tests {
             }],
         }];
 
-        let request = build_request(&operation).expect("provider compaction history translates");
+        let request = build_request_with_fast_mode(&operation, FastMode::Disabled, true)
+            .expect("provider compaction history translates");
         let serialized = serde_json::to_string(&request).expect("request serializes");
 
         assert!(serialized.contains(raw));
@@ -1214,12 +1189,26 @@ mod tests {
     }
 
     #[test]
-    fn compaction_is_enabled_only_for_supported_model_families() {
-        assert!(server_compaction_supported("claude-fable-5-1"));
-        assert!(server_compaction_supported("claude-opus-4-6-20260501"));
-        assert!(server_compaction_supported("claude-sonnet-5"));
-        assert!(!server_compaction_supported("claude-haiku-4-5"));
-        assert!(!server_compaction_supported("model-exact-1"));
+    fn configured_capability_gates_compaction_and_replay() {
+        let mut operation = operation("call-unsupported-provider-compaction");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![
+                MessagePart::Text("retained text".to_string()),
+                MessagePart::ProviderCompaction {
+                    block_json:
+                        r#"{"type":"compaction","content":null,"encrypted_content":"opaque"}"#
+                            .to_string(),
+                },
+            ],
+        }];
+
+        let request = build_request_with_fast_mode(&operation, FastMode::Disabled, false)
+            .expect("unsupported target omits provider compaction");
+        let serialized = serde_json::to_string(&request).expect("request serializes");
+
+        assert!(!serialized.contains("context_management"));
+        assert!(!serialized.contains("opaque"));
     }
 
     #[test]
@@ -1228,7 +1217,8 @@ mod tests {
         operation.resolved_target = ResolvedTarget::new("claude-opus-5");
         operation.provider_compaction = ProviderCompactionMode::Suppressed;
 
-        let request = build_request(&operation).expect("the summary operation translates");
+        let request = build_request_with_fast_mode(&operation, FastMode::Disabled, true)
+            .expect("the summary operation translates");
         let serialized = serde_json::to_string(&request).expect("request serializes");
 
         assert!(!serialized.contains("context_management"));
@@ -1273,7 +1263,7 @@ mod tests {
             }];
 
             assert!(matches!(
-                build_request(&operation),
+                build_request_with_fast_mode(&operation, FastMode::Disabled, true),
                 Err(PreparationFailure::UnsupportedOperation { .. })
             ));
         }
