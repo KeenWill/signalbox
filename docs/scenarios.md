@@ -591,7 +591,7 @@ INV-tagged test names and attached doc comments.
   delivery without retaining that slot; result commit creates a durable parent
   wake. The returned value or typed failure becomes delivered parent content,
   never child transcript content, under the
-  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#boundary-contracts).
 - **Transient updates:** Best-effort nudges reduce result/message wake latency;
   the durable eligibility sweep is the restart and lost-wake backstop.
 - **Owning component:** Daemon owns relationships and scheduling; each session
@@ -599,8 +599,7 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Restart restores the relationship, exact wait, messages,
   and undelivered result. Child failure, stop, or cancellation is delivered as a
   typed outcome. A detached result remains durable after parent termination, as
-  owned by
-  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+  owned by [session delegation](spec/sessions-and-transcript.md).
 - **Required invariants:** INV-003, INV-010, INV-034.
 - **Remaining questions:** Multi-source or merged transcript ancestry remains
   separate and unchanged.
@@ -612,7 +611,7 @@ INV-tagged test names and attached doc comments.
 - **Durable commands:** Parent stop/cancel carries `ParentAlone` or
   `ParentAndDescendants`. The latter atomically records a disposition for each
   evaluated relationship from the durable descendant walk defined by
-  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+  [session delegation](spec/sessions-and-transcript.md).
 - **State transitions:** Background children continue. Bound children apply
   their separately recorded stop/cancel action; `KeepRunning` is itself a typed
   disposition. A child is never deleted and may finish after the parent.
@@ -623,7 +622,7 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Every evaluated child has an explicit reason and exact
   spawn, parent-event, and command provenance. Already-issued effects are not
   undone and ambiguous effects remain reconcilable under the
-  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#boundary-contracts).
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-034.
 - **Remaining questions:** Ordinary archive remains independently non-cascading;
   destructive retention remains separate later scope.
