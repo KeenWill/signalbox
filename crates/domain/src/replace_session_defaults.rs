@@ -1195,8 +1195,7 @@ mod tests {
 
         /// One fail-closed perturbation and the typed failure it produced,
         /// rendered as a snapshot row supplementing the targeted asserts
-        /// above (TS-10, TS-12). The field names
-        /// are the rendered column headers.
+        /// above (TS-10, TS-12), rendered as one opaque Debug value.
         #[derive(Debug)]
         #[allow(
             dead_code,

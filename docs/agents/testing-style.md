@@ -194,22 +194,20 @@ for d in all_cancellation_dispositions() {
 // "rejected":
 //     Err(error) => { assert_eq!(error.current().id(), source_id); "rejected" }
 // so the table supplements the per-edge asserts (rule 10); it does not
-// replace them. Project each helper row into an opaque tuple for display.
+// replace them. Render each helper row as one opaque Debug value.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
-let rows = after_cancellation_rows(&prepared, proof(1))
-    .into_iter()
-    .map(|row| (row.attempted_end, row.outcome));
+let rows = after_cancellation_rows(&prepared, "after cancellation", proof(1));
 expect![[r#"
-    ┌─────────────────────────────┐
-    │ value                       │
-    ├─────────────────────────────┤
-    │ (TurnCompleted, "rejected") │
-    │ (TurnRefused, "rejected")   │
-    │ (KnownFailure, "rejected")  │
-    │ (Lost, "rejected")          │
-    │ (Cancelled, "ends")         │
-    │ (Ambiguous, "rejected")     │
-    └─────────────────────────────┘
+    ┌───────────────────────────────────────────────────────────────────────────────────────────┐
+    │ value                                                                                     │
+    ├───────────────────────────────────────────────────────────────────────────────────────────┤
+    │ AttemptEndRow { attempted_end: "after cancellation: TurnCompleted", outcome: "rejected" } │
+    │ AttemptEndRow { attempted_end: "after cancellation: TurnRefused", outcome: "rejected" }   │
+    │ AttemptEndRow { attempted_end: "after cancellation: KnownFailure", outcome: "rejected" }  │
+    │ AttemptEndRow { attempted_end: "after cancellation: Lost", outcome: "rejected" }          │
+    │ AttemptEndRow { attempted_end: "after cancellation: Cancelled", outcome: "ends" }         │
+    │ AttemptEndRow { attempted_end: "after cancellation: Ambiguous", outcome: "rejected" }     │
+    └───────────────────────────────────────────────────────────────────────────────────────────┘
 "#]]
 .assert_eq(&table(rows));
 ```
@@ -328,18 +326,17 @@ assert!(matches!(end, AttemptEnd::WithoutStop { disposition: actual }
 
 // Good: the retained cause is read back from the observed value and
 // displayed where a reviewer can see it (rule 12). The helper emits one
-// #[derive(Debug)] row struct per end — field names are the column
-// headers — rendered through the shared crate (rule 12).
+// #[derive(Debug)] row struct per end, rendered as one opaque value
+// through the shared crate (rule 12).
 expect![[r#"
-    ┌───────────────────────────────────────────────┐
-    │ value                                         │
-    ├───────────────────────────────────────────────┤
-    │ (1, 1, "ordinary")                            │
-    │ (2, 3, "interrupt immediately after input 1") │
-    │ (3, 2, "ordinary")                            │
-    └───────────────────────────────────────────────┘
+    ┌───────────────────────────────────────────────────────────────────────────────────────────────────────┐
+    │ value                                                                                                 │
+    ├───────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ Row { family: "without stop", disposition: "Lost", retained_cause: "-" }                              │
+    │ Row { family: "after cancellation", disposition: "Cancelled", retained_cause: "interrupt command 1" } │
+    └───────────────────────────────────────────────────────────────────────────────────────────────────────┘
 "#]]
-.assert_eq(&table(attempt_end_family_rows(&ends)));
+.assert_eq(&attempt_end_family_table(&ends));
 ```
 
 ## Failure messages
@@ -421,17 +418,17 @@ a glance (rules 9 and 12):
 
 ```rust
 expect![[r#"
-    ┌─────────┬──────────┬─────────────────────────────────────┐
-    │ derived │ accepted │ priority                            │
-    ├─────────┼──────────┼─────────────────────────────────────┤
-    │       1 │        1 │ ordinary                            │
-    │       2 │        3 │ interrupt immediately after input 1 │
-    │       3 │        2 │ ordinary                            │
-    └─────────┴──────────┴─────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+    │ value                                                                                       │
+    ├─────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ DerivedSlotRow { derived: 1, accepted: 1, priority: "ordinary" }                            │
+    │ DerivedSlotRow { derived: 2, accepted: 3, priority: "interrupt immediately after input 1" } │
+    │ DerivedSlotRow { derived: 3, accepted: 2, priority: "ordinary" }                            │
+    └─────────────────────────────────────────────────────────────────────────────────────────────┘
 "#]]
 .assert_eq(&derived_order_table(&[first, second, interrupt]));
 ```
 
-The rendering helper projects each row into `(derived, accepted, priority)` in
-derived order through the shared `signalbox-expect-table` renderer; read the
-snapshot diff when it changes (rule 11).
+The rendering helper passes one `DerivedSlotRow` per derived slot through the
+shared `signalbox-expect-table` renderer; read the snapshot diff when it changes
+(rule 11).

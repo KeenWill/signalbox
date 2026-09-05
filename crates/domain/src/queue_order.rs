@@ -539,8 +539,8 @@ mod tests {
     }
 
     /// One derived slot's snapshot row: only the acceptance ordinal and
-    /// priority fact the derivation depends on (TS-12). The field names are
-    /// the rendered column headers.
+    /// priority fact the derivation depends on (TS-12), rendered as one opaque
+    /// Debug value.
     #[derive(Debug)]
     #[allow(
         dead_code,
