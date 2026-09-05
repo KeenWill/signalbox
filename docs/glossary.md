@@ -115,8 +115,8 @@ authority for turn cancellation. See
 
 An outbound-connected process that declares capabilities and execution-boundary
 properties, then performs selected runner-local tool attempts under one
-deployment identity. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners).
+deployment identity. Planned design; see
+[runner protocol design](design/runner-protocol.md).
 
 ## Runner property evidence
 
