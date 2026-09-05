@@ -64,16 +64,28 @@ pub(crate) fn build_request_with_fast_mode<C>(
         .map(anthropic_effort)
         .transpose()?;
     let service_tier = anthropic_service_tier(&operation.settings, request_fast_mode)?;
+    let replay_provider_compaction =
+        server_compaction_supported(operation.resolved_target.as_str());
     let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
-        && server_compaction_supported(operation.resolved_target.as_str());
+        && replay_provider_compaction;
+    let messages = operation
+        .messages
+        .iter()
+        .map(|message| wire_message(message, replay_provider_compaction))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|message| !message.content.is_empty())
+        .collect::<Vec<_>>();
+    if messages.is_empty() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "the resolved Anthropic target has no replayable conversation messages"
+                .to_string(),
+        });
+    }
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
         max_tokens: operation.settings.max_output_tokens,
-        messages: operation
-            .messages
-            .iter()
-            .map(|message| wire_message(message, server_compaction))
-            .collect::<Result<Vec<_>, _>>()?,
+        messages,
         system: plan.system_text(operation.system.as_deref()),
         stop_sequences: operation.settings.stop_sequences.clone(),
         output_config: effort.map(|effort| OutputConfig { effort }),
@@ -86,9 +98,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
     })
 }
 
-/// Whether an exact Anthropic provider-model identifier supports the server
-/// compaction request and replay contract.
-pub fn server_compaction_supported(provider_model: &str) -> bool {
+pub(crate) fn server_compaction_supported(provider_model: &str) -> bool {
     const SUPPORTED_FAMILIES: [&str; 9] = [
         "claude-fable-5",
         "claude-mythos-5",
@@ -437,7 +447,7 @@ fn tool_plan<C>(operation: &ModelOperation<C>) -> Result<ToolPlan, PreparationFa
 
 fn wire_message(
     message: &ConversationMessage,
-    server_compaction: bool,
+    replay_provider_compaction: bool,
 ) -> Result<WireMessage, PreparationFailure> {
     let mut user_text_seen = false;
     for part in &message.parts {
@@ -481,6 +491,10 @@ fn wire_message(
     let content = message
         .parts
         .iter()
+        .filter(|part| {
+            replay_provider_compaction
+                || !matches!(part, MessagePart::ProviderCompaction { .. })
+        })
         .map(|part| match part {
             MessagePart::Text(text) => Ok(WireRequestBlock::Known(WireKnownRequestBlock::Text {
                 text: text.clone(),
@@ -541,7 +555,7 @@ fn wire_message(
                 WireKnownRequestBlock::RedactedThinking { data: data.clone() },
             )),
             MessagePart::ProviderCompaction { block_json } => {
-                if !server_compaction {
+                if !replay_provider_compaction {
                     return Err(PreparationFailure::UnsupportedOperation {
                         detail: "the resolved Anthropic target does not support replaying provider compaction blocks"
                             .to_string(),
@@ -1222,20 +1236,24 @@ mod tests {
     }
 
     #[test]
-    fn compaction_replay_is_rejected_for_an_unsupported_target() {
+    fn compaction_replay_is_omitted_for_an_unsupported_target() {
         let mut operation = operation("call-unsupported-provider-compaction");
         operation.resolved_target = ResolvedTarget::new("claude-haiku-4-5");
         operation.messages = vec![ConversationMessage {
             role: ConversationRole::Assistant,
-            parts: vec![MessagePart::ProviderCompaction {
-                block_json: r#"{"type":"compaction","content":"summary"}"#.to_string(),
-            }],
+            parts: vec![
+                MessagePart::Text(String::from("preserved output")),
+                MessagePart::ProviderCompaction {
+                    block_json: r#"{"type":"compaction","content":"summary"}"#.to_string(),
+                },
+            ],
         }];
 
-        assert!(matches!(
-            build_request(&operation),
-            Err(PreparationFailure::UnsupportedOperation { .. })
-        ));
+        let request = build_request(&operation).expect("preserved history translates");
+        let serialized = serde_json::to_string(&request).expect("request serializes");
+
+        assert!(serialized.contains("preserved output"));
+        assert!(!serialized.contains("compaction"));
     }
 
     #[test]

@@ -19,12 +19,13 @@ use std::time::Duration;
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, ConversationMessage,
-    DeliveryMode, FastMode, FastModeTarget, InputTokenCountOutcome, LossCause, ModelCapabilities,
-    ModelCapabilityCatalog, ModelCapabilityDefinition, ModelInputTokenCounter, ModelOperation,
-    ModelRuntime, ModelSettings, Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT,
-    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, ReasoningLevel,
-    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredOutputContract,
-    TerminalEvidence, TerminalReport, ToolCallId, ToolCallProposal, ToolName, UnsentCause,
+    ConversationRole, DeliveryMode, FastMode, FastModeTarget, InputTokenCountOutcome, LossCause,
+    MessagePart, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, ModelSettings, Observation,
+    ObservationFact, PROVIDER_JSON_NESTING_LIMIT, PreparationFailure, PreparationOutcome,
+    ProviderErrorKind, ProviderRequestId, ReasoningLevel, RequestedTarget, ResolvedTarget,
+    StreamInterruption, StructuredOutputContract, TerminalEvidence, TerminalReport, ToolCallId,
+    ToolCallProposal, ToolName, UnsentCause,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -157,6 +158,18 @@ fn operation(correlation: &str) -> ModelOperation<String> {
         vec![ConversationMessage::user_text("hello")],
         ModelSettings::new(64),
     )
+}
+
+fn append_provider_compaction(operation: &mut ModelOperation<String>) {
+    operation.messages.push(ConversationMessage {
+        role: ConversationRole::Assistant,
+        parts: vec![
+            MessagePart::Text(String::from("preserved output")),
+            MessagePart::ProviderCompaction {
+                block_json: String::from(r#"{"type":"compaction","content":"preserved summary"}"#),
+            },
+        ],
+    });
 }
 
 async fn execute<A: CredentialAccess>(
@@ -864,6 +877,82 @@ async fn input_count_uses_the_declared_fast_target() {
             .get("context_management")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn preparation_omits_compaction_for_an_unsupported_effective_fast_target() {
+    let server = CannedServer::serving(vec![text_response()]).await;
+    let selected = ResolvedTarget::new("claude-opus-5");
+    let mapped = ResolvedTarget::new("claude-haiku-4-5");
+    let definitions = [ModelCapabilityDefinition::new(
+        selected.clone(),
+        ModelCapabilities::new(
+            BTreeSet::new(),
+            Some(FastModeTarget::Mapped(mapped.clone())),
+            BTreeSet::new(),
+        ),
+    )];
+    let mut config = AnthropicConfig::new(None);
+    config.base_url = server.base_url.clone();
+    config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
+        .expect("fixture capabilities are unique");
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    let mut generated = operation("generate-fast-unsupported");
+    generated.resolved_target = selected;
+    generated.settings.fast_mode = FastMode::Enabled;
+    append_provider_compaction(&mut generated);
+
+    let _ = execute(&runtime, generated, CancellationSignal::never()).await;
+    let body = sent_request_body(&server);
+
+    assert_eq!(body["model"], mapped.as_str());
+    assert!(body.get("context_management").is_none());
+    assert!(!body.to_string().contains("preserved summary"));
+    assert!(body.to_string().contains("preserved output"));
+}
+
+#[tokio::test]
+async fn input_count_replays_compaction_for_a_supported_effective_fast_target() {
+    let server =
+        CannedServer::serving(vec![http_response("200 OK", &[], br#"{"input_tokens":7}"#)]).await;
+    let selected = ResolvedTarget::new("claude-haiku-4-5");
+    let mapped = ResolvedTarget::new("claude-opus-5");
+    let definitions = [ModelCapabilityDefinition::new(
+        selected.clone(),
+        ModelCapabilities::new(
+            BTreeSet::new(),
+            Some(FastModeTarget::Mapped(mapped.clone())),
+            BTreeSet::new(),
+        ),
+    )];
+    let mut config = AnthropicConfig::new(None);
+    config.base_url = server.base_url.clone();
+    config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
+        .expect("fixture capabilities are unique");
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    let mut counted = operation("count-fast-supported");
+    counted.resolved_target = selected;
+    counted.settings.fast_mode = FastMode::Enabled;
+    append_provider_compaction(&mut counted);
+
+    let outcome = runtime
+        .count_input_tokens(counted, CancellationSignal::never())
+        .await;
+    let body = sent_request_body(&server);
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Counted {
+            correlation: String::from("count-fast-supported"),
+            input_tokens: 7,
+        }
+    );
+    assert_eq!(body["model"], mapped.as_str());
+    assert_eq!(
+        body["context_management"],
+        serde_json::json!({"edits": [{"type": "compact_20260112"}]})
+    );
+    assert!(body.to_string().contains("preserved summary"));
 }
 
 #[tokio::test]

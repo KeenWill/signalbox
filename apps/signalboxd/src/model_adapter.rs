@@ -202,11 +202,10 @@ fn omit_unreplayable_provider_compaction<C>(
     operation: &mut ModelOperation<C>,
     adapter: ModelAdapter,
 ) {
-    let can_replay = adapter == ModelAdapter::Anthropic
-        && signalbox_model_runtime_anthropic::server_compaction_supported(
-            operation.resolved_target.as_str(),
-        );
-    if can_replay {
+    // Anthropic decides after applying its capability mapping because fast mode
+    // may replace the selected target. Every other adapter omits the
+    // Anthropic-qualified opaque part here.
+    if adapter == ModelAdapter::Anthropic {
         return;
     }
     operation.messages.retain_mut(|message| {
@@ -457,29 +456,6 @@ mod tests {
             operation.messages[0].parts,
             vec![MessagePart::Text(String::from("preserved output"))]
         );
-    }
-
-    #[test]
-    fn unsupported_anthropic_projection_omits_opaque_compaction_parts() {
-        let mut operation = operation_with_provider_compaction("claude-haiku-4-5");
-
-        omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::Anthropic);
-
-        assert_eq!(operation.messages.len(), 1);
-        assert_eq!(
-            operation.messages[0].parts,
-            vec![MessagePart::Text(String::from("preserved output"))]
-        );
-    }
-
-    #[test]
-    fn supported_anthropic_projection_retains_opaque_compaction_parts() {
-        let mut operation = operation_with_provider_compaction("claude-fable-5-1");
-        let expected = operation.messages.clone();
-
-        omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::Anthropic);
-
-        assert_eq!(operation.messages, expected);
     }
 
     #[test]
