@@ -23,24 +23,27 @@ from the writing surface, the journal write of the
 journal threshold, exactly as every class is derived; no operation or client
 field selects it. Unknown classes are still rejected as a closed set.
 
-A read scope is one connection's direct-read traversal or one model turn; a
-turn's attachment-preparation passes and blob-read tool calls share that one
-scope. Each scope owns a least-recently-used inventory of generation-pinned
-verifications keyed by digest, store name, and object key, so a token applies
-only to the replica whose verification produced it. An entry is a bounded
-immutable-generation token of at most 1,024 bytes; it never retains a file
-descriptor, socket, request, or store client, and each conditional read acquires
-and releases its own resources. The inventory holds at most eight entries.
-Eviction makes a later range verify again, and the whole inventory is discarded
-at scope end or on any candidate failure. A range read that reuses an entry
-targets that entry's replica and is conditional on the exact generation the
-token names; a failed condition discards the entry and reverifies the replica in
-full. The `BlobStore` trait returns a generation token from a full verification
-only when the adapter can pin an immutable object generation and make later
-ranges conditional on it; the filesystem adapter never can, and the present S3
-adapter returns none. Attachment preparation records into the turn's inventory
-any generation token a replica verification returns, so a blob-read tool call in
-that turn reuses that verification.
+A read scope is one process-protocol connection or one model turn; a turn's
+attachment-preparation passes and blob-read tool calls share that one scope. A
+connection's scope spans every blob read on that connection, so a later range
+request reuses an earlier request's verification. The same-origin HTTP surface
+has no scope, and every content request verifies in full. Each scope owns a
+least-recently-used inventory of generation-pinned verifications keyed by
+digest, store name, and object key, so a token applies only to the replica whose
+verification produced it. An entry is a bounded immutable-generation token of at
+most 1,024 bytes; it never retains a file descriptor, socket, request, or store
+client, and each conditional read acquires and releases its own resources. The
+inventory holds at most eight entries. Eviction makes a later range verify
+again, and the whole inventory is discarded at scope end or on any candidate
+failure. A range read that reuses an entry targets that entry's replica and is
+conditional on the exact generation the token names; a failed condition discards
+the entry and reverifies the replica in full. The `BlobStore` trait returns a
+generation token from a full verification only when the adapter can pin an
+immutable object generation and make later ranges conditional on it; the
+filesystem adapter never can, and the present S3 adapter returns none.
+Attachment preparation records into the turn's inventory any generation token a
+replica verification returns, so a blob-read tool call in that turn reuses that
+verification.
 
 Transcript data transfer objects in `crates/web-contract` carry, for each
 attachment part, the blob descriptor the same-origin HTTP surface would return:
@@ -83,14 +86,14 @@ startup, and a table naming an unknown class still fails startup. An
 over-threshold journal payload written by the program host lands in the store
 `program_journal` routes to and is catalogued with a verified replica.
 
-With an adapter that pins a generation, the second range read of a digest in one
-scope reads the verified replica and performs no full reverification, a changed
-object generation fails the conditional read and forces a full reverification,
-the inventory never holds more than eight entries, and it is empty after scope
-end and after any candidate failure. With the filesystem adapter every range
-still reverifies in full. After attachment preparation verifies a replica and
-receives a generation token, a blob-read tool call in the same turn reuses that
-verification.
+With an adapter that pins a generation, a second range request for a digest on
+one connection reads the verified replica and performs no full reverification, a
+changed object generation fails the conditional read and forces a full
+reverification, the inventory never holds more than eight entries, and it is
+empty after scope end and after any candidate failure. With the filesystem
+adapter every range still reverifies in full. After attachment preparation
+verifies a replica and receives a generation token, a blob-read tool call in the
+same turn reuses that verification.
 
 A transcript projection of an accepted input with attachments carries a
 descriptor and view URLs for each attachment part and contains no blob bytes.

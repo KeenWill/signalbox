@@ -233,9 +233,11 @@ Thumbnail and preview views exist only after their exact output is present and
 carry their complete derivation record.
 
 A recorded derivation key is reused without running the producer only while its
-output is still retrievable; missing or unverifiable output triggers
-reproduction without a new derivation record. Publication to the
-generated-artifact route and catalog registration precede the derivation append.
+output is still retrievable. Missing or unverifiable output re-runs the producer
+and republishes the same output digests. The key is unchanged, so the append
+resolves back to the existing record and writes no second one. Publication to
+the generated-artifact route and catalog registration precede the derivation
+append.
 
 The thumbnail and preview producer runs the current daemon executable through
 the configured filesystem-confined supervisor with no network and fixed deadline
