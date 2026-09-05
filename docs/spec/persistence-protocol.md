@@ -6,11 +6,11 @@ of stored rows into domain values, and the transactional outbox.
 
 ## Map
 
-`crates/persistence` holds the whole Postgres representation. It uses SQLx on
-Tokio: the Postgres driver, one `PgPool`, and an embedded migrator. Domain types
-live in `crates/domain` and know nothing of the database; each persistence
-module decodes its own rows and hands checked input to the domain for
-validation. What the rows mean is owned elsewhere: session semantics by
+`crates/persistence` holds the Postgres representation. It uses SQLx on Tokio:
+the Postgres driver, one `PgPool`, and an embedded migrator. Domain types live
+in `crates/domain` and know nothing of the database; each persistence module
+decodes its own rows and hands checked input to the domain for validation. What
+the rows mean is owned elsewhere: session semantics by
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and the command claim protocol by
@@ -21,7 +21,7 @@ sweep by [repo-watch](repo-watch.md), and the credential-availability machine by
 [credential-availability](credential-availability.md). This page states how
 those facts are stored, locked, published, and read back.
 
-Schema change is a forward-only set of versioned SQL files in
+The schema is defined by forward-only versioned SQL files in
 `crates/persistence/migrations/`, embedded as the static `MIGRATOR` and applied
 by one `migrate` call. Fifteen files form the per-domain baseline: one schema
 split by domain, applied only as a whole in filename order, with
@@ -30,9 +30,8 @@ forward migration on top of that baseline. SQLx records each applied file and
 its checksum in `_sqlx_migrations`.
 
 The schema is normalized and purpose-specific: mutable current-state rows
-guarded by constraints and triggers, and append-only immutable facts that
-triggers protect from update, delete, and truncate. Each domain's tables live in
-that domain's baseline file. Three singletons in the core file anchor the
+guarded by constraints and triggers, and append-only facts that triggers protect
+from update, delete, and truncate. Three singletons in the core file anchor the
 daemon: the hub-fence generation that fences the connection pool, the outbox
 sequence allocator, and the outbox delivery cursor.
 
@@ -44,17 +43,16 @@ conflicting reuse are owned by
 
 Every SQL statement issued from Rust that takes an explicit row lock lives in
 `crates/persistence/src/lock_inventory.rs`, together with a record of the locks
-that triggers take inside the schema. The lock order under Contracts is the rule
-that inventory documents.
+that triggers take inside the schema. That inventory documents the lock order
+stated under Contracts.
 
-Reconstitution turns rows back into domain values. The adapter decodes columns
-and assembles a checked input; the domain validates it and returns one complete
-value or a typed corruption error. Failures that reach an operator are
-classified in `crates/application` as infrastructure, fail-closed corruption,
-identity collision, or a caller bug, and an infrastructure failure carries a
-flag saying whether it happened at the commit boundary. The
-automatic-reconciliation ledger records the recovery of turns whose outcome is
-unknown; two singleton cursors page its discovery and supersession passes.
+Reconstitution turns rows back into domain values and returns one complete value
+or a typed corruption error. Failures that reach an operator are classified in
+`crates/application` as infrastructure, fail-closed corruption, identity
+collision, or a caller bug, and an infrastructure failure carries a flag saying
+whether it happened at the commit boundary. The automatic-reconciliation ledger
+records the recovery of turns whose outcome is unknown; two singleton cursors
+page its discovery and supersession passes.
 
 Delegation storage holds child sessions, their relationships to a parent, waits,
 messages, and results, with a delivery sequence per recipient. Its semantics are
@@ -63,9 +61,9 @@ owned by [sessions-and-transcript](sessions-and-transcript.md).
 The transactional outbox is the only path from a committed transition to a
 client-visible event. Two header tables, one for core kinds and one for
 delegation kinds, feed one delivery sequence, and each event kind has a typed
-record table. `OutboxDispatcher` is the single consumer seam: it locks the
-delivery singleton, decodes exactly the next event, invokes a synchronous
-consumer, and advances only when the consumer accepts.
+record table. `OutboxDispatcher` is the single consumer; it hands one event at a
+time to a synchronous consumer and advances the cursor only when the consumer
+accepts.
 
 ## Decisions
 
@@ -81,21 +79,21 @@ Migrations are checksummed forward-only files so every schema change is a
 reviewed, immutable artifact and no deployed database's history is silently
 edited.
 
-A rehearsal installation's recording of a migration not yet on `main` whose form
-fails validation is corrected before it reaches `main`, and the rehearsal ledger
-row is corrected as a documented step at its next deployment. Why: freezing a
-file that fails validation would freeze a defect into every future installation.
+When a migration recorded by a rehearsal installation but not yet on `main`
+fails form validation, the file is corrected before it reaches `main` and the
+rehearsal ledger row is corrected as a documented step at its next deployment.
+Why: freezing a file that fails validation would freeze a defect into every
+future installation.
 
 A collapse to a regenerated baseline is proved schema-equivalent first and cuts
 the deployed database over by replacing the `_sqlx_migrations` rows in one
 transaction; it changes bookkeeping, never schema or data.
 
-Every planned schema improvement lands as an ordinary forward migration on top
-of the baseline, in its own campaign; a collapse reproduces the current schema
-exactly.
+Every planned schema improvement lands as an ordinary forward migration in its
+own campaign, never inside a collapse.
 
-While there is exactly one deployment and no release, the collapse repeats: once
-forward migrations accumulate on the baseline, the same procedure runs again.
+While there is exactly one deployment and no release, the collapse repeats
+whenever forward migrations accumulate on the baseline.
 
 Dogfood session and conversation data survive every collapse. Repository-watch
 data is disposable, and that matters only for a repository-watch campaign that
@@ -140,8 +138,8 @@ No template catalog or mutable template object exists in Postgres; a template
 reaches the schema only as the provenance pair on a session and its creation
 command.
 
-Frontier lineage admits no ancestry or checked imported-frontier ancestry;
-native fork ancestry is not admitted.
+Frontier lineage is either absent or checked imported-frontier ancestry; native
+fork ancestry is not admitted.
 
 Each command kind stores its caller-supplied fields in one typed,
 check-constrained record table rather than a serialized payload column, because

@@ -28,9 +28,7 @@ correlated operation as refused, and the daemon acknowledges the failure to the
 runner only after that commit. Equal retransmission rereads the equal record;
 unequal reuse is a correlation error.
 
-Imported-create command records at storage version 4 carry runner placement. The
-model-settings writer skips that version today, and a reader that supports only
-earlier versions rejects it as unsupported.
+Imported-create command records at storage version 4 carry runner placement.
 
 The instruction admitted set is one durable table with one repository operation
 that writes it. Its row locks join `crates/persistence/src/lock_inventory.rs`
