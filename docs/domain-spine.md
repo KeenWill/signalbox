@@ -9332,65 +9332,6 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
-## application: convergence_reconciliation
-
-```rust
-pub enum PullRequestCheckState {
-    CheckRunInProgress,
-    CheckRunCompleted {
-        conclusion: Option<String>,
-    },
-    StatusContext {
-        state: String,
-    },
-}
-
-pub struct PullRequestCheck { /* private */ }
-impl PullRequestCheck {
-    pub fn new(name: String, state: PullRequestCheckState) -> Self;
-    // accessors: name(), state(), is_non_gating(), is_green(), observed_state()
-}
-
-pub enum PullRequestDraftState {
-    ReadyForReview,
-    Draft,
-}
-impl PullRequestDraftState {
-    pub const fn is_draft(self) -> bool;
-}
-
-pub struct PullRequestConvergenceFacts { /* private */ }
-impl PullRequestConvergenceFacts {
-    pub fn new(
-        head_sha: CommitSha,
-        checked_head_sha: Option<CommitSha>,
-        draft: PullRequestDraftState,
-        unresolved_review_threads: u64,
-        mergeable_state: MergeableState,
-        checks: Vec<PullRequestCheck>,
-    ) -> Self;
-    // accessors: head_sha(), checked_head_sha(), draft(),
-    // unresolved_review_threads(), mergeable_state(), checks()
-}
-
-pub enum PullRequestConvergenceBlocker {
-    UnresolvedReviewThreads(u64),
-    ChecksNotForCurrentHead,
-    CheckNotGreen { name: String, state: String },
-    BaseConflict,
-    MergeabilityUnknown,
-}
-
-pub struct PullRequestConvergence { /* private */ }
-impl PullRequestConvergence {
-    // accessors: is_converged(), blockers()
-}
-
-pub fn evaluate_pull_request_convergence(
-    facts: &PullRequestConvergenceFacts,
-) -> PullRequestConvergence;
-```
-
 ## application: repo_watch
 
 ```rust
@@ -13679,7 +13620,6 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
-| application: convergence_reconciliation            | 6 (+1 free fn)                   |
 | application: repo_watch                            | 49 (+3 free fn) (incl. 4 traits) |
 | application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
@@ -13694,4 +13634,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 16                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **497 (+34 free fn)**            |
+| **signalbox-application total**                    | **491 (+33 free fn)**            |

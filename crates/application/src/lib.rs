@@ -7,7 +7,6 @@ mod approval_judge;
 mod attention;
 mod blob_derivation;
 mod commissioned_dispatch;
-mod convergence_reconciliation;
 mod conversation_import;
 mod create_session;
 mod create_session_from_imported_frontier;
@@ -65,10 +64,7 @@ pub use commissioned_dispatch::{
     CommissionedDispatchIdGenerator, PreparedCommissionedDispatch,
     UuidV7CommissionedDispatchIdGenerator,
 };
-pub use convergence_reconciliation::{
-    PullRequestCheck, PullRequestCheckState, PullRequestConvergence, PullRequestConvergenceBlocker,
-    PullRequestConvergenceFacts, PullRequestDraftState, evaluate_pull_request_convergence,
-};
+
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
     ImportConversationService, ImportedConversationConversionReport, ImportedConversationConverter,

@@ -38,6 +38,9 @@ def assemble(responses):
         if page_node is None:
             continue
         if page_node["id"] == node["id"]:
+            if "headRefOid" in page_node and any(page_node[key] != node[key] for key in
+                ("state", "baseRefName", "baseRefOid", "headRefName", "headRefOid", "isDraft", "body", "lastEditedAt", "mergeable", "reviewDecision")):
+                raise RuntimeError("pull request changed after its convergence snapshot")
             for kind in ("reviewThreads", "comments", "reviews", "reactions", "files"):
                 if kind in page_node:
                     append_page(node[kind], page_node[kind])

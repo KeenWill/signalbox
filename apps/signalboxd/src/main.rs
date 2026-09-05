@@ -1720,7 +1720,7 @@ async fn run_hub(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("github_transport_construction_failed"),
             )
-        })?;
+        })?.with_convergence_policy(model_configuration.convergence().cloned());
     let runtime_models = model_configuration.runtime_model_catalog();
     let compaction_runtime = ConfiguredModelRuntime::new(
         compaction_anthropic,

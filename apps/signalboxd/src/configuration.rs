@@ -1045,6 +1045,7 @@ pub struct HubModelConfiguration {
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     approval_judge_selection: Option<DirectModelSelection>,
+    convergence: Option<signalbox_convergence::ConvergencePolicy>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
     workspace_instructions: WorkspaceInstructionConfiguration,
@@ -1090,6 +1091,7 @@ impl HubModelConfiguration {
                 "git_identity",
                 "tool_approval_postures",
                 "approval_judge",
+                "convergence",
                 "repository_watch",
                 "blob_storage",
                 "workspace_instructions",
@@ -1181,6 +1183,15 @@ impl HubModelConfiguration {
         let tool_approval_postures =
             parse_tool_approval_postures(document.get("tool_approval_postures"))?;
         let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
+        #[derive(serde::Deserialize)]
+        struct ConvergenceSection {
+            convergence: Option<signalbox_convergence::ConvergencePolicy>,
+        }
+        let convergence = toml::from_str::<ConvergenceSection>(content)
+            .map_err(|_|HubModelConfigurationError::InvalidDocument)?.convergence;
+        if let Some(policy) = &convergence {
+            policy.validate().map_err(|_|HubModelConfigurationError::InvalidDocument)?;
+        }
         let repository_watch = document
             .get("repository_watch")
             .map(|item| parse_repository_watch_configuration(item, &numeric_bounds))
@@ -1744,6 +1755,7 @@ impl HubModelConfiguration {
             daemon_tools,
             tool_approval_postures,
             approval_judge_selection,
+            convergence,
             repository_watch,
             blob_storage,
             workspace_instructions,
@@ -2243,6 +2255,11 @@ impl HubModelConfiguration {
     /// Reports whether the configuration contains one direct selection key.
     pub fn contains_selection(&self, selection: DirectModelSelection) -> bool {
         self.direct_selections.contains(&selection)
+    }
+
+    /// Shared pull-request convergence policy for the daemon and code-host tools.
+    pub const fn convergence(&self) -> Option<&signalbox_convergence::ConvergencePolicy> {
+        self.convergence.as_ref()
     }
 
     /// Returns the complete watch configuration, or absence when no task starts.

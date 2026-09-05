@@ -762,6 +762,14 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
     state["known_codex_review_ids"] = json!(known_ids);
     state["review_wave_ids"] = json!(wave_ids);
     state["review_wave_base_oid"] = json!(wave_base);
+    if let Some(observed_at) = &snapshot.observed_at {
+        let resolved = facts.review_threads.iter().filter(|thread| thread.is_resolved)
+            .filter_map(|thread| thread.id.as_ref()).collect::<Vec<_>>();
+        let mut times = previous["resolved_thread_observed_at"].as_object().cloned().unwrap_or_default();
+        times.retain(|id, _| resolved.contains(&id));
+        for id in resolved { times.entry(id.clone()).or_insert_with(||json!(observed_at)); }
+        state["resolved_thread_observed_at"] = Value::Object(times);
+    }
     if stable && facts.quiet_review_head_oids.iter().any(|oid| oid == head) {
         state["authenticated_review_head"] = json!(head);
         state["authenticated_review_body"] = node["body"].clone();

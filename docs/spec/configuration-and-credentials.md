@@ -656,6 +656,11 @@ before it crosses into evidence. An `ambient` or `codex_home` profile gives the
 daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
 
+The optional `[convergence]` table deserializes the shared convergence policy:
+repository, reviewer list and marker grammars, check exemptions, page and thread
+limits, and wave caps. Convergence reads and the sweep require this policy;
+other code-host operations do not use it.
+
 ## Planned
 
 - Input-modality declarations on model and serving-target records, and the blob

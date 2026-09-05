@@ -12,16 +12,16 @@ use super::{
 };
 
 /// Registry declaration effect posture: read-only, `Auto`, and
-/// `ExternalEffect` because its pure composition reads fresh GitHub evidence.
+/// `ExternalEffect` because it reads fresh GitHub evidence.
 pub(super) const NAME: &str = "review_gate_check";
 pub(super) const DESCRIPTION: &str =
-    "Composes convergence, stack, and thread evidence into a deterministic review-protocol gate.";
+    "Reports the shared convergence verdict from one complete GitHub snapshot.";
 
 /// The protocol boundary the caller is checking.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewGatePurpose {
-    /// Whether a new external review wave may be requested.
+    /// A convergence read made while preparing a review wave.
     RequestReviewWave,
     /// Whether the change request may be declared converged.
     DeclareConvergence,
@@ -34,7 +34,7 @@ pub struct ReviewGateCheckArguments {
     repository: CodeHostRepository,
     /// Change-request number.
     number: CodeHostChangeRequestNumber,
-    /// Protocol boundary to evaluate.
+    /// Caller context for the convergence read.
     purpose: ReviewGatePurpose,
 }
 
