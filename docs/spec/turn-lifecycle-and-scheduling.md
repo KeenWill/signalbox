@@ -208,8 +208,10 @@ that carries no model-call evidence. Each pass first reconciles an active
 running tool round, then drives a retained prepared model call, and only then
 activates a queued turn; failure of either lookup is an ordinary failed pass,
 and only a failure after active-turn execution begins trips fatal recovery
-supervision. A pass releases its slot during attachment or blob-store I/O and
-reacquires one before send authorization, and its guarded transaction
+supervision. A candidate the sweep marked from a repository-watch dispatch-start
+lease first drives its active turn through the dispatch-start resume path, and
+only then activates. A pass releases its slot during attachment or blob-store
+I/O and reacquires one before send authorization, and its guarded transaction
 revalidates authority. A model-originated blob read authorizes no later send, so
 it reacquires its slot before the correlated tool result commits. A pass that
 cannot immediately get an attachment-preparation permit ends and leaves only the
