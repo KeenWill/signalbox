@@ -12,17 +12,18 @@ a turn. It emits a process-level event carrying the complete exclusion evidence
 of a pre-call pool exhaustion. It checks at reconstitution that the pinned pool
 policy contains the pinned profile with the expected adapter and delivery kind.
 It carries a program-declared structured-output contract through preparation
-into runtime enforcement. It records refusal content as a semantic entry. It
-records durable provider-target evidence. It lets a user resolve an unstopped
-ambiguity. It carries the workspace-instruction region into the model operation
-as its own typed part.
+into runtime enforcement. It records durable provider-target evidence. It lets a
+user resolve an unstopped ambiguity. It carries the workspace-instruction region
+into the model operation as its own typed part.
 
 ## Design
 
 An accepted-input attachment part renders as a typed provider-neutral content
-part, and the bridge maps it to the provider's native part. Media with no
-admitted projection keeps the bounded textual stub. Modality admission is owned
-by [blob-storage](../spec/blob-storage.md).
+part, and the bridge maps it to the provider's native part. Provider-native
+media rendering is undecided in [open-questions](../open-questions.md), so that
+mapping is pending that decision. Media with no admitted projection keeps the
+bounded textual stub. Modality admission is owned by
+[blob-storage](../spec/blob-storage.md).
 
 A runner-placement change entry, itself not built and owned by
 [sessions-and-transcript](../spec/sessions-and-transcript.md), renders as a
@@ -81,21 +82,17 @@ runtime operation already carries an optional output contract; the session path
 into it does not exist. The program side is owned by
 [program-substrate](../spec/program-substrate.md).
 
-A refused turn appends a refusal-content semantic entry carrying the provider's
-refusal content, alongside the terminal frontier it commits today. The entry
-vocabulary is owned by
-[sessions-and-transcript](../spec/sessions-and-transcript.md).
-
-Each call's provider-reported identity is recorded as a provider-target evidence
-row. The domain types in `crates/domain/src/provider_evidence.rs` exist; the
-persistence and aggregate wiring do not. An accepted alias concretion becomes a
-durable per-call provenance row. A mismatch selects `KnownFailed` live instead
-of failing the adapter stage closed. A mismatch discovered after completion
-invalidates the completed call, unique by invalidated call. The provider
-fallback marker becomes typed provider-neutral evidence that both HTTP adapters
-construct and redact, so a marker naming the configured target carries the
-substitution on its own. The remaining representation questions are in
-[open-questions](../open-questions.md).
+The durable per-call provenance schema is undecided in
+[open-questions](../open-questions.md), so the evidence row and the rules that
+depend on it are pending that decision. Each call's provider-reported identity
+is recorded as a provider-target evidence row. The domain types in
+`crates/domain/src/provider_evidence.rs` exist; the persistence and aggregate
+wiring do not. An accepted alias concretion becomes a durable per-call
+provenance row. A mismatch selects `KnownFailed` live instead of failing the
+adapter stage closed. A mismatch discovered after completion invalidates the
+completed call, unique by invalidated call. The provider fallback marker becomes
+typed provider-neutral evidence that both HTTP adapters construct and redact, so
+a marker naming the configured target carries the substitution on its own.
 
 From the awaiting-recovery phase, a user decision resolves an unstopped
 ambiguity. Accepting the duplicate risk records `DuplicateRiskAccepted` as the
@@ -135,9 +132,6 @@ Nothing assumes a prepared model operation carries no output contract, and the
 prepared-operation shape stays extensible to the recorded schema without
 reinterpreting existing calls.
 
-A refused turn commits an equal-content terminal frontier with no refusal entry,
-and no reader assumes one exists.
-
 Substitution is carried entirely by the reported identity; an alias concretion
 is diagnostics only; a substituted call is `Ambiguous` by restart.
 
@@ -169,8 +163,6 @@ pinned policy, or whose adapter or delivery kind differs, fails closed.
 
 A program-driven turn whose response violates its declared schema fails with a
 typed cause and never commits an unvalidated payload.
-
-A refused turn's transcript carries the refusal content as its own entry.
 
 An alias concretion leaves a durable provenance row; a substitution ends the
 call `KnownFailed` live; a marker naming the configured target classifies as

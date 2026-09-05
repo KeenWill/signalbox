@@ -416,8 +416,6 @@ the sealed issued call carries is.
   ([design](../design/model-call-execution.md)).
 - A structured-output contract on the session path
   ([design](../design/model-call-execution.md)).
-- A refusal-content semantic entry
-  ([design](../design/model-call-execution.md)).
 - Durable provider-target evidence
   ([design](../design/model-call-execution.md)).
 - Unstopped ambiguity recovery ([design](../design/model-call-execution.md)).
