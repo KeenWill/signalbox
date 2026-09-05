@@ -214,12 +214,13 @@ returned token, and clears the marker before the new access token is used; a
 differing identity quarantines instead. A committed replacement overwrites the
 previous refresh token. Every refresh that returns a new identity token replaces
 the stored one in the same commit; a refresh that returns none leaves it in
-place. On restart with the marker still present the daemon rereads the durable
-generation: a committed replacement is adopted and an uncleared marker
-quarantines. Cancellation is definitely non-rotating before possible request
-bytes and ambiguous afterward. Access tokens are held in memory only; a clean
-restart discards them without contacting a provider, and the first later
-preparation that needs the profile refreshes lazily, so recovery stays
+place. When a replacement commit is ambiguous the daemon rereads the durable
+generation, whether it restarts or stays alive with the marker still present: a
+committed replacement is adopted and published to the joined single-flight, and
+an uncleared marker quarantines. Cancellation is definitely non-rotating before
+possible request bytes and ambiguous afterward. Access tokens are held in memory
+only; a clean restart discards them without contacting a provider, and the first
+later preparation that needs the profile refreshes lazily, so recovery stays
 configuration-independent. A refresh rejected as expired, reused, or revoked is
 permanent: the profile quarantines and re-provisioning is the only recovery.
 Delivery-layer quarantine that occurs before a provider request names its own
@@ -266,17 +267,18 @@ adapter and delivery kind, membership settings, tie-break, exhaustion rule, and
 trigger actions, under a uniqueness constraint on that value, so an unchanged
 document reuses one revision across restarts and an exact reversion reuses the
 old one; hashes accelerate lookup but never establish equality. The cursor names
-one member ordinal in that priority's declaration order; selection starts there
-and walks cyclically, skipping inadmissible members, and the transaction that
-commits the `Prepared` record advances the cursor to the next declared member
-even when that member is excluded. Preparation locks the cursor row `FOR UPDATE`
-after its session scheduler, the candidate action heads, and any candidate
-capacity rows, then rereads the facts those locks protect; no path acquires a
-capacity row while holding a cursor row. A failed preparation advances nothing.
-`least_used` and a headroom reserve are admitted once an adapter reports
-remaining capacity; that adapter defines the normalized quantity, the
-observation lifetime, and a deterministic secondary tie-break. The admission
-gate is the capacity report alone.
+one member ordinal in that priority's declaration order. An admissible sticky
+member is still preferred; otherwise selection starts at the cursor and walks
+cyclically, skipping inadmissible members, and the transaction that commits that
+`Prepared` record advances the cursor to the next declared member even when that
+member is excluded. A sticky selection advances nothing. Preparation locks the
+cursor row `FOR UPDATE` after its session scheduler, the candidate action heads,
+and any candidate capacity rows, then rereads the facts those locks protect; no
+path acquires a capacity row while holding a cursor row. A failed preparation
+advances nothing. `least_used` and a headroom reserve are admitted once an
+adapter reports remaining capacity; that adapter defines the normalized
+quantity, the observation lifetime, and a deterministic secondary tie-break. The
+admission gate is the capacity report alone.
 
 A membership exclusion is reset-aware: a reported reset time clears it when that
 time passes, and only an exclusion carrying no reported reset is indefinite. The
@@ -328,15 +330,16 @@ profile then fails `credential_unavailable`, while a named profile is granted to
 a session with no repository because the credential is scoped to the session's
 dispatches. At lease admission the runner requires the exact granted name in its
 startup configuration, and absence rejects the claim before any executable
-capability is issued. Immediately before each dispatch the runner opens the
-configured path without following symlinks, requires a `0600` regular file owned
-by the effective user, reads at most 65,536 bytes, and drops trailing `\n` and
-`\r` bytes; empty, NUL-containing, unreadable, oversized, wrong-owner,
+capability is issued. Immediately before each dispatch, and again when
+provisioning a repository worktree whose clone is authenticated, the runner
+opens the configured path without following symlinks, requires a `0600` regular
+file owned by the effective user, reads at most 65,536 bytes, and drops trailing
+`\n` and `\r` bytes; empty, NUL-containing, unreadable, oversized, wrong-owner,
 wrong-mode, or non-regular files are typed unavailable failures. The value is
-scoped to that dispatch and never cached. It is supplied only under the
-configured environment name inside the bubblewrap namespace and never in
-arguments, remote URLs, Git configuration, the inherited environment, errors, or
-logs. Git tools use a fixed runner-owned credential helper bound to the
+scoped to that dispatch or provisioning and never cached. It is supplied only
+under the configured environment name inside the bubblewrap namespace and never
+in arguments, remote URLs, Git configuration, the inherited environment, errors,
+or logs. Git tools use a fixed runner-owned credential helper bound to the
 repository entry the dispatch resolved, the manifest's repository key for an
 existing worktree or the checked `repository` argument for `git_clone`; the
 helper returns the value only when the query's protocol, exact `github.com`

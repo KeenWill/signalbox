@@ -18,15 +18,18 @@ uses it.
 The environment supplies a fixed set of deployment values: the database URL, the
 catalog paths, the socket paths, the paths of the two integration credential
 files, the optional browser bind address and static-asset root, the log filter,
-and the telemetry settings. `DATABASE_URL` is the whole database channel, and a
-deployment carries every connection parameter in the URL. Whatever TLS mode the
-URL states, the production connection verifies the server certificate and
-hostname in full. Model-provider credential paths come from `file` profiles in
-the catalog; `ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An
-absent `SIGNALBOX_WEB_BIND` binds a loopback default, and an explicit socket
-must be a loopback address or configuration fails. The daemon's browser listener
-serves the `/api` routes on that bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names
-a production web build, the static files under that root; an empty root fails
+and the telemetry settings. An absent `SIGNALBOX_RUNNER_SOCKET_PATH` derives the
+runner socket by replacing the process socket path's final extension with
+`.runner.sock`, and the runner's `daemon_socket_path` dials that path.
+`DATABASE_URL` is the whole database channel, and a deployment carries every
+connection parameter in the URL. Whatever TLS mode the URL states, the
+production connection verifies the server certificate and hostname in full.
+Model-provider credential paths come from `file` profiles in the catalog;
+`ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An absent
+`SIGNALBOX_WEB_BIND` binds a loopback default, and an explicit socket must be a
+loopback address or configuration fails. The daemon's browser listener serves
+the `/api` routes on that bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names a
+production web build, the static files under that root; an empty root fails
 configuration and an absent one answers every other path 404. The DTOs and
 schemas under `crates/web-contract` are the authority for that surface, and the
 checked-in JavaScript decoders and TypeScript declarations are generated from
@@ -367,15 +370,18 @@ powers outside the grant channel.
 
 The daemon refers to a credential by its non-secret name everywhere except at
 the point of use. No credential value, credential file path, or database URL
-appears in a log, an error, or a durable record. The daemon redacts the exact
-credential value from provider text before it truncates that text. A credential
-for one repository never authorizes a request to another.
+appears in a log, an error, or a durable record. For a profile whose credential
+value the daemon resolves, the daemon redacts that exact value from provider
+text before it truncates the text; a delivery that gives the daemon no value
+receives credential-shape redaction instead. A credential for one repository
+never authorizes a request to another.
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
 identifiers. They never contain source bytes, host or credential paths, raw or
-unsanitized provider payloads, SQL, or user content; a tool failure may name a
-bounded workspace-relative path. Retained source content, such as an imported
-transcript entry, is not diagnostic evidence.
+unsanitized provider payloads, SQL, or user content other than a bounded,
+credential-redacted provider error body; a tool failure may name a bounded
+workspace-relative path. Retained source content, such as an imported transcript
+entry, is not diagnostic evidence.
 
 `HOME` locates the default PostgreSQL password file and must be a nonempty
 absolute path when a template uses a `$HOME/` prompt reference. The
