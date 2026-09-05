@@ -33,8 +33,9 @@ production web build, the static files under that root; an empty root fails
 configuration and an absent one answers every other path 404. The DTOs and
 schemas under `crates/web-contract` are the authority for that surface, and the
 checked-in JavaScript decoders and TypeScript declarations are generated from
-them. `RUST_LOG` admits one log level and nothing else; any other value warns
-and falls back to the INFO default.
+them. `RUST_LOG` admits one log level and nothing else; an empty or whitespace
+value selects the INFO default silently, as absence does, and any other value
+warns and falls back to it.
 
 `SIGNALBOX_OTLP_ENDPOINT` enables span export; its absence disables OTLP and
 makes every other OTLP setting inert. With the endpoint set, a general or
@@ -110,11 +111,12 @@ inventory.
 
 The optional `[tool_approval_postures]` table decides, per exact composed tool
 name, whether a request is approved by policy, judged by the approval judge, or
-parked for a person. The optional `[approval_judge]` table decides which
-configured direct selection judges delegated requests, and when it is absent the
-judge reuses the request-producing call's selection. The optional
-`[workspace_instructions]` table is either absent or present at version one, and
-its bounded `registered_roots` array names the instruction directories
+parked for a person; a tool whose declaration always confirms keeps that
+requirement under every posture but delegation. The optional `[approval_judge]`
+table decides which configured direct selection judges delegated requests, and
+when it is absent the judge reuses the request-producing call's selection. The
+optional `[workspace_instructions]` table is either absent or present at version
+one, and its bounded `registered_roots` array names the instruction directories
 registered outside a session's workspace.
 
 A credential profile names one account. Its `CredentialReference` is the
@@ -399,9 +401,10 @@ daemon's code-host tools use one fixed credential reference.
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
 identifiers. They never contain source bytes, host or credential paths, raw or
 unsanitized provider payloads, SQL, or user content other than a bounded,
-credential-redacted provider error body; a tool failure may name a bounded
-workspace-relative path. Retained source content, such as an imported transcript
-entry, is not diagnostic evidence.
+credential-redacted provider error body, except the rejection text a failed
+migration records; a tool failure may name a bounded workspace-relative path.
+Retained source content, such as an imported transcript entry, is not diagnostic
+evidence.
 
 `HOME` locates the default PostgreSQL password file and must be a nonempty
 absolute path when a template uses a `$HOME/` prompt reference. The
@@ -603,12 +606,14 @@ typed adapter defect, `UnconfiguredTarget`, never provider evidence.
 Dollar cost is derived only while reading a terminal call. An API-metered
 profile produces a real figure and a subscription profile a metered equivalent,
 regardless of adapter kind. A model with no configured rates, a missing profile
-declaration, an absent usage axis, or pre-pin input semantics produces no dollar
-figure rather than zero. Codex CLI and OpenAI report cache-inclusive input, so
-ordinary input is priced only when both cache axes are present and subtractable,
-and each cache rate is applied once. The inclusive-input meaning is pinned on
-the call when prepared, so a later configuration change reusing the target with
-another adapter cannot reinterpret historical usage.
+declaration, no reported usage axis, or pre-pin input semantics produces no
+dollar figure rather than zero, and an axis absent from an otherwise reported
+set is skipped rather than suppressing the figure. Codex CLI and OpenAI report
+cache-inclusive input, so ordinary input is priced only when both cache axes are
+present and subtractable, and each cache rate is applied once. The
+inclusive-input meaning is pinned on the call when prepared, so a later
+configuration change reusing the target with another adapter cannot reinterpret
+historical usage.
 
 The adapter invents no credential-value shape of its own; the profile's
 configured billing kind labels derived cost, and adapter kind and delivery do
@@ -631,14 +636,15 @@ into known-failure evidence. The plan tools require no credential profile,
 egress policy, or workspace root, and model arguments cannot select another
 session or storage adapter.
 
-Exact-value redaction is seeded with the credential resolved at preparation and
-retained in the request's one-shot capability, so it exists only for a profile
-whose value the daemon reads. Every provider-controlled text leaving such an
-adapter, and every checked string in a successful code-host result, is scrubbed
-of that value and its JSON-escaped form before it crosses into evidence. An
-`ambient` or `codex_home` profile gives the daemon no value, so a CLI child's
-output receives only the credential-shape redaction owned by
-[runtime substrate](runtime-substrate.md).
+Exact-value redaction is seeded with the credential a direct HTTP adapter
+resolves at preparation and retained in the request's one-shot capability, so it
+exists only for a profile whose value the daemon reads; a code-host tool instead
+resolves its fixed reference and builds its scrubber inside execution. Every
+provider-controlled text leaving such an adapter, and every checked string in a
+successful code-host result, is scrubbed of that value and its JSON-escaped form
+before it crosses into evidence. An `ambient` or `codex_home` profile gives the
+daemon no value, so a CLI child's output receives only the credential-shape
+redaction owned by [runtime substrate](runtime-substrate.md).
 
 ## Planned
 

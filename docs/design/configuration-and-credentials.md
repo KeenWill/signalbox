@@ -44,10 +44,12 @@ the `effective_from` of the successor installed with it. Declaring part of a
 rate set is a configuration error, and declaring no window yields no dollar
 figure. Two model entries naming one target agree on their complete window sets
 or complete absence. Cost derivation selects the window covering the call's
-execution timestamp on the channel pinned on the call. The present flat rate is
-one window across all time. The document root may carry an optional
-`[verified_through]` table mapping a provider name to a date; it is provenance
-metadata, never a resolution gate.
+execution timestamp on the channel pinned on the call. The present flat rate
+migrates into one `api`-channel window that keeps its four rates, starts before
+every stored call, never closes, and takes its provider and provenance pair from
+the operator, so it is one window across all time. The document root may carry
+an optional `[verified_through]` table mapping a provider name to a date; it is
+provenance metadata, never a resolution gate.
 
 Each `[[models]]` and `[[serving_targets]]` record admits `input_modalities`: a
 nonempty array from the closed set `text`, `image`, and `document` that rejects
