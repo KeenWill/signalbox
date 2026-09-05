@@ -38,14 +38,6 @@ impl ChildStackState {
             })
     }
 
-    pub(super) fn needs_merge_forward(&self) -> bool {
-        self.base_commits_not_in_head > 0
-    }
-
-    pub(super) fn number(&self) -> u32 {
-        self.number
-    }
-
     fn into_value(self) -> Value {
         json!({
             "base_commits_not_in_head": self.base_commits_not_in_head,
@@ -136,43 +128,6 @@ impl StackStateResult {
             children_truncated: fields.children_truncated,
             children_next_cursor: fields.children_next_cursor,
         })
-    }
-
-    pub(super) fn evidence_truncated(&self) -> bool {
-        self.children_truncated
-    }
-    pub(super) fn head_revision(&self) -> &str {
-        &self.head_revision
-    }
-
-    pub(super) fn needs_merge_forward(&self) -> bool {
-        self.base_commits_not_in_head > 0
-    }
-
-    pub(super) fn main_missing(&self) -> bool {
-        self.main_commits_not_in_base > 0
-    }
-
-    pub(super) fn child_needs_merge_forward(&self) -> bool {
-        self.children
-            .iter()
-            .any(ChildStackState::needs_merge_forward)
-    }
-
-    pub(super) fn child_numbers_needing_merge(&self) -> Vec<String> {
-        self.children
-            .iter()
-            .filter(|child| child.needs_merge_forward())
-            .map(|child| child.number().to_string())
-            .collect()
-    }
-
-    pub(super) fn base_ref(&self) -> &str {
-        &self.base_ref
-    }
-
-    pub(super) fn default_ref(&self) -> &str {
-        &self.default_ref
     }
 
     pub(super) fn into_value(self) -> Value {

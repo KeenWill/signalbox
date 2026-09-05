@@ -62,20 +62,6 @@ expired_pass_recovery_attempt_bound = "3s"
 expired_pass_recovery_lock_retry_delay = "6s"
 # Delay after an ambiguous expired-pass recovery failure.
 expired_pass_recovery_conservative_retry_delay = "120s"
-# Time allowed for one convergence census provider request.
-convergence_sweep_request_timeout = "30s"
-# GraphQL connection pages read for one convergence census.
-max_convergence_sweep_connection_pages = 100
-# Convergence census targets queried concurrently.
-max_concurrent_convergence_sweep_targets = 8
-# Transport attempts made for one convergence census request.
-max_convergence_sweep_request_attempts = 3
-# Delay between convergence census request attempts.
-convergence_sweep_request_retry_delay = "250ms"
-# Initial retry delay after a convergence census failure.
-convergence_sweep_retry_backoff_base = "60s"
-# Longest retry delay after repeated convergence census failures.
-convergence_sweep_retry_backoff_cap = "900s"
 # Stale turns terminalized during one liveness scan.
 terminalizations_per_liveness_scan = 64
 # Time allowed for one slot-held liveness recovery transaction.
@@ -84,12 +70,6 @@ turn_liveness_recovery_attempt_bound = "10s"
 automatic_reconciliations_per_liveness_scan = 64
 # Time allowed for one automatic reconciliation transaction.
 automatic_reconciliation_attempt_bound = "60s"
-# Credentialed targets retained by one convergence sweep.
-max_convergence_sweep_targets = 256
-# Longest configured convergence census interval.
-max_convergence_sweep_interval = "300s"
-# Longest configured delay after a convergence dispatch.
-max_convergence_sweep_cool_off = "1800s"
 # Initial delay before automatically resuming a failed goal turn.
 automatic_resume_base_backoff = "120s"
 # Longest delay between automatic goal resumption attempts.
@@ -463,14 +443,6 @@ allowed_origins = [
 # version = 1
 # signal_reviewers = ["signal-reviewer", "review-bot[bot]"]
 #
-# The sweep remains disabled unless this policy and at least one repository's
-# explicit pull-request list are both present. Deployments may lower, never
-# raise, the five-minute census and thirty-minute cool-off ceilings.
-# [repository_watch.convergence_sweep]
-# template = "review-response"
-# interval_seconds = 300
-# cool_off_seconds = 1800
-#
 # [repository_watch.webhook]
 # bind_address = "127.0.0.1:3333"
 # path = "/"
@@ -484,7 +456,6 @@ allowed_origins = [
 # repository = "namespace/project"
 # poll_interval_seconds = 3600
 # credential_file = "/run/credentials/repository-watch-namespace-project"
-# convergence_pull_requests = [892]
 # webhook_hook_id = 123456789
 # webhook_secret_file = "/etc/signalbox/github-webhook-secret"
 # webhook_mode = "primary"

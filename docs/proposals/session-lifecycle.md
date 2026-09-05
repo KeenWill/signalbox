@@ -129,12 +129,11 @@ this suspension, which is how an expired approval survives without failing its
 turn (the waiting rule above).
 
 **Proposed behavior.** Module machinery that parks its own targets today —
-`convergence_sweep_target` rows in `parked`, repo-watch external obligations
-with `parked_at` — must drive the session itself to core `parked` whenever the
-parked thing is or wraps a session. Module-internal parks may remain only for
-non-session obligations. No module state may hold a session waiting on a human
-outside core `parked` (§13); otherwise the operator-queue query above is
-incomplete.
+repo-watch external obligations with `parked_at` — must drive the session itself
+to core `parked` whenever the parked thing is or wraps a session.
+Module-internal parks may remain only for non-session obligations. No module
+state may hold a session waiting on a human outside core `parked` (§13);
+otherwise the operator-queue query above is incomplete.
 
 ## 2. Terminal outcomes
 

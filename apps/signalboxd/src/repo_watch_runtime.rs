@@ -24,16 +24,14 @@ use sha2::{Digest, Sha256};
 use signalbox_application::{
     EligibilityNudge, EligibilityNudgeOutcome, InProcessEligibilityNudge, RepoWatchBranchHead,
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
-    RepoWatchConvergenceAssessmentInput, RepoWatchDifferFailureKind, RepoWatchDispatchService,
+    RepoWatchCheckSuiteObservation, RepoWatchDifferFailureKind, RepoWatchDispatchService,
     RepoWatchDispatchTransaction, RepoWatchEventIdentityFrontierEntryV1,
     RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
     RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchObservationApplyV1,
     RepoWatchObservationPatchV1, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchReviewDecision, RepoWatchReviewObservation,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchStaleReviewClearanceCandidate, RepoWatchTargetedRefreshCoalescerV1,
+    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
+    RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshCoalescerV1,
     RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
     RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
     RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
@@ -54,8 +52,6 @@ use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest, RepoWatchCursor,
     RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchEventProducer,
-    RepoWatchObservedReviewState, RepoWatchPlannedStaleReviewClearance,
-    RepoWatchStaleReviewClearanceOutcome, RepoWatchStaleReviewClearanceRenewal,
     RepoWatchStoreError,
 };
 use signalbox_persistence::repo_watch_dispatch::{
@@ -112,12 +108,6 @@ const MAX_POLL_WIRE_BYTES: usize = 768 * 1024 * 1024;
 // and therefore multiplies by the configured repository count. Deliberately not
 // raised with the per-attempt bound: transfer is transient, retention is not.
 const MAX_CACHED_WIRE_BYTES: usize = 64 * 1024 * 1024;
-const NON_GATING_CHECK_NAME_MARKERS: [&str; 4] = [
-    "report only",
-    "coderabbit",
-    "codecov/project",
-    "codecov/patch",
-];
 const WEBHOOK_PENDING_PAGE_SIZE: NonZeroU16 =
     NonZeroU16::new(25).expect("webhook pending page size is positive");
 const WEBHOOK_DRAIN_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -224,96 +214,6 @@ query RepositoryWatchReviewThreads(
       reviewThreads(first: 100, after: $after) {
         nodes { id isResolved }
         pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-"#;
-
-const CONVERGENCE_QUERY: &str = r#"
-query RepositoryWatchConvergence(
-  $namespace: String!, $name: String!, $number: Int!, $after: String
-) {
-  repository(owner: $namespace, name: $name) {
-    pullRequest(number: $number) {
-      headRefOid
-      baseRefName
-      baseRefOid
-      mergeable
-      reviewDecision
-      commits(last: 1) {
-        nodes {
-          commit {
-            oid
-            statusCheckRollup {
-              contexts(first: 100, after: $after) {
-                nodes {
-                  __typename
-                  ... on CheckRun { name status conclusion }
-                  ... on StatusContext { context state }
-                }
-                pageInfo { hasNextPage endCursor }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"#;
-
-const BLOCKING_REVIEWS_QUERY: &str = r#"
-query RepositoryWatchBlockingReviews(
-  $namespace: String!, $name: String!, $number: Int!, $after: String
-) {
-  repository(owner: $namespace, name: $name) {
-    pullRequest(number: $number) {
-      headRefOid
-      baseRefOid
-      reviewDecision
-      latestOpinionatedReviews(first: 100, after: $after) {
-        nodes {
-          id
-          state
-          author { login }
-          commit { oid }
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-"#;
-
-const DISMISS_REVIEW_MUTATION: &str = r#"
-mutation RepositoryWatchDismissReview($review: ID!, $message: String!) {
-  dismissPullRequestReview(
-    input: {pullRequestReviewId: $review, message: $message}
-  ) {
-    pullRequestReview { id state }
-  }
-}
-"#;
-
-const REVIEW_CLEARANCE_STATE_QUERY: &str = r#"
-query RepositoryWatchReviewClearanceState($review: ID!, $after: String) {
-  node(id: $review) {
-    ... on PullRequestReview {
-      id
-      state
-      commit { oid }
-      pullRequest {
-        number
-        state
-        headRefOid
-        baseRefName
-        baseRefOid
-        reviewDecision
-        latestOpinionatedReviews(first: 100, after: $after) {
-          nodes { id }
-          pageInfo { hasNextPage endCursor }
-        }
       }
     }
   }
@@ -3662,40 +3562,6 @@ impl RepositoryWatchTask {
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }
         }
-        let mut processed = 0_usize;
-        loop {
-            match self
-                .dispatch_store
-                .process_next_convergence_cutoff(&self.repository, || {
-                    DurableCommandId::from_uuid(uuid::Uuid::now_v7())
-                })
-                .await
-            {
-                Ok(true) => {
-                    processed = processed.saturating_add(1);
-                    if self.yield_after_reconciliation_quantum("convergence_cutoff", processed) {
-                        return Ok(());
-                    }
-                }
-                Ok(false) => break,
-                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
-                    error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
-                )) => {
-                    tracing::error!(
-                        repository = %self.repository.as_str(),
-                        cause_code = "repository_watch_convergence_cutoff_corruption",
-                        error = %error,
-                        "repository-watch convergence cutoff quarantined a corrupt goal; dispatch processing continues"
-                    );
-                    processed = processed.saturating_add(1);
-                    if self.yield_after_reconciliation_quantum("convergence_cutoff", processed) {
-                        return Ok(());
-                    }
-                    continue;
-                }
-                Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
-            }
-        }
         Ok(())
     }
 
@@ -3851,7 +3717,6 @@ impl RepositoryWatchTask {
             RepoWatchRuleEvaluationOutcome::NotMatched
             | RepoWatchRuleEvaluationOutcome::Inactive
             | RepoWatchRuleEvaluationOutcome::TargetClosed
-            | RepoWatchRuleEvaluationOutcome::TargetConverged
             | RepoWatchRuleEvaluationOutcome::Occupied
             | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }
@@ -3920,18 +3785,6 @@ impl RepositoryWatchTask {
             previous,
             merged_pull_request_baselines,
         )?;
-        let retained_pull_requests = compacted
-            .observation
-            .state()
-            .pull_requests()
-            .iter()
-            .map(|pull_request| pull_request.context().number())
-            .collect::<HashSet<_>>();
-        let convergence = polled
-            .convergence
-            .into_iter()
-            .filter(|assessment| retained_pull_requests.contains(&assessment.number()))
-            .collect();
         Ok(PreparedCompletePoll {
             cursor_generation,
             candidate:
@@ -3942,8 +3795,6 @@ impl RepositoryWatchTask {
                 )
                 .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
             events,
-            convergence,
-            stale_review_clearances: polled.stale_review_clearances,
         })
     }
 
@@ -3954,14 +3805,13 @@ impl RepositoryWatchTask {
     ) -> Result<(), RepositoryWatchAttemptError> {
         let outcome = self
             .store
-            .commit_with_convergence(
+            .commit_complete_poll(
                 &self.repository,
                 RepoWatchCommitRequest::new(
                     prepared.cursor_generation,
                     prepared.candidate,
                     prepared.events,
                 ),
-                &prepared.convergence,
             )
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
@@ -3969,7 +3819,6 @@ impl RepositoryWatchTask {
             RepoWatchCommitOutcome::Committed(cursor)
             | RepoWatchCommitOutcome::Replayed(cursor)
             | RepoWatchCommitOutcome::Unchanged(cursor) => {
-                // Published before the clearance sweep rather than after it.
                 // The cursor is durable at this point, so the freshness this
                 // poll recorded is legitimately tied to a committed generation,
                 // and clearance revalidation reads exactly that entry to decide
@@ -3979,59 +3828,6 @@ impl RepositoryWatchTask {
                 // no review would ever be dismissed. A failed attempt still
                 // invalidates every entry on its way out.
                 self.poller.publish_freshness(cursor.generation());
-                self.reconcile_pending_stale_review_clearances().await?;
-                let planned_clearances = self
-                    .store
-                    .plan_stale_review_clearances(
-                        &self.repository,
-                        cursor.generation(),
-                        &prepared.stale_review_clearances,
-                    )
-                    .await
-                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-                for clearance in &planned_clearances {
-                    if !self
-                        .poller
-                        .revalidate_stale_review_clearance(clearance, cursor.generation())
-                        .await?
-                    {
-                        self.store
-                            .release_stale_review_clearance_claim(
-                                clearance.clearance_id(),
-                                clearance.claim_token(),
-                            )
-                            .await
-                            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-                        continue;
-                    }
-                    if self
-                        .store
-                        .renew_stale_review_clearance_claim(
-                            clearance.clearance_id(),
-                            clearance.claim_token(),
-                        )
-                        .await
-                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?
-                        == RepoWatchStaleReviewClearanceRenewal::Lost
-                    {
-                        continue;
-                    }
-                    self.poller
-                        .dismiss_review_node(DismissReviewInput {
-                            review_node_id: clearance.review_node_id(),
-                            dismissal_message: clearance.dismissal_message(),
-                        })
-                        .await?;
-                    self.store
-                        .record_stale_review_clearance_outcome(
-                            clearance.clearance_id(),
-                            clearance.claim_token(),
-                            RepoWatchStaleReviewClearanceOutcome::Dismissed,
-                            RepoWatchObservedReviewState::Dismissed,
-                        )
-                        .await
-                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-                }
                 // A full poll is the complete reconciliation sweep, so the
                 // cursor it commits supersedes everything the webhook stream
                 // had accumulated in memory. It is not handed over here: this
@@ -4050,74 +3846,6 @@ impl RepositoryWatchTask {
                 Err(RepositoryWatchAttemptError::Persistence)
             }
         }
-    }
-
-    async fn reconcile_pending_stale_review_clearances(
-        &self,
-    ) -> Result<(), RepositoryWatchAttemptError> {
-        let pending = self
-            .store
-            .claim_pending_stale_review_clearances(&self.repository)
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        for clearance in &pending {
-            // Observing a batch row costs provider requests, so a deeply
-            // paginated batch can outlive the two-minute lease taken when it
-            // was claimed. Re-establish ownership immediately before each row:
-            // a lease another watcher has since taken belongs to that watcher,
-            // and skipping the row leaves it to them instead of acting twice.
-            if self
-                .store
-                .renew_stale_review_clearance_claim(
-                    clearance.clearance_id(),
-                    clearance.claim_token(),
-                )
-                .await
-                .map_err(|_| RepositoryWatchAttemptError::Persistence)?
-                == RepoWatchStaleReviewClearanceRenewal::Lost
-            {
-                continue;
-            }
-            match self
-                .poller
-                .observe_stale_review_clearance(clearance)
-                .await?
-            {
-                StaleReviewClearanceObservation::StillBlocking => {
-                    self.store
-                        .release_stale_review_clearance_claim(
-                            clearance.clearance_id(),
-                            clearance.claim_token(),
-                        )
-                        .await
-                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-                }
-                StaleReviewClearanceObservation::Terminal {
-                    outcome,
-                    provider_state,
-                } => {
-                    // The lease can still expire between the renewal above and
-                    // this write. That intent now belongs to its new claimant,
-                    // whose own scan will settle it; failing the attempt here
-                    // would instead abandon every row the batch has left.
-                    match self
-                        .store
-                        .record_stale_review_clearance_outcome(
-                            clearance.clearance_id(),
-                            clearance.claim_token(),
-                            outcome,
-                            provider_state,
-                        )
-                        .await
-                    {
-                        Ok(()) => {}
-                        Err(RepoWatchStoreError::StaleReviewClearanceMismatch) => continue,
-                        Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -4219,8 +3947,6 @@ struct PreparedCompletePoll {
     cursor_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
     events: Vec<RepoWatchEventOccurrenceV1>,
-    convergence: Vec<RepoWatchConvergenceAssessment>,
-    stale_review_clearances: Vec<RepoWatchStaleReviewClearanceCandidate>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5315,9 +5041,7 @@ async fn drain_pull_request_fetches<T: 'static>(
 
 struct PullRequestFreshness {
     updated_at: String,
-    head_sha: CommitSha,
     settlement: PullRequestSettlement,
-    gating_check_inventory: Vec<String>,
     skipped_polls: usize,
     // A fetch that never reached the durable cursor must not authorize reuse:
     // the next attempt would compare this updated_at against a stale committed
@@ -5336,62 +5060,15 @@ struct ListedPullRequest {
 struct FetchedPullRequest {
     state: RepoWatchPullRequestState,
     settlement: PullRequestSettlement,
-    convergence_evidence: FetchedConvergenceEvidence,
-}
-
-struct FetchedConvergenceEvidence {
-    base_revision: CommitSha,
-    gating_checks_settled: bool,
-    gating_check_inventory_quiesced: bool,
-    gating_check_inventory: Vec<String>,
-    review_decision: RepoWatchReviewDecision,
-    gating_check_count: u64,
-    non_green_gating_checks: Vec<CheckRunName>,
-}
-
-impl FetchedConvergenceEvidence {
-    fn assess(
-        self,
-        state: &RepoWatchPullRequestState,
-        base_revision: CommitSha,
-    ) -> Result<RepoWatchConvergenceAssessment, RepositoryWatchAttemptError> {
-        if self.base_revision != base_revision {
-            return Err(RepositoryWatchAttemptError::InvalidResponse);
-        }
-        RepoWatchConvergenceAssessment::try_new(RepoWatchConvergenceAssessmentInput {
-            number: state.context().number(),
-            head_sha: state.context().head_sha().clone(),
-            base_branch: state.context().base_branch().clone(),
-            base_revision,
-            mergeable_state: state.mergeable_state(),
-            settled: self.gating_checks_settled
-                && self.gating_check_inventory_quiesced
-                && state.mergeable_state() != MergeableState::Unknown,
-            review_decision: self.review_decision,
-            unresolved_threads: state
-                .threads()
-                .iter()
-                .filter(|thread| thread.state() == RepoWatchThreadState::Open)
-                .map(|thread| thread.thread().clone())
-                .collect(),
-            gating_check_count: self.gating_check_count,
-            non_green_gating_checks: self.non_green_gating_checks,
-        })
-        .map_err(|_| RepositoryWatchAttemptError::Normalization)
-    }
 }
 
 struct PolledRepository {
     observation: RepoWatchObservation,
-    convergence: Vec<RepoWatchConvergenceAssessment>,
-    stale_review_clearances: Vec<RepoWatchStaleReviewClearanceCandidate>,
 }
 
 #[derive(Debug)]
 struct FetchedPullRequests {
     states: Vec<RepoWatchPullRequestState>,
-    convergence: Vec<RepoWatchConvergenceAssessment>,
-    stale_review_clearances: Vec<RepoWatchStaleReviewClearanceCandidate>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5578,10 +5255,6 @@ impl GitHubRepositoryPoller {
                 }
             }
         }
-        // Anchor convergence assessments to the same branch-head snapshot that
-        // will be committed in the cursor. Pull-request hydration is the long
-        // phase of a poll, so reading branch heads afterwards creates a broad
-        // window in which an ordinary base advance invalidates all evidence.
         let branch_heads = self.fetch_branch_heads().await?;
         let pull_requests = self
             .fetch_pull_requests(
@@ -5611,8 +5284,6 @@ impl GitHubRepositoryPoller {
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         Ok(PolledRepository {
             observation: RepoWatchObservation::new(self.signal_reviewers.clone(), state),
-            convergence: pull_requests.convergence,
-            stale_review_clearances: pull_requests.stale_review_clearances,
         })
     }
 
@@ -5652,37 +5323,10 @@ impl GitHubRepositoryPoller {
         let mut pull_requests = collected?;
         pull_requests.sort_by_key(|pull_request| pull_request.state.context().number().get());
         let mut states = Vec::with_capacity(pull_requests.len());
-        let mut convergence = Vec::with_capacity(pull_requests.len());
-        let mut stale_review_clearances = Vec::new();
         for pull_request in pull_requests {
-            let base_revision = branch_heads
-                .iter()
-                .find(|branch_head| {
-                    branch_head.branch() == pull_request.state.context().base_branch()
-                })
-                .map(|branch_head| branch_head.head().clone())
-                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-            let assessment = pull_request
-                .convergence_evidence
-                .assess(&pull_request.state, base_revision)?;
-            // Clearance candidates are read from the assessment, which only
-            // exists once the snapshot's base revision is known, so this runs
-            // here rather than in the per-pull-request fetch task. The lookup
-            // returns immediately unless a changes-requested review is the sole
-            // remaining blocker, so the serial call costs nothing in the common
-            // case.
-            if pull_request.state.lifecycle() == RepoWatchPullRequestLifecycle::Open {
-                stale_review_clearances
-                    .extend(self.fetch_stale_review_clearances(&assessment).await?);
-            }
-            convergence.push(assessment);
             states.push(pull_request.state);
         }
-        Ok(FetchedPullRequests {
-            states,
-            convergence,
-            stale_review_clearances,
-        })
+        Ok(FetchedPullRequests { states })
     }
 
     /// Joins every child fetch a cancelled attempt left behind. The repository
@@ -5805,50 +5449,23 @@ impl GitHubRepositoryPoller {
             && self.pull_request_detail_is_reusable(number, listed, previous, cursor_generation)
         {
             let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
-            let mut convergence_evidence =
-                self.fetch_convergence_evidence(previous.context()).await?;
-            convergence_evidence.gating_check_inventory_quiesced = self
-                .gating_check_inventory_quiesced(
-                    number,
-                    listed,
-                    cursor_generation,
-                    &convergence_evidence.gating_check_inventory,
-                );
             let threads = self.fetch_threads(number).await?;
             let reactions = self
                 .fetch_reactions(number, Some(previous.reactions()))
                 .await?;
             self.record_skipped_poll(number);
-            self.record_gating_check_inventory(
-                number,
-                listed,
-                convergence_evidence.gating_check_inventory.clone(),
-            );
             let state = reuse_pull_request(previous, reviews, threads, reactions)?;
             return Ok(FetchedPullRequest {
                 state,
                 settlement: PullRequestSettlement::Settled,
-                convergence_evidence,
             });
         }
-        let mut fetched = self
+        let fetched = self
             .fetch_pull_request(number, previous_pull_request)
             .await?;
         match listed_pull_request {
             Some(listed) => {
-                fetched.convergence_evidence.gating_check_inventory_quiesced = self
-                    .gating_check_inventory_quiesced(
-                        number,
-                        listed,
-                        cursor_generation,
-                        &fetched.convergence_evidence.gating_check_inventory,
-                    );
-                self.record_fetched_pull_request(
-                    number,
-                    listed,
-                    fetched.settlement,
-                    fetched.convergence_evidence.gating_check_inventory.clone(),
-                );
+                self.record_fetched_pull_request(number, listed, fetched.settlement);
             }
             None => self.forget_pull_request(number),
         }
@@ -5878,50 +5495,17 @@ impl GitHubRepositoryPoller {
         }
     }
 
-    fn gating_check_inventory_quiesced(
-        &self,
-        number: u64,
-        listed: &ListedPullRequest,
-        cursor_generation: Option<RepoWatchCursorGeneration>,
-        gating_check_inventory: &[String],
-    ) -> bool {
-        self.freshness().get(&number).is_some_and(|freshness| {
-            freshness.published_generation == cursor_generation
-                && cursor_generation.is_some()
-                && freshness.updated_at == listed.updated_at
-                && freshness.head_sha == listed.head_sha
-                && freshness.gating_check_inventory == gating_check_inventory
-        })
-    }
-
-    fn record_gating_check_inventory(
-        &self,
-        number: u64,
-        listed: &ListedPullRequest,
-        gating_check_inventory: Vec<String>,
-    ) {
-        if let Some(freshness) = self.freshness().get_mut(&number) {
-            freshness.updated_at = listed.updated_at.clone();
-            freshness.head_sha = listed.head_sha.clone();
-            freshness.gating_check_inventory = gating_check_inventory;
-            freshness.published_generation = None;
-        }
-    }
-
     fn record_fetched_pull_request(
         &self,
         number: u64,
         listed: &ListedPullRequest,
         settlement: PullRequestSettlement,
-        gating_check_inventory: Vec<String>,
     ) {
         self.freshness().insert(
             number,
             PullRequestFreshness {
                 updated_at: listed.updated_at.clone(),
-                head_sha: listed.head_sha.clone(),
                 settlement,
-                gating_check_inventory,
                 skipped_polls: 0,
                 published_generation: None,
             },
@@ -6004,7 +5588,6 @@ impl GitHubRepositoryPoller {
                 previous_pull_request.map(RepoWatchPullRequestState::reviews),
             )
             .await?;
-        let convergence_evidence = self.fetch_convergence_evidence(&context).await?;
         let threads = self.fetch_threads(number).await?;
         let reactions = self
             .fetch_reactions(
@@ -6023,11 +5606,7 @@ impl GitHubRepositoryPoller {
             reactions,
         })
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        Ok(FetchedPullRequest {
-            state,
-            settlement,
-            convergence_evidence,
-        })
+        Ok(FetchedPullRequest { state, settlement })
     }
 
     async fn fetch_check_suites(
@@ -6140,7 +5719,7 @@ impl GitHubRepositoryPoller {
                             .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                         normalize_conclusion(run.conclusion.as_deref())?,
                     ));
-                } else if !is_non_gating_check_name(&run.name) {
+                } else {
                     every_run_completed = false;
                 }
             }
@@ -6269,489 +5848,6 @@ impl GitHubRepositoryPoller {
                 return Ok(observations);
             }
             after = connection.page_info.end_cursor;
-            if after.is_none() {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            page = next_page(page)?;
-        }
-    }
-
-    async fn fetch_convergence_evidence(
-        &self,
-        context: &PullRequestEventContext,
-    ) -> Result<FetchedConvergenceEvidence, RepositoryWatchAttemptError> {
-        let (namespace, name) = self
-            .repository
-            .as_str()
-            .split_once('/')
-            .ok_or(RepositoryWatchAttemptError::Normalization)?;
-        let number = i64::try_from(context.number().get())
-            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        let mut after: Option<String> = None;
-        let mut page = 1_u16;
-        let mut gating_check_count = 0_u64;
-        let mut gating_checks_settled = true;
-        let mut gating_check_inventory = Vec::new();
-        let mut non_green_gating_checks = Vec::new();
-        let mut retained_review_decision = None;
-        let mut retained_base_revision = None;
-        loop {
-            let body = serde_json::to_vec(&GraphQlRequest {
-                query: CONVERGENCE_QUERY,
-                variables: ThreadVariables {
-                    namespace,
-                    name,
-                    number,
-                    after: after.as_deref(),
-                },
-            })
-            .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
-            let response: GraphQlEnvelope<ConvergenceData> = self
-                .conditional_json(
-                    "convergence",
-                    Method::POST,
-                    self.graphql_url.clone(),
-                    Some(body),
-                )
-                .await?;
-            if !response.errors.is_empty() {
-                return Err(graphql_envelope_error(&response.errors));
-            }
-            let pull_request = response
-                .data
-                .and_then(|data| data.repository)
-                .and_then(|repository| repository.pull_request)
-                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-            let _provider_mergeable_state = normalize_graphql_mergeable(&pull_request.mergeable)?;
-            if pull_request.head_ref_oid != context.head_sha().as_str()
-                || pull_request.base_ref_name != context.base_branch().as_str()
-            {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            if retained_base_revision
-                .replace(pull_request.base_ref_oid.clone())
-                .is_some_and(|retained| retained != pull_request.base_ref_oid)
-            {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            let review_decision =
-                normalize_review_decision(pull_request.review_decision.as_deref())?;
-            if retained_review_decision
-                .replace(review_decision)
-                .is_some_and(|retained| retained != review_decision)
-            {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            let [commit_node] = pull_request.commits.nodes.as_slice() else {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            };
-            let commit = &commit_node.commit;
-            if commit.oid != pull_request.head_ref_oid {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            let Some(rollup) = commit.status_check_rollup.as_ref() else {
-                if page != 1 {
-                    return Err(RepositoryWatchAttemptError::InvalidResponse);
-                }
-                break;
-            };
-            for check in &rollup.contexts.nodes {
-                if check.is_report_only() {
-                    continue;
-                }
-                gating_check_inventory.push(check.name().to_owned());
-                gating_check_count = gating_check_count
-                    .checked_add(1)
-                    .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
-                if !check.complete() {
-                    gating_checks_settled = false;
-                }
-                if !check.green() {
-                    non_green_gating_checks.push(
-                        CheckRunName::try_new(check.name().to_owned())
-                            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
-                    );
-                }
-            }
-            if !rollup.contexts.page_info.has_next_page {
-                break;
-            }
-            after = rollup.contexts.page_info.end_cursor.clone();
-            if after.is_none() {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            page = next_page(page)?;
-        }
-        let base_revision = CommitSha::try_new(
-            retained_base_revision.ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
-        )
-        .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        gating_check_inventory.sort_unstable();
-        Ok(FetchedConvergenceEvidence {
-            base_revision,
-            gating_checks_settled,
-            // Quiescence is not a property of one check-rollup read: it takes a
-            // second observation to say the inventory stopped growing. This
-            // read cannot know that, so it reports the conservative default and
-            // every caller replaces it with the verdict
-            // `GitHubRepositoryPoller::gating_check_inventory_quiesced` reads
-            // from the freshness the last committed cursor published. A caller
-            // that leaves the default in place reports every head unsettled.
-            gating_check_inventory_quiesced: false,
-            gating_check_inventory,
-            review_decision: retained_review_decision
-                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
-            gating_check_count,
-            non_green_gating_checks,
-        })
-    }
-
-    async fn fetch_stale_review_clearances(
-        &self,
-        assessment: &RepoWatchConvergenceAssessment,
-    ) -> Result<Vec<RepoWatchStaleReviewClearanceCandidate>, RepositoryWatchAttemptError> {
-        // Mirrors the candidate rule so a head that cannot yield a candidate
-        // costs no provider request. The domain type re-checks every gate.
-        if assessment.review_decision() != RepoWatchReviewDecision::ChangesRequested
-            || !assessment.unresolved_threads().is_empty()
-            || !assessment.non_green_gating_checks().is_empty()
-            || !assessment.settled()
-            || assessment.gating_check_count() == 0
-            || assessment.mergeable_state() == MergeableState::Conflicting
-        {
-            return Ok(Vec::new());
-        }
-        let (namespace, name) = self
-            .repository
-            .as_str()
-            .split_once('/')
-            .ok_or(RepositoryWatchAttemptError::Normalization)?;
-        let number = i64::try_from(assessment.number().get())
-            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        let mut after: Option<String> = None;
-        let mut page = 1_u16;
-        let mut candidates = Vec::new();
-        loop {
-            let body = serde_json::to_vec(&GraphQlRequest {
-                query: BLOCKING_REVIEWS_QUERY,
-                variables: ThreadVariables {
-                    namespace,
-                    name,
-                    number,
-                    after: after.as_deref(),
-                },
-            })
-            .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
-            let response: GraphQlEnvelope<BlockingReviewData> = self
-                .conditional_json(
-                    "blocking-reviews",
-                    Method::POST,
-                    self.graphql_url.clone(),
-                    Some(body),
-                )
-                .await?;
-            if !response.errors.is_empty() {
-                return Err(graphql_envelope_error(&response.errors));
-            }
-            let pull_request = response
-                .data
-                .and_then(|data| data.repository)
-                .and_then(|repository| repository.pull_request)
-                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-            if pull_request.head_ref_oid != assessment.head_sha().as_str()
-                || pull_request.base_ref_oid != assessment.base_revision().as_str()
-                || normalize_review_decision(pull_request.review_decision.as_deref())?
-                    != RepoWatchReviewDecision::ChangesRequested
-            {
-                return Ok(Vec::new());
-            }
-            for review in pull_request.latest_opinionated_reviews.nodes {
-                if review.state != "CHANGES_REQUESTED" {
-                    continue;
-                }
-                let Some(author) = review.author else {
-                    return Ok(Vec::new());
-                };
-                let reviewer = RepoWatchAuthorLogin::try_new(author.login)
-                    .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-                let Some(commit) = review.commit else {
-                    return Ok(Vec::new());
-                };
-                let reviewed_head_sha = CommitSha::try_new(commit.oid)
-                    .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-                if &reviewed_head_sha == assessment.head_sha() {
-                    return Ok(Vec::new());
-                }
-                candidates.push(
-                    RepoWatchStaleReviewClearanceCandidate::try_new(
-                        assessment,
-                        review.id,
-                        reviewer,
-                        reviewed_head_sha,
-                    )
-                    .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?,
-                );
-            }
-            if !pull_request
-                .latest_opinionated_reviews
-                .page_info
-                .has_next_page
-            {
-                candidates.sort_by(|left, right| left.review_node_id().cmp(right.review_node_id()));
-                return Ok(candidates);
-            }
-            after = pull_request.latest_opinionated_reviews.page_info.end_cursor;
-            if after.is_none() {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            page = next_page(page)?;
-        }
-    }
-
-    /// Re-reads the provider immediately before a dismissal and reports
-    /// whether the planned clearance still holds against live evidence.
-    ///
-    /// `cursor_generation` is the generation the poll that raised this
-    /// candidate committed, and the freshness it published is what proves the
-    /// gating-check inventory has stood still: a candidate is only admissible
-    /// when the inventory this re-read observes is the one that committed
-    /// generation recorded for the same head and update stamp.
-    async fn revalidate_stale_review_clearance(
-        &self,
-        clearance: &RepoWatchPlannedStaleReviewClearance,
-        cursor_generation: RepoWatchCursorGeneration,
-    ) -> Result<bool, RepositoryWatchAttemptError> {
-        let number_text = clearance.number().get().to_string();
-        let detail: PullResponse = self
-            .conditional_json(
-                "pull-clearance-revalidation",
-                Method::GET,
-                self.repository_url(&["pulls", &number_text], &[])?,
-                None,
-            )
-            .await?;
-        if detail.number != clearance.number().get()
-            || normalize_lifecycle(&detail)? != RepoWatchPullRequestLifecycle::Open
-        {
-            return Ok(false);
-        }
-        let head_sha = CommitSha::try_new(detail.head.sha.clone())
-            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        if &head_sha != clearance.current_head_sha() {
-            return Ok(false);
-        }
-        let base_branch = BranchName::try_new(detail.base.reference.clone())
-            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        if &base_branch != clearance.base_branch() {
-            return Ok(false);
-        }
-        let mergeable_state = match detail.mergeable {
-            Some(true) => MergeableState::Mergeable,
-            Some(false) => MergeableState::Conflicting,
-            None => MergeableState::Unknown,
-        };
-        let context = normalize_pull_request_context(&detail, head_sha.clone(), None)?;
-        let mut evidence = self.fetch_convergence_evidence(&context).await?;
-        // The same quiescence rule the polling path applies, against the same
-        // published freshness. Here the two observations being compared are the
-        // committed poll that raised this candidate and this pre-dismissal
-        // re-read, so a gating check that appeared in between leaves the head
-        // unsettled and the review undismissed until a later poll sees the
-        // inventory hold still.
-        let listed = ListedPullRequest {
-            updated_at: detail.updated_at.clone(),
-            head_sha: head_sha.clone(),
-        };
-        evidence.gating_check_inventory_quiesced = self.gating_check_inventory_quiesced(
-            clearance.number().get(),
-            &listed,
-            Some(cursor_generation),
-            &evidence.gating_check_inventory,
-        );
-        if &evidence.base_revision != clearance.base_revision()
-            || evidence.review_decision != RepoWatchReviewDecision::ChangesRequested
-            || !evidence.non_green_gating_checks.is_empty()
-            || mergeable_state == MergeableState::Conflicting
-        {
-            return Ok(false);
-        }
-        let unresolved_threads = self
-            .fetch_threads(clearance.number().get())
-            .await?
-            .into_iter()
-            .filter(|thread| thread.state() == RepoWatchThreadState::Open)
-            .map(|thread| thread.thread().clone())
-            .collect::<Vec<_>>();
-        if !unresolved_threads.is_empty() {
-            return Ok(false);
-        }
-        let assessment =
-            RepoWatchConvergenceAssessment::try_new(RepoWatchConvergenceAssessmentInput {
-                number: clearance.number(),
-                head_sha: clearance.current_head_sha().clone(),
-                base_branch: clearance.base_branch().clone(),
-                base_revision: evidence.base_revision,
-                mergeable_state,
-                // Clearance candidacy does consult this, and refuses every
-                // unsettled head, so it is computed from the same evidence the
-                // polling path uses: finished exact-head checks, an inventory
-                // quiesced against the published freshness above, and a decided
-                // mergeable state.
-                settled: evidence.gating_checks_settled
-                    && evidence.gating_check_inventory_quiesced
-                    && mergeable_state != MergeableState::Unknown,
-                review_decision: evidence.review_decision,
-                unresolved_threads,
-                gating_check_count: evidence.gating_check_count,
-                non_green_gating_checks: evidence.non_green_gating_checks,
-            })
-            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        let candidates = self.fetch_stale_review_clearances(&assessment).await?;
-        Ok(candidates.iter().any(|candidate| {
-            candidate.review_node_id() == clearance.review_node_id()
-                && candidate.reviewed_head_sha() == clearance.reviewed_head_sha()
-        }))
-    }
-
-    async fn dismiss_review_node(
-        &self,
-        input: DismissReviewInput<'_>,
-    ) -> Result<(), RepositoryWatchAttemptError> {
-        let DismissReviewInput {
-            review_node_id,
-            dismissal_message,
-        } = input;
-        let body = serde_json::to_vec(&GraphQlRequest {
-            query: DISMISS_REVIEW_MUTATION,
-            variables: DismissReviewVariables {
-                review: review_node_id,
-                message: dismissal_message,
-            },
-        })
-        .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
-        let response: GraphQlEnvelope<DismissReviewData> = self
-            .conditional_json(
-                "dismiss-review",
-                Method::POST,
-                self.graphql_url.clone(),
-                Some(body),
-            )
-            .await?;
-        if !response.errors.is_empty() {
-            return Err(graphql_envelope_error(&response.errors));
-        }
-        let review = response
-            .data
-            .and_then(|data| data.dismiss_pull_request_review)
-            .and_then(|payload| payload.pull_request_review)
-            .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-        if review.id != review_node_id || review.state != "DISMISSED" {
-            return Err(RepositoryWatchAttemptError::InvalidResponse);
-        }
-        Ok(())
-    }
-
-    async fn observe_stale_review_clearance(
-        &self,
-        clearance: &RepoWatchPlannedStaleReviewClearance,
-    ) -> Result<StaleReviewClearanceObservation, RepositoryWatchAttemptError> {
-        let mut after: Option<String> = None;
-        let mut page = 1_u16;
-        loop {
-            let body = serde_json::to_vec(&GraphQlRequest {
-                query: REVIEW_CLEARANCE_STATE_QUERY,
-                variables: ReviewNodeVariables {
-                    review: clearance.review_node_id(),
-                    after: after.as_deref(),
-                },
-            })
-            .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
-            let response: GraphQlEnvelope<ReviewClearanceStateData> = self
-                .conditional_json(
-                    "review-clearance-state",
-                    Method::POST,
-                    self.graphql_url.clone(),
-                    Some(body),
-                )
-                .await?;
-            if !response.errors.is_empty() {
-                return Err(graphql_envelope_error(&response.errors));
-            }
-            let review = response
-                .data
-                .and_then(|data| data.node)
-                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-            if review.id != clearance.review_node_id()
-                || review.pull_request.number != clearance.number().get()
-            {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            let provider_state = normalize_observed_review_state(&review.state)?;
-            if let Some(outcome) = terminal_clearance_outcome(provider_state) {
-                return Ok(StaleReviewClearanceObservation::Terminal {
-                    outcome,
-                    provider_state,
-                });
-            }
-            match review.pull_request.state.as_str() {
-                "OPEN" => {}
-                "CLOSED" | "MERGED" => {
-                    return Ok(StaleReviewClearanceObservation::Terminal {
-                        outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
-                        provider_state,
-                    });
-                }
-                _ => return Err(RepositoryWatchAttemptError::InvalidResponse),
-            }
-            if review.pull_request.head_ref_oid != clearance.current_head_sha().as_str()
-                || review.pull_request.base_ref_name != clearance.base_branch().as_str()
-                || review.pull_request.base_ref_oid != clearance.base_revision().as_str()
-            {
-                return Ok(StaleReviewClearanceObservation::Terminal {
-                    outcome: RepoWatchStaleReviewClearanceOutcome::Superseded,
-                    provider_state,
-                });
-            }
-            if review
-                .commit
-                .as_ref()
-                .is_some_and(|commit| commit.oid != clearance.reviewed_head_sha().as_str())
-            {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            if normalize_review_decision(review.pull_request.review_decision.as_deref())?
-                != RepoWatchReviewDecision::ChangesRequested
-            {
-                return Ok(StaleReviewClearanceObservation::Terminal {
-                    outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
-                    provider_state,
-                });
-            }
-            if review
-                .pull_request
-                .latest_opinionated_reviews
-                .nodes
-                .iter()
-                .any(|candidate| candidate.id == clearance.review_node_id())
-            {
-                return Ok(StaleReviewClearanceObservation::StillBlocking);
-            }
-            if !review
-                .pull_request
-                .latest_opinionated_reviews
-                .page_info
-                .has_next_page
-            {
-                return Ok(StaleReviewClearanceObservation::Terminal {
-                    outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
-                    provider_state,
-                });
-            }
-            after = review
-                .pull_request
-                .latest_opinionated_reviews
-                .page_info
-                .end_cursor;
             if after.is_none() {
                 return Err(RepositoryWatchAttemptError::InvalidResponse);
             }
@@ -7855,19 +6951,6 @@ fn normalize_review_state(state: &str) -> Result<ProviderReviewState, Repository
     }
 }
 
-fn normalize_observed_review_state(
-    state: &str,
-) -> Result<RepoWatchObservedReviewState, RepositoryWatchAttemptError> {
-    match state {
-        "APPROVED" => Ok(RepoWatchObservedReviewState::Approved),
-        "CHANGES_REQUESTED" => Ok(RepoWatchObservedReviewState::ChangesRequested),
-        "COMMENTED" => Ok(RepoWatchObservedReviewState::Commented),
-        "DISMISSED" => Ok(RepoWatchObservedReviewState::Dismissed),
-        "PENDING" => Ok(RepoWatchObservedReviewState::Pending),
-        _ => Err(RepositoryWatchAttemptError::InvalidResponse),
-    }
-}
-
 #[derive(Clone, Deserialize)]
 struct PullNumberResponse {
     number: u64,
@@ -7884,10 +6967,6 @@ struct ListedPullHeadResponse {
 struct PullResponse {
     number: u64,
     state: String,
-    // The same stamp the pulls listing carries, so a detail read can be
-    // compared against the freshness a committed poll recorded from the
-    // listing.
-    updated_at: String,
     merged_at: Option<String>,
     mergeable: Option<bool>,
     head: PullReferenceResponse,
@@ -8048,23 +7127,6 @@ struct ThreadVariables<'a> {
     after: Option<&'a str>,
 }
 
-#[derive(Serialize)]
-struct DismissReviewVariables<'a> {
-    review: &'a str,
-    message: &'a str,
-}
-
-struct DismissReviewInput<'a> {
-    review_node_id: &'a str,
-    dismissal_message: &'a str,
-}
-
-#[derive(Serialize)]
-struct ReviewNodeVariables<'a> {
-    review: &'a str,
-    after: Option<&'a str>,
-}
-
 #[derive(Clone, Deserialize)]
 struct GraphQlEnvelope<T> {
     data: Option<T>,
@@ -8147,269 +7209,6 @@ struct ThreadResponse {
 }
 
 #[derive(Clone, Deserialize)]
-struct ConvergenceData {
-    repository: Option<ConvergenceRepository>,
-}
-
-#[derive(Clone, Deserialize)]
-struct ConvergenceRepository {
-    #[serde(rename = "pullRequest")]
-    pull_request: Option<ConvergencePullRequest>,
-}
-
-#[derive(Clone, Deserialize)]
-struct ConvergencePullRequest {
-    #[serde(rename = "headRefOid")]
-    head_ref_oid: String,
-    #[serde(rename = "baseRefName")]
-    base_ref_name: String,
-    #[serde(rename = "baseRefOid")]
-    base_ref_oid: String,
-    mergeable: String,
-    #[serde(rename = "reviewDecision")]
-    review_decision: Option<String>,
-    commits: ConvergenceCommitConnection,
-}
-
-#[derive(Clone, Deserialize)]
-struct ConvergenceCommitConnection {
-    nodes: Vec<ConvergenceCommitNode>,
-}
-
-#[derive(Clone, Deserialize)]
-struct ConvergenceCommitNode {
-    commit: ConvergenceCommit,
-}
-
-#[derive(Clone, Deserialize)]
-struct ConvergenceCommit {
-    oid: String,
-    #[serde(rename = "statusCheckRollup")]
-    status_check_rollup: Option<ConvergenceCheckRollup>,
-}
-
-#[derive(Clone, Deserialize)]
-struct ConvergenceCheckRollup {
-    contexts: ConvergenceCheckConnection,
-}
-
-#[derive(Clone, Deserialize)]
-struct ConvergenceCheckConnection {
-    nodes: Vec<ConvergenceCheck>,
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
-}
-
-#[derive(Clone, Deserialize)]
-struct BlockingReviewData {
-    repository: Option<BlockingReviewRepository>,
-}
-
-#[derive(Clone, Deserialize)]
-struct BlockingReviewRepository {
-    #[serde(rename = "pullRequest")]
-    pull_request: Option<BlockingReviewPullRequest>,
-}
-
-#[derive(Clone, Deserialize)]
-struct BlockingReviewPullRequest {
-    #[serde(rename = "headRefOid")]
-    head_ref_oid: String,
-    #[serde(rename = "baseRefOid")]
-    base_ref_oid: String,
-    #[serde(rename = "reviewDecision")]
-    review_decision: Option<String>,
-    #[serde(rename = "latestOpinionatedReviews")]
-    latest_opinionated_reviews: BlockingReviewConnection,
-}
-
-#[derive(Clone, Deserialize)]
-struct BlockingReviewConnection {
-    nodes: Vec<BlockingReviewNode>,
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
-}
-
-#[derive(Clone, Deserialize)]
-struct BlockingReviewNode {
-    id: String,
-    state: String,
-    author: Option<BlockingReviewAuthor>,
-    commit: Option<BlockingReviewCommit>,
-}
-
-#[derive(Clone, Deserialize)]
-struct BlockingReviewAuthor {
-    login: String,
-}
-
-#[derive(Clone, Deserialize)]
-struct BlockingReviewCommit {
-    oid: String,
-}
-
-#[derive(Clone, Deserialize)]
-struct DismissReviewData {
-    #[serde(rename = "dismissPullRequestReview")]
-    dismiss_pull_request_review: Option<DismissReviewPayload>,
-}
-
-#[derive(Clone, Deserialize)]
-struct DismissReviewPayload {
-    #[serde(rename = "pullRequestReview")]
-    pull_request_review: Option<DismissedReview>,
-}
-
-#[derive(Clone, Deserialize)]
-struct DismissedReview {
-    id: String,
-    state: String,
-}
-
-#[derive(Clone, Deserialize)]
-struct ReviewClearanceStateData {
-    node: Option<ReviewClearanceState>,
-}
-
-#[derive(Clone, Deserialize)]
-struct ReviewClearanceState {
-    id: String,
-    state: String,
-    commit: Option<BlockingReviewCommit>,
-    #[serde(rename = "pullRequest")]
-    pull_request: ReviewClearancePullRequest,
-}
-
-#[derive(Clone, Deserialize)]
-struct ReviewClearancePullRequest {
-    number: u64,
-    state: String,
-    #[serde(rename = "headRefOid")]
-    head_ref_oid: String,
-    #[serde(rename = "baseRefName")]
-    base_ref_name: String,
-    #[serde(rename = "baseRefOid")]
-    base_ref_oid: String,
-    #[serde(rename = "reviewDecision")]
-    review_decision: Option<String>,
-    #[serde(rename = "latestOpinionatedReviews")]
-    latest_opinionated_reviews: ReviewClearanceReviewConnection,
-}
-
-#[derive(Clone, Deserialize)]
-struct ReviewClearanceReviewConnection {
-    nodes: Vec<ReviewClearanceReviewNode>,
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
-}
-
-#[derive(Clone, Deserialize)]
-struct ReviewClearanceReviewNode {
-    id: String,
-}
-
-enum StaleReviewClearanceObservation {
-    StillBlocking,
-    Terminal {
-        outcome: RepoWatchStaleReviewClearanceOutcome,
-        provider_state: RepoWatchObservedReviewState,
-    },
-}
-
-const fn terminal_clearance_outcome(
-    provider_state: RepoWatchObservedReviewState,
-) -> Option<RepoWatchStaleReviewClearanceOutcome> {
-    match provider_state {
-        RepoWatchObservedReviewState::Dismissed => {
-            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed)
-        }
-        RepoWatchObservedReviewState::ChangesRequested => None,
-        RepoWatchObservedReviewState::Approved
-        | RepoWatchObservedReviewState::Commented
-        | RepoWatchObservedReviewState::Pending => {
-            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere)
-        }
-    }
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(tag = "__typename")]
-enum ConvergenceCheck {
-    CheckRun {
-        name: String,
-        status: String,
-        conclusion: Option<String>,
-    },
-    StatusContext {
-        context: String,
-        state: String,
-    },
-}
-
-impl ConvergenceCheck {
-    fn name(&self) -> &str {
-        match self {
-            Self::CheckRun { name, .. } => name,
-            Self::StatusContext { context, .. } => context,
-        }
-    }
-
-    fn is_report_only(&self) -> bool {
-        is_non_gating_check_name(self.name())
-    }
-
-    fn complete(&self) -> bool {
-        match self {
-            Self::CheckRun { status, .. } => status == "COMPLETED",
-            Self::StatusContext { state, .. } => state != "PENDING",
-        }
-    }
-
-    fn green(&self) -> bool {
-        match self {
-            Self::CheckRun {
-                status, conclusion, ..
-            } => {
-                status == "COMPLETED"
-                    && matches!(
-                        conclusion.as_deref(),
-                        Some("SUCCESS" | "SKIPPED" | "NEUTRAL")
-                    )
-            }
-            Self::StatusContext { state, .. } => state == "SUCCESS",
-        }
-    }
-}
-
-fn is_non_gating_check_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    NON_GATING_CHECK_NAME_MARKERS
-        .iter()
-        .any(|marker| name.contains(marker))
-}
-
-fn normalize_graphql_mergeable(value: &str) -> Result<MergeableState, RepositoryWatchAttemptError> {
-    match value {
-        "MERGEABLE" => Ok(MergeableState::Mergeable),
-        "CONFLICTING" => Ok(MergeableState::Conflicting),
-        "UNKNOWN" => Ok(MergeableState::Unknown),
-        _ => Err(RepositoryWatchAttemptError::InvalidResponse),
-    }
-}
-
-fn normalize_review_decision(
-    value: Option<&str>,
-) -> Result<RepoWatchReviewDecision, RepositoryWatchAttemptError> {
-    match value {
-        None => Ok(RepoWatchReviewDecision::None),
-        Some("APPROVED") => Ok(RepoWatchReviewDecision::Approved),
-        Some("REVIEW_REQUIRED") => Ok(RepoWatchReviewDecision::ReviewRequired),
-        Some("CHANGES_REQUESTED") => Ok(RepoWatchReviewDecision::ChangesRequested),
-        Some(_) => Err(RepositoryWatchAttemptError::InvalidResponse),
-    }
-}
-
-#[derive(Clone, Deserialize)]
 struct PageInfo {
     #[serde(rename = "hasNextPage")]
     has_next_page: bool,
@@ -8444,24 +7243,22 @@ mod tests {
     };
 
     use super::{
-        CheckConclusion, ChecksOutcome, ConvergenceCheck, DrainRetryBackoff, EntityTag,
-        FileCredentialAccess, GitHubRepositoryPoller, GraphQlEnvelope, GraphQlError,
-        GraphQlErrorExtensions, HeaderMap, HeaderValue, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
+        CheckConclusion, ChecksOutcome, DrainRetryBackoff, EntityTag, FileCredentialAccess,
+        GitHubRepositoryPoller, GraphQlEnvelope, GraphQlError, GraphQlErrorExtensions, HeaderMap,
+        HeaderValue, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
         MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
         MAX_CONSECUTIVE_POLL_PREEMPTIONS, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
         MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
         PreparedTargetedRefresh, PullRequestSettlement, PullResponse, RETRY_AFTER, ReactionContent,
-        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
-        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchEventKindNameV1,
-        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-        RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-        RepoWatchRepositoryStateInput, RepoWatchReviewDecision, RepoWatchReviewObservation,
-        RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
-        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
-        RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
-        RepositoryWatchRuntimeError, RepositoryWatchTask, RepositoryWatchWake, ResourceKey,
-        ReviewState, StatusCode, TargetedPollOutcome, TargetedPullRequest,
-        TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration,
+        RepoWatchEventKindNameV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+        RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
+        RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
+        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
+        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
+        RepositoryWatchWake, ResourceKey, ReviewState, StatusCode, TargetedPollOutcome,
+        TargetedPullRequest, TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
         WEBHOOK_CURSOR_SIZING_TIMEOUT, WEBHOOK_DRAIN_ATTEMPT_TIMEOUT,
         WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY,
         WEBHOOK_DRAIN_RETRY_MAX_DELAY, WEBHOOK_DRAIN_TIMEOUT_PAYLOAD_QUANTUM_BYTES,
@@ -8496,8 +7293,6 @@ mod tests {
         repo_watch::{
             PostgresRepoWatchStore, RepoWatchCommitRequest, RepoWatchCursorCandidate,
             RepoWatchEventPageSize, RepoWatchEventProducer,
-            RepoWatchPlannedStaleReviewClearanceFixture, RepoWatchStaleReviewClearanceClaimToken,
-            RepoWatchStaleReviewClearanceId,
         },
         repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
         repo_watch_webhook::{
@@ -8613,9 +7408,6 @@ mod tests {
     const QUEUED_CHECK_SUITE_UPDATED_AT: &str = "2026-08-03T12:35:18Z";
     const WORKFLOW_NAME: &str = "CI";
     const REVIEWER: &str = "signal-reviewer";
-    const STALE_REVIEW_NODE_ID: &str = "PRR_fixture_stale";
-    const STALE_REVIEW_HEAD_SHA: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    const DISMISSAL_MESSAGE: &str = "Every finding is resolved on the current head.";
     const REVIEW_THREAD: &str = "PRRT_fixture_open";
     const RESOLVED_REVIEW_THREAD: &str = "PRRT_fixture_resolved";
     const PULL_NUMBERS: [u64; 1] = [PULL_NUMBER];
@@ -8996,16 +7788,6 @@ mod tests {
         detail.to_string()
     }
 
-    /// The fixture pull request with mergeability decided in its favor, which
-    /// a clearance revalidation needs: the shared fixture reports
-    /// `CONFLICTING`, and that alone refuses every dismissal.
-    fn mergeable_pull_detail() -> String {
-        let mut detail = serde_json::from_str::<serde_json::Value>(&pull_detail())
-            .expect("fixture pull detail is JSON");
-        detail["mergeable"] = serde_json::Value::Bool(true);
-        detail.to_string()
-    }
-
     fn pull_detail_without_head_repository() -> String {
         let mut detail = serde_json::from_str::<serde_json::Value>(&pull_detail())
             .expect("fixture pull detail is JSON");
@@ -9235,148 +8017,6 @@ mod tests {
                             ],
                             "pageInfo": { "hasNextPage": false, "endCursor": null }
                         }
-                    }
-                }
-            }
-        })
-        .to_string()
-    }
-
-    fn convergence() -> String {
-        convergence_with_mergeability("CONFLICTING")
-    }
-
-    /// Convergence evidence for a head whose only remaining blocker is the
-    /// aggregate review decision: one complete, green, gating check and no
-    /// other. This is the evidence a stale-review clearance is allowed to act
-    /// on, so it is what a revalidation must be able to read back.
-    fn review_only_blocked_convergence() -> String {
-        serde_json::json!({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "headRefOid": HEAD_SHA,
-                        "baseRefName": BASE_BRANCH,
-                        "baseRefOid": BASE_SHA,
-                        "mergeable": "MERGEABLE",
-                        "reviewDecision": "CHANGES_REQUESTED",
-                        "commits": {
-                            "nodes": [{
-                                "commit": {
-                                    "oid": HEAD_SHA,
-                                    "statusCheckRollup": {
-                                        "contexts": {
-                                            "nodes": [{
-                                                "__typename": "CheckRun",
-                                                "name": CHECK_RUN_NAME,
-                                                "status": "COMPLETED",
-                                                "conclusion": "SUCCESS"
-                                            }],
-                                            "pageInfo": {
-                                                "hasNextPage": false,
-                                                "endCursor": null
-                                            }
-                                        }
-                                    }
-                                }
-                            }]
-                        }
-                    }
-                }
-            }
-        })
-        .to_string()
-    }
-
-    fn convergence_with_mergeability(mergeable: &str) -> String {
-        serde_json::json!({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "headRefOid": HEAD_SHA,
-                        "baseRefName": BASE_BRANCH,
-                        "baseRefOid": BASE_SHA,
-                        "mergeable": mergeable,
-                        "reviewDecision": "APPROVED",
-                        "commits": {
-                            "nodes": [{
-                                "commit": {
-                                    "oid": HEAD_SHA,
-                                    "statusCheckRollup": {
-                                        "contexts": {
-                                            "nodes": [
-                                                {
-                                                    "__typename": "CheckRun",
-                                                    "name": CHECK_RUN_NAME,
-                                                    "status": "COMPLETED",
-                                                    "conclusion": "FAILURE"
-                                                },
-                                                {
-                                                    "__typename": "CheckRun",
-                                                    "name": "coverage (report only)",
-                                                    "status": "IN_PROGRESS",
-                                                    "conclusion": null
-                                                },
-                                                {
-                                                    "__typename": "StatusContext",
-                                                    "context": "CodeRabbit",
-                                                    "state": "ERROR"
-                                                }
-                                            ],
-                                            "pageInfo": {
-                                                "hasNextPage": false,
-                                                "endCursor": null
-                                            }
-                                        }
-                                    }
-                                }
-                            }]
-                        }
-                    }
-                }
-            }
-        })
-        .to_string()
-    }
-
-    fn blocking_reviews(reviewed_head_sha: &str) -> String {
-        blocking_reviews_by(REVIEWER, reviewed_head_sha)
-    }
-
-    fn blocking_reviews_by(reviewer: &str, reviewed_head_sha: &str) -> String {
-        serde_json::json!({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "headRefOid": HEAD_SHA,
-                        "baseRefOid": BASE_SHA,
-                        "reviewDecision": "CHANGES_REQUESTED",
-                        "latestOpinionatedReviews": {
-                            "nodes": [{
-                                "id": STALE_REVIEW_NODE_ID,
-                                "state": "CHANGES_REQUESTED",
-                                "author": { "login": reviewer },
-                                "commit": { "oid": reviewed_head_sha }
-                            }],
-                            "pageInfo": {
-                                "hasNextPage": false,
-                                "endCursor": null
-                            }
-                        }
-                    }
-                }
-            }
-        })
-        .to_string()
-    }
-
-    fn dismissed_review(review_node_id: &str) -> String {
-        serde_json::json!({
-            "data": {
-                "dismissPullRequestReview": {
-                    "pullRequestReview": {
-                        "id": review_node_id,
-                        "state": "DISMISSED"
                     }
                 }
             }
@@ -10151,81 +8791,7 @@ mod tests {
             ),
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(convergence()),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
                 ResponseBody(threads()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
-                ResponseBody(pull_reactions()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
-                ResponseBody(issue_comments()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(ISSUE_COMMENT_REACTIONS_TARGET.to_owned()),
-                ResponseBody(issue_comment_reactions()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
-                ResponseBody(review_comments()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
-                ResponseBody(review_comment_reactions()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(WORKFLOWS_TARGET.to_owned()),
-                ResponseBody(workflows()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
-                ResponseBody(main_workflow_run()),
-            ),
-        ]
-    }
-
-    /// The same complete sweep over a pull request whose only remaining
-    /// convergence blocker is its aggregate review decision: GitHub reports it
-    /// mergeable and every review thread is resolved. This is the state a stale
-    /// blocking review may be dismissed against, so it is the cursor a clearance
-    /// is planned and dismissed from.
-    fn review_only_blocked_observation_responses() -> Vec<ScriptedResponse> {
-        vec![
-            ScriptedResponse::ok(
-                RequestTarget(PULLS_TARGET.to_owned()),
-                ResponseBody(pulls_with_one()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(BRANCHES_TARGET.to_owned()),
-                ResponseBody(branches()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(PULL_DETAIL_TARGET.to_owned()),
-                ResponseBody(mergeable_pull_detail()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(CHECK_SUITES_TARGET.to_owned()),
-                ResponseBody(check_suites()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(COMMIT_CHECK_RUNS_TARGET.to_owned()),
-                ResponseBody(check_runs()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(REVIEWS_TARGET.to_owned()),
-                ResponseBody(reviews()),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(review_only_blocked_convergence()),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(empty_threads()),
             ),
             ScriptedResponse::ok(
                 RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
@@ -10266,7 +8832,7 @@ mod tests {
             // repository listing and branch page ahead of it and the workflow
             // queries behind it excluded.
             .skip(2)
-            .take(11)
+            .take(10)
             .collect()
     }
 
@@ -10323,32 +8889,6 @@ mod tests {
         .to_string()
     }
 
-    fn minimal_convergence(number: u64) -> String {
-        let head_sha = minimal_pull_head_sha(number);
-        serde_json::json!({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "headRefOid": head_sha,
-                        "baseRefName": BASE_BRANCH,
-                        "baseRefOid": BASE_SHA,
-                        "mergeable": "MERGEABLE",
-                        "reviewDecision": null,
-                        "commits": {
-                            "nodes": [{
-                                "commit": {
-                                    "oid": minimal_pull_head_sha(number),
-                                    "statusCheckRollup": null
-                                }
-                            }]
-                        }
-                    }
-                }
-            }
-        })
-        .to_string()
-    }
-
     fn minimal_pull_responses(number: u64) -> Vec<ScriptedResponse> {
         let head_sha = minimal_pull_head_sha(number);
         vec![
@@ -10369,11 +8909,6 @@ mod tests {
                 )),
                 ResponseBody(EMPTY_LIST.to_owned()),
             ),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(minimal_convergence(number)),
-            )
-            .matching_request_body(format!("\"number\":{number}")),
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
                 ResponseBody(empty_threads()),
@@ -10425,10 +8960,6 @@ mod tests {
             ScriptedResponse::ok(
                 RequestTarget(REVIEWS_TARGET.to_owned()),
                 ResponseBody(reviews()),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(convergence()),
             ),
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
@@ -10486,10 +9017,6 @@ mod tests {
             ScriptedResponse::conditional_ok(
                 RequestTarget(REVIEWS_TARGET.to_owned()),
                 ResponseBody(reviews),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(convergence()),
             ),
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
@@ -10570,11 +9097,6 @@ mod tests {
                     ScriptedResponse::ok(
                         RequestTarget(PULL_DETAIL_TARGET.to_owned()),
                         ResponseBody(pull_detail_with_pending_mergeability()),
-                    )
-                } else if response.target == THREADS_TARGET && response.body == convergence() {
-                    ScriptedResponse::post(
-                        RequestTarget(THREADS_TARGET.to_owned()),
-                        ResponseBody(convergence_with_mergeability("UNKNOWN")),
                     )
                 } else {
                     response
@@ -10710,38 +9232,6 @@ mod tests {
         RepoWatchObservation::new(observation.signal_reviewers().to_vec(), rebuilt)
     }
 
-    /// The observation [`review_only_blocked_assessment`] describes. A first
-    /// poll publishes no freshness, so its own candidate lookup finds the head
-    /// unsettled and short-circuits before any blocking-review request.
-    async fn review_only_blocked_observation() -> RepoWatchObservation {
-        let server = ScriptedServer::start(review_only_blocked_observation_responses()).await;
-        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
-        server.finish().await;
-        observation
-    }
-
-    fn review_only_blocked_assessment() -> RepoWatchConvergenceAssessment {
-        RepoWatchConvergenceAssessment::try_new(RepoWatchConvergenceAssessmentInput {
-            number: PullRequestNumber::new(
-                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
-            ),
-            head_sha: CommitSha::try_new(String::from(HEAD_SHA))
-                .expect("fixture head is canonical"),
-            base_branch: BranchName::try_new(String::from(BASE_BRANCH))
-                .expect("fixture base branch is canonical"),
-            base_revision: CommitSha::try_new(String::from(BASE_SHA))
-                .expect("fixture base revision is canonical"),
-            mergeable_state: MergeableState::Mergeable,
-            settled: true,
-            review_decision: RepoWatchReviewDecision::ChangesRequested,
-            unresolved_threads: Vec::new(),
-            gating_check_count: 1,
-            non_green_gating_checks: Vec::new(),
-        })
-        .expect("review decision is the fixture's only convergence blocker")
-    }
-
     #[tokio::test]
     async fn targeted_refresh_reuses_the_repository_poller_and_preserves_untouched_state() {
         let previous = complete_typed_observation().await;
@@ -10794,7 +9284,6 @@ mod tests {
             UNTOUCHED_PULL_NUMBER,
             &listed_pull_request(&minimal_pull_head_sha(UNTOUCHED_PULL_NUMBER)),
             PullRequestSettlement::Settled,
-            Vec::new(),
         );
         let target = TargetedPullRequest {
             number: PullRequestNumber::new(
@@ -10925,7 +9414,6 @@ mod tests {
                 CANCELLED_FETCH_PULL_NUMBER,
                 &listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
                 PullRequestSettlement::Settled,
-                Vec::new(),
             );
         }
     }
@@ -12237,7 +10725,6 @@ mod tests {
             PULL_NUMBER,
             &listed_pull_request(HEAD_SHA),
             PullRequestSettlement::Settled,
-            Vec::new(),
         );
         fixture.task.webhook_targeted_completion =
             Some(super::RetainedTargetedWebhookCompletion::new(tokio::spawn(
@@ -12711,394 +11198,6 @@ mod tests {
             Some((smaller, larger))
         );
     }
-
-    #[tokio::test]
-    async fn convergence_matches_the_exact_head_gate() {
-        let server = ScriptedServer::start(complete_typed_observation_responses()).await;
-        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-
-        let polled = fixture
-            .poller
-            .poll_against_cursor(None, Some(RepoWatchCursorGeneration::INITIAL))
-            .await
-            .expect("full poll and convergence assessment succeed");
-        server.finish().await;
-        let assessment = &polled.convergence[0];
-
-        assert_eq!(assessment.gating_check_count(), 1);
-        assert_eq!(
-            assessment.non_green_gating_checks()[0].as_str(),
-            CHECK_RUN_NAME
-        );
-        assert_eq!(assessment.unresolved_threads()[0].as_str(), REVIEW_THREAD);
-        assert_eq!(
-            assessment.verdict(),
-            signalbox_application::RepoWatchConvergenceVerdict::NotConverged
-        );
-    }
-
-    #[tokio::test]
-    async fn older_head_review_becomes_a_clearance_candidate() {
-        let response = ScriptedResponse::post(
-            RequestTarget(String::from(THREADS_TARGET)),
-            ResponseBody(blocking_reviews(STALE_REVIEW_HEAD_SHA)),
-        )
-        .matching_request_body(String::from("RepositoryWatchBlockingReviews"));
-        let server = ScriptedServer::start(vec![response]).await;
-        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-
-        let candidates = fixture
-            .poller
-            .fetch_stale_review_clearances(&review_only_blocked_assessment())
-            .await
-            .expect("blocking review evidence is valid");
-        server.finish().await;
-
-        assert_eq!(candidates[0].review_node_id(), STALE_REVIEW_NODE_ID);
-        assert_eq!(candidates[0].reviewer().as_str(), REVIEWER);
-        assert_eq!(
-            candidates[0].reviewed_head_sha().as_str(),
-            STALE_REVIEW_HEAD_SHA
-        );
-    }
-
-    #[tokio::test]
-    async fn inv072_current_head_review_is_not_a_clearance_candidate() {
-        let response = ScriptedResponse::post(
-            RequestTarget(String::from(THREADS_TARGET)),
-            ResponseBody(blocking_reviews(HEAD_SHA)),
-        )
-        .matching_request_body(String::from("RepositoryWatchBlockingReviews"));
-        let server = ScriptedServer::start(vec![response]).await;
-        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-
-        let candidates = fixture
-            .poller
-            .fetch_stale_review_clearances(&review_only_blocked_assessment())
-            .await
-            .expect("current-head blocker fails closed without an error");
-        server.finish().await;
-
-        assert!(candidates.is_empty());
-    }
-
-    #[tokio::test]
-    async fn dismissal_mutation_requires_the_expected_review_identity() {
-        const MISMATCHING_REVIEW_NODE_ID: &str = "PRR_mismatching_review_node";
-        let response = ScriptedResponse::post(
-            RequestTarget(String::from(THREADS_TARGET)),
-            ResponseBody(dismissed_review(MISMATCHING_REVIEW_NODE_ID)),
-        )
-        .matching_request_body(String::from("RepositoryWatchDismissReview"));
-        let server = ScriptedServer::start(vec![response]).await;
-        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-
-        let error = fixture
-            .poller
-            .dismiss_review_node(super::DismissReviewInput {
-                review_node_id: STALE_REVIEW_NODE_ID,
-                dismissal_message: DISMISSAL_MESSAGE,
-            })
-            .await
-            .expect_err("a response naming another review must fail closed");
-        server.finish().await;
-
-        assert_eq!(error, RepositoryWatchAttemptError::InvalidResponse);
-    }
-
-    fn planned_stale_review_clearance() -> super::RepoWatchPlannedStaleReviewClearance {
-        super::RepoWatchPlannedStaleReviewClearance::from_fixture(
-            RepoWatchPlannedStaleReviewClearanceFixture {
-                clearance_id: RepoWatchStaleReviewClearanceId::new(Uuid::from_u128(0x_c1ea_0001)),
-                claim_token: RepoWatchStaleReviewClearanceClaimToken::new(Uuid::from_u128(
-                    0x_c1a1_0001,
-                )),
-                number: PullRequestNumber::new(
-                    NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
-                ),
-                current_head_sha: CommitSha::try_new(String::from(HEAD_SHA))
-                    .expect("fixture head is canonical"),
-                base_branch: BranchName::try_new(String::from(BASE_BRANCH))
-                    .expect("fixture base branch is canonical"),
-                base_revision: CommitSha::try_new(String::from(BASE_SHA))
-                    .expect("fixture base revision is canonical"),
-                review_node_id: String::from(STALE_REVIEW_NODE_ID),
-                reviewer: RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
-                    .expect("fixture reviewer is valid"),
-                reviewed_head_sha: CommitSha::try_new(String::from(STALE_REVIEW_HEAD_SHA))
-                    .expect("fixture reviewed head is canonical"),
-                dismissal_message: String::from(DISMISSAL_MESSAGE),
-            },
-        )
-    }
-
-    /// The in-memory candidate the committed poll raises for the review
-    /// [`blocking_reviews`] reports, against the evidence
-    /// [`review_only_blocked_assessment`] records.
-    fn stale_review_clearance_candidate() -> RepoWatchStaleReviewClearanceCandidate {
-        RepoWatchStaleReviewClearanceCandidate::try_new(
-            &review_only_blocked_assessment(),
-            String::from(STALE_REVIEW_NODE_ID),
-            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
-                .expect("fixture reviewer is valid"),
-            CommitSha::try_new(String::from(STALE_REVIEW_HEAD_SHA))
-                .expect("fixture reviewed head is canonical"),
-        )
-        .expect("the review is the fixture head's only convergence blocker")
-    }
-
-    /// Revalidation is the gate the dismissal mutation sits behind, and it
-    /// reports the clearance still holds only for a settled head. Settlement in
-    /// turn requires a quiesced gating-check inventory, so evidence that never
-    /// carries quiescence makes the whole feature a no-op: the candidate lookup
-    /// short-circuits, the revalidation refuses, and no review is ever
-    /// dismissed. This proves the re-read backed by the committed poll's
-    /// freshness passes that gate;
-    /// [`a_planned_clearance_reaches_its_dismissal_mutation`] proves the
-    /// orchestration then issues the mutation.
-    #[tokio::test]
-    async fn a_quiesced_inventory_revalidates_a_planned_clearance() {
-        let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(
-                RequestTarget(String::from(PULL_DETAIL_TARGET)),
-                ResponseBody(mergeable_pull_detail()),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(String::from(THREADS_TARGET)),
-                ResponseBody(review_only_blocked_convergence()),
-            )
-            .matching_request_body(String::from("RepositoryWatchConvergence")),
-            ScriptedResponse::post(
-                RequestTarget(String::from(THREADS_TARGET)),
-                ResponseBody(empty_threads()),
-            )
-            .matching_request_body(String::from("RepositoryWatchReviewThreads")),
-            ScriptedResponse::post(
-                RequestTarget(String::from(THREADS_TARGET)),
-                ResponseBody(blocking_reviews(STALE_REVIEW_HEAD_SHA)),
-            )
-            .matching_request_body(String::from("RepositoryWatchBlockingReviews")),
-        ])
-        .await;
-        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let generation = RepoWatchCursorGeneration::INITIAL;
-        fixture.poller.record_fetched_pull_request(
-            PULL_NUMBER,
-            &listed_pull_request(HEAD_SHA),
-            PullRequestSettlement::Settled,
-            vec![String::from(CHECK_RUN_NAME)],
-        );
-        fixture.poller.publish_freshness(generation);
-
-        let holds = fixture
-            .poller
-            .revalidate_stale_review_clearance(&planned_stale_review_clearance(), generation)
-            .await
-            .expect("clearance revalidation reads valid evidence");
-        server.finish().await;
-
-        assert!(
-            holds,
-            "a settled head whose only blocker is a superseded review must pass revalidation"
-        );
-    }
-
-    /// The whole live path, from the poll that commits the candidate's evidence
-    /// to the provider mutation: the completed poll records its assessment,
-    /// plans the intent durably, revalidates it against a re-read, and sends the
-    /// dismissal. Scripting the mutation as a matched response is what makes
-    /// this end-to-end rather than a revalidation test — a build that stops
-    /// short of `dismiss_review_node` leaves that response unconsumed and no
-    /// terminal outcome recorded.
-    #[tokio::test]
-    #[ignore = "requires ephemeral PostgreSQL"]
-    async fn a_planned_clearance_reaches_its_dismissal_mutation() -> Result<(), Box<dyn Error>> {
-        let (_container, pool) = migrated_postgres().await?;
-        let server = ConcurrentScriptedServer::start(vec![
-            ScriptedResponse::ok(
-                RequestTarget(String::from(PULL_DETAIL_TARGET)),
-                ResponseBody(mergeable_pull_detail()),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(String::from(THREADS_TARGET)),
-                ResponseBody(review_only_blocked_convergence()),
-            )
-            .matching_request_body(String::from("RepositoryWatchConvergence")),
-            ScriptedResponse::post(
-                RequestTarget(String::from(THREADS_TARGET)),
-                ResponseBody(empty_threads()),
-            )
-            .matching_request_body(String::from("RepositoryWatchReviewThreads")),
-            ScriptedResponse::post(
-                RequestTarget(String::from(THREADS_TARGET)),
-                ResponseBody(blocking_reviews(STALE_REVIEW_HEAD_SHA)),
-            )
-            .matching_request_body(String::from("RepositoryWatchBlockingReviews")),
-            ScriptedResponse::post(
-                RequestTarget(String::from(THREADS_TARGET)),
-                ResponseBody(dismissed_review(STALE_REVIEW_NODE_ID)),
-            )
-            .matching_request_body(String::from("RepositoryWatchDismissReview")),
-        ])
-        .await;
-        let observation = review_only_blocked_observation().await;
-        let mut fixture = task_against(&pool, server.base_url.clone(), observation.clone()).await?;
-        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
-        let generation = PostgresRepoWatchStore::new(pool.clone())
-            .load_cursor(&repository)
-            .await?
-            .expect("the fixture commits its cursor")
-            .generation();
-        fixture.task.poller.record_fetched_pull_request(
-            PULL_NUMBER,
-            &listed_pull_request(HEAD_SHA),
-            PullRequestSettlement::Settled,
-            vec![String::from(CHECK_RUN_NAME)],
-        );
-
-        fixture
-            .task
-            .commit_complete_poll(super::PreparedCompletePoll {
-                cursor_generation: Some(generation),
-                candidate: RepoWatchCursorCandidate::new(observation),
-                events: Vec::new(),
-                convergence: vec![review_only_blocked_assessment()],
-                stale_review_clearances: vec![stale_review_clearance_candidate()],
-            })
-            .await
-            .expect("the completed poll commits its evidence and sweeps its clearances");
-        // Asserts that every scripted response was consumed and that every
-        // request matched one, so the dismissal mutation reached the provider
-        // as the mutation it claims to be rather than as some other body.
-        server.finish().await;
-
-        let outcome: String =
-            sqlx::query_scalar("SELECT outcome_kind FROM repo_watch_stale_review_clearance_result")
-                .fetch_one(&pool)
-                .await?;
-        assert_eq!(outcome, "dismissed");
-        Ok(())
-    }
-
-    /// The mirror of the revalidation test: a gating check that appeared since
-    /// the committed poll leaves the inventory unquiesced, the head unsettled,
-    /// and the review undismissed. The candidate lookup short-circuits before
-    /// its provider request, so only three calls are scripted.
-    #[tokio::test]
-    async fn a_gating_check_added_since_the_committed_poll_refuses_the_clearance() {
-        let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(
-                RequestTarget(String::from(PULL_DETAIL_TARGET)),
-                ResponseBody(mergeable_pull_detail()),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(String::from(THREADS_TARGET)),
-                ResponseBody(review_only_blocked_convergence()),
-            )
-            .matching_request_body(String::from("RepositoryWatchConvergence")),
-            ScriptedResponse::post(
-                RequestTarget(String::from(THREADS_TARGET)),
-                ResponseBody(empty_threads()),
-            )
-            .matching_request_body(String::from("RepositoryWatchReviewThreads")),
-        ])
-        .await;
-        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let generation = RepoWatchCursorGeneration::INITIAL;
-        fixture.poller.record_fetched_pull_request(
-            PULL_NUMBER,
-            &listed_pull_request(HEAD_SHA),
-            PullRequestSettlement::Settled,
-            vec![String::from(CHECK_RUN_NAME), String::from("later gate")],
-        );
-        fixture.poller.publish_freshness(generation);
-
-        let holds = fixture
-            .poller
-            .revalidate_stale_review_clearance(&planned_stale_review_clearance(), generation)
-            .await
-            .expect("clearance revalidation reads valid evidence");
-        server.finish().await;
-
-        assert!(
-            !holds,
-            "an inventory that has not stood still since the committed poll must refuse dismissal"
-        );
-    }
-
-    #[test]
-    fn recovery_settles_review_states_that_no_longer_block() {
-        use signalbox_persistence::repo_watch::{
-            RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome,
-        };
-
-        assert_eq!(
-            super::terminal_clearance_outcome(RepoWatchObservedReviewState::Dismissed),
-            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed)
-        );
-        assert_eq!(
-            super::terminal_clearance_outcome(RepoWatchObservedReviewState::Approved),
-            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere)
-        );
-        assert_eq!(
-            super::terminal_clearance_outcome(RepoWatchObservedReviewState::Commented),
-            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere)
-        );
-        assert_eq!(
-            super::terminal_clearance_outcome(RepoWatchObservedReviewState::Pending),
-            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere)
-        );
-        assert_eq!(
-            super::terminal_clearance_outcome(RepoWatchObservedReviewState::ChangesRequested),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn convergence_rejects_evidence_from_a_different_base_revision() {
-        let observation = complete_typed_observation().await;
-        let pull_request = &observation.state().pull_requests()[0];
-        let evidence = super::FetchedConvergenceEvidence {
-            base_revision: CommitSha::try_new(CHANGED_LISTED_HEAD_SHA.to_owned())
-                .expect("fixture provider base revision is valid"),
-            gating_checks_settled: true,
-            gating_check_inventory_quiesced: true,
-            gating_check_inventory: vec![String::from(CHECK_RUN_NAME)],
-            review_decision: super::RepoWatchReviewDecision::Approved,
-            gating_check_count: 1,
-            non_green_gating_checks: Vec::new(),
-        };
-        let snapshot_base_revision = CommitSha::try_new(BASE_SHA.to_owned())
-            .expect("fixture snapshot base revision is valid");
-
-        let assessment = evidence.assess(pull_request, snapshot_base_revision);
-
-        assert!(matches!(
-            assessment,
-            Err(RepositoryWatchAttemptError::InvalidResponse)
-        ));
-    }
-
-    #[test]
-    fn codecov_project_status_is_report_only() {
-        let check = ConvergenceCheck::StatusContext {
-            context: String::from("codecov/project"),
-            state: String::from("PENDING"),
-        };
-
-        assert!(check.is_report_only());
-    }
-
-    #[test]
-    fn codecov_patch_status_is_report_only_case_insensitively() {
-        let check = ConvergenceCheck::StatusContext {
-            context: String::from("Codecov/Patch"),
-            state: String::from("PENDING"),
-        };
-
-        assert!(check.is_report_only());
-    }
-
     #[tokio::test]
     async fn shutdown_wins_when_a_repository_task_exits_cleanly_at_the_same_time() {
         let (sender, receiver) = watch::channel(false);
@@ -14687,12 +12786,9 @@ mod tests {
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
         let number = previous.context().number().get();
-        fixture.poller.record_fetched_pull_request(
-            number,
-            &listed,
-            PullRequestSettlement::Settled,
-            Vec::new(),
-        );
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -14747,7 +12843,6 @@ mod tests {
             number,
             &listed,
             PullRequestSettlement::Settled,
-            Vec::new(),
         );
 
         // A generation the durable cursor has not reached, so this commit loses
@@ -14760,7 +12855,7 @@ mod tests {
         );
         let prepared = PreparedTargetedRefresh {
             generation: unreached,
-            candidate: RepoWatchCursorCandidate::new(review_only_blocked_observation().await),
+            candidate: RepoWatchCursorCandidate::new(complete_typed_observation().await),
             events: Vec::new(),
             queried: vec![RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }],
             targeted_pull_requests: vec![pull_request],
@@ -14895,12 +12990,9 @@ mod tests {
         let loaded_generation = published_generation
             .next()
             .expect("fixture cursor generation has a successor");
-        fixture.poller.record_fetched_pull_request(
-            number,
-            &listed,
-            PullRequestSettlement::Settled,
-            Vec::new(),
-        );
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture.poller.publish_freshness(published_generation);
 
         assert!(
@@ -14913,47 +13005,6 @@ mod tests {
             "freshness published against another durable cursor must not authorize reuse"
         );
     }
-
-    #[tokio::test]
-    async fn a_new_gating_context_requires_another_committed_poll_to_quiesce() {
-        let fixture = poller_fixture(
-            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
-        )
-        .expect("poller is constructed");
-        let listed = listed_pull_request(HEAD_SHA);
-        let generation = RepoWatchCursorGeneration::INITIAL;
-        fixture.poller.record_fetched_pull_request(
-            PULL_NUMBER,
-            &listed,
-            PullRequestSettlement::Settled,
-            vec![String::from(CHECK_RUN_NAME)],
-        );
-        fixture.poller.publish_freshness(generation);
-        let expanded_inventory = vec![
-            String::from(CHECK_RUN_NAME),
-            String::from("later gating check"),
-        ];
-
-        assert!(!fixture.poller.gating_check_inventory_quiesced(
-            PULL_NUMBER,
-            &listed,
-            Some(generation),
-            &expanded_inventory,
-        ));
-        fixture.poller.record_gating_check_inventory(
-            PULL_NUMBER,
-            &listed,
-            expanded_inventory.clone(),
-        );
-        fixture.poller.publish_freshness(generation);
-        assert!(fixture.poller.gating_check_inventory_quiesced(
-            PULL_NUMBER,
-            &listed,
-            Some(generation),
-            &expanded_inventory,
-        ));
-    }
-
     #[tokio::test]
     async fn changed_pull_request_timestamp_authorizes_no_reuse() {
         let fixture = poller_fixture(
@@ -14968,12 +13019,9 @@ mod tests {
             head_sha: listed.head_sha.clone(),
         };
         let number = previous.context().number().get();
-        fixture.poller.record_fetched_pull_request(
-            number,
-            &listed,
-            PullRequestSettlement::Settled,
-            Vec::new(),
-        );
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -14996,12 +13044,9 @@ mod tests {
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
         let number = previous.context().number().get();
-        fixture.poller.record_fetched_pull_request(
-            number,
-            &listed,
-            PullRequestSettlement::Settled,
-            Vec::new(),
-        );
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -15049,7 +13094,6 @@ mod tests {
             number,
             &previously_listed,
             PullRequestSettlement::Settled,
-            Vec::new(),
         );
         fixture
             .poller
@@ -15142,8 +13186,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unfinished_report_only_run_does_not_unsettle_gating_checks() {
-        let response = check_runs().replace(IN_PROGRESS_CHECK_RUN_NAME, "coverage (report only)");
+    async fn an_unfinished_check_keeps_pull_request_unsettled() {
+        let response = check_runs();
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
             RequestTarget(COMMIT_CHECK_RUNS_TARGET.to_owned()),
             ResponseBody(response),
@@ -15154,14 +13198,14 @@ mod tests {
         let suite =
             object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
 
-        let (_, every_gating_run_completed) = fixture
+        let (_, every_run_completed) = fixture
             .poller
             .fetch_check_runs(&head, std::slice::from_ref(&suite))
             .await
-            .expect("report-only run is valid check evidence");
+            .expect("unfinished run is valid check evidence");
         server.finish().await;
 
-        assert!(every_gating_run_completed);
+        assert!(!every_run_completed);
     }
 
     #[tokio::test]

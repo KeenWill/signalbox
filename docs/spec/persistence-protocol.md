@@ -139,30 +139,6 @@ locks, and races described below against a pinned Postgres image.
 Migration `202609020021_watchdog_durability.sql` adds the durable evidence and
 scan ordinal used by both turn-liveness watchdog predicates.
 
-Migration `202608210400_convergence_sweep.sql` adds the mutable
-`convergence_sweep_target` scheduler projection, the append-only
-`convergence_sweep_event` audit, and the `convergence_sweep_parked_target`
-operator view. Closed checks bind retry and park shapes to the five-attempt
-`convergence_sweep_retry_budget()` ceiling, bind each provider, commission,
-template, or state-access failure outcome to its typed cause and operator need,
-and prevent partial command-fence or commissioned-dispatch identities.
-Observation projections are decoded as complete pairs by the persistence
-adapter. The function pins the restore-safe schema search path. The
-cross-component behavior using these records is owned by
-[pull-request convergence reconciliation](repo-watch.md). Migration
-`202608210402_repo_watch_pull_request_target_indexes.sql` indexes the
-repository-watch event-to-action path used to census sessions by pull-request
-target. Migration `202608210403_convergence_sweep_parked_session.sql` projects
-the exact inactive census dispatch and session through the parked-target
-operator view, including repository-watch sessions not dispatched by the sweep.
-Migration `202608210404_convergence_sweep_immutable_parked_session.sql` persists
-that selected identity and timestamp in the guarded parking transition, so later
-censuses cannot change the operator-visible parked session. Its two check
-constraints are validated rather than declared `NOT VALID`: the whole
-`202608210400`–`202608210404` block applies as a whole, so no database has held
-an inactivity park without those columns, and the schema asserts unconditionally
-that every such park carries an operator-visible dispatch identity.
-
 ## Relational representation
 
 Storage is a normalized, purpose-specific relational schema of current-state

@@ -1226,15 +1226,14 @@ This avoids an aggregate frame-size limit.
 A successful `read_operator_status` response consists of `operator_status`
 messages: `kind=start`, zero or more rows from each section in this fixed order,
 then `kind=end` with one count per section. The row kinds are `held_slot`,
-`queued_obligation`, `pull_request_convergence`,
-`pending_stale_review_clearance`, `lifecycle_week`, and
-`lifecycle_deadline_violation`. The daemon reads the four repository-watch views
-bearing those respective concepts and the two session-lifecycle metric views in
-one read-only repeatable-read transaction. It streams their rows through
-server-side cursors into a temporary-file spool before writing the first
-response frame, so a database or encoding failure produces no partial successful
-snapshot and the request retains neither an unbounded row inventory nor a
-database transaction while the client reads.
+`queued_obligation`, `lifecycle_week`, and `lifecycle_deadline_violation`. The
+daemon reads the two repository-watch views bearing those respective concepts
+and the two session-lifecycle metric views in one read-only repeatable-read
+transaction. It streams their rows through server-side cursors into a
+temporary-file spool before writing the first response frame, so a database or
+encoding failure produces no partial successful snapshot and the request retains
+neither an unbounded row inventory nor a database transaction while the client
+reads.
 
 A `lifecycle_week` row carries one calendar week's session-lifecycle metrics:
 the week's UTC start as an ISO-8601 date, and each metric as its exact numerator
@@ -1285,36 +1284,13 @@ the view's whole decision — excluding a dispatch or external session holding t
 target, a parked obligation, and a spent attempt budget — narrowed only so that
 a cooldown expiring mid-read cannot report readiness alongside a positive
 remaining cooldown. An infinite eligibility timestamp is represented as a
-never-eligible cooldown rather than a numeric duration. A convergence row
-carries repository and pull request, head and base revisions, base branch,
-mergeable state, review decision, unresolved-thread and gating-check counts,
-sorted non-green check names, verdict, optional durable seal, and whole-second
-assessment age. The verdict agrees with the evidence carried beside it: an
-assessment settles unconverged exactly when the pull request carries any
-blocker, so a converged verdict — internally converged or merge ready — carries
-no unresolved thread, no non-green check, a mergeable provider state, a positive
-gating-check count, and no requested change. Exactly one durable blocker, an
-unsettled provider snapshot, is not carried on the wire, so an unconverged
-verdict remains admissible beside wholly clean carried evidence. The base branch
-is what separates the two converged verdicts: a merge-ready verdict is settled
-only against `main`, an internally-converged verdict only against another
-branch, and an unconverged verdict against either. The seal takes no such
-pairing, because it is retained from the assessment that produced it and
-outlives later ones, so a pull request retargeted after sealing carries it
-beside a base branch that verdict could not have been settled against. Each
-non-green check name is canonical padded base64 of its exact UTF-8 bytes on the
-wire, keeping the complete admitted 10,000-name inventory below the frame cap
-even under worst-case JSON escaping. A pending-clearance row carries repository
-and pull request, current and reviewed heads, review identity, reviewer, and
-whole-second pending duration. The structured identifiers these rows carry are
-admitted by grammar rather than by width alone, each mirroring the domain
-constructor and durable check that produced it: a repository is a canonical
-lowercase `namespace/name` slug whose segments are neither empty nor a bare dot
-or double dot, a rule identity is ASCII letters, digits, hyphens, underscores,
-and dots, a branch name follows git's ref-name rules, and a reviewer is a
-lowercase login with an optional App-bot suffix. A check name and a review node
-identity remain unstructured text, which is all their durable counterparts
-require. Every duration is clamped nonnegative and sampled against the database
+never-eligible cooldown rather than a numeric duration. The structured
+identifiers these rows carry are admitted by grammar rather than by width alone,
+each mirroring the domain constructor and durable check that produced it: a
+repository is a canonical lowercase `namespace/name` slug whose segments are
+neither empty nor a bare dot or double dot, a rule identity is ASCII letters,
+digits, hyphens, underscores, and dots, and a branch name follows git's ref-name
+rules. Every duration is clamped nonnegative and sampled against the database
 transaction timestamp, not a client clock.
 
 Identifiers are canonical UUID strings. Request identities, ordinal versions,
@@ -2589,25 +2565,23 @@ durable terminal material and accepts another ordinary input line.
 
 `status` sends exactly one `read_operator_status` request through the configured
 owner-only daemon socket; it never opens the database itself. It validates the
-fixed section order and all six terminal counts before printing anything. The
+fixed section order and all four terminal counts before printing anything. The
 first output line names those counts, followed by one human-scannable line per
-row with `held`, `queued`, `convergence`, `stale_review_clearance`,
-`lifecycle_week`, or `nonterminal_past_deadline` as its kind. A `lifecycle_week`
-line prints each metric as `numerator/denominator` and, where the denominator is
-not zero, the derived rate in parts per million, so an absent rate is visibly
-absent rather than printed as zero. A held line prints its dispatch origin as
-`origin=pull_request#<number>` or `origin=branch:<branch>`, naming the fact the
-slot was taken from under one field whichever shape it has. A queued line prints
-an occupant blocked by an independently commissioned live session as
-`occupying=external:<sessions>`, distinguishing it from a watch dispatch, which
-prints its identity ahead of its sessions. A convergence line prints
-`non_green_count` beside the comma-joined `non_green` field, so an empty
-inventory cannot collide with a check literally named `none`. Durations use
-compact day, hour, minute, and second units. Process-derived text uses
-terminal-safe field escaping unless `--raw-output` is selected. The final
-`model_usage=omitted` line states that no cheap status aggregate is available:
-model usage crosses this protocol only inside each complete session transcript,
-and `status` does not issue one transcript read per session.
+row with `held`, `queued`, `lifecycle_week`, or `nonterminal_past_deadline` as
+its kind. A `lifecycle_week` line prints each metric as `numerator/denominator`
+and, where the denominator is not zero, the derived rate in parts per million,
+so an absent rate is visibly absent rather than printed as zero. A held line
+prints its dispatch origin as `origin=pull_request#<number>` or
+`origin=branch:<branch>`, naming the fact the slot was taken from under one
+field whichever shape it has. A queued line prints an occupant blocked by an
+independently commissioned live session as `occupying=external:<sessions>`,
+distinguishing it from a watch dispatch, which prints its identity ahead of its
+sessions. Durations use compact day, hour, minute, and second units.
+Process-derived text uses terminal-safe field escaping unless `--raw-output` is
+selected. The final `model_usage=omitted` line states that no cheap status
+aggregate is available: model usage crosses this protocol only inside each
+complete session transcript, and `status` does not issue one transcript read per
+session.
 
 `list` is the complete unfiltered summary sequence. `search` is the separate
 verb for `list_session_metadata`, whose filters, bounded page, and keyset cursor

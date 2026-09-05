@@ -19,13 +19,12 @@ use signalbox_domain::{
     MergeableState, ModelAlias, ModelCapabilities, ModelCapabilityCatalog,
     ModelCapabilityDefinition, ModelSelectionRequest, ModelSettingsOverlay,
     ModelSettingsPrecedence, ModelTargetCatalog, ModelTargetDefinition, OpenAiServiceTier,
-    ProviderModelIdentity, PullRequestNumber, ReasoningLevel, RepoWatchAuthorLogin,
-    RepoWatchEventKindNameV1, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput,
-    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
-    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
-    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
-    ValidatedModelSettings,
+    ProviderModelIdentity, ReasoningLevel, RepoWatchAuthorLogin, RepoWatchEventKindNameV1,
+    RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, RepositorySlug,
+    ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
+    ToolName, UnsupportedModelSetting, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -566,7 +565,6 @@ pub struct WatchedRepositoryConfiguration {
     poll_interval: Duration,
     credential_file: PathBuf,
     webhook: Option<WatchedRepositoryWebhookConfiguration>,
-    convergence_pull_requests: Box<[PullRequestNumber]>,
 }
 
 impl WatchedRepositoryConfiguration {
@@ -595,11 +593,6 @@ impl WatchedRepositoryConfiguration {
         self.webhook.as_ref()
     }
 
-    /// Returns the explicit operator-owned convergence throttle for this repository.
-    pub fn convergence_pull_requests(&self) -> &[PullRequestNumber] {
-        &self.convergence_pull_requests
-    }
-
     /// Returns the non-secret reference used to resolve this repository's
     /// webhook secret, if webhook delivery is enabled for it.
     pub fn webhook_secret_reference(&self) -> Option<CredentialReference> {
@@ -620,7 +613,6 @@ impl fmt::Debug for WatchedRepositoryConfiguration {
             .field("poll_interval", &self.poll_interval)
             .field("credential_file", &"[REDACTED REFERENCE]")
             .field("webhook", &self.webhook)
-            .field("convergence_pull_requests", &self.convergence_pull_requests)
             .finish()
     }
 }
@@ -632,30 +624,6 @@ pub struct RepositoryWatchConfiguration {
     repositories: Box<[WatchedRepositoryConfiguration]>,
     rules: Box<[RepoWatchRule]>,
     webhook: Option<RepositoryWatchWebhookConfiguration>,
-    convergence_sweep: Option<ConvergenceSweepConfiguration>,
-}
-
-/// Daemon-native convergence sweep policy, enabled only with explicit targets.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConvergenceSweepConfiguration {
-    template: SessionTemplateName,
-    interval: Duration,
-    cool_off: Duration,
-}
-
-impl ConvergenceSweepConfiguration {
-    /// Returns the fenced session template used for review-response work.
-    pub const fn template(&self) -> &SessionTemplateName {
-        &self.template
-    }
-    /// Returns the census interval, never above its hard ceiling.
-    pub const fn interval(&self) -> Duration {
-        self.interval
-    }
-    /// Returns the per-pull-request dispatch cool-off, never above its hard ceiling.
-    pub const fn cool_off(&self) -> Duration {
-        self.cool_off
-    }
 }
 
 impl RepositoryWatchConfiguration {
@@ -678,30 +646,6 @@ impl RepositoryWatchConfiguration {
     /// intake is disabled.
     pub const fn webhook(&self) -> Option<&RepositoryWatchWebhookConfiguration> {
         self.webhook.as_ref()
-    }
-
-    /// Returns enabled convergence reconciliation policy, if explicitly configured.
-    pub const fn convergence_sweep(&self) -> Option<&ConvergenceSweepConfiguration> {
-        self.convergence_sweep.as_ref()
-    }
-
-    /// Validates the convergence template against the immutable session-template catalog.
-    pub fn validate_convergence_template<'a>(
-        &self,
-        templates: impl Iterator<Item = &'a SessionTemplateName>,
-    ) -> Result<(), HubModelConfigurationError> {
-        let Some(policy) = self.convergence_sweep() else {
-            return Ok(());
-        };
-        if templates.into_iter().any(|name| name == policy.template()) {
-            Ok(())
-        } else {
-            Err(
-                HubModelConfigurationError::UnknownConvergenceSweepTemplate {
-                    template: policy.template().as_str().to_owned(),
-                },
-            )
-        }
     }
 
     /// Validates every rule against the immutable session-template catalog.
@@ -797,34 +741,6 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         NumericBoundKind::Duration,
     ),
     (
-        "convergence_sweep_request_timeout",
-        NumericBoundKind::Duration,
-    ),
-    (
-        "max_convergence_sweep_connection_pages",
-        NumericBoundKind::Integer,
-    ),
-    (
-        "max_concurrent_convergence_sweep_targets",
-        NumericBoundKind::Integer,
-    ),
-    (
-        "max_convergence_sweep_request_attempts",
-        NumericBoundKind::Integer,
-    ),
-    (
-        "convergence_sweep_request_retry_delay",
-        NumericBoundKind::Duration,
-    ),
-    (
-        "convergence_sweep_retry_backoff_base",
-        NumericBoundKind::Duration,
-    ),
-    (
-        "convergence_sweep_retry_backoff_cap",
-        NumericBoundKind::Duration,
-    ),
-    (
         "terminalizations_per_liveness_scan",
         NumericBoundKind::Integer,
     ),
@@ -840,9 +756,6 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "automatic_reconciliation_attempt_bound",
         NumericBoundKind::Duration,
     ),
-    ("max_convergence_sweep_targets", NumericBoundKind::Integer),
-    ("max_convergence_sweep_interval", NumericBoundKind::Duration),
-    ("max_convergence_sweep_cool_off", NumericBoundKind::Duration),
     ("automatic_resume_base_backoff", NumericBoundKind::Duration),
     ("automatic_resume_backoff_cap", NumericBoundKind::Duration),
     ("automatic_resume_attempt_budget", NumericBoundKind::Integer),
@@ -1178,7 +1091,7 @@ impl HubModelConfiguration {
         let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
         let repository_watch = document
             .get("repository_watch")
-            .map(|item| parse_repository_watch_configuration(item, &numeric_bounds))
+            .map(parse_repository_watch_configuration)
             .transpose()?;
         let workspace_instructions =
             parse_workspace_instruction_configuration(document.get("workspace_instructions"))?;
@@ -2291,7 +2204,6 @@ fn parse_workspace_instruction_configuration(
 
 fn parse_repository_watch_configuration(
     item: &Item,
-    numeric_bounds: &NumericBoundsConfiguration,
 ) -> Result<RepositoryWatchConfiguration, HubModelConfigurationError> {
     let table = item
         .as_table()
@@ -2304,7 +2216,6 @@ fn parse_repository_watch_configuration(
             "repositories",
             "rules",
             "webhook",
-            "convergence_sweep",
         ],
     )
     .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
@@ -2336,16 +2247,6 @@ fn parse_repository_watch_configuration(
     signal_reviewers.sort();
 
     let webhook = parse_repository_watch_webhook_configuration(table.get("webhook"))?;
-    let convergence_sweep = parse_convergence_sweep_configuration(
-        table.get("convergence_sweep"),
-        numeric_bounds
-            .duration("max_convergence_sweep_interval")
-            .flatten(),
-        numeric_bounds
-            .duration("max_convergence_sweep_cool_off")
-            .flatten(),
-    )?;
-
     let repository_tables = table
         .get("repositories")
         .and_then(Item::as_array_of_tables)
@@ -2368,7 +2269,6 @@ fn parse_repository_watch_configuration(
                 "webhook_hook_id",
                 "webhook_secret_file",
                 "webhook_mode",
-                "convergence_pull_requests",
             ],
         )
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
@@ -2467,14 +2367,11 @@ fn parse_repository_watch_configuration(
                 return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
             }
         };
-        let convergence_pull_requests =
-            parse_convergence_pull_requests(repository.get("convergence_pull_requests"))?;
         repositories.push(WatchedRepositoryConfiguration {
             repository: repository_slug,
             poll_interval: Duration::from_secs(interval),
             credential_file,
             webhook: repository_webhook,
-            convergence_pull_requests: convergence_pull_requests.into_boxed_slice(),
         });
     }
     if webhook.is_some() != (webhook_repository_count > 0) {
@@ -2482,92 +2379,12 @@ fn parse_repository_watch_configuration(
     }
     repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
     let rules = parse_repository_watch_rules(table)?;
-    let convergence_target_count = repositories
-        .iter()
-        .map(|repository| repository.convergence_pull_requests.len())
-        .sum::<usize>();
-    let convergence_target_limit = numeric_bounds
-        .integer("max_convergence_sweep_targets")
-        .flatten()
-        .and_then(|value| usize::try_from(value).ok());
-    if convergence_target_limit.is_some_and(|limit| convergence_target_count > limit)
-        || (convergence_target_count == 0) != convergence_sweep.is_none()
-    {
-        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
-    }
     Ok(RepositoryWatchConfiguration {
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),
         rules: rules.into_boxed_slice(),
         webhook,
-        convergence_sweep,
     })
-}
-
-fn parse_convergence_sweep_configuration(
-    item: Option<&Item>,
-    interval_ceiling: Option<Duration>,
-    cool_off_ceiling: Option<Duration>,
-) -> Result<Option<ConvergenceSweepConfiguration>, HubModelConfigurationError> {
-    let Some(item) = item else {
-        return Ok(None);
-    };
-    let table = item
-        .as_table()
-        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-    reject_unknown_fields(table, &["template", "interval_seconds", "cool_off_seconds"])
-        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-    let template = SessionTemplateName::try_new(required_string(table, "template")?.to_owned())
-        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-    let interval = bounded_positive_duration(table, "interval_seconds", interval_ceiling)?;
-    let cool_off = bounded_positive_duration(table, "cool_off_seconds", cool_off_ceiling)?;
-    Ok(Some(ConvergenceSweepConfiguration {
-        template,
-        interval,
-        cool_off,
-    }))
-}
-
-fn bounded_positive_duration(
-    table: &Table,
-    field: &str,
-    ceiling: Option<Duration>,
-) -> Result<Duration, HubModelConfigurationError> {
-    table
-        .get(field)
-        .and_then(Item::as_integer)
-        .and_then(|value| u64::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .map(Duration::from_secs)
-        .filter(|value| ceiling.is_none_or(|ceiling| *value <= ceiling))
-        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
-}
-
-fn parse_convergence_pull_requests(
-    item: Option<&Item>,
-) -> Result<Vec<PullRequestNumber>, HubModelConfigurationError> {
-    let Some(item) = item else {
-        return Ok(Vec::new());
-    };
-    let values = item
-        .as_array()
-        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-    let mut parsed = Vec::with_capacity(values.len());
-    for value in values {
-        let number = value
-            .as_integer()
-            .and_then(|value| u64::try_from(value).ok())
-            .and_then(NonZeroU64::new)
-            .filter(|value| value.get() <= i32::MAX as u64)
-            .map(PullRequestNumber::new)
-            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-        if parsed.contains(&number) {
-            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
-        }
-        parsed.push(number);
-    }
-    parsed.sort();
-    Ok(parsed)
 }
 
 fn parse_repository_watch_webhook_configuration(
@@ -4086,11 +3903,6 @@ pub enum HubModelConfigurationError {
     InvalidRepositoryWatchConfiguration,
     /// The optional version-one workspace-instruction section was malformed.
     InvalidWorkspaceInstructionConfiguration,
-    /// The convergence sweep names no loaded session template.
-    UnknownConvergenceSweepTemplate {
-        /// Exact missing template name.
-        template: String,
-    },
     /// One structured repository-watch rule failed closed validation.
     InvalidRepositoryWatchRule {
         /// Stable operator-assigned rule identity.
@@ -4146,12 +3958,6 @@ impl fmt::Display for HubModelConfigurationError {
             return write!(
                 formatter,
                 "model configuration contains invalid repository-watch rule `{rule}`: {reason}"
-            );
-        }
-        if let Self::UnknownConvergenceSweepTemplate { template } = self {
-            return write!(
-                formatter,
-                "model configuration names unknown convergence template `{template}`"
             );
         }
         // Startup telemetry formats this value, so the failing member and the
@@ -4324,9 +4130,6 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidWorkspaceInstructionConfiguration => {
                 "model configuration contains invalid workspace-instruction settings"
-            }
-            Self::UnknownConvergenceSweepTemplate { .. } => {
-                "model configuration names an unknown convergence template"
             }
             Self::InvalidRepositoryWatchRule { .. } => {
                 "model configuration contains an invalid repository-watch rule"
@@ -4510,7 +4313,7 @@ pub(crate) mod tests {
     use signalbox_domain::{
         AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
         ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
-        PullRequestNumber, ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
+        ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
         RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
         ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
@@ -4538,15 +4341,6 @@ pub(crate) mod tests {
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
     const ANTHROPIC_OVERFLOW_PROFILE: &str = "anthropic-overflow";
-
-    fn example_numeric_duration(field: &'static str) -> Duration {
-        super::checked_in_example_configuration()
-            .expect("checked-in example parses")
-            .numeric_bounds()
-            .duration(field)
-            .flatten()
-            .expect("example field is bounded")
-    }
 
     /// The exact pool block [`CONFIGURATION`] declares, so a test that cares
     /// about pool shape states its own replacement in full.
@@ -4599,7 +4393,6 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const WILDCARD_WATCH_WEBHOOK_PATH: &str = "/github/*rest";
     const WATCH_INTERVAL_SECONDS: u64 = 90;
     const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
-    const CONVERGENCE_PULL_REQUEST: u64 = 892;
     const SIGNAL_REVIEWER: &str = "signal-reviewer";
     const SECOND_SIGNAL_REVIEWER: &str = "review-bot[bot]";
     const GIT_AUTHOR_NAME: &str = "Signalbox Daemon";
@@ -4642,20 +4435,10 @@ expired_pass_recovery_attempts = 4
 expired_pass_recovery_attempt_bound = "3s"
 expired_pass_recovery_lock_retry_delay = "6s"
 expired_pass_recovery_conservative_retry_delay = "120s"
-convergence_sweep_request_timeout = "30s"
-max_convergence_sweep_connection_pages = 100
-max_concurrent_convergence_sweep_targets = 8
-max_convergence_sweep_request_attempts = 3
-convergence_sweep_request_retry_delay = "250ms"
-convergence_sweep_retry_backoff_base = "60s"
-convergence_sweep_retry_backoff_cap = "900s"
 terminalizations_per_liveness_scan = 64
 turn_liveness_recovery_attempt_bound = "10s"
 automatic_reconciliations_per_liveness_scan = 64
 automatic_reconciliation_attempt_bound = "60s"
-max_convergence_sweep_targets = 256
-max_convergence_sweep_interval = "300s"
-max_convergence_sweep_cool_off = "1800s"
 automatic_resume_base_backoff = "120s"
 automatic_resume_backoff_cap = "1800s"
 automatic_resume_attempt_budget = 20
@@ -5074,26 +4857,6 @@ repository = "{PROVIDER_SECOND_WATCH_REPOSITORY}"
 poll_interval_seconds = {SECOND_WATCH_INTERVAL_SECONDS}
 credential_file = "{SECOND_WATCH_CREDENTIAL_FILE}"
 "#,
-        )
-    }
-
-    fn configuration_with_convergence_sweep() -> String {
-        format!(
-            r#"{}
-
-[repository_watch.convergence_sweep]
-template = "{WATCH_TEMPLATE}"
-interval_seconds = {}
-cool_off_seconds = {}
-"#,
-            configuration_with_repository_watch().replace(
-                &format!("repository = \"{PROVIDER_WATCH_REPOSITORY}\""),
-                &format!(
-                    "repository = \"{PROVIDER_WATCH_REPOSITORY}\"\nconvergence_pull_requests = [{CONVERGENCE_PULL_REQUEST}]"
-                ),
-            ),
-            example_numeric_duration("max_convergence_sweep_interval").as_secs(),
-            example_numeric_duration("max_convergence_sweep_cool_off").as_secs(),
         )
     }
 
@@ -5835,143 +5598,6 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             [MergeableState::Conflicting]
         );
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
-    }
-
-    #[test]
-    fn repository_watch_parses_the_explicit_convergence_sweep() {
-        let configured = HubModelConfiguration::parse(&configuration_with_convergence_sweep())
-            .expect("convergence sweep fixture is valid");
-        let watch = configured
-            .repository_watch()
-            .expect("fixture configures repository watch");
-        let policy = watch
-            .convergence_sweep()
-            .expect("fixture enables convergence reconciliation");
-        let repository = watch
-            .repositories()
-            .iter()
-            .find(|entry| {
-                entry.repository().as_str() == PROVIDER_WATCH_REPOSITORY.to_ascii_lowercase()
-            })
-            .expect("fixture repository is retained");
-        let pull_request = PullRequestNumber::new(
-            NonZeroU64::new(CONVERGENCE_PULL_REQUEST).expect("fixture number is positive"),
-        );
-
-        assert_eq!(policy.template().as_str(), WATCH_TEMPLATE);
-        assert_eq!(
-            policy.interval(),
-            example_numeric_duration("max_convergence_sweep_interval")
-        );
-        assert_eq!(
-            policy.cool_off(),
-            example_numeric_duration("max_convergence_sweep_cool_off")
-        );
-        assert_eq!(repository.convergence_pull_requests(), [pull_request]);
-    }
-
-    #[test]
-    fn repository_watch_rejects_an_unknown_convergence_template() {
-        let configured = HubModelConfiguration::parse(&configuration_with_convergence_sweep())
-            .expect("convergence sweep fixture is valid");
-        let watch = configured
-            .repository_watch()
-            .expect("fixture configures repository watch");
-        let available = SessionTemplateName::try_new(String::from("another-template"))
-            .expect("available template fixture is valid");
-
-        assert_eq!(
-            watch.validate_convergence_template(std::iter::once(&available)),
-            Err(
-                HubModelConfigurationError::UnknownConvergenceSweepTemplate {
-                    template: String::from(WATCH_TEMPLATE),
-                }
-            )
-        );
-    }
-
-    #[test]
-    fn repository_watch_rejects_convergence_policy_without_targets() {
-        let configured = configuration_with_convergence_sweep().replace(
-            &format!("convergence_pull_requests = [{CONVERGENCE_PULL_REQUEST}]\n"),
-            "",
-        );
-
-        assert_eq!(
-            HubModelConfiguration::parse(&configured).err(),
-            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
-        );
-    }
-
-    #[test]
-    fn repository_watch_rejects_convergence_targets_without_policy() {
-        let policy = format!(
-            r#"
-[repository_watch.convergence_sweep]
-template = "{WATCH_TEMPLATE}"
-interval_seconds = {}
-cool_off_seconds = {}
-"#,
-            example_numeric_duration("max_convergence_sweep_interval").as_secs(),
-            example_numeric_duration("max_convergence_sweep_cool_off").as_secs(),
-        );
-        let configured = configuration_with_convergence_sweep().replace(&policy, "");
-
-        assert_eq!(
-            HubModelConfiguration::parse(&configured).err(),
-            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
-        );
-    }
-
-    #[test]
-    fn repository_watch_rejects_a_convergence_interval_above_its_ceiling() {
-        let configured = configuration_with_convergence_sweep().replace(
-            &format!(
-                "interval_seconds = {}",
-                example_numeric_duration("max_convergence_sweep_interval").as_secs()
-            ),
-            &format!(
-                "interval_seconds = {}",
-                example_numeric_duration("max_convergence_sweep_interval").as_secs() + 1
-            ),
-        );
-
-        assert_eq!(
-            HubModelConfiguration::parse(&configured).err(),
-            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
-        );
-    }
-
-    #[test]
-    fn repository_watch_rejects_a_convergence_cool_off_above_its_ceiling() {
-        let configured = configuration_with_convergence_sweep().replace(
-            &format!(
-                "cool_off_seconds = {}",
-                example_numeric_duration("max_convergence_sweep_cool_off").as_secs()
-            ),
-            &format!(
-                "cool_off_seconds = {}",
-                example_numeric_duration("max_convergence_sweep_cool_off").as_secs() + 1
-            ),
-        );
-
-        assert_eq!(
-            HubModelConfiguration::parse(&configured).err(),
-            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
-        );
-    }
-
-    #[test]
-    fn repository_watch_rejects_a_convergence_pull_request_above_graphql_int() {
-        let configured = configuration_with_convergence_sweep().replace(
-            &format!("convergence_pull_requests = [{CONVERGENCE_PULL_REQUEST}]"),
-            &format!("convergence_pull_requests = [{}]", i64::from(i32::MAX) + 1),
-        );
-
-        assert_eq!(
-            HubModelConfiguration::parse(&configured).err(),
-            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
-        );
     }
 
     #[test]

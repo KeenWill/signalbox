@@ -72,8 +72,7 @@ use signalbox_tools_web::{
 };
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
-    CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME,
-    CHANGE_REQUEST_CONVERGENCE_STATE_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
+    CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
     CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_REVIEW_THREADS_NAME,
     CHANGE_REQUEST_STACK_STATE_NAME, CHANGE_REQUEST_SUMMARY_NAME,
     CHANGE_REQUEST_THREAD_INVENTORY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
@@ -81,19 +80,17 @@ use signalboxd::{
     ChangeRequestSummaryResult, ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult,
     CiJobLogResult, CodeHostNumericBounds, CodeHostOperation, CodeHostResult,
     CodeHostResultCompleteness, CodeHostTransport, CodeHostTransportFailure,
-    ConvergenceStateFields, ConvergenceStateResult, ConversationIntrospectionPort,
-    ConversationListPage, ConversationListRequest, ConversationTranscriptRead,
-    ConversationTranscriptRequest, DaemonTools, DaemonToolsConstructionError, FilePatchResult,
-    GitHubEgressPolicy, GitHubOperation, GitHubResult, GitHubTransport, GitHubTransportFailure,
-    HubModelConfiguration, ImportedTranscriptRequest, LocalProcessListener,
-    LocalWorkspaceFileSystem, MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME,
-    PULL_REQUEST_PUBLISH_REVIEW_NAME, PostgresConversationIntrospection,
-    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
-    ProcessRuntime, READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult,
-    ReviewAuthorClass, ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose,
-    ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
-    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
-    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
+    ConversationIntrospectionPort, ConversationListPage, ConversationListRequest,
+    ConversationTranscriptRead, ConversationTranscriptRequest, DaemonTools,
+    DaemonToolsConstructionError, FilePatchResult, GitHubEgressPolicy, GitHubOperation,
+    GitHubResult, GitHubTransport, GitHubTransportFailure, HubModelConfiguration,
+    ImportedTranscriptRequest, LocalProcessListener, LocalWorkspaceFileSystem,
+    MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
+    PostgresConversationIntrospection, PostgresProviderModelExecution,
+    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
+    RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass, ReviewThread,
+    ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
+    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult, SessionStatusWrite,
     SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
     ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME,
     WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
@@ -934,7 +931,6 @@ fn commissioned_catalog_names() -> Vec<String> {
         "change_request_checks_status",
         "change_request_ci_job_log",
         "change_request_comment",
-        "change_request_convergence_state",
         "change_request_file_patch",
         "change_request_rerun_failed_jobs",
         "change_request_review_threads",
@@ -968,7 +964,6 @@ fn commissioned_catalog_names() -> Vec<String> {
         "read_own_conversation",
         "repository_list_directory",
         "repository_read_file",
-        "review_gate_check",
         "sandboxed_exec",
         "search_files",
         "send_session_message",
@@ -1641,10 +1636,6 @@ enum ExpectedCodeHostOperation {
         repository: &'static str,
         number: u32,
     },
-    ConvergenceState {
-        repository: &'static str,
-        number: u32,
-    },
     StackState {
         repository: &'static str,
         number: u32,
@@ -1654,11 +1645,6 @@ enum ExpectedCodeHostOperation {
         repository: &'static str,
         number: u32,
         cursor: Option<&'static str>,
-    },
-    ReviewGateCheck {
-        repository: &'static str,
-        number: u32,
-        purpose: ReviewGatePurpose,
     },
     ThreadReply {
         repository: &'static str,
@@ -1740,13 +1726,6 @@ fn assert_code_host_operation(actual: &CodeHostOperation, expected: ExpectedCode
             assert_eq!(arguments.number().get(), number);
         }
         (
-            CodeHostOperation::ConvergenceState(arguments),
-            ExpectedCodeHostOperation::ConvergenceState { repository, number },
-        ) => {
-            assert_eq!(arguments.repository().as_str(), repository);
-            assert_eq!(arguments.number().get(), number);
-        }
-        (
             CodeHostOperation::StackState(arguments),
             ExpectedCodeHostOperation::StackState {
                 repository,
@@ -1769,18 +1748,6 @@ fn assert_code_host_operation(actual: &CodeHostOperation, expected: ExpectedCode
             assert_eq!(arguments.repository().as_str(), repository);
             assert_eq!(arguments.number().get(), number);
             assert_eq!(arguments.cursor().map(|cursor| cursor.as_str()), cursor);
-        }
-        (
-            CodeHostOperation::ReviewGateCheck(arguments),
-            ExpectedCodeHostOperation::ReviewGateCheck {
-                repository,
-                number,
-                purpose,
-            },
-        ) => {
-            assert_eq!(arguments.repository().as_str(), repository);
-            assert_eq!(arguments.number().get(), number);
-            assert_eq!(arguments.purpose(), purpose);
         }
         (
             CodeHostOperation::ThreadReply(arguments),
@@ -2058,56 +2025,10 @@ fn rerun_failed_jobs_result() -> CodeHostResult {
 
 const REVIEW_SLOG_HEAD_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const REVIEW_SLOG_BASE_REVISION: &str = "1111111111111111111111111111111111111111";
-const REVIEW_SLOG_REVIEWED_AT: &str = "2026-07-27T10:00:00Z";
 const REVIEW_SLOG_REPOSITORY: &str = "owner/repository";
 const REVIEW_SLOG_NUMBER: u32 = 17;
 const REVIEW_SLOG_BASE_REF: &str = "main";
 const REVIEW_SLOG_HEAD_REF: &str = "feature";
-
-fn reviewer_verdict_result() -> ReviewerVerdictEvidence {
-    ReviewerVerdictEvidence::try_new(
-        code_host_bounds(),
-        ReviewerVerdictFields {
-            status: ReviewerVerdictStatus::CurrentHead,
-            reviewed_revision: Some(String::from(REVIEW_SLOG_HEAD_REVISION)),
-            reviewed_at: Some(String::from(REVIEW_SLOG_REVIEWED_AT)),
-            starvation_after_verdict: false,
-            latest_starvation_at: None,
-            latest_review_request_at: None,
-            review_request_in_flight: false,
-            source_truncated: false,
-            comments_previous_cursor: None,
-            reviews_previous_cursor: None,
-        },
-    )
-    .expect("fixture reviewer verdict is bounded")
-}
-
-fn convergence_state_evidence() -> ConvergenceStateResult {
-    ConvergenceStateResult::try_new(
-        code_host_bounds(),
-        ConvergenceStateFields {
-            head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
-            mergeable_state: String::from("MERGEABLE"),
-            ci_rollup_state: Some(String::from("SUCCESS")),
-            checks: Vec::new(),
-            checks_truncated: false,
-            checks_next_cursor: None,
-            unresolved_threads: Vec::new(),
-            open_escalations: Vec::new(),
-            buried_escalations: Vec::new(),
-            undispositioned_threads: Vec::new(),
-            threads_truncated: false,
-            threads_next_cursor: None,
-            reviewer: reviewer_verdict_result(),
-        },
-    )
-    .expect("fixture convergence state is bounded")
-}
-
-fn convergence_state_result() -> CodeHostResult {
-    CodeHostResult::ConvergenceState(convergence_state_evidence())
-}
 
 fn stack_state_evidence() -> StackStateResult {
     StackStateResult::try_new(
@@ -2162,18 +2083,6 @@ fn thread_inventory_evidence() -> ThreadInventoryResult {
 
 fn thread_inventory_result() -> CodeHostResult {
     CodeHostResult::ThreadInventory(thread_inventory_evidence())
-}
-
-fn review_gate_result() -> CodeHostResult {
-    let convergence = convergence_state_evidence();
-    let stack = stack_state_evidence();
-    let inventory = thread_inventory_evidence();
-    CodeHostResult::ReviewGateCheck(ReviewGateCheckResult::compose(
-        ReviewGatePurpose::DeclareConvergence,
-        &convergence,
-        &stack,
-        &inventory,
-    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3754,56 +3663,6 @@ async fn tier_one_change_request_rerun_failed_jobs_completes_offline_tool_loop()
     .await
 }
 
-/// Tier 1 convergence lookup crosses only the typed mocked transport and
-/// persists its derived current-head verdict.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn tier_one_change_request_convergence_state_completes_offline_tool_loop()
--> Result<(), Box<dyn Error>> {
-    code_host_tool_completes_offline(
-        CHANGE_REQUEST_CONVERGENCE_STATE_NAME,
-        serde_json::json!({"number": REVIEW_SLOG_NUMBER, "repository": REVIEW_SLOG_REPOSITORY})
-            .to_string(),
-        convergence_state_result(),
-        serde_json::json!({
-            "buried_escalations": [],
-            "checks": [],
-            "checks_next_cursor": null,
-            "checks_truncated": false,
-            "ci_green": true,
-            "ci_rollup_state": "SUCCESS",
-            "head_revision": REVIEW_SLOG_HEAD_REVISION,
-            "mergeable_state": "MERGEABLE",
-            "open_escalations": [],
-            "reviewer_verdict": {
-                "comments_previous_cursor": null,
-                "latest_starvation_at": null,
-                "latest_review_request_at": null,
-                "review_request_in_flight": false,
-                "reviewed_at": REVIEW_SLOG_REVIEWED_AT,
-                "reviewed_revision": REVIEW_SLOG_HEAD_REVISION,
-                "reviews_previous_cursor": null,
-                "source_truncated": false,
-                "starvation_after_verdict": false,
-                "status": "current_head",
-            },
-            "threads_next_cursor": null,
-            "threads_truncated": false,
-            "unresolved_thread_count": 0,
-            "undispositioned_thread_count": 0,
-            "undispositioned_threads": [],
-            "unresolved_threads": [],
-            "verdict": "converged",
-        }),
-        ExpectedCodeHostOperation::ConvergenceState {
-            repository: REVIEW_SLOG_REPOSITORY,
-            number: REVIEW_SLOG_NUMBER,
-        },
-        ExpectedCodeHostApproval::Auto,
-    )
-    .await
-}
-
 /// Tier 1 stack lookup preserves its explicit child-page continuation offline.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -3879,36 +3738,6 @@ async fn tier_one_change_request_thread_inventory_completes_offline_tool_loop()
             repository: REVIEW_SLOG_REPOSITORY,
             number: REVIEW_SLOG_NUMBER,
             cursor: Some("opaque-cursor"),
-        },
-        ExpectedCodeHostApproval::Auto,
-    )
-    .await
-}
-
-/// Tier 1 review gating persists the pure composition result while its fresh
-/// evidence reads cross only the typed mocked transport boundary.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn tier_one_review_gate_check_completes_offline_tool_loop() -> Result<(), Box<dyn Error>> {
-    code_host_tool_completes_offline(
-        REVIEW_GATE_CHECK_NAME,
-        serde_json::json!({
-            "number": REVIEW_SLOG_NUMBER,
-            "purpose": "declare_convergence",
-            "repository": REVIEW_SLOG_REPOSITORY,
-        })
-        .to_string(),
-        review_gate_result(),
-        serde_json::json!({
-            "blockers": [],
-            "head_revision": REVIEW_SLOG_HEAD_REVISION,
-            "purpose": "declare_convergence",
-            "ready": true,
-        }),
-        ExpectedCodeHostOperation::ReviewGateCheck {
-            repository: REVIEW_SLOG_REPOSITORY,
-            number: REVIEW_SLOG_NUMBER,
-            purpose: ReviewGatePurpose::DeclareConvergence,
         },
         ExpectedCodeHostApproval::Auto,
     )

@@ -5,7 +5,6 @@ mod change_request_changed_files;
 mod change_request_checks_status;
 mod change_request_ci_job_log;
 mod change_request_comment;
-mod change_request_convergence_state;
 mod change_request_file_patch;
 mod change_request_rerun_failed_jobs;
 mod change_request_review_threads;
@@ -19,7 +18,6 @@ mod repository_list_directory;
 mod repository_read_file;
 mod repository_result;
 mod result;
-mod review_gate_check;
 mod review_slog;
 
 use std::{error::Error, fmt, future::Future, time::Duration};
@@ -43,7 +41,6 @@ pub use change_request_changed_files::ChangedFilesArguments;
 pub use change_request_checks_status::ChecksStatusArguments;
 pub use change_request_ci_job_log::CiJobLogArguments;
 pub use change_request_comment::ChangeRequestCommentArguments;
-pub use change_request_convergence_state::ConvergenceStateArguments;
 pub use change_request_file_patch::FilePatchArguments;
 pub use change_request_rerun_failed_jobs::RerunFailedJobsArguments;
 pub use change_request_review_threads::ReviewThreadsArguments;
@@ -66,13 +63,9 @@ pub use result::{
     RerunFailedJobsResult, ReviewThread, ReviewThreadComment, ReviewThreadFields,
     ReviewThreadResolution, ReviewThreadsResult, ThreadReplyResult, ThreadResolveResult,
 };
-pub use review_gate_check::{ReviewGateCheckArguments, ReviewGatePurpose};
 pub use review_slog::{
-    ChildStackState, ConvergenceStateFields, ConvergenceStateResult, ConvergenceVerdict,
-    ESCALATION_MARKER, ReviewAuthorClass, ReviewCheck, ReviewDispositionClass,
-    ReviewGateBlockerCode, ReviewGateCheckResult, ReviewThreadIdentity,
-    ReviewThreadInventoryFields, ReviewThreadInventoryItem, ReviewerVerdictEvidence,
-    ReviewerVerdictFields, ReviewerVerdictStatus, StackStateFields, StackStateResult,
+    ChildStackState, ESCALATION_MARKER, ReviewAuthorClass, ReviewDispositionClass,
+    ReviewThreadInventoryFields, ReviewThreadInventoryItem, StackStateFields, StackStateResult,
     ThreadInventoryResult,
 };
 
@@ -162,8 +155,6 @@ pub const REPOSITORY_LIST_DIRECTORY_NAME: &str = repository_list_directory::NAME
 pub const CHANGE_REQUEST_CHECKS_STATUS_NAME: &str = change_request_checks_status::NAME;
 /// Registry name for top-level comment creation.
 pub const CHANGE_REQUEST_COMMENT_NAME: &str = change_request_comment::NAME;
-/// Registry name for deterministic convergence-state lookup.
-pub const CHANGE_REQUEST_CONVERGENCE_STATE_NAME: &str = change_request_convergence_state::NAME;
 /// Registry name for review-thread lookup.
 pub const CHANGE_REQUEST_REVIEW_THREADS_NAME: &str = change_request_review_threads::NAME;
 /// Registry name for stack ancestry lookup.
@@ -178,16 +169,13 @@ pub const CHANGE_REQUEST_THREAD_RESOLVE_NAME: &str = change_request_thread_resol
 pub const CHANGE_REQUEST_CI_JOB_LOG_NAME: &str = change_request_ci_job_log::NAME;
 /// Registry name for failed-job reruns.
 pub const CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME: &str = change_request_rerun_failed_jobs::NAME;
-/// Registry name for deterministic review-protocol gating.
-pub const REVIEW_GATE_CHECK_NAME: &str = review_gate_check::NAME;
 
 /// Registry names in deterministic catalog order.
-pub const CODE_HOST_TOOL_NAMES: [&str; 16] = [
+pub const CODE_HOST_TOOL_NAMES: [&str; 14] = [
     CHANGE_REQUEST_CHANGED_FILES_NAME,
     CHANGE_REQUEST_CHECKS_STATUS_NAME,
     CHANGE_REQUEST_CI_JOB_LOG_NAME,
     CHANGE_REQUEST_COMMENT_NAME,
-    CHANGE_REQUEST_CONVERGENCE_STATE_NAME,
     CHANGE_REQUEST_FILE_PATCH_NAME,
     CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME,
     CHANGE_REQUEST_REVIEW_THREADS_NAME,
@@ -198,7 +186,6 @@ pub const CODE_HOST_TOOL_NAMES: [&str; 16] = [
     CHANGE_REQUEST_THREAD_RESOLVE_NAME,
     REPOSITORY_LIST_DIRECTORY_NAME,
     REPOSITORY_READ_FILE_NAME,
-    REVIEW_GATE_CHECK_NAME,
 ];
 
 const INVALID_ARGUMENTS_DETAIL: &str = "code-host tool arguments are invalid";
@@ -240,8 +227,6 @@ define_code_host_tool_kinds! {
     /// Registry effect posture: mutation, `Confirm`, and `ExternalEffect`.
     Comment,
     /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
-    ConvergenceState,
-    /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
     ReviewThreads,
     /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
     StackState,
@@ -255,8 +240,6 @@ define_code_host_tool_kinds! {
     CiJobLog,
     /// Registry effect posture: mutation, `Confirm`, and `ExternalEffect`.
     RerunFailedJobs,
-    /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
-    ReviewGateCheck,
 }
 
 impl CodeHostToolKind {
@@ -269,7 +252,6 @@ impl CodeHostToolKind {
             Self::ReadFile => repository_read_file::NAME,
             Self::ChecksStatus => change_request_checks_status::NAME,
             Self::Comment => change_request_comment::NAME,
-            Self::ConvergenceState => change_request_convergence_state::NAME,
             Self::ReviewThreads => change_request_review_threads::NAME,
             Self::StackState => change_request_stack_state::NAME,
             Self::ThreadInventory => change_request_thread_inventory::NAME,
@@ -277,7 +259,6 @@ impl CodeHostToolKind {
             Self::ThreadResolve => change_request_thread_resolve::NAME,
             Self::CiJobLog => change_request_ci_job_log::NAME,
             Self::RerunFailedJobs => change_request_rerun_failed_jobs::NAME,
-            Self::ReviewGateCheck => review_gate_check::NAME,
         }
     }
 
@@ -312,9 +293,6 @@ impl CodeHostToolKind {
                 permission,
                 ToolEffectClass::ExternalEffect,
             ),
-            Self::ConvergenceState => compile_contract_definition::<
-                change_request_convergence_state::Contract,
-            >(permission, ToolEffectClass::ExternalEffect),
             Self::ReviewThreads => compile_contract_definition::<
                 change_request_review_threads::Contract,
             >(permission, ToolEffectClass::ExternalEffect),
@@ -343,10 +321,6 @@ impl CodeHostToolKind {
             Self::RerunFailedJobs => compile_contract_definition::<
                 change_request_rerun_failed_jobs::Contract,
             >(permission, ToolEffectClass::ExternalEffect),
-            Self::ReviewGateCheck => compile_contract_definition::<review_gate_check::Contract>(
-                permission,
-                ToolEffectClass::ExternalEffect,
-            ),
         }
     }
 
@@ -361,12 +335,10 @@ impl CodeHostToolKind {
             | Self::ListDirectory
             | Self::ReadFile
             | Self::ChecksStatus
-            | Self::ConvergenceState
             | Self::ReviewThreads
             | Self::StackState
             | Self::ThreadInventory
-            | Self::CiJobLog
-            | Self::ReviewGateCheck => ToolPermissionDefault::Auto,
+            | Self::CiJobLog => ToolPermissionDefault::Auto,
         }
     }
 
@@ -379,12 +351,10 @@ impl CodeHostToolKind {
             | Self::ListDirectory
             | Self::ReadFile
             | Self::ChecksStatus
-            | Self::ConvergenceState
             | Self::ReviewThreads
             | Self::StackState
             | Self::ThreadInventory
-            | Self::CiJobLog
-            | Self::ReviewGateCheck => false,
+            | Self::CiJobLog => false,
         }
     }
 
@@ -397,7 +367,6 @@ impl CodeHostToolKind {
             CodeHostResult::ReadFile(_) => Self::ReadFile,
             CodeHostResult::ChecksStatus(_) => Self::ChecksStatus,
             CodeHostResult::Comment(_) => Self::Comment,
-            CodeHostResult::ConvergenceState(_) => Self::ConvergenceState,
             CodeHostResult::ReviewThreads(_) => Self::ReviewThreads,
             CodeHostResult::StackState(_) => Self::StackState,
             CodeHostResult::ThreadInventory(_) => Self::ThreadInventory,
@@ -405,7 +374,6 @@ impl CodeHostToolKind {
             CodeHostResult::ThreadResolve(_) => Self::ThreadResolve,
             CodeHostResult::CiJobLog(_) => Self::CiJobLog,
             CodeHostResult::RerunFailedJobs(_) => Self::RerunFailedJobs,
-            CodeHostResult::ReviewGateCheck(_) => Self::ReviewGateCheck,
         };
         match self {
             Self::Summary
@@ -415,15 +383,13 @@ impl CodeHostToolKind {
             | Self::ReadFile
             | Self::ChecksStatus
             | Self::Comment
-            | Self::ConvergenceState
             | Self::ReviewThreads
             | Self::StackState
             | Self::ThreadInventory
             | Self::ThreadReply
             | Self::ThreadResolve
             | Self::CiJobLog
-            | Self::RerunFailedJobs
-            | Self::ReviewGateCheck => self == result_kind,
+            | Self::RerunFailedJobs => self == result_kind,
         }
     }
 }
@@ -452,8 +418,6 @@ pub enum CodeHostOperation {
     ChecksStatus(ChecksStatusArguments),
     /// Post one top-level comment.
     Comment(ChangeRequestCommentArguments),
-    /// Read deterministic convergence evidence.
-    ConvergenceState(ConvergenceStateArguments),
     /// Read one review-thread page.
     ReviewThreads(ReviewThreadsArguments),
     /// Read parent and immediate-child stack ancestry.
@@ -468,8 +432,6 @@ pub enum CodeHostOperation {
     CiJobLog(CiJobLogArguments),
     /// Rerun failed jobs in one workflow run.
     RerunFailedJobs(RerunFailedJobsArguments),
-    /// Compose the deterministic review-protocol gate.
-    ReviewGateCheck(ReviewGateCheckArguments),
 }
 
 impl CodeHostOperation {
@@ -483,7 +445,6 @@ impl CodeHostOperation {
             Self::ReadFile(_) => repository_read_file::NAME,
             Self::ChecksStatus(_) => change_request_checks_status::NAME,
             Self::Comment(_) => change_request_comment::NAME,
-            Self::ConvergenceState(_) => change_request_convergence_state::NAME,
             Self::ReviewThreads(_) => change_request_review_threads::NAME,
             Self::StackState(_) => change_request_stack_state::NAME,
             Self::ThreadInventory(_) => change_request_thread_inventory::NAME,
@@ -491,7 +452,6 @@ impl CodeHostOperation {
             Self::ThreadResolve(_) => change_request_thread_resolve::NAME,
             Self::CiJobLog(_) => change_request_ci_job_log::NAME,
             Self::RerunFailedJobs(_) => change_request_rerun_failed_jobs::NAME,
-            Self::ReviewGateCheck(_) => review_gate_check::NAME,
         }
     }
 
@@ -510,10 +470,8 @@ impl CodeHostOperation {
                 | CodeHostResult::ThreadResolve(_)
                 | CodeHostResult::CiJobLog(_)
                 | CodeHostResult::RerunFailedJobs(_)
-                | CodeHostResult::ConvergenceState(_)
                 | CodeHostResult::StackState(_)
-                | CodeHostResult::ThreadInventory(_)
-                | CodeHostResult::ReviewGateCheck(_) => false,
+                | CodeHostResult::ThreadInventory(_) => false,
             },
             Self::ListDirectory(arguments) => match result {
                 CodeHostResult::ListDirectory(result) => result.matches(arguments),
@@ -528,25 +486,21 @@ impl CodeHostOperation {
                 | CodeHostResult::ThreadResolve(_)
                 | CodeHostResult::CiJobLog(_)
                 | CodeHostResult::RerunFailedJobs(_)
-                | CodeHostResult::ConvergenceState(_)
                 | CodeHostResult::StackState(_)
-                | CodeHostResult::ThreadInventory(_)
-                | CodeHostResult::ReviewGateCheck(_) => false,
+                | CodeHostResult::ThreadInventory(_) => false,
             },
             Self::Summary(_)
             | Self::ChangedFiles(_)
             | Self::FilePatch(_)
             | Self::ChecksStatus(_)
             | Self::Comment(_)
-            | Self::ConvergenceState(_)
             | Self::ReviewThreads(_)
             | Self::StackState(_)
             | Self::ThreadInventory(_)
             | Self::ThreadReply(_)
             | Self::ThreadResolve(_)
             | Self::CiJobLog(_)
-            | Self::RerunFailedJobs(_)
-            | Self::ReviewGateCheck(_) => true,
+            | Self::RerunFailedJobs(_) => true,
         }
     }
 }
@@ -563,7 +517,6 @@ fn decode_operation(
         CodeHostToolKind::ReadFile => repository_read_file::decode(arguments),
         CodeHostToolKind::ChecksStatus => change_request_checks_status::decode(arguments),
         CodeHostToolKind::Comment => change_request_comment::decode(arguments),
-        CodeHostToolKind::ConvergenceState => change_request_convergence_state::decode(arguments),
         CodeHostToolKind::ReviewThreads => change_request_review_threads::decode(arguments),
         CodeHostToolKind::StackState => change_request_stack_state::decode(arguments),
         CodeHostToolKind::ThreadInventory => change_request_thread_inventory::decode(arguments),
@@ -571,7 +524,6 @@ fn decode_operation(
         CodeHostToolKind::ThreadResolve => change_request_thread_resolve::decode(arguments),
         CodeHostToolKind::CiJobLog => change_request_ci_job_log::decode(arguments),
         CodeHostToolKind::RerunFailedJobs => change_request_rerun_failed_jobs::decode(arguments),
-        CodeHostToolKind::ReviewGateCheck => review_gate_check::decode(arguments),
     }
 }
 
@@ -633,7 +585,7 @@ impl ToolArgumentValidator for CodeHostArgumentValidator {
 /// All sixteen compiled code-host declarations and their matching executor.
 ///
 /// Effect postures are explicit per declaration: summary, files, patch,
-/// checks, threads, job-log, convergence, stack, thread-inventory, and
+/// checks, threads, job-log, stack, thread-inventory, and
 /// review-gate reads are `Auto`; comment, reply, resolve, and rerun mutations
 /// are `Confirm`. Every operation is `ExternalEffect` because even an
 /// authenticated read is visible to the remote code host.
@@ -1158,11 +1110,6 @@ mod tests {
         );
         assert_definition(
             &catalog,
-            change_request_convergence_state::NAME,
-            ToolPermissionDefault::Auto,
-        );
-        assert_definition(
-            &catalog,
             change_request_review_threads::NAME,
             ToolPermissionDefault::Auto,
         );
@@ -1195,11 +1142,6 @@ mod tests {
             &catalog,
             change_request_rerun_failed_jobs::NAME,
             ToolPermissionDefault::Confirm,
-        );
-        assert_definition(
-            &catalog,
-            review_gate_check::NAME,
-            ToolPermissionDefault::Auto,
         );
     }
 
@@ -1670,37 +1612,6 @@ mod tests {
         );
     }
 
-    /// Complete model-facing schema for `change_request_convergence_state`.
-    #[test]
-    fn change_request_convergence_state_schema_is_the_exact_wire_artifact() {
-        assert_schema(
-            change_request_convergence_state::NAME,
-            expect_test::expect![[r#"
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "number": {
-                      "description": "Change-request number.",
-                      "maximum": 2147483647,
-                      "minimum": 1,
-                      "type": "integer"
-                    },
-                    "repository": {
-                      "description": "Exact owner/repository spelling.",
-                      "maxLength": 256,
-                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "repository",
-                    "number"
-                  ],
-                  "type": "object"
-                }"#]],
-        );
-    }
-
     /// Complete model-facing schema for `change_request_stack_state`.
     #[test]
     fn change_request_stack_state_schema_is_the_exact_wire_artifact() {
@@ -1780,59 +1691,6 @@ mod tests {
                   ],
                   "type": "object"
                 }"#]],
-        );
-    }
-
-    /// Complete model-facing schema for `review_gate_check`.
-    #[test]
-    fn review_gate_check_schema_is_the_exact_wire_artifact() {
-        assert_schema(
-            review_gate_check::NAME,
-            expect_test::expect![[r##"
-            {
-              "$defs": {
-                "ReviewGatePurpose": {
-                  "description": "The protocol boundary the caller is checking.",
-                  "oneOf": [
-                    {
-                      "const": "request_review_wave",
-                      "description": "Whether a new external review wave may be requested.",
-                      "type": "string"
-                    },
-                    {
-                      "const": "declare_convergence",
-                      "description": "Whether the change request may be declared converged.",
-                      "type": "string"
-                    }
-                  ]
-                }
-              },
-              "additionalProperties": false,
-              "properties": {
-                "number": {
-                  "description": "Change-request number.",
-                  "maximum": 2147483647,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                "purpose": {
-                  "$ref": "#/$defs/ReviewGatePurpose",
-                  "description": "Protocol boundary to evaluate."
-                },
-                "repository": {
-                  "description": "Exact owner/repository spelling.",
-                  "maxLength": 256,
-                  "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "repository",
-                "number",
-                "purpose"
-              ],
-              "type": "object"
-            }"##]],
         );
     }
 
@@ -2107,16 +1965,6 @@ mod tests {
         );
     }
 
-    /// Convergence-state arguments retain one checked change-request selector.
-    #[test]
-    fn change_request_convergence_state_typed_decode_accepts_exact_shape() {
-        assert_valid(
-            &catalog(),
-            change_request_convergence_state::NAME,
-            r#"{"number":17,"repository":"owner/repository"}"#,
-        );
-    }
-
     /// Stack-state arguments retain the optional opaque child-page cursor.
     #[test]
     fn change_request_stack_state_typed_decode_accepts_cursor() {
@@ -2134,16 +1982,6 @@ mod tests {
             &catalog(),
             change_request_thread_inventory::NAME,
             r#"{"cursor":"opaque-page","number":17,"repository":"owner/repository"}"#,
-        );
-    }
-
-    /// Review-gate arguments require the exact protocol boundary to evaluate.
-    #[test]
-    fn review_gate_check_typed_decode_accepts_exact_purpose() {
-        assert_valid(
-            &catalog(),
-            review_gate_check::NAME,
-            r#"{"number":17,"purpose":"declare_convergence","repository":"owner/repository"}"#,
         );
     }
 

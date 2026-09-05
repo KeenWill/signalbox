@@ -83,11 +83,6 @@ authority, the block it writes claims no release and states that no automatic
 resumption is scheduled, one of the two exceptions [goal mode](goal-mode.md)
 admits.
 
-Every completed poll also records convergence evidence for each pull request at
-the exact head and base revision. A passing assessment for a pull request based
-on `main` is `merge_ready` and one based on another branch is
-`internally_converged`; both end autonomous work on that exact head.
-
 Rule activation stores a digest of the complete versioned matcher, ordered
 actions, singleton scope, and cooldown, plus content-free per-field fingerprints
 labeled with the fields they represent, so reconciliation can tell a changed
@@ -106,17 +101,6 @@ delivery to the guarded state it applies and the events it may derive.
 Repository-watch operations are readable through a typed read-only application
 port (`repo_watch_operations`) backed by the durable cursor, event, evaluation,
 dispatch, obligation, webhook, and commissioned records.
-
-The convergence sweep is a periodic pass that runs beside repository watch.
-Repository watch owns event-driven dispatch; the sweep supplies liveness for
-watched pull requests whose provider events stopped arriving. It owns its
-convergence predicate, its fenced commission, its durable retry and park
-records, and its configuration throttle. It is opt-in twice:
-`[repository_watch.convergence_sweep]` supplies one review-response session
-template and the timing policy, and each repository lists its
-`convergence_pull_requests`. A census snapshot is converged exactly when no
-review thread is unresolved, the status rollup belongs to the current head,
-every gating check is green, and mergeability is `mergeable`.
 
 ## Design decisions
 
@@ -368,54 +352,6 @@ its requeue while its own cutoff remains the latest. Corruption in one
 commissioned goal rolls back that goal's stop to a savepoint without rolling
 back the cutoff, so healthy goals stop and later cutoffs stay eligible.
 
-Every completed poll commits its cursor, events, and convergence evidence in one
-transaction; evidence identical to the latest assessment for the same head and
-base revision is an idempotent replay, and changed evidence appends a new
-assessment. The gating-check inventory is settled only after the same inventory
-is observed in two consecutive committed polls for the unchanged head, so a fast
-check cannot seal the head before a later workflow registers. Check runs are
-green only when completed with success, skipped, or neutral, status contexts
-only at success, and pending or missing-conclusion results are not green. Check
-names containing `report only`, `CodeRabbit`, `codecov/project`, or
-`codecov/patch`, compared case-insensitively, are non-gating. Head, check, and
-aggregate-review evidence is read before the thread inventory, so a thread
-opened between those reads cannot be hidden by an earlier snapshot. The rollup's
-commit, head, and base-branch evidence must agree with the REST projection and
-cursor generation, or the poll fails without recording an assessment. An
-append-only cursor-generation identity advances the current projection when an
-A-B-A return reuses A's unchanged evidence, while a superseded exact replay
-cannot advance it. The first passing assessment creates one monotonic seal for
-repository, pull request, exact head, and exact base revision; later checks or
-reviews on a sealed identity stay visible but cannot reopen dispatch, so a
-session does not revisit threads it already resolved, and a different head or
-base inherits no seal. A convergence cutoff is recorded only when a seal's head
-and base are the latest assessed identity, stale seals stay pending until their
-identity is current again, and admission rechecks the seal under the repository
-lock, settling a stale match as `target_converged` only for the latest assessed
-and sealed identity.
-
-`CHANGES_REQUESTED` gates merging, never dispatching: repository watch keeps
-delivering matching findings while that aggregate decision remains. A blocking
-review may be dismissed only when GitHub reports it among the latest opinionated
-`CHANGES_REQUESTED` reviews, its commit differs from the exact current head, and
-the current evidence otherwise passes with zero unresolved threads, at least one
-gating check and zero non-green ones, a settled head, and nonconflicting
-mergeability. Both the in-memory candidate rule and the durable eligibility
-query enforce the gating count, the settled head, and mergeability, so neither
-admits an intent the other would refuse. Before sending the dismissal mutation,
-the daemon appends a unique intent naming assessment, repository, pull request,
-both heads, review node, reviewer, reason kind, and the exact message, then
-re-reads the pull request and proves the whole predicate again against live
-evidence, requiring the gating inventory the committed poll recorded for the
-same head and stamp. Replaying equal evidence reuses the intent, and a
-still-blocking intent is retried only when a current poll again proves the full
-predicate. After an ambiguous failure a later poll observes the review directly:
-an already dismissed review completes the audit, a newer head supersedes the
-intent, and another actor's clearance is recorded as cleared elsewhere. The
-following poll observes the dismissal through the ordinary review and
-convergence projections and may then seal; no synthetic approval is created, no
-fresh review is requested, and dismissal itself does not stop dispatch.
-
 A newly configured rule activates immediately after the repository's current
 durable event tail, before its task polls, and consumes later events in cursor
 and event-ordinal order. Restart resumes the oldest unevaluated fact and the
@@ -527,27 +463,10 @@ because under primary mode every applied delivery is a cursor advance rules may
 act on. Parity is measurable in shadow mode as zero parity rows whose status is
 `webhook_only` or `poll_only` and whose cause is null.
 
-Automation convergence is not provider mergeability or checks: a current-head
+Automation settlement is not provider mergeability or checks: a current-head
 seal requires the latest dispatch released, its goal achieved, and its delivered
 head current; an achieved release against an older head is a stale seal, and
 held, queued, non-converged, and unattempted states stay distinct.
-
-The convergence sweep observes GitHub and commissions work; it never merges a
-pull request, replies to or resolves a review thread, or mutates Git. No rule
-discovers or enrolls every open pull request. The sweep interval bounds how long
-unconverged work stays undiscovered while limiting provider request volume, and
-the per-pull-request cool-off gives a commissioned session time to make durable
-progress before another dispatch. A failed census fetch, commission, template
-resolution, or sweep-state read appends a typed failure event and advances the
-count of consecutive failures of that kind; retries back off exponentially
-within configured bounds, the fifth consecutive failure parks the target for an
-operator, and a successful observation resets the count. A storage outage that
-also prevents the failure record leaves only a log, and the target retries at
-the next census. After cool-off, repeated sweeps with an unchanged head, an
-unchanged unresolved-thread count, and no recorded model call park the target at
-once as `no_model_activity` with the operator need `inspect_inactive_session`.
-The sweep is a shallow daemon loop that creates no reusable program primitive,
-and it does no prioritization or scheduling beyond the configured list.
 
 ## Boundary contracts
 
@@ -651,14 +570,6 @@ While a pull request's lifecycle remains terminal, repository watch applies the
 parent-only stop to each generation-one goal it commissioned for that pull
 request and to nothing else.
 
-A converged assessment requires every review thread resolved, at least one
-gating check with every gating check green, settled `mergeable` mergeability,
-and no `changes_requested` decision.
-
-Every effective blocking review must target a superseded head; one current-head
-blocker prevents every dismissal for that assessment, and a current-head review
-is never dismissed automatically.
-
 The webhook receiver collects at most 25 MiB of body, compares the HMAC in
 constant time, and parses nothing before verification succeeds.
 
@@ -668,9 +579,6 @@ missed deliveries, reactions, and every fact outside the mapped set.
 Readiness is read from the durable outstanding-obligation view rather than
 recomputed, so the operator read cannot report an obligation ready that
 admission would refuse.
-
-A malformed, closed, missing, partial, oversized, or provider-refused sweep
-census is a facts-fetch failure, never evidence of convergence.
 
 Contracts this page relies on but does not own: the command claim and replay
 protocol and the provenance-only rule in

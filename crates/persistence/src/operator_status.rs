@@ -3,8 +3,6 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
-use signalbox_application::{RepoWatchConvergenceVerdict, RepoWatchReviewDecision};
-use signalbox_domain::MergeableState;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
@@ -13,11 +11,7 @@ use crate::{
         LifecycleDeadlineViolation, LifecycleMetricsError, LifecycleWeeklyMetrics,
         MAX_REPORTED_WEEKS, decode_violation, decode_week,
     },
-    mapping::{
-        RepoWatchSingletonScopeStorageKind, repo_watch_convergence_verdict_from_str,
-        repo_watch_mergeable_state_from_str, repo_watch_review_decision_from_str,
-        repo_watch_singleton_scope_from_str,
-    },
+    mapping::{RepoWatchSingletonScopeStorageKind, repo_watch_singleton_scope_from_str},
 };
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
@@ -38,38 +32,6 @@ pub enum ProcessOperatorStatusHeldSlotBlocker {
     DeliveryTurnRuntimeRelevant,
     LiveRuntimeTurn,
     PursuingGoal,
-}
-
-/// Current provider mergeability in a convergence assessment.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProcessOperatorStatusMergeableState {
-    Mergeable,
-    Conflicting,
-    Unknown,
-}
-
-/// Current provider review decision in a convergence assessment.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProcessOperatorStatusReviewDecision {
-    None,
-    Approved,
-    ReviewRequired,
-    ChangesRequested,
-}
-
-/// Latest convergence verdict for one pull request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProcessOperatorStatusConvergenceVerdict {
-    NotConverged,
-    InternallyConverged,
-    MergeReady,
-}
-
-/// Durable convergence seal attached to the latest assessment.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProcessOperatorStatusConvergenceSeal {
-    InternallyConverged,
-    MergeReady,
 }
 
 /// One decoded singleton key from a repository-watch status projection.
@@ -239,127 +201,11 @@ impl ProcessOperatorStatusQueuedObligation {
     }
 }
 
-/// One latest pull-request convergence assessment.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProcessOperatorStatusPullRequestConvergence {
-    repository: String,
-    pull_request_number: u64,
-    head_sha: String,
-    base_branch: String,
-    base_revision: String,
-    mergeable_state: ProcessOperatorStatusMergeableState,
-    review_decision: ProcessOperatorStatusReviewDecision,
-    unresolved_thread_count: u64,
-    gating_check_count: u64,
-    non_green_gating_checks: Vec<String>,
-    verdict: ProcessOperatorStatusConvergenceVerdict,
-    seal: Option<ProcessOperatorStatusConvergenceSeal>,
-    assessed_seconds_ago: u64,
-}
-
-impl ProcessOperatorStatusPullRequestConvergence {
-    pub fn repository(&self) -> &str {
-        &self.repository
-    }
-
-    pub const fn pull_request_number(&self) -> u64 {
-        self.pull_request_number
-    }
-
-    pub fn head_sha(&self) -> &str {
-        &self.head_sha
-    }
-
-    pub fn base_branch(&self) -> &str {
-        &self.base_branch
-    }
-
-    pub fn base_revision(&self) -> &str {
-        &self.base_revision
-    }
-
-    pub const fn mergeable_state(&self) -> ProcessOperatorStatusMergeableState {
-        self.mergeable_state
-    }
-
-    pub const fn review_decision(&self) -> ProcessOperatorStatusReviewDecision {
-        self.review_decision
-    }
-
-    pub const fn unresolved_thread_count(&self) -> u64 {
-        self.unresolved_thread_count
-    }
-
-    pub const fn gating_check_count(&self) -> u64 {
-        self.gating_check_count
-    }
-
-    pub fn non_green_gating_checks(&self) -> &[String] {
-        &self.non_green_gating_checks
-    }
-
-    pub const fn verdict(&self) -> ProcessOperatorStatusConvergenceVerdict {
-        self.verdict
-    }
-
-    pub const fn seal(&self) -> Option<ProcessOperatorStatusConvergenceSeal> {
-        self.seal
-    }
-
-    pub const fn assessed_seconds_ago(&self) -> u64 {
-        self.assessed_seconds_ago
-    }
-}
-
-/// One stale blocking review whose planned clearance is not yet settled.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProcessOperatorStatusPendingStaleReviewClearance {
-    repository: String,
-    pull_request_number: u64,
-    current_head_sha: String,
-    review_node_id: String,
-    reviewer: String,
-    reviewed_head_sha: String,
-    pending_for_seconds: u64,
-}
-
-impl ProcessOperatorStatusPendingStaleReviewClearance {
-    pub fn repository(&self) -> &str {
-        &self.repository
-    }
-
-    pub const fn pull_request_number(&self) -> u64 {
-        self.pull_request_number
-    }
-
-    pub fn current_head_sha(&self) -> &str {
-        &self.current_head_sha
-    }
-
-    pub fn review_node_id(&self) -> &str {
-        &self.review_node_id
-    }
-
-    pub fn reviewer(&self) -> &str {
-        &self.reviewer
-    }
-
-    pub fn reviewed_head_sha(&self) -> &str {
-        &self.reviewed_head_sha
-    }
-
-    pub const fn pending_for_seconds(&self) -> u64 {
-        self.pending_for_seconds
-    }
-}
-
 /// One row in the fixed-phase operator-status snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessOperatorStatusItem {
     HeldSlot(ProcessOperatorStatusHeldSlot),
     QueuedObligation(ProcessOperatorStatusQueuedObligation),
-    PullRequestConvergence(ProcessOperatorStatusPullRequestConvergence),
-    PendingStaleReviewClearance(ProcessOperatorStatusPendingStaleReviewClearance),
     /// One calendar week's §12 metrics.
     LifecycleWeek(LifecycleWeeklyMetrics),
     /// One owned non-terminal session past its §1 deadline obligation.
@@ -371,8 +217,6 @@ pub enum ProcessOperatorStatusItem {
 pub struct ProcessOperatorStatusCounts {
     held_slots: u64,
     queued_obligations: u64,
-    pull_request_convergences: u64,
-    pending_stale_review_clearances: u64,
     lifecycle_weeks: u64,
     lifecycle_deadline_violations: u64,
 }
@@ -384,14 +228,6 @@ impl ProcessOperatorStatusCounts {
 
     pub const fn queued_obligations(self) -> u64 {
         self.queued_obligations
-    }
-
-    pub const fn pull_request_convergences(self) -> u64 {
-        self.pull_request_convergences
-    }
-
-    pub const fn pending_stale_review_clearances(self) -> u64 {
-        self.pending_stale_review_clearances
     }
 
     pub const fn lifecycle_weeks(self) -> u64 {
@@ -416,7 +252,7 @@ impl ProcessOperatorStatusRepository {
         Self { pool }
     }
 
-    /// Opens one coherent snapshot over all four repository-watch views.
+    /// Opens one coherent snapshot over the repository-watch views.
     pub async fn open(&self) -> Result<ProcessOperatorStatusReader, ProcessOperatorStatusError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(REPEATABLE_READ_ONLY)
@@ -436,8 +272,6 @@ impl ProcessOperatorStatusRepository {
 enum ProcessOperatorStatusPhase {
     HeldSlots,
     QueuedObligations,
-    PullRequestConvergences,
-    PendingStaleReviewClearances,
     LifecycleWeeks,
     LifecycleDeadlineViolations,
     Complete,
@@ -470,14 +304,6 @@ impl ProcessOperatorStatusReader {
                 ),
                 ProcessOperatorStatusPhase::QueuedObligations => (
                     "FETCH NEXT FROM operator_status_queued_obligations",
-                    ProcessOperatorStatusPhase::PullRequestConvergences,
-                ),
-                ProcessOperatorStatusPhase::PullRequestConvergences => (
-                    "FETCH NEXT FROM operator_status_pull_request_convergences",
-                    ProcessOperatorStatusPhase::PendingStaleReviewClearances,
-                ),
-                ProcessOperatorStatusPhase::PendingStaleReviewClearances => (
-                    "FETCH NEXT FROM operator_status_pending_stale_review_clearances",
                     ProcessOperatorStatusPhase::LifecycleWeeks,
                 ),
                 ProcessOperatorStatusPhase::LifecycleWeeks => (
@@ -519,22 +345,6 @@ impl ProcessOperatorStatusReader {
                     self.counts.queued_obligations =
                         increment(self.counts.queued_obligations, "queued obligation count")?;
                     ProcessOperatorStatusItem::QueuedObligation(decode_queued_obligation(&row)?)
-                }
-                ProcessOperatorStatusPhase::PullRequestConvergences => {
-                    self.counts.pull_request_convergences = increment(
-                        self.counts.pull_request_convergences,
-                        "pull request convergence count",
-                    )?;
-                    ProcessOperatorStatusItem::PullRequestConvergence(decode_convergence(&row)?)
-                }
-                ProcessOperatorStatusPhase::PendingStaleReviewClearances => {
-                    self.counts.pending_stale_review_clearances = increment(
-                        self.counts.pending_stale_review_clearances,
-                        "pending stale review clearance count",
-                    )?;
-                    ProcessOperatorStatusItem::PendingStaleReviewClearance(
-                        decode_pending_clearance(&row)?,
-                    )
                 }
                 ProcessOperatorStatusPhase::LifecycleWeeks => {
                     self.counts.lifecycle_weeks =
@@ -644,33 +454,6 @@ async fn declare_status_cursors(
     )
     .execute(&mut **transaction)
     .await?;
-    sqlx::query(
-        "DECLARE operator_status_pull_request_convergences NO SCROLL CURSOR FOR
-         SELECT repository, pull_request_number, head_sha, base_branch,
-                base_revision, mergeable_state, review_decision,
-                unresolved_thread_count::numeric AS unresolved_thread_count,
-                gating_check_count, non_green_gating_checks, verdict_kind,
-                sealed_kind,
-                GREATEST(0, floor(extract(epoch FROM
-                    (transaction_timestamp() - recorded_at))))::numeric
-                    AS assessed_seconds_ago
-           FROM repo_watch_current_pull_request_convergence
-          ORDER BY repository, pull_request_number",
-    )
-    .execute(&mut **transaction)
-    .await?;
-    sqlx::query(
-        "DECLARE operator_status_pending_stale_review_clearances NO SCROLL CURSOR FOR
-         SELECT repository, pull_request_number, current_head_sha, review_node_id,
-                reviewer, reviewed_head_sha,
-                GREATEST(0, floor(extract(epoch FROM
-                    (transaction_timestamp() - planned_at))))::numeric
-                    AS pending_for_seconds
-           FROM repo_watch_pending_stale_review_clearance
-          ORDER BY planned_at, repository, pull_request_number, review_node_id",
-    )
-    .execute(&mut **transaction)
-    .await?;
     // The two §12 sections read the same views the telemetry pass reads, in
     // the same snapshot as the sections above.
     sqlx::query(DECLARE_WEEKLY_METRICS_CURSOR)
@@ -764,126 +547,6 @@ fn decode_queued_obligation(
             .transpose()?,
         cooldown_never_eligible: row.try_get("cooldown_never_eligible")?,
         ready: row.try_get("ready")?,
-    })
-}
-
-fn decode_convergence(
-    row: &PgRow,
-) -> Result<ProcessOperatorStatusPullRequestConvergence, ProcessOperatorStatusError> {
-    let mergeable_state_value = row.try_get::<String, _>("mergeable_state")?;
-    let mergeable_state = match repo_watch_mergeable_state_from_str(&mergeable_state_value).ok_or(
-        ProcessOperatorStatusCorruption::Unsupported {
-            field: "mergeable state",
-            value: mergeable_state_value,
-        },
-    )? {
-        MergeableState::Mergeable => ProcessOperatorStatusMergeableState::Mergeable,
-        MergeableState::Conflicting => ProcessOperatorStatusMergeableState::Conflicting,
-        MergeableState::Unknown => ProcessOperatorStatusMergeableState::Unknown,
-    };
-    let review_decision_value = row.try_get::<String, _>("review_decision")?;
-    let review_decision = match repo_watch_review_decision_from_str(&review_decision_value).ok_or(
-        ProcessOperatorStatusCorruption::Unsupported {
-            field: "review decision",
-            value: review_decision_value,
-        },
-    )? {
-        RepoWatchReviewDecision::None => ProcessOperatorStatusReviewDecision::None,
-        RepoWatchReviewDecision::Approved => ProcessOperatorStatusReviewDecision::Approved,
-        RepoWatchReviewDecision::ReviewRequired => {
-            ProcessOperatorStatusReviewDecision::ReviewRequired
-        }
-        RepoWatchReviewDecision::ChangesRequested => {
-            ProcessOperatorStatusReviewDecision::ChangesRequested
-        }
-    };
-    let verdict_value = row.try_get::<String, _>("verdict_kind")?;
-    let verdict = match repo_watch_convergence_verdict_from_str(&verdict_value).ok_or(
-        ProcessOperatorStatusCorruption::Unsupported {
-            field: "convergence verdict",
-            value: verdict_value,
-        },
-    )? {
-        RepoWatchConvergenceVerdict::NotConverged => {
-            ProcessOperatorStatusConvergenceVerdict::NotConverged
-        }
-        RepoWatchConvergenceVerdict::InternallyConverged => {
-            ProcessOperatorStatusConvergenceVerdict::InternallyConverged
-        }
-        RepoWatchConvergenceVerdict::MergeReady => {
-            ProcessOperatorStatusConvergenceVerdict::MergeReady
-        }
-    };
-    let seal = row
-        .try_get::<Option<String>, _>("sealed_kind")?
-        .map(|value| {
-            match repo_watch_convergence_verdict_from_str(&value).ok_or_else(|| {
-                ProcessOperatorStatusCorruption::Unsupported {
-                    field: "convergence seal",
-                    value: value.clone(),
-                }
-            })? {
-                RepoWatchConvergenceVerdict::InternallyConverged => {
-                    Ok(ProcessOperatorStatusConvergenceSeal::InternallyConverged)
-                }
-                RepoWatchConvergenceVerdict::MergeReady => {
-                    Ok(ProcessOperatorStatusConvergenceSeal::MergeReady)
-                }
-                RepoWatchConvergenceVerdict::NotConverged => {
-                    Err(ProcessOperatorStatusCorruption::Unsupported {
-                        field: "convergence seal",
-                        value,
-                    })
-                }
-            }
-        })
-        .transpose()?;
-    Ok(ProcessOperatorStatusPullRequestConvergence {
-        repository: row.try_get("repository")?,
-        pull_request_number: positive_decimal(
-            row.try_get("pull_request_number")?,
-            "convergence pull request number",
-        )?,
-        head_sha: row.try_get("head_sha")?,
-        base_branch: row.try_get("base_branch")?,
-        base_revision: row.try_get("base_revision")?,
-        mergeable_state,
-        review_decision,
-        unresolved_thread_count: nonnegative_decimal(
-            row.try_get("unresolved_thread_count")?,
-            "unresolved thread count",
-        )?,
-        gating_check_count: nonnegative_i64(
-            row.try_get("gating_check_count")?,
-            "gating check count",
-        )?,
-        non_green_gating_checks: row.try_get("non_green_gating_checks")?,
-        verdict,
-        seal,
-        assessed_seconds_ago: nonnegative_decimal(
-            row.try_get("assessed_seconds_ago")?,
-            "assessment age",
-        )?,
-    })
-}
-
-fn decode_pending_clearance(
-    row: &PgRow,
-) -> Result<ProcessOperatorStatusPendingStaleReviewClearance, ProcessOperatorStatusError> {
-    Ok(ProcessOperatorStatusPendingStaleReviewClearance {
-        repository: row.try_get("repository")?,
-        pull_request_number: positive_decimal(
-            row.try_get("pull_request_number")?,
-            "clearance pull request number",
-        )?,
-        current_head_sha: row.try_get("current_head_sha")?,
-        review_node_id: row.try_get("review_node_id")?,
-        reviewer: row.try_get("reviewer")?,
-        reviewed_head_sha: row.try_get("reviewed_head_sha")?,
-        pending_for_seconds: nonnegative_decimal(
-            row.try_get("pending_for_seconds")?,
-            "clearance duration",
-        )?,
     })
 }
 

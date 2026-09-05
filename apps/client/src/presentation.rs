@@ -15,17 +15,15 @@ use signalbox_process_protocol::{
     GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
     ImportedTextPreview, LifecycleActorClass, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor,
     MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallState,
-    OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker,
-    OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
+    OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
     OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
-    OperatorStatusLifecycleWeekMessage, OperatorStatusMergeableState, OperatorStatusMessage,
-    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
-    OperatorStatusQueuedObligationMessage, OperatorStatusReviewDecision,
-    OperatorStatusSingletonScope, ReviewDiffSide, ReviewFindingSnapshot, ReviewFindingStatus,
-    ReviewOrchestrationConcernStatus, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
-    ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity,
-    ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth,
-    RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
+    OperatorStatusLifecycleWeekMessage, OperatorStatusMessage,
+    OperatorStatusQueuedObligationMessage, OperatorStatusSingletonScope, ReviewDiffSide,
+    ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
+    ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
+    ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth, RunnerProjection,
+    RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
     RunnerStateTransitionState, ServerMessage, SessionClosureOutcome, SessionEvent,
     ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
     TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance, UserInputContent,
@@ -75,8 +73,6 @@ pub(crate) struct SessionMessageSentPresentation {
 pub(crate) struct OperatorStatusPresentationCounts {
     pub(crate) held_slots: u64,
     pub(crate) queued_obligations: u64,
-    pub(crate) pull_request_convergences: u64,
-    pub(crate) pending_stale_review_clearances: u64,
     pub(crate) lifecycle_weeks: u64,
     pub(crate) lifecycle_deadline_violations: u64,
 }
@@ -1138,16 +1134,12 @@ impl<'a> Output<'a> {
         let OperatorStatusPresentationCounts {
             held_slots,
             queued_obligations,
-            pull_request_convergences,
-            pending_stale_review_clearances,
             lifecycle_weeks,
             lifecycle_deadline_violations,
         } = counts;
         writeln!(
             self.stdout,
             "status held_slots={held_slots} queued_obligations={queued_obligations} \
-             pull_request_convergences={pull_request_convergences} \
-             pending_stale_review_clearances={pending_stale_review_clearances} \
              lifecycle_weeks={lifecycle_weeks} \
              nonterminal_past_deadline={lifecycle_deadline_violations}"
         )
@@ -1279,73 +1271,6 @@ impl<'a> Output<'a> {
                     rule_version.value(),
                     duration_label(waiting_for_seconds.value()),
                     matched_event_count.value(),
-                )?;
-                Ok(())
-            }
-            OperatorStatusMessage::PullRequestConvergence(item) => {
-                let OperatorStatusPullRequestConvergenceMessage {
-                    repository,
-                    pull_request_number,
-                    head_sha,
-                    base_branch,
-                    base_revision,
-                    mergeable_state,
-                    review_decision,
-                    unresolved_thread_count,
-                    gating_check_count,
-                    non_green_gating_checks,
-                    verdict,
-                    seal,
-                    assessed_seconds_ago,
-                } = item.as_ref();
-                let repository = self.render_field(repository, TextField::DelimitedOnLine);
-                let base_branch = self.render_field(base_branch, TextField::DelimitedOnLine);
-                let checks = non_green_gating_checks
-                    .iter()
-                    .map(|check| self.render_field(check, TextField::DelimitedOnLine))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                writeln!(
-                    self.stdout,
-                    "convergence repository={repository} pr={} verdict={} seal={} \
-                     unresolved_threads={} gating_checks={} non_green_count={} non_green={} mergeable={} review={} \
-                     assessed_ago={} head={} base={base_branch}@{}",
-                    pull_request_number.value(),
-                    operator_status_verdict_label(*verdict),
-                    seal.map_or("none", operator_status_seal_label),
-                    unresolved_thread_count.value(),
-                    gating_check_count.value(),
-                    non_green_gating_checks.len(),
-                    checks,
-                    operator_status_mergeable_label(*mergeable_state),
-                    operator_status_review_decision_label(*review_decision),
-                    duration_label(assessed_seconds_ago.value()),
-                    head_sha,
-                    base_revision,
-                )?;
-                Ok(())
-            }
-            OperatorStatusMessage::PendingStaleReviewClearance(item) => {
-                let OperatorStatusPendingStaleReviewClearanceMessage {
-                    repository,
-                    pull_request_number,
-                    current_head_sha,
-                    review_node_id,
-                    reviewer,
-                    reviewed_head_sha,
-                    pending_for_seconds,
-                } = item.as_ref();
-                let repository = self.render_field(repository, TextField::DelimitedOnLine);
-                let review_node_id = self.render_field(review_node_id, TextField::DelimitedOnLine);
-                let reviewer = self.render_field(reviewer, TextField::DelimitedOnLine);
-                writeln!(
-                    self.stdout,
-                    "stale_review_clearance repository={repository} pr={} reviewer={reviewer} \
-                     pending={} review={review_node_id} reviewed_head={} current_head={}",
-                    pull_request_number.value(),
-                    duration_label(pending_for_seconds.value()),
-                    reviewed_head_sha,
-                    current_head_sha,
                 )?;
                 Ok(())
             }
@@ -2998,40 +2923,6 @@ const fn operator_status_blocker_label(blocker: OperatorStatusHeldSlotBlocker) -
     }
 }
 
-const fn operator_status_mergeable_label(state: OperatorStatusMergeableState) -> &'static str {
-    match state {
-        OperatorStatusMergeableState::Mergeable => "mergeable",
-        OperatorStatusMergeableState::Conflicting => "conflicting",
-        OperatorStatusMergeableState::Unknown => "unknown",
-    }
-}
-
-const fn operator_status_review_decision_label(
-    decision: OperatorStatusReviewDecision,
-) -> &'static str {
-    match decision {
-        OperatorStatusReviewDecision::None => "none",
-        OperatorStatusReviewDecision::Approved => "approved",
-        OperatorStatusReviewDecision::ReviewRequired => "review_required",
-        OperatorStatusReviewDecision::ChangesRequested => "changes_requested",
-    }
-}
-
-const fn operator_status_verdict_label(verdict: OperatorStatusConvergenceVerdict) -> &'static str {
-    match verdict {
-        OperatorStatusConvergenceVerdict::NotConverged => "not_converged",
-        OperatorStatusConvergenceVerdict::InternallyConverged => "internally_converged",
-        OperatorStatusConvergenceVerdict::MergeReady => "merge_ready",
-    }
-}
-
-const fn operator_status_seal_label(seal: OperatorStatusConvergenceSeal) -> &'static str {
-    match seal {
-        OperatorStatusConvergenceSeal::InternallyConverged => "internally_converged",
-        OperatorStatusConvergenceSeal::MergeReady => "merge_ready",
-    }
-}
-
 const fn operator_status_lifecycle_state_label(
     state: OperatorStatusLifecycleState,
 ) -> &'static str {
@@ -3801,14 +3692,11 @@ mod tests {
         DescendantTerminationScope, ErrorCode, ErrorDetail, FailedModelCallDisposition,
         FailedTerminalModelCall, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
         ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-        ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, OperatorStatusConvergenceSeal,
-        OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker,
+        ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, OperatorStatusHeldSlotBlocker,
         OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
         OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
-        OperatorStatusLifecycleWeekMessage, OperatorStatusMergeableState, OperatorStatusMessage,
-        OperatorStatusPendingStaleReviewClearanceMessage,
-        OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
-        OperatorStatusReviewDecision, OperatorStatusSingletonScope, ReviewDiffSide,
+        OperatorStatusLifecycleWeekMessage, OperatorStatusMessage,
+        OperatorStatusQueuedObligationMessage, OperatorStatusSingletonScope, ReviewDiffSide,
         ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
         ReviewTargetSnapshot, ReviewTargetSubject, RunnerCapabilityClass, RunnerConnectionHealth,
         RunnerCredentialProfileName, RunnerPlacementRevision, RunnerProjection,
@@ -3955,8 +3843,6 @@ mod tests {
                 .operator_status_counts(super::OperatorStatusPresentationCounts {
                     held_slots: 1,
                     queued_obligations: 1,
-                    pull_request_convergences: 1,
-                    pending_stale_review_clearances: 1,
                     lifecycle_weeks: 1,
                     lifecycle_deadline_violations: 1,
                 })
@@ -4008,46 +3894,6 @@ mod tests {
                 .expect("in-memory output cannot fail");
             output
                 .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
-                    OperatorStatusMessage::PullRequestConvergence(Box::new(
-                        OperatorStatusPullRequestConvergenceMessage {
-                            repository: String::from("example/repo"),
-                            pull_request_number: CanonicalU64::new(41),
-                            head_sha: String::from("1111111111111111111111111111111111111111"),
-                            base_branch: String::from("main"),
-                            base_revision: String::from("2222222222222222222222222222222222222222"),
-                            mergeable_state: OperatorStatusMergeableState::Mergeable,
-                            review_decision: OperatorStatusReviewDecision::Approved,
-                            unresolved_thread_count: CanonicalU64::new(0),
-                            gating_check_count: CanonicalU64::new(2),
-                            non_green_gating_checks: Vec::new(),
-                            verdict: OperatorStatusConvergenceVerdict::MergeReady,
-                            seal: Some(OperatorStatusConvergenceSeal::MergeReady),
-                            assessed_seconds_ago: CanonicalU64::new(9),
-                        },
-                    )),
-                )))
-                .expect("in-memory output cannot fail");
-            output
-                .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
-                    OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
-                        OperatorStatusPendingStaleReviewClearanceMessage {
-                            repository: String::from("example/repo"),
-                            pull_request_number: CanonicalU64::new(41),
-                            current_head_sha: String::from(
-                                "1111111111111111111111111111111111111111",
-                            ),
-                            review_node_id: String::from("PRR_node"),
-                            reviewer: String::from("reviewer"),
-                            reviewed_head_sha: String::from(
-                                "3333333333333333333333333333333333333333",
-                            ),
-                            pending_for_seconds: CanonicalU64::new(8),
-                        },
-                    )),
-                )))
-                .expect("in-memory output cannot fail");
-            output
-                .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
                     OperatorStatusMessage::LifecycleWeek(Box::new(
                         OperatorStatusLifecycleWeekMessage {
                             week_start_date: String::from("2026-08-31"),
@@ -4087,50 +3933,14 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            status held_slots=1 queued_obligations=1 pull_request_convergences=1 pending_stale_review_clearances=1 lifecycle_weeks=1 nonterminal_past_deadline=1
+            status held_slots=1 queued_obligations=1 lifecycle_weeks=1 nonterminal_past_deadline=1
             held repository=example/repo origin=pull_request#41 rule=review@1 singleton=pull_request:example/repo#41 held=1h1m1s blockers=pursuing_goal sessions=00000000-0000-0000-0000-000000000002 dispatch=00000000-0000-0000-0000-000000000001
             queued repository=example/repo rule=review@1 singleton=rule waiting=1m5s matches=3 ready=false occupying=none cooldown=5s first_event=00000000-0000-0000-0000-000000000004 latest_event=00000000-0000-0000-0000-000000000005 obligation=00000000-0000-0000-0000-000000000003
-            convergence repository=example/repo pr=41 verdict=merge_ready seal=merge_ready unresolved_threads=0 gating_checks=2 non_green_count=0 non_green= mergeable=mergeable review=approved assessed_ago=9s head=1111111111111111111111111111111111111111 base=main@2222222222222222222222222222222222222222
-            stale_review_clearance repository=example/repo pr=41 reviewer=reviewer pending=8s review=PRR_node reviewed_head=3333333333333333333333333333333333333333 current_head=1111111111111111111111111111111111111111
             lifecycle_week week=2026-08-31 completion_failure=3/40@75000ppm failed_unknown=1/40@25000ppm overflow=5/44@113636ppm finish_given_overflow=4/5@800000ppm wall=0/38@0ppm wall_occurrences=0 turn_cause_completeness=980/985@994923ppm model_call_cause_completeness=91/95@957894ppm
             nonterminal_past_deadline session=00000000-0000-0000-0000-000000000006 state=parked deadline=armed expired=1m30s
             model_usage=omitted reason=no_cheap_status_aggregate
         "#]]
         .assert_eq(&rendered);
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn operator_status_distinguishes_a_check_named_none_from_an_empty_inventory() {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        {
-            let mut output = Output::new(&mut stdout, &mut stderr, false);
-            output
-                .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
-                    OperatorStatusMessage::PullRequestConvergence(Box::new(
-                        OperatorStatusPullRequestConvergenceMessage {
-                            repository: String::from("example/repo"),
-                            pull_request_number: CanonicalU64::new(41),
-                            head_sha: String::from("1111111111111111111111111111111111111111"),
-                            base_branch: String::from("main"),
-                            base_revision: String::from("2222222222222222222222222222222222222222"),
-                            mergeable_state: OperatorStatusMergeableState::Mergeable,
-                            review_decision: OperatorStatusReviewDecision::ChangesRequested,
-                            unresolved_thread_count: CanonicalU64::new(1),
-                            gating_check_count: CanonicalU64::new(1),
-                            non_green_gating_checks: vec![String::from("none")],
-                            verdict: OperatorStatusConvergenceVerdict::NotConverged,
-                            seal: None,
-                            assessed_seconds_ago: CanonicalU64::new(1),
-                        },
-                    )),
-                )))
-                .expect("in-memory output cannot fail");
-        }
-
-        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
-        assert!(rendered.contains("non_green_count=1 non_green=none"));
         assert!(stderr.is_empty());
     }
 

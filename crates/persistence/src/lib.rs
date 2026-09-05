@@ -17,7 +17,6 @@ pub mod blob;
 pub mod blob_derivation;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
-pub mod convergence_sweep;
 pub mod conversation_import;
 pub mod conversation_import_discovery;
 pub mod conversation_listing;

@@ -21,10 +21,10 @@ use std::{
 };
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityNudge, GoalAwareEligibilityPass,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop,
-    SchedulerLoopExit, SchedulerPassOccupancyBound, StaleActiveTurnBound, StartEligibleTurnService,
+    ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+    SchedulerPassOccupancyBound, StaleActiveTurnBound, StartEligibleTurnService,
     StartupScanService, TurnLivenessScanInterval, UuidV7StartEligibleTurnIdGenerator,
     UuidV7StartupScanIdGenerator,
 };
@@ -44,7 +44,6 @@ use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, Open
 use signalbox_persistence::{
     automatic_reconciliation::RETRY_LADDER_ARITY,
     blob::BlobCatalogRepository,
-    convergence_sweep::PostgresConvergenceSweepStore,
     hub_fence::FENCED_POOL_MAX_CONNECTIONS,
     migrate,
     model_execution::PostgresModelCallRepository,
@@ -63,18 +62,17 @@ use signalboxd::runner_protocol_runtime::{
 use signalboxd::{
     ActivatedTurnPass, AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs,
     BlobStoreRegistry, BlobTools, CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds,
-    ConfiguredApprovalPostureError, ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
-    DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
-    ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
-    FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
-    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError,
-    LifecycleDeadlineRuntime, LifecycleMetricsRuntime, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    ReportedUsageCompaction, RepositoryWatchNumericBounds, RepositoryWatchRuntime,
-    RepositoryWatchRuntimeError, SessionTemplateConfiguration, SessionTemplateConfigurationError,
-    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
-    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
+    DaemonToolsConstructionError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation, FileCredentialAccess,
+    GitHubCodeHostTransport, GoalModeNumericBounds, HubModelConfiguration,
+    HubModelConfigurationError, LifecycleDeadlineRuntime, LifecycleMetricsRuntime,
+    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter,
+    OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, RepositoryWatchNumericBounds,
+    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
@@ -677,7 +675,6 @@ enum RuntimeTaskExit {
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
     RepositoryWatchLeaseExpiry(Result<(), RepoWatchDispatchRepositoryError>),
-    ConvergenceSweep,
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
     LifecycleDeadline,
@@ -724,7 +721,6 @@ enum RuntimeTaskDefect {
     RunnerCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
     RepositoryWatchLeaseExpiryCompletedBeforeShutdown,
-    ConvergenceSweepCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
     LifecycleDeadlineCompletedBeforeShutdown,
@@ -749,9 +745,6 @@ impl RuntimeTaskDefect {
             }
             Self::RepositoryWatchLeaseExpiryCompletedBeforeShutdown => {
                 "repository_watch_lease_expiry_completed_before_shutdown"
-            }
-            Self::ConvergenceSweepCompletedBeforeShutdown => {
-                "convergence_sweep_completed_before_shutdown"
             }
             Self::WebHttpCompletedBeforeShutdown => "web_http_completed_before_shutdown",
             Self::TurnLivenessCompletedBeforeShutdown => "turn_liveness_completed_before_shutdown",
@@ -1155,7 +1148,6 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))
-        | Ok(RuntimeTaskExit::ConvergenceSweep)
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness)
         | Ok(RuntimeTaskExit::LifecycleDeadline)
@@ -1515,15 +1507,6 @@ async fn run_hub(
         configured_usize("repository_reconciliation_quantum")?,
         configured_duration("webhook_drain_work_budget"),
     );
-    let convergence_sweep_numeric_bounds = ConvergenceSweepNumericBounds::new(
-        configured_duration("convergence_sweep_request_timeout"),
-        configured_usize("max_convergence_sweep_connection_pages")?,
-        configured_usize("max_concurrent_convergence_sweep_targets")?,
-        configured_usize("max_convergence_sweep_request_attempts")?,
-        configured_duration("convergence_sweep_request_retry_delay"),
-        configured_duration("convergence_sweep_retry_backoff_base"),
-        configured_duration("convergence_sweep_retry_backoff_cap"),
-    );
     let turn_liveness_persistence_bounds = TurnLivenessPersistenceBounds::new(
         configured_duration("terminalization_lock_wait"),
         configured_duration("terminalization_acquire_wait"),
@@ -1608,11 +1591,6 @@ async fn run_hub(
             })?;
         repository_watch
             .validate_template_contexts(&declarations)
-            .and_then(|()| {
-                repository_watch.validate_convergence_template(
-                    template_configuration.summaries().map(|(name, _)| name),
-                )
-            })
             .map_err(|error| {
                 erase_startup_cause(
                     RuntimePhase::Configuration,
@@ -1898,24 +1876,6 @@ async fn run_hub(
                     .map(|repository| repository.repository().clone())
                     .collect()
             });
-    let configured_convergence_targets =
-        model_configuration
-            .repository_watch()
-            .map_or_else(Vec::new, |configuration| {
-                if configuration.convergence_sweep().is_none() {
-                    return Vec::new();
-                }
-                configuration
-                    .repositories()
-                    .iter()
-                    .flat_map(|repository| {
-                        repository
-                            .convergence_pull_requests()
-                            .iter()
-                            .map(|pull_request| (repository.repository().clone(), *pull_request))
-                    })
-                    .collect()
-            });
     let repository_watch_store = PostgresRepoWatchDispatchStore::new(
         pool.clone(),
         model_configuration.session_credential_pin(),
@@ -2189,11 +2149,6 @@ async fn run_hub(
             .await?;
         repository_watch_store
             .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
-            .await?;
-        repository_watch_store
-            .process_pending_convergence_cutoffs(|| {
-                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
-            })
             .await
     };
     match await_while_guarded(&mut database, repository_watch_reconciliation).await {
@@ -2258,68 +2213,6 @@ async fn run_hub(
         },
         None => None,
     };
-    let convergence_sweep_runtime = match model_configuration.repository_watch() {
-        Some(configuration) => match ConvergenceSweepRuntime::try_new(
-            pool.clone(),
-            configuration,
-            template_configuration.clone(),
-            model_configuration.clone(),
-            eligibility_nudge.clone(),
-            convergence_sweep_numeric_bounds,
-        ) {
-            Ok(runtime) => runtime,
-            Err(_) => {
-                let failure = erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static(
-                        "convergence_sweep_transport_construction_failed",
-                    ),
-                );
-                let _ = listener.cleanup();
-                let _ = runner_listener.cleanup();
-                drop(blob_executor);
-                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-                drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
-            }
-        },
-        None => None,
-    };
-    let convergence_sweep_store = PostgresConvergenceSweepStore::new(pool.clone());
-    let convergence_target_admission =
-        convergence_sweep_store.reconcile_configured_targets(&configured_convergence_targets);
-    match await_while_guarded(&mut database, convergence_target_admission).await {
-        GuardedAwait::Completed(Ok(restored)) => {
-            for session in restored {
-                let _ = eligibility_nudge.nudge(session);
-            }
-        }
-        GuardedAwait::Completed(Err(_)) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("convergence_target_admission_failed"),
-            );
-            let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
-            drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-        GuardedAwait::GuardLost => {
-            let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
-            if let Some(registry) = blob_store_registry.as_ref() {
-                registry.disarm_staging_sweep();
-            }
-            drop(blob_executor);
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Ok(ShutdownOutcome::GuardLost);
-        }
-    }
     // Every fallible construction above has succeeded, so the revisions this
     // consumes belong to a daemon that reaches its runtime. A startup that
     // failed earlier retired and activated nothing, leaving the previous
@@ -2546,7 +2439,6 @@ async fn run_hub(
         repository_watch_lease_expiry_shutdown,
         mut repository_watch_lease_expiry_shutdown_receiver,
     ) = watch::channel(false);
-    let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
@@ -2617,14 +2509,6 @@ async fn run_hub(
         };
         RuntimeTaskExit::RepositoryWatchLeaseExpiry(outcome)
     });
-    if let Some(convergence_sweep_runtime) = convergence_sweep_runtime {
-        runtime_tasks.spawn(async move {
-            convergence_sweep_runtime
-                .run(convergence_sweep_shutdown_receiver)
-                .await;
-            RuntimeTaskExit::ConvergenceSweep
-        });
-    }
     runtime_tasks.spawn(async move {
         turn_liveness_runtime
             .run(turn_liveness_shutdown_receiver)
@@ -2708,12 +2592,6 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
-                    Some(Ok(RuntimeTaskExit::ConvergenceSweep)) => {
-                        report_runtime_task_defect(
-                            RuntimeTaskDefect::ConvergenceSweepCompletedBeforeShutdown,
-                        );
-                        RuntimeStopCause::RuntimeDefect
-                    }
                     Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
                         report_web_http_runtime_failure(&error);
                         RuntimeStopCause::RuntimeFailed
@@ -2772,7 +2650,6 @@ async fn run_hub(
             let _ = runner_shutdown.send(true);
             let _ = repository_watch_shutdown.send(true);
             let _ = repository_watch_lease_expiry_shutdown.send(true);
-            let _ = convergence_sweep_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
             let _ = lifecycle_deadline_shutdown.send(true);

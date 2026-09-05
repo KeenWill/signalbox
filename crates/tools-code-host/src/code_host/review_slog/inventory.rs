@@ -9,6 +9,12 @@ use crate::code_host::{
     review_slog::ESCALATION_MARKER,
 };
 
+/// Whether the code host identifies an actor as a repository participant who
+/// can speak for the review protocol.
+pub(crate) fn authorized_association(association: &str) -> bool {
+    matches!(association, "OWNER" | "MEMBER" | "COLLABORATOR")
+}
+
 /// Classification of the first review-thread author.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReviewAuthorClass {
@@ -170,14 +176,6 @@ impl ThreadInventoryResult {
             truncated,
             next_cursor,
         })
-    }
-
-    pub(super) const fn truncated(&self) -> bool {
-        self.truncated
-    }
-
-    pub(super) fn head_revision(&self) -> &str {
-        &self.head_revision
     }
 
     pub(super) fn into_value(self) -> Value {

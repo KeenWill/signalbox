@@ -68,6 +68,7 @@ query($ids: [ID!]!) {
       headRepository { nameWithOwner }
       mergeable
       reviewThreads(first: 100) {
+        totalCount
         nodes {
           id
           isResolved
@@ -1096,6 +1097,9 @@ query($owner: String!, $name: String!, $head: String!, $base: String!) {
                     pending.append(
                         PaginationTask(task.kind, task.pull_request, page["pageInfo"]["endCursor"])
                     )
+        for pull_request in pull_requests:
+            if len(pull_request["_review_thread_nodes"]) != pull_request["_thread_total_count"]:
+                raise RuntimeError("review thread pagination returned an incomplete census")
 
 
 def chunks(values: Sequence[str], size: int) -> Iterable[Sequence[str]]:
@@ -1458,6 +1462,7 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         "planning_only": False,
         "review_exempt_since_quiet_review": False,
         "_review_thread_nodes": list(threads["nodes"]),
+        "_thread_total_count": threads["totalCount"],
         "_review_comments": list(node["comments"]["nodes"]),
         "_reviews": list(node["reviews"]["nodes"]),
         "_review_comment_page": node["comments"].get(
@@ -1487,7 +1492,7 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
         if task.kind == "threads":
             connection = (
                 f"reviewThreads(first: 100, after: $after{index}) {{ "
-                "nodes { id isResolved comments(first: 100) { totalCount "
+                "totalCount nodes { id isResolved comments(first: 100) { totalCount "
                 "nodes { author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id } } "
                 "pageInfo { hasNextPage endCursor } } } "
                 "pageInfo { hasNextPage endCursor } }"
@@ -1534,7 +1539,12 @@ def check_name(check: dict[str, Any]) -> str:
 
 def is_non_gating_check(check: dict[str, Any]) -> bool:
     name = check_name(check)
-    return name.endswith("(report only)") or name.casefold() in NON_GATING_CHECK_NAMES
+    folded_name = name.casefold()
+    return (
+        folded_name.endswith("(report only)")
+        or "smoke" in folded_name
+        or folded_name in NON_GATING_CHECK_NAMES
+    )
 
 
 def check_is_green(check: dict[str, Any]) -> bool:

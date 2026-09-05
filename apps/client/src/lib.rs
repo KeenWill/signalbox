@@ -5094,8 +5094,6 @@ fn write_assistant_texts(
 enum OperatorStatusPhase {
     HeldSlots,
     QueuedObligations,
-    PullRequestConvergences,
-    PendingStaleReviewClearances,
     LifecycleWeeks,
     LifecycleDeadlineViolations,
 }
@@ -5104,8 +5102,6 @@ enum OperatorStatusPhase {
 struct OperatorStatusCounts {
     held_slots: u64,
     queued_obligations: u64,
-    pull_request_convergences: u64,
-    pending_stale_review_clearances: u64,
     lifecycle_weeks: u64,
     lifecycle_deadline_violations: u64,
 }
@@ -5141,16 +5137,6 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
                     counts.queued_obligations = status_increment(counts.queued_obligations)?;
                     Some(OperatorStatusPhase::QueuedObligations)
                 }
-                OperatorStatusMessage::PullRequestConvergence(_) => {
-                    counts.pull_request_convergences =
-                        status_increment(counts.pull_request_convergences)?;
-                    Some(OperatorStatusPhase::PullRequestConvergences)
-                }
-                OperatorStatusMessage::PendingStaleReviewClearance(_) => {
-                    counts.pending_stale_review_clearances =
-                        status_increment(counts.pending_stale_review_clearances)?;
-                    Some(OperatorStatusPhase::PendingStaleReviewClearances)
-                }
                 OperatorStatusMessage::LifecycleWeek(_) => {
                     counts.lifecycle_weeks = status_increment(counts.lifecycle_weeks)?;
                     Some(OperatorStatusPhase::LifecycleWeeks)
@@ -5165,10 +5151,6 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
                         == (OperatorStatusCounts {
                             held_slots: item.held_slot_count.value(),
                             queued_obligations: item.queued_obligation_count.value(),
-                            pull_request_convergences: item.pull_request_convergence_count.value(),
-                            pending_stale_review_clearances: item
-                                .pending_stale_review_clearance_count
-                                .value(),
                             lifecycle_weeks: item.lifecycle_week_count.value(),
                             lifecycle_deadline_violations: item
                                 .lifecycle_deadline_violation_count
@@ -5210,8 +5192,6 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
     output.operator_status_counts(OperatorStatusPresentationCounts {
         held_slots: counts.held_slots,
         queued_obligations: counts.queued_obligations,
-        pull_request_convergences: counts.pull_request_convergences,
-        pending_stale_review_clearances: counts.pending_stale_review_clearances,
         lifecycle_weeks: counts.lifecycle_weeks,
         lifecycle_deadline_violations: counts.lifecycle_deadline_violations,
     })?;

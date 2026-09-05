@@ -1127,15 +1127,14 @@ the user before entering its transport or credential boundary. The
 [approval policy and decision sources](#approval-policy-and-decision-sources)
 section owns that precedence and the durable approval flow.
 
-The code-host catalog contains sixteen GitHub tools. Every operation is
-`ExternalEffect` because GitHub observes its authenticated request. The twelve
+The code-host catalog contains fourteen GitHub tools. Every operation is
+`ExternalEffect` because GitHub observes its authenticated request. The ten
 read-only declarations — `change_request_summary`,
 `change_request_changed_files`, `change_request_file_patch`,
 `repository_read_file`, `repository_list_directory`,
 `change_request_checks_status`, `change_request_review_threads`,
-`change_request_ci_job_log`, `change_request_convergence_state`,
-`change_request_stack_state`, `change_request_thread_inventory`, and
-`review_gate_check` — default to `Auto`. The four mutations —
+`change_request_ci_job_log`, `change_request_stack_state`, and
+`change_request_thread_inventory` — default to `Auto`. The four mutations —
 `change_request_comment`, `change_request_thread_reply`,
 `change_request_thread_resolve`, and `change_request_rerun_failed_jobs` —
 default to `Confirm`. The normal approval transaction therefore authorizes each
@@ -1252,27 +1251,6 @@ The declarations and compact result objects are:
   returns that id, at most 64 KiB of lossy UTF-8 log text, and `truncated`.
 - `change_request_rerun_failed_jobs` accepts `repository` and a positive
   workflow `run_id`; it returns the acknowledged run id.
-- `change_request_convergence_state` accepts `repository` and `number`. It
-  returns the exact head and mergeable state; the current-head CI rollup and
-  bounded check contexts; unresolved-thread identities; open and buried
-  escalation-marker identities; all resolved or unresolved undispositioned
-  threads; and reviewer-verdict evidence. Reviewer evidence merges review bodies
-  and issue comments in code-host timestamp order. Only the exact
-  `chatgpt-codex-connector` bot can supply a verdict or usage-limit response;
-  the last complete, line-anchored `Reviewed commit:` record is the verdict, and
-  only the complete canonical usage-limit response is starvation evidence. The
-  evidence also reports usage-limit starvation and whether the latest explicit
-  `@codex review` request by an owner, member, or collaborator has no later
-  verdict or starvation response. A request tied with the latest response
-  timestamp is treated as still pending because the code host does not expose a
-  reliable order within that timestamp. Typed construction rejects an open
-  escalation identity absent from the unresolved-thread evidence. Its derived
-  verdict is `converged`, `converged_with_escalations`, `not_converged`, or
-  `indeterminate`. A missing or non-successful CI rollup, conflicting
-  mergeability, any unresolved non-escalation or undispositioned thread,
-  reviewer starvation, or a still-pending request prevents convergence; an
-  additive unknown mergeability state or any truncated evidence required for the
-  verdict makes it indeterminate.
 - `change_request_stack_state` accepts `repository`, `number`, and an optional
   opaque GraphQL child-page `cursor`. It returns the current immediate-base,
   head, and default-branch refs and revisions; current-base commits absent from
@@ -1302,40 +1280,19 @@ The declarations and compact result objects are:
   replies, while `escalation_marker` requires the trimmed last reply to equal
   the exact marker. Classification rejects a thread whose comment history
   exceeds the 100-comment read bound. The page carries `truncated` and
-  `next_cursor`.
-- `review_gate_check` accepts `repository`, `number`, and purpose
-  `request_review_wave` or `declare_convergence`. It reads the same fresh typed
-  evidence as the three slog tools, then re-reads stack ancestry and convergence
-  after inventory. It rejects the composed read if either before-and-after
-  evidence pair differs and uses the final stack and convergence reads for
-  blockers, then purely derives `ready`, the exact head, and stable blocker
-  codes with affected identities within the transport's 30-second aggregate
-  deadline. Both purposes block when the three evidence sources name different
-  heads, a review request is still in flight, evidence is incomplete, CI is not
-  green, threads are undispositioned or unresolved, escalations are buried, or
-  parent, default-chain, or immediate-child ancestry is unhealthy. Declaring
-  convergence additionally requires the exact mergeable posture and an actual
-  current-head reviewer verdict not followed by usage-limit starvation.
-  Requesting a review wave is blocked when a completed reviewer verdict already
-  covers the current head and no later usage-limit response requires a retry,
-  because that quiet or all-declined wave concludes the loop.
-
-Shared typed admission rejects extra object members; repositories are at most
-256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
-opaque node ids and GraphQL cursors are at most 512 bytes. Paths use canonical
-repository-relative spelling: no empty, dot, or parent component is admitted,
-with bare `.` reserved for the repository root. A returned node id, head
-revision, or stack or inventory continuation is admitted by the same predicate
-its argument counterpart uses, so those identities and continuations can be
-passed back as arguments. Convergence-state cursors identify a diagnostic
-truncation boundary; that tool and the gate remain indeterminate rather than
-performing an unbounded continuation scan. Every returned URL is one absolute
-credential-free HTTPS location. Typed construction rejects aggregate convergence
-evidence whose overlapping bounded lists would exceed the shared encoded-result
-limit. No result has more than 100 collection members or more than 512 KiB of
-encoded JSON. Every bounded slog list reports whether it is truncated and the
-matching continuation cursor; a verdict never silently treats a partial evidence
-page as complete.
+  `next_cursor`. Shared typed admission rejects extra object members;
+  repositories are at most 256 bytes, paths 4 KiB, comment bodies and returned
+  text fields 64 KiB, and opaque node ids and GraphQL cursors are at most 512
+  bytes. Paths use canonical repository-relative spelling: no empty, dot, or
+  parent component is admitted, with bare `.` reserved for the repository root.
+  A returned node id, head revision, or stack or inventory continuation is
+  admitted by the same predicate its argument counterpart uses, so those
+  identities and continuations can be passed back as arguments. Every returned
+  URL is one absolute credential-free HTTPS location. Typed construction rejects
+  aggregate convergence evidence whose overlapping bounded lists would exceed
+  the shared encoded-result limit. No result has more than 100 collection
+  members or more than 512 KiB of encoded JSON. Every bounded slog list reports
+  whether it is truncated and the matching continuation cursor.
 
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses

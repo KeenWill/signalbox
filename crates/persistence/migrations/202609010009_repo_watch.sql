@@ -1,8 +1,7 @@
 -- Repo watch: the poll cursor and event log, webhook receipt and projection,
--- rule activation and evaluation, pull-request state and convergence
--- assessment, dispatch obligations through leases, batches, deliveries, and
--- settlements, commissioned dispatches with their headless approval
--- escalations, and the convergence sweep.
+-- rule activation and evaluation, pull-request state, dispatch obligations
+-- through leases, batches, deliveries, and settlements, and commissioned
+-- dispatches with their headless approval escalations.
 
 -- Function bodies may read tables a later section or file creates;
 -- 202609010000_core.sql explains why validation is deferred.
@@ -106,15 +105,6 @@ BEGIN
     RETURN NULL;
 END;
 $$;
-
-
---
--- Name: convergence_sweep_retry_budget(); Type: FUNCTION; Schema: public
---
-
-CREATE FUNCTION convergence_sweep_retry_budget() RETURNS smallint
-    LANGUAGE sql IMMUTABLE PARALLEL SAFE
-    AS $$ SELECT 5::smallint $$;
 
 
 --
@@ -556,50 +546,6 @@ CREATE FUNCTION repo_watch_branch_is_valid(candidate text) RETURNS boolean
             WHERE part.value = ''
                OR left(part.value, 1) = '.'
                OR right(part.value, 5) = '.lock'
-       )
-$$;
-
-
---
--- Name: repo_watch_convergence_check_names_are_valid(text[]); Type: FUNCTION; Schema: public
---
-
-CREATE FUNCTION repo_watch_convergence_check_names_are_valid(candidate text[]) RETURNS boolean
-    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
-    AS $$
-    SELECT COALESCE(array_ndims(candidate), 1) = 1
-       AND COALESCE(array_lower(candidate, 1), 1) = 1
-       AND cardinality(candidate) <= 10000
-       AND candidate = ARRAY(
-            SELECT value COLLATE "C"
-              FROM unnest(candidate) AS item(value)
-             ORDER BY value COLLATE "C"
-       )
-       AND NOT EXISTS (
-            SELECT 1 FROM unnest(candidate) AS item(value)
-             WHERE value IS NULL OR octet_length(value) NOT BETWEEN 1 AND 256
-       )
-$$;
-
-
---
--- Name: repo_watch_convergence_threads_are_valid(text[]); Type: FUNCTION; Schema: public
---
-
-CREATE FUNCTION repo_watch_convergence_threads_are_valid(candidate text[]) RETURNS boolean
-    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
-    AS $$
-    SELECT COALESCE(array_ndims(candidate), 1) = 1
-       AND COALESCE(array_lower(candidate, 1), 1) = 1
-       AND cardinality(candidate) <= 10000
-       AND candidate = ARRAY(
-            SELECT DISTINCT value COLLATE "C"
-              FROM unnest(candidate) AS item(value)
-             ORDER BY value COLLATE "C"
-       )
-       AND NOT EXISTS (
-            SELECT 1 FROM unnest(candidate) AS item(value)
-             WHERE value IS NULL OR octet_length(value) NOT BETWEEN 1 AND 256
        )
 $$;
 
@@ -1755,124 +1701,6 @@ CREATE VIEW commissioned_dispatch_headless_approval_escalation_audit AS
 
 
 --
--- Name: convergence_sweep_event; Type: TABLE; Schema: public
---
-
-CREATE TABLE convergence_sweep_event (
-    event_id uuid NOT NULL,
-    repository text NOT NULL,
-    pull_request_number numeric(20,0) NOT NULL,
-    outcome_kind text NOT NULL,
-    failure_kind text,
-    head_sha text,
-    unresolved_threads numeric(20,0),
-    dispatch_id uuid,
-    session_id uuid,
-    consecutive_failures smallint NOT NULL,
-    retry_not_before timestamp with time zone,
-    operator_need text,
-    recorded_at timestamp with time zone DEFAULT transaction_timestamp() NOT NULL,
-    CONSTRAINT convergence_sweep_event_check CHECK (((dispatch_id IS NULL) = (session_id IS NULL))),
-    CONSTRAINT convergence_sweep_event_check1 CHECK ((((outcome_kind = ANY (ARRAY['converged'::text, 'cooling_off'::text, 'live_session'::text, 'dispatched'::text])) AND (failure_kind IS NULL) AND (consecutive_failures = 0) AND (retry_not_before IS NULL) AND (operator_need IS NULL)) OR ((outcome_kind = 'facts_fetch_failed'::text) AND (failure_kind = 'facts_fetch'::text)) OR ((outcome_kind = 'commission_refused'::text) AND (failure_kind = 'commission_refused'::text)) OR ((outcome_kind = 'template_drift'::text) AND (failure_kind = 'template_drift'::text)) OR ((outcome_kind = 'no_model_activity'::text) AND (failure_kind = 'no_model_activity'::text)) OR ((outcome_kind = 'state_access_failed'::text) AND (failure_kind = 'state_access'::text)))),
-    CONSTRAINT convergence_sweep_event_check2 CHECK (((failure_kind IS NULL) OR ((operator_need IS NULL) AND ((consecutive_failures >= 1) AND (consecutive_failures <= (convergence_sweep_retry_budget() - 1))) AND (retry_not_before IS NOT NULL)) OR ((operator_need IS NOT NULL) AND (consecutive_failures = convergence_sweep_retry_budget()) AND (retry_not_before IS NULL)))),
-    CONSTRAINT convergence_sweep_event_consecutive_failures_check CHECK (((consecutive_failures >= 0) AND (consecutive_failures <= convergence_sweep_retry_budget()))),
-    CONSTRAINT convergence_sweep_event_failure_kind_check CHECK (((failure_kind IS NULL) OR (failure_kind = ANY (ARRAY['facts_fetch'::text, 'commission_refused'::text, 'template_drift'::text, 'no_model_activity'::text, 'state_access'::text])))),
-    CONSTRAINT convergence_sweep_event_head_sha_check CHECK (((head_sha IS NULL) OR ((head_sha COLLATE "C") ~ '^[0-9a-f]{40}$'::text))),
-    CONSTRAINT convergence_sweep_event_operator_need_check CHECK (((operator_need IS NULL) OR (operator_need = ANY (ARRAY['repair_facts_fetch'::text, 'repair_commission'::text, 'repair_template'::text, 'inspect_inactive_session'::text, 'repair_sweep_state'::text])))),
-    CONSTRAINT convergence_sweep_event_outcome_kind_check CHECK ((outcome_kind = ANY (ARRAY['converged'::text, 'cooling_off'::text, 'live_session'::text, 'dispatched'::text, 'facts_fetch_failed'::text, 'commission_refused'::text, 'template_drift'::text, 'no_model_activity'::text, 'state_access_failed'::text]))),
-    CONSTRAINT convergence_sweep_event_pull_request_number_check CHECK (((pull_request_number >= (1)::numeric) AND (pull_request_number <= '18446744073709551615'::numeric))),
-    CONSTRAINT convergence_sweep_event_repository_check CHECK (repo_watch_repository_is_valid(repository)),
-    CONSTRAINT convergence_sweep_event_unresolved_threads_check CHECK (((unresolved_threads IS NULL) OR (unresolved_threads >= (0)::numeric)))
-);
-
-
---
--- Name: convergence_sweep_target; Type: TABLE; Schema: public
---
-
-CREATE TABLE convergence_sweep_target (
-    repository text NOT NULL,
-    pull_request_number numeric(20,0) NOT NULL,
-    enrolled boolean DEFAULT true NOT NULL,
-    state_kind text DEFAULT 'observed'::text NOT NULL,
-    failure_kind text,
-    consecutive_failures smallint DEFAULT 0 NOT NULL,
-    retry_not_before timestamp with time zone,
-    parked_at timestamp with time zone,
-    operator_need text,
-    last_head_sha text,
-    last_unresolved_threads numeric(20,0),
-    last_observed_at timestamp with time zone,
-    pending_command_id uuid,
-    pending_head_sha text,
-    pending_unresolved_threads numeric(20,0),
-    pending_content_digest bytea,
-    pending_started_at timestamp with time zone,
-    last_dispatch_id uuid,
-    last_session_id uuid,
-    last_dispatched_at timestamp with time zone,
-    last_dispatch_head_sha text,
-    last_dispatch_unresolved_threads numeric(20,0),
-    census_dispatch_id uuid,
-    census_session_id uuid,
-    census_dispatch_head_sha text,
-    census_dispatch_unresolved_threads numeric(20,0),
-    parked_dispatch_id uuid,
-    parked_session_id uuid,
-    parked_dispatched_at timestamp with time zone,
-    CONSTRAINT convergence_sweep_inactivity_park_has_dispatch CHECK (((state_kind <> 'parked'::text) OR (failure_kind <> 'no_model_activity'::text) OR (parked_dispatch_id IS NOT NULL))),
-    CONSTRAINT convergence_sweep_parked_dispatch_shape CHECK ((((parked_dispatch_id IS NULL) AND (parked_session_id IS NULL) AND (parked_dispatched_at IS NULL)) OR ((state_kind = 'parked'::text) AND (failure_kind = 'no_model_activity'::text) AND (parked_dispatch_id IS NOT NULL) AND (parked_session_id IS NOT NULL) AND (parked_dispatched_at IS NOT NULL)))),
-    CONSTRAINT convergence_sweep_target_census_dispatch_head_sha_check CHECK (((census_dispatch_head_sha IS NULL) OR ((census_dispatch_head_sha COLLATE "C") ~ '^[0-9a-f]{40}$'::text))),
-    CONSTRAINT convergence_sweep_target_census_dispatch_unresolved_threa_check CHECK (((census_dispatch_unresolved_threads IS NULL) OR (census_dispatch_unresolved_threads >= (0)::numeric))),
-    CONSTRAINT convergence_sweep_target_check CHECK ((((state_kind = 'observed'::text) AND (failure_kind IS NULL) AND (consecutive_failures = 0) AND (retry_not_before IS NULL) AND (parked_at IS NULL) AND (operator_need IS NULL)) OR ((state_kind = 'retry_wait'::text) AND (failure_kind IS NOT NULL) AND (failure_kind <> 'no_model_activity'::text) AND ((consecutive_failures >= 1) AND (consecutive_failures <= (convergence_sweep_retry_budget() - 1))) AND (retry_not_before IS NOT NULL) AND (parked_at IS NULL) AND (operator_need IS NULL)) OR ((state_kind = 'parked'::text) AND (failure_kind IS NOT NULL) AND (consecutive_failures = convergence_sweep_retry_budget()) AND (retry_not_before IS NULL) AND (parked_at IS NOT NULL) AND (operator_need IS NOT NULL)))),
-    CONSTRAINT convergence_sweep_target_check1 CHECK ((((pending_command_id IS NULL) AND (pending_head_sha IS NULL) AND (pending_unresolved_threads IS NULL) AND (pending_content_digest IS NULL) AND (pending_started_at IS NULL)) OR ((pending_command_id IS NOT NULL) AND (pending_head_sha IS NOT NULL) AND (pending_unresolved_threads IS NOT NULL) AND (pending_content_digest IS NOT NULL) AND (octet_length(pending_content_digest) = 32) AND (pending_started_at IS NOT NULL)))),
-    CONSTRAINT convergence_sweep_target_check2 CHECK ((((last_dispatch_id IS NULL) AND (last_session_id IS NULL) AND (last_dispatched_at IS NULL) AND (last_dispatch_head_sha IS NULL) AND (last_dispatch_unresolved_threads IS NULL)) OR ((last_dispatch_id IS NOT NULL) AND (last_session_id IS NOT NULL) AND (last_dispatched_at IS NOT NULL) AND (last_dispatch_head_sha IS NOT NULL) AND (last_dispatch_unresolved_threads IS NOT NULL)))),
-    CONSTRAINT convergence_sweep_target_check3 CHECK ((((census_dispatch_id IS NULL) AND (census_session_id IS NULL) AND (census_dispatch_head_sha IS NULL) AND (census_dispatch_unresolved_threads IS NULL)) OR ((census_dispatch_id IS NOT NULL) AND (census_session_id IS NOT NULL) AND (census_dispatch_head_sha IS NOT NULL) AND (census_dispatch_unresolved_threads IS NOT NULL)))),
-    CONSTRAINT convergence_sweep_target_consecutive_failures_check CHECK (((consecutive_failures >= 0) AND (consecutive_failures <= convergence_sweep_retry_budget()))),
-    CONSTRAINT convergence_sweep_target_failure_kind_check CHECK (((failure_kind IS NULL) OR (failure_kind = ANY (ARRAY['facts_fetch'::text, 'commission_refused'::text, 'template_drift'::text, 'no_model_activity'::text, 'state_access'::text])))),
-    CONSTRAINT convergence_sweep_target_last_dispatch_head_sha_check CHECK (((last_dispatch_head_sha IS NULL) OR ((last_dispatch_head_sha COLLATE "C") ~ '^[0-9a-f]{40}$'::text))),
-    CONSTRAINT convergence_sweep_target_last_dispatch_unresolved_threads_check CHECK (((last_dispatch_unresolved_threads IS NULL) OR (last_dispatch_unresolved_threads >= (0)::numeric))),
-    CONSTRAINT convergence_sweep_target_last_head_sha_check CHECK (((last_head_sha IS NULL) OR ((last_head_sha COLLATE "C") ~ '^[0-9a-f]{40}$'::text))),
-    CONSTRAINT convergence_sweep_target_last_unresolved_threads_check CHECK (((last_unresolved_threads IS NULL) OR (last_unresolved_threads >= (0)::numeric))),
-    CONSTRAINT convergence_sweep_target_operator_need_check CHECK (((operator_need IS NULL) OR (operator_need = ANY (ARRAY['repair_facts_fetch'::text, 'repair_commission'::text, 'repair_template'::text, 'inspect_inactive_session'::text, 'repair_sweep_state'::text])))),
-    CONSTRAINT convergence_sweep_target_pending_head_sha_check CHECK (((pending_head_sha IS NULL) OR ((pending_head_sha COLLATE "C") ~ '^[0-9a-f]{40}$'::text))),
-    CONSTRAINT convergence_sweep_target_pending_unresolved_threads_check CHECK (((pending_unresolved_threads IS NULL) OR (pending_unresolved_threads >= (0)::numeric))),
-    CONSTRAINT convergence_sweep_target_pull_request_number_check CHECK (((pull_request_number >= (1)::numeric) AND (pull_request_number <= '18446744073709551615'::numeric))),
-    CONSTRAINT convergence_sweep_target_repository_check CHECK (repo_watch_repository_is_valid(repository)),
-    CONSTRAINT convergence_sweep_target_state_kind_check CHECK ((state_kind = ANY (ARRAY['observed'::text, 'retry_wait'::text, 'parked'::text])))
-);
-
-
---
--- Name: convergence_sweep_parked_target; Type: VIEW; Schema: public
---
-
-CREATE VIEW convergence_sweep_parked_target AS
- SELECT repository,
-    pull_request_number,
-    failure_kind,
-    consecutive_failures,
-    parked_at,
-    operator_need,
-    last_head_sha,
-    last_unresolved_threads,
-        CASE
-            WHEN (failure_kind = 'no_model_activity'::text) THEN parked_dispatch_id
-            ELSE last_dispatch_id
-        END AS last_dispatch_id,
-        CASE
-            WHEN (failure_kind = 'no_model_activity'::text) THEN parked_session_id
-            ELSE last_session_id
-        END AS last_session_id,
-        CASE
-            WHEN (failure_kind = 'no_model_activity'::text) THEN parked_dispatched_at
-            ELSE last_dispatched_at
-        END AS last_dispatched_at
-   FROM convergence_sweep_target target
-  WHERE (enrolled AND (state_kind = 'parked'::text));
-
-
---
 -- Name: repo_watch_achieved_dispatch_settlement; Type: TABLE; Schema: public
 --
 
@@ -1895,31 +1723,6 @@ CREATE TABLE repo_watch_complete_poll (
     repository text NOT NULL,
     completed_at timestamp with time zone DEFAULT transaction_timestamp() NOT NULL,
     CONSTRAINT repo_watch_complete_poll_repository_check CHECK (repo_watch_repository_is_valid(repository))
-);
-
-
---
--- Name: repo_watch_convergence_cutoff; Type: TABLE; Schema: public
---
-
-CREATE TABLE repo_watch_convergence_cutoff (
-    assessment_id uuid NOT NULL,
-    identity_id uuid NOT NULL,
-    identity_assessment_id uuid NOT NULL,
-    cursor_generation bigint NOT NULL,
-    processed_at timestamp with time zone DEFAULT transaction_timestamp() NOT NULL
-);
-
-
---
--- Name: repo_watch_convergence_cutoff_goal; Type: TABLE; Schema: public
---
-
-CREATE TABLE repo_watch_convergence_cutoff_goal (
-    assessment_id uuid NOT NULL,
-    identity_id uuid NOT NULL,
-    session_id uuid NOT NULL,
-    goal_command_id uuid NOT NULL
 );
 
 
@@ -1988,115 +1791,6 @@ CREATE TABLE repo_watch_cursor (
     CONSTRAINT repo_watch_cursor_repository_check CHECK (repo_watch_repository_is_valid(repository)),
     CONSTRAINT repo_watch_cursor_storage_version_check CHECK ((storage_version = 4))
 );
-
-
---
--- Name: repo_watch_pull_request_convergence; Type: TABLE; Schema: public
---
-
-CREATE TABLE repo_watch_pull_request_convergence (
-    repository text NOT NULL,
-    pull_request_number numeric(20,0) CONSTRAINT repo_watch_pull_request_convergen_pull_request_number_not_null1 NOT NULL,
-    head_sha text NOT NULL,
-    base_revision text NOT NULL,
-    assessment_id uuid NOT NULL,
-    convergence_kind text NOT NULL,
-    converged_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT repo_watch_pull_request_convergence_base_revision_check CHECK (((base_revision COLLATE "C") ~ '^[0-9a-f]{40}$'::text)),
-    CONSTRAINT repo_watch_pull_request_convergence_convergence_kind_check CHECK ((convergence_kind = ANY (ARRAY['internally_converged'::text, 'merge_ready'::text])))
-);
-
-
---
--- Name: repo_watch_pull_request_convergence_assessment; Type: TABLE; Schema: public
---
-
-CREATE TABLE repo_watch_pull_request_convergence_assessment (
-    assessment_id uuid CONSTRAINT repo_watch_pull_request_convergence_asse_assessment_id_not_null NOT NULL,
-    repository text CONSTRAINT repo_watch_pull_request_convergence_assessm_repository_not_null NOT NULL,
-    cursor_generation bigint CONSTRAINT repo_watch_pull_request_convergence__cursor_generation_not_null NOT NULL,
-    pull_request_number numeric(20,0) CONSTRAINT repo_watch_pull_request_convergenc_pull_request_number_not_null NOT NULL,
-    head_sha text CONSTRAINT repo_watch_pull_request_convergence_assessmen_head_sha_not_null NOT NULL,
-    base_branch text CONSTRAINT repo_watch_pull_request_convergence_assess_base_branch_not_null NOT NULL,
-    base_revision text CONSTRAINT repo_watch_pull_request_convergence_asse_base_revision_not_null NOT NULL,
-    mergeable_state text CONSTRAINT repo_watch_pull_request_convergence_as_mergeable_state_not_null NOT NULL,
-    settled boolean NOT NULL,
-    review_decision text CONSTRAINT repo_watch_pull_request_convergence_as_review_decision_not_null NOT NULL,
-    unresolved_threads text[] CONSTRAINT repo_watch_pull_request_convergence_unresolved_threads_not_null NOT NULL,
-    gating_check_count bigint CONSTRAINT repo_watch_pull_request_convergence_gating_check_count_not_null NOT NULL,
-    non_green_gating_checks text[] CONSTRAINT repo_watch_pull_request_conver_non_green_gating_checks_not_null NOT NULL,
-    verdict_kind text CONSTRAINT repo_watch_pull_request_convergence_asses_verdict_kind_not_null NOT NULL,
-    recorded_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT repo_watch_pull_request_convergence_assess_recorded_at_not_null NOT NULL,
-    CONSTRAINT repo_watch_convergence_verdict_matches_evidence CHECK (((verdict_kind = 'not_converged'::text) = ((cardinality(unresolved_threads) > 0) OR (cardinality(non_green_gating_checks) > 0) OR (mergeable_state <> 'mergeable'::text) OR (NOT settled) OR (gating_check_count = 0) OR (review_decision = 'changes_requested'::text)))),
-    CONSTRAINT repo_watch_pull_request_convergen_non_green_gating_checks_check CHECK (repo_watch_convergence_check_names_are_valid(non_green_gating_checks)),
-    CONSTRAINT repo_watch_pull_request_convergence_a_pull_request_number_check CHECK (((pull_request_number > (0)::numeric) AND (pull_request_number <= '18446744073709551615'::numeric))),
-    CONSTRAINT repo_watch_pull_request_convergence_as_gating_check_count_check CHECK (((gating_check_count >= 0) AND (gating_check_count <= 10000))),
-    CONSTRAINT repo_watch_pull_request_convergence_as_unresolved_threads_check CHECK (repo_watch_convergence_threads_are_valid(unresolved_threads)),
-    CONSTRAINT repo_watch_pull_request_convergence_asses_mergeable_state_check CHECK ((mergeable_state = ANY (ARRAY['mergeable'::text, 'conflicting'::text, 'unknown'::text]))),
-    CONSTRAINT repo_watch_pull_request_convergence_asses_review_decision_check CHECK ((review_decision = ANY (ARRAY['none'::text, 'approved'::text, 'review_required'::text, 'changes_requested'::text]))),
-    CONSTRAINT repo_watch_pull_request_convergence_assessm_base_revision_check CHECK (((base_revision COLLATE "C") ~ '^[0-9a-f]{40}$'::text)),
-    CONSTRAINT repo_watch_pull_request_convergence_assessme_verdict_kind_check CHECK ((verdict_kind = ANY (ARRAY['not_converged'::text, 'internally_converged'::text, 'merge_ready'::text]))),
-    CONSTRAINT repo_watch_pull_request_convergence_assessmen_base_branch_check CHECK (repo_watch_branch_is_valid(base_branch)),
-    CONSTRAINT repo_watch_pull_request_convergence_assessment_check CHECK ((cardinality(non_green_gating_checks) <= gating_check_count)),
-    CONSTRAINT repo_watch_pull_request_convergence_assessment_check1 CHECK (((verdict_kind <> 'merge_ready'::text) OR (base_branch = 'main'::text))),
-    CONSTRAINT repo_watch_pull_request_convergence_assessment_check2 CHECK (((verdict_kind <> 'internally_converged'::text) OR (base_branch <> 'main'::text))),
-    CONSTRAINT repo_watch_pull_request_convergence_assessment_head_sha_check CHECK (((head_sha COLLATE "C") ~ '^[0-9a-f]{40}$'::text)),
-    CONSTRAINT repo_watch_pull_request_convergence_assessment_repository_check CHECK (repo_watch_repository_is_valid(repository))
-);
-
-
---
--- Name: repo_watch_pull_request_convergence_identity; Type: TABLE; Schema: public
---
-
-CREATE TABLE repo_watch_pull_request_convergence_identity (
-    identity_id uuid CONSTRAINT repo_watch_pull_request_convergence_identi_identity_id_not_null NOT NULL,
-    repository text CONSTRAINT repo_watch_pull_request_convergence_identit_repository_not_null NOT NULL,
-    cursor_generation bigint CONSTRAINT repo_watch_pull_request_convergence_cursor_generation_not_null1 NOT NULL,
-    pull_request_number numeric(20,0) CONSTRAINT repo_watch_pull_request_convergen_pull_request_number_not_null2 NOT NULL,
-    assessment_id uuid CONSTRAINT repo_watch_pull_request_convergence_iden_assessment_id_not_null NOT NULL,
-    recorded_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT repo_watch_pull_request_convergence_identi_recorded_at_not_null NOT NULL
-);
-
-
---
--- Name: repo_watch_current_pull_request_convergence; Type: VIEW; Schema: public
---
-
-CREATE VIEW repo_watch_current_pull_request_convergence AS
- SELECT assessment.repository,
-    assessment.pull_request_number,
-    assessment.head_sha,
-    assessment.base_branch,
-    assessment.base_revision,
-    assessment.mergeable_state,
-    assessment.settled,
-    assessment.review_decision,
-    cardinality(assessment.unresolved_threads) AS unresolved_thread_count,
-    assessment.gating_check_count,
-    assessment.non_green_gating_checks,
-    assessment.verdict_kind,
-    convergence.convergence_kind AS sealed_kind,
-    convergence.converged_at,
-    assessment.recorded_at
-   FROM (((((( SELECT DISTINCT ON (repo_watch_pull_request_convergence_identity.repository, repo_watch_pull_request_convergence_identity.pull_request_number) repo_watch_pull_request_convergence_identity.identity_id,
-            repo_watch_pull_request_convergence_identity.repository,
-            repo_watch_pull_request_convergence_identity.cursor_generation,
-            repo_watch_pull_request_convergence_identity.pull_request_number,
-            repo_watch_pull_request_convergence_identity.assessment_id,
-            repo_watch_pull_request_convergence_identity.recorded_at
-           FROM repo_watch_pull_request_convergence_identity
-          ORDER BY repo_watch_pull_request_convergence_identity.repository, repo_watch_pull_request_convergence_identity.pull_request_number, repo_watch_pull_request_convergence_identity.cursor_generation DESC, repo_watch_pull_request_convergence_identity.recorded_at DESC, repo_watch_pull_request_convergence_identity.identity_id DESC) identity
-     JOIN repo_watch_pull_request_convergence_assessment assessment ON ((assessment.assessment_id = identity.assessment_id)))
-     JOIN LATERAL ( SELECT repo_watch_cursor.cursor_payload
-           FROM repo_watch_cursor
-          WHERE (repo_watch_cursor.repository = identity.repository)
-          ORDER BY repo_watch_cursor.generation DESC
-         LIMIT 1) cursor ON (true))
-     JOIN LATERAL jsonb_array_elements(((cursor.cursor_payload -> 'state'::text) -> 'pull_requests'::text)) pull_request(value) ON ((((pull_request.value ->> 'number'::text))::numeric = identity.pull_request_number)))
-     JOIN LATERAL jsonb_array_elements(((cursor.cursor_payload -> 'state'::text) -> 'branch_heads'::text)) base_head(value) ON (((base_head.value ->> 'branch'::text) = (pull_request.value ->> 'base_branch'::text))))
-     LEFT JOIN repo_watch_pull_request_convergence convergence ON (((convergence.repository = assessment.repository) AND (convergence.pull_request_number = assessment.pull_request_number) AND (convergence.head_sha = assessment.head_sha) AND (convergence.base_revision = assessment.base_revision))))
-  WHERE (((pull_request.value ->> 'head_sha'::text) = assessment.head_sha) AND ((base_head.value ->> 'head'::text) = assessment.base_revision));
 
 
 --
@@ -2299,8 +1993,8 @@ CREATE TABLE repo_watch_dispatch_obligation (
     CONSTRAINT repo_watch_dispatch_obligation_repository_check CHECK (repo_watch_repository_is_valid(repository)),
     CONSTRAINT repo_watch_dispatch_obligation_rule_id_check CHECK (repo_watch_rule_id_is_valid(rule_id)),
     CONSTRAINT repo_watch_dispatch_obligation_rule_version_check CHECK ((rule_version > 0)),
-    CONSTRAINT repo_watch_dispatch_obligation_settled_kind_check CHECK (((settled_kind IS NULL) OR (settled_kind = ANY (ARRAY['dispatched'::text, 'deactivated'::text, 'target_closed'::text, 'target_converged'::text])))),
-    CONSTRAINT repo_watch_dispatch_obligation_settlement_shape_check CHECK ((((settled_kind IS NULL) AND (settled_dispatch_id IS NULL) AND (settled_at IS NULL)) OR ((settled_kind = 'dispatched'::text) AND (settled_dispatch_id IS NOT NULL) AND (settled_at IS NOT NULL)) OR ((settled_kind = ANY (ARRAY['deactivated'::text, 'target_closed'::text, 'target_converged'::text])) AND (settled_dispatch_id IS NULL) AND (settled_at IS NOT NULL)))),
+    CONSTRAINT repo_watch_dispatch_obligation_settled_kind_check CHECK (((settled_kind IS NULL) OR (settled_kind = ANY (ARRAY['dispatched'::text, 'deactivated'::text, 'target_closed'::text])))),
+    CONSTRAINT repo_watch_dispatch_obligation_settlement_shape_check CHECK ((((settled_kind IS NULL) AND (settled_dispatch_id IS NULL) AND (settled_at IS NULL)) OR ((settled_kind = 'dispatched'::text) AND (settled_dispatch_id IS NOT NULL) AND (settled_at IS NOT NULL)) OR ((settled_kind = ANY (ARRAY['deactivated'::text, 'target_closed'::text])) AND (settled_dispatch_id IS NULL) AND (settled_at IS NOT NULL)))),
     CONSTRAINT repo_watch_dispatch_obligation_singleton_repository_check CHECK (((singleton_repository IS NULL) OR repo_watch_repository_is_valid(singleton_repository))),
     CONSTRAINT repo_watch_dispatch_obligation_singleton_scope_check CHECK ((singleton_scope = ANY (ARRAY['pull_request'::text, 'stack'::text, 'rule'::text, 'repo'::text])))
 );
@@ -2722,74 +2416,6 @@ CREATE VIEW repo_watch_parked_dispatch_obligation AS
 
 
 --
--- Name: repo_watch_stale_review_clearance; Type: TABLE; Schema: public
---
-
-CREATE TABLE repo_watch_stale_review_clearance (
-    clearance_id uuid NOT NULL,
-    assessment_id uuid NOT NULL,
-    repository text NOT NULL,
-    pull_request_number numeric(20,0) NOT NULL,
-    current_head_sha text NOT NULL,
-    base_revision text NOT NULL,
-    review_node_id text NOT NULL,
-    reviewer text NOT NULL,
-    reviewed_head_sha text NOT NULL,
-    assessment_verdict text DEFAULT 'not_converged'::text NOT NULL,
-    reason_kind text DEFAULT 'only_stale_review_blocks'::text NOT NULL,
-    dismissal_message text NOT NULL,
-    planned_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT repo_watch_stale_review_clearance_assessment_verdict_check CHECK ((assessment_verdict = 'not_converged'::text)),
-    CONSTRAINT repo_watch_stale_review_clearance_base_revision_check CHECK (((base_revision COLLATE "C") ~ '^[0-9a-f]{40}$'::text)),
-    CONSTRAINT repo_watch_stale_review_clearance_check CHECK ((reviewed_head_sha <> current_head_sha)),
-    CONSTRAINT repo_watch_stale_review_clearance_current_head_sha_check CHECK (((current_head_sha COLLATE "C") ~ '^[0-9a-f]{40}$'::text)),
-    CONSTRAINT repo_watch_stale_review_clearance_dismissal_message_check CHECK (((octet_length(dismissal_message) >= 1) AND (octet_length(dismissal_message) <= 1024))),
-    CONSTRAINT repo_watch_stale_review_clearance_pull_request_number_check CHECK (((pull_request_number > (0)::numeric) AND (pull_request_number <= '18446744073709551615'::numeric))),
-    CONSTRAINT repo_watch_stale_review_clearance_reason_kind_check CHECK ((reason_kind = 'only_stale_review_blocks'::text)),
-    CONSTRAINT repo_watch_stale_review_clearance_repository_check CHECK (repo_watch_repository_is_valid(repository)),
-    CONSTRAINT repo_watch_stale_review_clearance_review_node_id_check CHECK (((octet_length(review_node_id) >= 1) AND (octet_length(review_node_id) <= 256))),
-    CONSTRAINT repo_watch_stale_review_clearance_reviewed_head_sha_check CHECK (((reviewed_head_sha COLLATE "C") ~ '^[0-9a-f]{40}$'::text)),
-    CONSTRAINT repo_watch_stale_review_clearance_reviewer_check CHECK (repo_watch_login_is_valid(reviewer))
-);
-
-
---
--- Name: repo_watch_stale_review_clearance_result; Type: TABLE; Schema: public
---
-
-CREATE TABLE repo_watch_stale_review_clearance_result (
-    clearance_id uuid NOT NULL,
-    outcome_kind text NOT NULL,
-    provider_review_state text CONSTRAINT repo_watch_stale_review_clearanc_provider_review_state_not_null NOT NULL,
-    observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT repo_watch_stale_review_clearance_r_provider_review_state_check CHECK ((provider_review_state = ANY (ARRAY['approved'::text, 'changes_requested'::text, 'commented'::text, 'dismissed'::text, 'pending'::text]))),
-    CONSTRAINT repo_watch_stale_review_clearance_result_check CHECK ((((outcome_kind = ANY (ARRAY['dismissed'::text, 'already_dismissed'::text])) AND (provider_review_state = 'dismissed'::text)) OR ((outcome_kind = 'cleared_elsewhere'::text) AND (provider_review_state = ANY (ARRAY['approved'::text, 'changes_requested'::text, 'commented'::text, 'pending'::text]))) OR (outcome_kind = 'superseded'::text))),
-    CONSTRAINT repo_watch_stale_review_clearance_result_outcome_kind_check CHECK ((outcome_kind = ANY (ARRAY['dismissed'::text, 'already_dismissed'::text, 'cleared_elsewhere'::text, 'superseded'::text])))
-);
-
-
---
--- Name: repo_watch_pending_stale_review_clearance; Type: VIEW; Schema: public
---
-
-CREATE VIEW repo_watch_pending_stale_review_clearance AS
- SELECT clearance.clearance_id,
-    clearance.assessment_id,
-    clearance.repository,
-    clearance.pull_request_number,
-    clearance.current_head_sha,
-    clearance.review_node_id,
-    clearance.reviewer,
-    clearance.reviewed_head_sha,
-    clearance.reason_kind,
-    clearance.dismissal_message,
-    clearance.planned_at
-   FROM (repo_watch_stale_review_clearance clearance
-     LEFT JOIN repo_watch_stale_review_clearance_result result ON ((result.clearance_id = clearance.clearance_id)))
-  WHERE (result.clearance_id IS NULL);
-
-
---
 -- Name: repo_watch_repository_key; Type: TABLE; Schema: public
 --
 
@@ -2849,7 +2475,7 @@ CREATE TABLE repo_watch_rule_evaluation (
     CONSTRAINT repo_watch_rule_evaluation_check CHECK (((dispatch_id IS NOT NULL) = (outcome_kind = 'dispatched'::text))),
     CONSTRAINT repo_watch_rule_evaluation_cursor_generation_check CHECK ((cursor_generation > 0)),
     CONSTRAINT repo_watch_rule_evaluation_event_ordinal_check CHECK ((event_ordinal > 0)),
-    CONSTRAINT repo_watch_rule_evaluation_outcome_kind_check CHECK ((outcome_kind = ANY (ARRAY['not_matched'::text, 'target_closed'::text, 'target_converged'::text, 'occupied'::text, 'coalesced'::text, 'cooldown'::text, 'dispatched'::text]))),
+    CONSTRAINT repo_watch_rule_evaluation_outcome_kind_check CHECK ((outcome_kind = ANY (ARRAY['not_matched'::text, 'target_closed'::text, 'occupied'::text, 'coalesced'::text, 'cooldown'::text, 'dispatched'::text]))),
     CONSTRAINT repo_watch_rule_evaluation_pull_request_number_check CHECK (((pull_request_number IS NULL) OR ((pull_request_number > (0)::numeric) AND (pull_request_number <= '18446744073709551615'::numeric)))),
     CONSTRAINT repo_watch_rule_evaluation_repository_check CHECK (repo_watch_repository_is_valid(repository)),
     CONSTRAINT repo_watch_rule_evaluation_rule_id_check CHECK (repo_watch_rule_id_is_valid(rule_id)),
@@ -2871,28 +2497,6 @@ CREATE TABLE repo_watch_rule_field_fingerprint (
     CONSTRAINT repo_watch_rule_field_fingerprint_rule_field_digests_check CHECK ((octet_length(rule_field_digests) = 512)),
     CONSTRAINT repo_watch_rule_field_fingerprint_rule_id_check CHECK (repo_watch_rule_id_is_valid(rule_id)),
     CONSTRAINT repo_watch_rule_field_fingerprint_rule_version_check CHECK ((rule_version > 0))
-);
-
-
---
--- Name: repo_watch_stale_review_clearance_claim; Type: TABLE; Schema: public
---
-
-CREATE TABLE repo_watch_stale_review_clearance_claim (
-    clearance_id uuid NOT NULL,
-    claim_token uuid NOT NULL,
-    claimed_until timestamp with time zone NOT NULL
-);
-
-
---
--- Name: repo_watch_stale_review_clearance_recovery_cursor; Type: TABLE; Schema: public
---
-
-CREATE TABLE repo_watch_stale_review_clearance_recovery_cursor (
-    repository text CONSTRAINT repo_watch_stale_review_clearance_recovery__repository_not_null NOT NULL,
-    after_clearance_id uuid,
-    CONSTRAINT repo_watch_stale_review_clearance_recovery_cur_repository_check CHECK (repo_watch_repository_is_valid(repository))
 );
 
 
@@ -3199,22 +2803,6 @@ ALTER TABLE ONLY commissioned_dispatch
 
 
 --
--- Name: convergence_sweep_event convergence_sweep_event_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY convergence_sweep_event
-    ADD CONSTRAINT convergence_sweep_event_pkey PRIMARY KEY (event_id);
-
-
---
--- Name: convergence_sweep_target convergence_sweep_target_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY convergence_sweep_target
-    ADD CONSTRAINT convergence_sweep_target_pkey PRIMARY KEY (repository, pull_request_number);
-
-
---
 -- Name: repo_watch_achieved_dispatch_settlement repo_watch_achieved_dispatch_settlement_pkey; Type: CONSTRAINT; Schema: public
 --
 
@@ -3228,30 +2816,6 @@ ALTER TABLE ONLY repo_watch_achieved_dispatch_settlement
 
 ALTER TABLE ONLY repo_watch_complete_poll
     ADD CONSTRAINT repo_watch_complete_poll_pkey PRIMARY KEY (repository);
-
-
---
--- Name: repo_watch_convergence_cutoff_goal repo_watch_convergence_cutoff_goal_goal_command_id_key; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_convergence_cutoff_goal
-    ADD CONSTRAINT repo_watch_convergence_cutoff_goal_goal_command_id_key UNIQUE (goal_command_id);
-
-
---
--- Name: repo_watch_convergence_cutoff_goal repo_watch_convergence_cutoff_goal_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_convergence_cutoff_goal
-    ADD CONSTRAINT repo_watch_convergence_cutoff_goal_pkey PRIMARY KEY (assessment_id, identity_id, session_id);
-
-
---
--- Name: repo_watch_convergence_cutoff repo_watch_convergence_cutoff_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_convergence_cutoff
-    ADD CONSTRAINT repo_watch_convergence_cutoff_pkey PRIMARY KEY (assessment_id, identity_id);
 
 
 --
@@ -3631,62 +3195,6 @@ ALTER TABLE ONLY repo_watch_lifecycle_cutoff
 
 
 --
--- Name: repo_watch_pull_request_convergence_assessment repo_watch_pull_request_conve_assessment_id_repository_pul_key1; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence_assessment
-    ADD CONSTRAINT repo_watch_pull_request_conve_assessment_id_repository_pul_key1 UNIQUE (assessment_id, repository, pull_request_number);
-
-
---
--- Name: repo_watch_pull_request_convergence_assessment repo_watch_pull_request_conve_assessment_id_repository_pull_key; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence_assessment
-    ADD CONSTRAINT repo_watch_pull_request_conve_assessment_id_repository_pull_key UNIQUE (assessment_id, repository, pull_request_number, head_sha, base_revision, verdict_kind);
-
-
---
--- Name: repo_watch_pull_request_convergence_identity repo_watch_pull_request_conve_identity_id_assessment_id_cur_key; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence_identity
-    ADD CONSTRAINT repo_watch_pull_request_conve_identity_id_assessment_id_cur_key UNIQUE (identity_id, assessment_id, cursor_generation);
-
-
---
--- Name: repo_watch_pull_request_convergence repo_watch_pull_request_convergence_assessment_id_key; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence
-    ADD CONSTRAINT repo_watch_pull_request_convergence_assessment_id_key UNIQUE (assessment_id);
-
-
---
--- Name: repo_watch_pull_request_convergence_assessment repo_watch_pull_request_convergence_assessment_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence_assessment
-    ADD CONSTRAINT repo_watch_pull_request_convergence_assessment_pkey PRIMARY KEY (assessment_id);
-
-
---
--- Name: repo_watch_pull_request_convergence_identity repo_watch_pull_request_convergence_identity_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence_identity
-    ADD CONSTRAINT repo_watch_pull_request_convergence_identity_pkey PRIMARY KEY (identity_id);
-
-
---
--- Name: repo_watch_pull_request_convergence repo_watch_pull_request_convergence_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence
-    ADD CONSTRAINT repo_watch_pull_request_convergence_pkey PRIMARY KEY (repository, pull_request_number, head_sha, base_revision);
-
-
---
 -- Name: repo_watch_repository_key repo_watch_repository_key_pkey; Type: CONSTRAINT; Schema: public
 --
 
@@ -3732,54 +3240,6 @@ ALTER TABLE ONLY repo_watch_rule_evaluation
 
 ALTER TABLE ONLY repo_watch_rule_field_fingerprint
     ADD CONSTRAINT repo_watch_rule_field_fingerprint_pkey PRIMARY KEY (repository, rule_id, rule_version);
-
-
---
--- Name: repo_watch_stale_review_clearance repo_watch_stale_review_cleara_assessment_id_review_node_id_key; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_stale_review_clearance
-    ADD CONSTRAINT repo_watch_stale_review_cleara_assessment_id_review_node_id_key UNIQUE (assessment_id, review_node_id);
-
-
---
--- Name: repo_watch_stale_review_clearance_claim repo_watch_stale_review_clearance_claim_claim_token_key; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_stale_review_clearance_claim
-    ADD CONSTRAINT repo_watch_stale_review_clearance_claim_claim_token_key UNIQUE (claim_token);
-
-
---
--- Name: repo_watch_stale_review_clearance_claim repo_watch_stale_review_clearance_claim_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_stale_review_clearance_claim
-    ADD CONSTRAINT repo_watch_stale_review_clearance_claim_pkey PRIMARY KEY (clearance_id);
-
-
---
--- Name: repo_watch_stale_review_clearance repo_watch_stale_review_clearance_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_stale_review_clearance
-    ADD CONSTRAINT repo_watch_stale_review_clearance_pkey PRIMARY KEY (clearance_id);
-
-
---
--- Name: repo_watch_stale_review_clearance_recovery_cursor repo_watch_stale_review_clearance_recovery_cursor_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_stale_review_clearance_recovery_cursor
-    ADD CONSTRAINT repo_watch_stale_review_clearance_recovery_cursor_pkey PRIMARY KEY (repository);
-
-
---
--- Name: repo_watch_stale_review_clearance_result repo_watch_stale_review_clearance_result_pkey; Type: CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_stale_review_clearance_result
-    ADD CONSTRAINT repo_watch_stale_review_clearance_result_pkey PRIMARY KEY (clearance_id);
 
 
 --
@@ -3868,20 +3328,6 @@ CREATE INDEX repo_watch_achieved_dispatch_settlement_pull_request ON repo_watch_
 --
 
 CREATE INDEX repo_watch_achieved_dispatch_settlement_repository ON repo_watch_achieved_dispatch_settlement USING btree (repository, released_at DESC, dispatch_id DESC);
-
-
---
--- Name: repo_watch_convergence_assessment_current_idx; Type: INDEX; Schema: public
---
-
-CREATE INDEX repo_watch_convergence_assessment_current_idx ON repo_watch_pull_request_convergence_assessment USING btree (repository, pull_request_number, recorded_at DESC, assessment_id DESC);
-
-
---
--- Name: repo_watch_convergence_identity_current_idx; Type: INDEX; Schema: public
---
-
-CREATE INDEX repo_watch_convergence_identity_current_idx ON repo_watch_pull_request_convergence_identity USING btree (repository, pull_request_number, cursor_generation DESC, recorded_at DESC, identity_id DESC);
 
 
 --
@@ -4060,13 +3506,6 @@ CREATE INDEX repo_watch_rule_evaluation_cursor ON repo_watch_rule_evaluation USI
 
 
 --
--- Name: repo_watch_stale_review_clearance_recovery_idx; Type: INDEX; Schema: public
---
-
-CREATE INDEX repo_watch_stale_review_clearance_recovery_idx ON repo_watch_stale_review_clearance USING btree (repository, clearance_id);
-
-
---
 -- Name: repo_watch_webhook_delivery_pending_order; Type: INDEX; Schema: public
 --
 
@@ -4141,20 +3580,6 @@ CREATE TRIGGER commissioned_dispatch_reject_truncate BEFORE TRUNCATE ON commissi
 
 
 --
--- Name: convergence_sweep_event convergence_sweep_event_is_append_only; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER convergence_sweep_event_is_append_only BEFORE DELETE OR UPDATE ON convergence_sweep_event FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
-
---
--- Name: convergence_sweep_event convergence_sweep_event_reject_truncate; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER convergence_sweep_event_reject_truncate BEFORE TRUNCATE ON convergence_sweep_event FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
 -- Name: repo_watch_achieved_dispatch_settlement repo_watch_achieved_dispatch_settlement_is_append_only; Type: TRIGGER; Schema: public
 --
 
@@ -4166,62 +3591,6 @@ CREATE TRIGGER repo_watch_achieved_dispatch_settlement_is_append_only BEFORE DEL
 --
 
 CREATE TRIGGER repo_watch_achieved_dispatch_settlement_reject_truncate BEFORE TRUNCATE ON repo_watch_achieved_dispatch_settlement FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
--- Name: repo_watch_pull_request_convergence_assessment repo_watch_convergence_assessment_is_append_only; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_convergence_assessment_is_append_only BEFORE DELETE OR UPDATE ON repo_watch_pull_request_convergence_assessment FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
-
---
--- Name: repo_watch_pull_request_convergence_assessment repo_watch_convergence_assessment_reject_truncate; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_convergence_assessment_reject_truncate BEFORE TRUNCATE ON repo_watch_pull_request_convergence_assessment FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
--- Name: repo_watch_convergence_cutoff_goal repo_watch_convergence_cutoff_goal_is_append_only; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_convergence_cutoff_goal_is_append_only BEFORE DELETE OR UPDATE ON repo_watch_convergence_cutoff_goal FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
-
---
--- Name: repo_watch_convergence_cutoff_goal repo_watch_convergence_cutoff_goal_reject_truncate; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_convergence_cutoff_goal_reject_truncate BEFORE TRUNCATE ON repo_watch_convergence_cutoff_goal FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
--- Name: repo_watch_convergence_cutoff repo_watch_convergence_cutoff_is_append_only; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_convergence_cutoff_is_append_only BEFORE DELETE OR UPDATE ON repo_watch_convergence_cutoff FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
-
---
--- Name: repo_watch_convergence_cutoff repo_watch_convergence_cutoff_reject_truncate; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_convergence_cutoff_reject_truncate BEFORE TRUNCATE ON repo_watch_convergence_cutoff FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
--- Name: repo_watch_pull_request_convergence_identity repo_watch_convergence_identity_is_append_only; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_convergence_identity_is_append_only BEFORE DELETE OR UPDATE ON repo_watch_pull_request_convergence_identity FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
-
---
--- Name: repo_watch_pull_request_convergence_identity repo_watch_convergence_identity_reject_truncate; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_convergence_identity_reject_truncate BEFORE TRUNCATE ON repo_watch_pull_request_convergence_identity FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
 
 
 --
@@ -4582,20 +3951,6 @@ CREATE TRIGGER repo_watch_lifecycle_cutoff_reject_truncate BEFORE TRUNCATE ON re
 
 
 --
--- Name: repo_watch_pull_request_convergence repo_watch_pull_request_convergence_is_append_only; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_pull_request_convergence_is_append_only BEFORE DELETE OR UPDATE ON repo_watch_pull_request_convergence FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
-
---
--- Name: repo_watch_pull_request_convergence repo_watch_pull_request_convergence_reject_truncate; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_pull_request_convergence_reject_truncate BEFORE TRUNCATE ON repo_watch_pull_request_convergence FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
 -- Name: repo_watch_rule_activation repo_watch_rule_activation_is_append_only; Type: TRIGGER; Schema: public
 --
 
@@ -4649,48 +4004,6 @@ CREATE TRIGGER repo_watch_rule_field_fingerprint_is_append_only BEFORE DELETE OR
 --
 
 CREATE TRIGGER repo_watch_rule_field_fingerprint_reject_truncate BEFORE TRUNCATE ON repo_watch_rule_field_fingerprint FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
--- Name: repo_watch_stale_review_clearance_claim repo_watch_stale_review_clearance_claim_reject_truncate; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_stale_review_clearance_claim_reject_truncate BEFORE TRUNCATE ON repo_watch_stale_review_clearance_claim FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
--- Name: repo_watch_stale_review_clearance repo_watch_stale_review_clearance_is_append_only; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_stale_review_clearance_is_append_only BEFORE DELETE OR UPDATE ON repo_watch_stale_review_clearance FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
-
---
--- Name: repo_watch_stale_review_clearance_recovery_cursor repo_watch_stale_review_clearance_recovery_cursor_reject_trunca; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_stale_review_clearance_recovery_cursor_reject_trunca BEFORE TRUNCATE ON repo_watch_stale_review_clearance_recovery_cursor FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
--- Name: repo_watch_stale_review_clearance repo_watch_stale_review_clearance_reject_truncate; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_stale_review_clearance_reject_truncate BEFORE TRUNCATE ON repo_watch_stale_review_clearance FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
-
-
---
--- Name: repo_watch_stale_review_clearance_result repo_watch_stale_review_clearance_result_is_append_only; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_stale_review_clearance_result_is_append_only BEFORE DELETE OR UPDATE ON repo_watch_stale_review_clearance_result FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
-
---
--- Name: repo_watch_stale_review_clearance_result repo_watch_stale_review_clearance_result_reject_truncate; Type: TRIGGER; Schema: public
---
-
-CREATE TRIGGER repo_watch_stale_review_clearance_result_reject_truncate BEFORE TRUNCATE ON repo_watch_stale_review_clearance_result FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
 
 
 --
@@ -4868,30 +4181,6 @@ ALTER TABLE ONLY commissioned_dispatch
 
 
 --
--- Name: convergence_sweep_event convergence_sweep_event_dispatch_id_session_id_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY convergence_sweep_event
-    ADD CONSTRAINT convergence_sweep_event_dispatch_id_session_id_fkey FOREIGN KEY (dispatch_id, session_id) REFERENCES commissioned_dispatch(dispatch_id, session_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: convergence_sweep_event convergence_sweep_event_repository_pull_request_number_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY convergence_sweep_event
-    ADD CONSTRAINT convergence_sweep_event_repository_pull_request_number_fkey FOREIGN KEY (repository, pull_request_number) REFERENCES convergence_sweep_target(repository, pull_request_number) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: convergence_sweep_target convergence_sweep_target_last_dispatch_id_last_session_id_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY convergence_sweep_target
-    ADD CONSTRAINT convergence_sweep_target_last_dispatch_id_last_session_id_fkey FOREIGN KEY (last_dispatch_id, last_session_id) REFERENCES commissioned_dispatch(dispatch_id, session_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
 -- Name: repo_watch_achieved_dispatch_settlement repo_watch_achieved_dispatch_settlement_dispatch_id_fkey; Type: FK CONSTRAINT; Schema: public
 --
 
@@ -4905,46 +4194,6 @@ ALTER TABLE ONLY repo_watch_achieved_dispatch_settlement
 
 ALTER TABLE ONLY repo_watch_achieved_dispatch_settlement
     ADD CONSTRAINT repo_watch_achieved_dispatch_settlement_event_id_fkey FOREIGN KEY (event_id) REFERENCES repo_watch_event(event_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_pull_request_convergence repo_watch_convergence_assessment_matches; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence
-    ADD CONSTRAINT repo_watch_convergence_assessment_matches FOREIGN KEY (assessment_id, repository, pull_request_number, head_sha, base_revision, convergence_kind) REFERENCES repo_watch_pull_request_convergence_assessment(assessment_id, repository, pull_request_number, head_sha, base_revision, verdict_kind) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_convergence_cutoff repo_watch_convergence_cutoff_assessment_id_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_convergence_cutoff
-    ADD CONSTRAINT repo_watch_convergence_cutoff_assessment_id_fkey FOREIGN KEY (assessment_id) REFERENCES repo_watch_pull_request_convergence(assessment_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_convergence_cutoff_goal repo_watch_convergence_cutoff_g_goal_command_id_session_id_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_convergence_cutoff_goal
-    ADD CONSTRAINT repo_watch_convergence_cutoff_g_goal_command_id_session_id_fkey FOREIGN KEY (goal_command_id, session_id) REFERENCES goal_command(command_id, session_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_convergence_cutoff_goal repo_watch_convergence_cutoff_go_assessment_id_identity_id_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_convergence_cutoff_goal
-    ADD CONSTRAINT repo_watch_convergence_cutoff_go_assessment_id_identity_id_fkey FOREIGN KEY (assessment_id, identity_id) REFERENCES repo_watch_convergence_cutoff(assessment_id, identity_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_convergence_cutoff repo_watch_convergence_cutoff_identity_id_identity_assessm_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_convergence_cutoff
-    ADD CONSTRAINT repo_watch_convergence_cutoff_identity_id_identity_assessm_fkey FOREIGN KEY (identity_id, identity_assessment_id, cursor_generation) REFERENCES repo_watch_pull_request_convergence_identity(identity_id, assessment_id, cursor_generation) ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 --
@@ -5252,30 +4501,6 @@ ALTER TABLE ONLY repo_watch_lifecycle_cutoff_goal
 
 
 --
--- Name: repo_watch_pull_request_convergence_identity repo_watch_pull_request_conv_repository_cursor_generation_fkey1; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence_identity
-    ADD CONSTRAINT repo_watch_pull_request_conv_repository_cursor_generation_fkey1 FOREIGN KEY (repository, cursor_generation) REFERENCES repo_watch_cursor(repository, generation) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_pull_request_convergence_identity repo_watch_pull_request_conve_assessment_id_repository_pul_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence_identity
-    ADD CONSTRAINT repo_watch_pull_request_conve_assessment_id_repository_pul_fkey FOREIGN KEY (assessment_id, repository, pull_request_number) REFERENCES repo_watch_pull_request_convergence_assessment(assessment_id, repository, pull_request_number) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_pull_request_convergence_assessment repo_watch_pull_request_conve_repository_cursor_generation_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_pull_request_convergence_assessment
-    ADD CONSTRAINT repo_watch_pull_request_conve_repository_cursor_generation_fkey FOREIGN KEY (repository, cursor_generation) REFERENCES repo_watch_cursor(repository, generation) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
 -- Name: repo_watch_rule_activation repo_watch_rule_activation_repository_after_cursor_generat_fkey; Type: FK CONSTRAINT; Schema: public
 --
 
@@ -5321,30 +4546,6 @@ ALTER TABLE ONLY repo_watch_rule_evaluation
 
 ALTER TABLE ONLY repo_watch_rule_field_fingerprint
     ADD CONSTRAINT repo_watch_rule_field_fingerp_repository_rule_id_rule_vers_fkey FOREIGN KEY (repository, rule_id, rule_version) REFERENCES repo_watch_rule_activation(repository, rule_id, rule_version) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_stale_review_clearance repo_watch_stale_review_clearance_assessment_matches; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_stale_review_clearance
-    ADD CONSTRAINT repo_watch_stale_review_clearance_assessment_matches FOREIGN KEY (assessment_id, repository, pull_request_number, current_head_sha, base_revision, assessment_verdict) REFERENCES repo_watch_pull_request_convergence_assessment(assessment_id, repository, pull_request_number, head_sha, base_revision, verdict_kind) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_stale_review_clearance_claim repo_watch_stale_review_clearance_claim_clearance_id_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_stale_review_clearance_claim
-    ADD CONSTRAINT repo_watch_stale_review_clearance_claim_clearance_id_fkey FOREIGN KEY (clearance_id) REFERENCES repo_watch_stale_review_clearance(clearance_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: repo_watch_stale_review_clearance_result repo_watch_stale_review_clearance_result_clearance_id_fkey; Type: FK CONSTRAINT; Schema: public
---
-
-ALTER TABLE ONLY repo_watch_stale_review_clearance_result
-    ADD CONSTRAINT repo_watch_stale_review_clearance_result_clearance_id_fkey FOREIGN KEY (clearance_id) REFERENCES repo_watch_stale_review_clearance(clearance_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 --
@@ -5416,10 +4617,7 @@ BEGIN
     END LOOP;
     -- the canonical restore-safe pin: the migration-selected schema, then pg_catalog, then pg_temp
     FOREACH signature IN ARRAY ARRAY[
-        'convergence_sweep_retry_budget()',
         'repo_watch_branch_is_valid(text)',
-        'repo_watch_convergence_check_names_are_valid(text[])',
-        'repo_watch_convergence_threads_are_valid(text[])',
         'repo_watch_labels_are_valid(text[])',
         'repo_watch_login_is_valid(text)',
         'repo_watch_repository_is_valid(text)',

@@ -128,11 +128,9 @@ use signalbox_persistence::{
     lifecycle_metrics::LifecycleNonTerminalState,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     operator_status::{
-        ProcessOperatorStatusConvergenceSeal, ProcessOperatorStatusConvergenceVerdict,
         ProcessOperatorStatusError, ProcessOperatorStatusHeldSlotBlocker,
         ProcessOperatorStatusHeldSlotOrigin, ProcessOperatorStatusItem,
-        ProcessOperatorStatusMergeableState, ProcessOperatorStatusRepository,
-        ProcessOperatorStatusReviewDecision, ProcessOperatorStatusSingletonScope,
+        ProcessOperatorStatusRepository, ProcessOperatorStatusSingletonScope,
     },
     outbox::{
         DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
@@ -199,17 +197,12 @@ use signalbox_process_protocol::{
     ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
     ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
-    ModelSettingsSnapshot as WireModelSettingsSnapshot,
-    OperatorStatusConvergenceSeal as WireOperatorStatusConvergenceSeal,
-    OperatorStatusConvergenceVerdict as WireOperatorStatusConvergenceVerdict,
-    OperatorStatusEndMessage, OperatorStatusHeldSlotBlocker as WireOperatorStatusHeldSlotBlocker,
+    ModelSettingsSnapshot as WireModelSettingsSnapshot, OperatorStatusEndMessage,
+    OperatorStatusHeldSlotBlocker as WireOperatorStatusHeldSlotBlocker,
     OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
     OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
-    OperatorStatusLifecycleWeekMessage,
-    OperatorStatusMergeableState as WireOperatorStatusMergeableState, OperatorStatusMessage,
-    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
+    OperatorStatusLifecycleWeekMessage, OperatorStatusMessage,
     OperatorStatusQueuedObligationMessage,
-    OperatorStatusReviewDecision as WireOperatorStatusReviewDecision,
     OperatorStatusSingletonScope as WireOperatorStatusSingletonScope, PositiveCanonicalU64,
     ProtocolVersion, ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
     ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
@@ -10426,12 +10419,6 @@ async fn spool_operator_status(
             OperatorStatusEndMessage {
                 held_slot_count: CanonicalU64::new(counts.held_slots()),
                 queued_obligation_count: CanonicalU64::new(counts.queued_obligations()),
-                pull_request_convergence_count: CanonicalU64::new(
-                    counts.pull_request_convergences(),
-                ),
-                pending_stale_review_clearance_count: CanonicalU64::new(
-                    counts.pending_stale_review_clearances(),
-                ),
                 lifecycle_week_count: CanonicalU64::new(counts.lifecycle_weeks()),
                 lifecycle_deadline_violation_count: CanonicalU64::new(
                     counts.lifecycle_deadline_violations(),
@@ -10529,40 +10516,6 @@ fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
                 }),
             )))
         }
-        ProcessOperatorStatusItem::PullRequestConvergence(item) => {
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(OperatorStatusPullRequestConvergenceMessage {
-                    repository: item.repository().to_owned(),
-                    pull_request_number: CanonicalU64::new(item.pull_request_number()),
-                    head_sha: item.head_sha().to_owned(),
-                    base_branch: item.base_branch().to_owned(),
-                    base_revision: item.base_revision().to_owned(),
-                    mergeable_state: wire_operator_status_mergeable_state(item.mergeable_state()),
-                    review_decision: wire_operator_status_review_decision(item.review_decision()),
-                    unresolved_thread_count: CanonicalU64::new(item.unresolved_thread_count()),
-                    gating_check_count: CanonicalU64::new(item.gating_check_count()),
-                    non_green_gating_checks: item.non_green_gating_checks().to_vec(),
-                    verdict: wire_operator_status_verdict(item.verdict()),
-                    seal: item.seal().map(wire_operator_status_seal),
-                    assessed_seconds_ago: CanonicalU64::new(item.assessed_seconds_ago()),
-                }),
-            )))
-        }
-        ProcessOperatorStatusItem::PendingStaleReviewClearance(item) => {
-            ServerMessage::OperatorStatus(Box::new(
-                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
-                    OperatorStatusPendingStaleReviewClearanceMessage {
-                        repository: item.repository().to_owned(),
-                        pull_request_number: CanonicalU64::new(item.pull_request_number()),
-                        current_head_sha: item.current_head_sha().to_owned(),
-                        review_node_id: item.review_node_id().to_owned(),
-                        reviewer: item.reviewer().to_owned(),
-                        reviewed_head_sha: item.reviewed_head_sha().to_owned(),
-                        pending_for_seconds: CanonicalU64::new(item.pending_for_seconds()),
-                    },
-                )),
-            ))
-        }
         ProcessOperatorStatusItem::LifecycleWeek(item) => ServerMessage::OperatorStatus(Box::new(
             OperatorStatusMessage::LifecycleWeek(Box::new(OperatorStatusLifecycleWeekMessage {
                 week_start_date: item.week_start_date(),
@@ -10655,64 +10608,6 @@ fn wire_operator_status_blocker(
         }
         ProcessOperatorStatusHeldSlotBlocker::PursuingGoal => {
             WireOperatorStatusHeldSlotBlocker::PursuingGoal
-        }
-    }
-}
-
-fn wire_operator_status_mergeable_state(
-    state: ProcessOperatorStatusMergeableState,
-) -> WireOperatorStatusMergeableState {
-    match state {
-        ProcessOperatorStatusMergeableState::Mergeable => {
-            WireOperatorStatusMergeableState::Mergeable
-        }
-        ProcessOperatorStatusMergeableState::Conflicting => {
-            WireOperatorStatusMergeableState::Conflicting
-        }
-        ProcessOperatorStatusMergeableState::Unknown => WireOperatorStatusMergeableState::Unknown,
-    }
-}
-
-fn wire_operator_status_review_decision(
-    decision: ProcessOperatorStatusReviewDecision,
-) -> WireOperatorStatusReviewDecision {
-    match decision {
-        ProcessOperatorStatusReviewDecision::None => WireOperatorStatusReviewDecision::None,
-        ProcessOperatorStatusReviewDecision::Approved => WireOperatorStatusReviewDecision::Approved,
-        ProcessOperatorStatusReviewDecision::ReviewRequired => {
-            WireOperatorStatusReviewDecision::ReviewRequired
-        }
-        ProcessOperatorStatusReviewDecision::ChangesRequested => {
-            WireOperatorStatusReviewDecision::ChangesRequested
-        }
-    }
-}
-
-fn wire_operator_status_verdict(
-    verdict: ProcessOperatorStatusConvergenceVerdict,
-) -> WireOperatorStatusConvergenceVerdict {
-    match verdict {
-        ProcessOperatorStatusConvergenceVerdict::NotConverged => {
-            WireOperatorStatusConvergenceVerdict::NotConverged
-        }
-        ProcessOperatorStatusConvergenceVerdict::InternallyConverged => {
-            WireOperatorStatusConvergenceVerdict::InternallyConverged
-        }
-        ProcessOperatorStatusConvergenceVerdict::MergeReady => {
-            WireOperatorStatusConvergenceVerdict::MergeReady
-        }
-    }
-}
-
-fn wire_operator_status_seal(
-    seal: ProcessOperatorStatusConvergenceSeal,
-) -> WireOperatorStatusConvergenceSeal {
-    match seal {
-        ProcessOperatorStatusConvergenceSeal::InternallyConverged => {
-            WireOperatorStatusConvergenceSeal::InternallyConverged
-        }
-        ProcessOperatorStatusConvergenceSeal::MergeReady => {
-            WireOperatorStatusConvergenceSeal::MergeReady
         }
     }
 }

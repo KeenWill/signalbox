@@ -14,7 +14,6 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as STANDARD_BASE64};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
-    ser::SerializeSeq,
 };
 use serde_json::value::RawValue;
 use signalbox_domain::{
@@ -134,7 +133,7 @@ pub const MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES: usize = 128;
 
 /// Maximum UTF-8 bytes in one operator-status branch name.
 ///
-/// Covers a held slot's branch origin and a convergence row's base branch.
+/// Covers a held slot's branch origin.
 // numeric-bound: guard - the operator-status wire grammar advertises accepting branch names only to this length
 pub const MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES: usize = 255;
 
@@ -148,48 +147,6 @@ pub const MAX_OPERATOR_STATUS_DISPATCH_SESSIONS: usize = 32;
 /// Maximum independently failing release clauses on one held slot.
 // numeric-bound: not-a-bound - the closed blocker enum's exact variant count, which one slot cannot repeat
 pub const MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS: usize = 4;
-
-/// Maximum unresolved review threads counted by one convergence assessment.
-// numeric-bound: guard - refuses a thread count no durable assessment can have produced
-pub const MAX_OPERATOR_STATUS_UNRESOLVED_THREADS: u64 = 10_000;
-
-/// Maximum gating checks counted by one convergence assessment.
-///
-/// Persistence admits the same inventory, so a divergence here would reject an
-/// otherwise valid projection and fail the whole snapshot.
-// numeric-bound: guard - bounds the non-green check names one convergence frame can carry
-pub const MAX_OPERATOR_STATUS_GATING_CHECKS: u64 = 10_000;
-
-/// Maximum UTF-8 bytes in one operator-status gating-check name.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting check names only to this length
-pub const MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES: usize = 256;
-
-/// Maximum UTF-8 bytes in one operator-status review node identity.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting review node identities only to this length
-pub const MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES: usize = 256;
-
-/// Maximum UTF-8 bytes in one operator-status reviewer login.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting reviewer logins only to this length
-pub const MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES: usize = 44;
-
-/// Maximum UTF-8 bytes in one operator-status reviewer login's base, the
-/// spelling left once the optional App-bot suffix is set aside.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting a login base only to this length
-pub const MAX_OPERATOR_STATUS_REVIEWER_BASE_UTF8_BYTES: usize = 39;
-
-/// Literal suffix an App-bot reviewer login carries after its base.
-pub const OPERATOR_STATUS_BOT_LOGIN_SUFFIX: &str = "[bot]";
-
-/// The one base branch a merge-ready convergence verdict is settled against.
-///
-/// The durable assessment keys both converged verdicts to this spelling: a
-/// merge-ready row's base branch is exactly this branch, and an
-/// internally-converged row's base branch is any other.
-pub const OPERATOR_STATUS_TRUNK_BASE_BRANCH: &str = "main";
-
-/// Exact hexadecimal characters in one operator-status commit revision.
-// numeric-bound: not-a-bound - the fixed width of a git SHA-1 object name
-pub const OPERATOR_STATUS_COMMIT_SHA_LENGTH: usize = 40;
 
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -3371,42 +3328,6 @@ pub enum OperatorStatusHeldSlotBlocker {
     DeliveryTurnRuntimeRelevant,
     LiveRuntimeTurn,
     PursuingGoal,
-}
-
-/// Current provider mergeability shown by repository-watch operator status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusMergeableState {
-    Mergeable,
-    Conflicting,
-    Unknown,
-}
-
-/// Current provider review decision shown by repository-watch operator status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusReviewDecision {
-    None,
-    Approved,
-    ReviewRequired,
-    ChangesRequested,
-}
-
-/// Latest repository-watch convergence verdict.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusConvergenceVerdict {
-    NotConverged,
-    InternallyConverged,
-    MergeReady,
-}
-
-/// Durable convergence seal attached to the latest assessment, when any.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusConvergenceSeal {
-    InternallyConverged,
-    MergeReady,
 }
 
 /// Immutable authority fence a commissioned-session request records.
@@ -7630,43 +7551,6 @@ pub struct OperatorStatusQueuedObligationMessage {
     pub ready: bool,
 }
 
-/// Payload for one latest pull-request convergence assessment.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperatorStatusPullRequestConvergenceMessage {
-    pub repository: String,
-    pub pull_request_number: CanonicalU64,
-    pub head_sha: String,
-    pub base_branch: String,
-    pub base_revision: String,
-    pub mergeable_state: OperatorStatusMergeableState,
-    pub review_decision: OperatorStatusReviewDecision,
-    pub unresolved_thread_count: CanonicalU64,
-    pub gating_check_count: CanonicalU64,
-    #[serde(
-        serialize_with = "serialize_operator_status_check_names",
-        deserialize_with = "deserialize_operator_status_check_names"
-    )]
-    pub non_green_gating_checks: Vec<String>,
-    pub verdict: OperatorStatusConvergenceVerdict,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub seal: Option<OperatorStatusConvergenceSeal>,
-    pub assessed_seconds_ago: CanonicalU64,
-}
-
-/// Payload for one stale blocking review whose planned clearance is unsettled.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperatorStatusPendingStaleReviewClearanceMessage {
-    pub repository: String,
-    pub pull_request_number: CanonicalU64,
-    pub current_head_sha: String,
-    pub review_node_id: String,
-    pub reviewer: String,
-    pub reviewed_head_sha: String,
-    pub pending_for_seconds: CanonicalU64,
-}
-
 /// One non-terminal session state a deadline violation can be reported under.
 ///
 /// `terminal` is absent by construction: a terminal session owes no deadline,
@@ -7741,8 +7625,6 @@ pub struct OperatorStatusLifecycleDeadlineViolationMessage {
 pub struct OperatorStatusEndMessage {
     pub held_slot_count: CanonicalU64,
     pub queued_obligation_count: CanonicalU64,
-    pub pull_request_convergence_count: CanonicalU64,
-    pub pending_stale_review_clearance_count: CanonicalU64,
     pub lifecycle_week_count: CanonicalU64,
     /// The `nonterminal_past_deadline` alarm value, target zero.
     pub lifecycle_deadline_violation_count: CanonicalU64,
@@ -7758,10 +7640,6 @@ pub enum OperatorStatusMessage {
     HeldSlot(Box<OperatorStatusHeldSlotMessage>),
     /// One owed repository-watch dispatch waiting for admission.
     QueuedObligation(Box<OperatorStatusQueuedObligationMessage>),
-    /// One latest pull-request convergence assessment.
-    PullRequestConvergence(Box<OperatorStatusPullRequestConvergenceMessage>),
-    /// One stale blocking review whose planned clearance is not yet settled.
-    PendingStaleReviewClearance(Box<OperatorStatusPendingStaleReviewClearanceMessage>),
     /// One calendar week of session-lifecycle metrics.
     LifecycleWeek(Box<OperatorStatusLifecycleWeekMessage>),
     /// One owned non-terminal session past its armed-deadline obligation.
@@ -8815,38 +8693,6 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                         || item.cooldown_remaining_seconds.is_some()
                         || item.cooldown_never_eligible))
         }
-        OperatorStatusMessage::PullRequestConvergence(item) => {
-            operator_status_repository_is_valid(&item.repository)
-                && item.pull_request_number.value() > 0
-                && operator_status_sha_is_valid(&item.head_sha)
-                && operator_status_branch_is_valid(&item.base_branch)
-                && operator_status_sha_is_valid(&item.base_revision)
-                && item.unresolved_thread_count.value() <= MAX_OPERATOR_STATUS_UNRESOLVED_THREADS
-                && item.gating_check_count.value() <= MAX_OPERATOR_STATUS_GATING_CHECKS
-                && u64::try_from(item.non_green_gating_checks.len())
-                    .is_ok_and(|count| count <= item.gating_check_count.value())
-                && item.non_green_gating_checks.iter().all(|name| {
-                    operator_status_text_is_valid(name, MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES)
-                })
-                && item
-                    .non_green_gating_checks
-                    .windows(2)
-                    .all(|pair| pair[0] <= pair[1])
-                && operator_status_convergence_verdict_matches_evidence(item)
-                && operator_status_convergence_base_branch_matches_verdict(item)
-        }
-        OperatorStatusMessage::PendingStaleReviewClearance(item) => {
-            operator_status_repository_is_valid(&item.repository)
-                && item.pull_request_number.value() > 0
-                && operator_status_sha_is_valid(&item.current_head_sha)
-                && operator_status_text_is_valid(
-                    &item.review_node_id,
-                    MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES,
-                )
-                && operator_status_reviewer_is_valid(&item.reviewer)
-                && operator_status_sha_is_valid(&item.reviewed_head_sha)
-                && item.current_head_sha != item.reviewed_head_sha
-        }
         OperatorStatusMessage::LifecycleWeek(item) => {
             // Every pair is a rate, so no numerator may exceed its own
             // denominator; the trim only removes members, so the headline's
@@ -8990,65 +8836,7 @@ fn operator_status_obligation_lineage_is_coherent(
         && (item.matched_event_count.value() == 1) == (item.first_event_id == item.latest_event_id)
 }
 
-/// Holds the durable
-/// `repo_watch_convergence_verdict_matches_evidence` constraint on the wire.
-/// The stored assessment settles on the unconverged verdict exactly when the
-/// pull request carries at least one blocker, so either converged verdict
-/// contradicts every blocker the row carries beside it. Exactly one durable
-/// disjunct — the unsettled provider snapshot — is not carried on this wire, so
-/// the implication is only enforced in the direction the frame can prove: an
-/// unconverged verdict stays admissible against wholly clean carried evidence,
-/// while a converged verdict requires each carried condition to be clean.
-fn operator_status_convergence_verdict_matches_evidence(
-    item: &OperatorStatusPullRequestConvergenceMessage,
-) -> bool {
-    match item.verdict {
-        OperatorStatusConvergenceVerdict::NotConverged => true,
-        OperatorStatusConvergenceVerdict::InternallyConverged
-        | OperatorStatusConvergenceVerdict::MergeReady => {
-            item.unresolved_thread_count.value() == 0
-                && item.non_green_gating_checks.is_empty()
-                && item.mergeable_state == OperatorStatusMergeableState::Mergeable
-                && item.gating_check_count.value() > 0
-                && item.review_decision != OperatorStatusReviewDecision::ChangesRequested
-        }
-    }
-}
-
-/// Holds the durable base-branch pair on the wire.
-///
-/// Two constraints sit beside the evidence constraint on the same assessment
-/// row, and the status projection reads the verdict and the base branch from
-/// that one row: a merge-ready verdict is settled only against `main`, and an
-/// internally-converged verdict only against a branch that is not `main`. The
-/// pair is what distinguishes the two converged verdicts, so a merge-ready row
-/// on a release branch or an internally-converged row on the trunk names an
-/// assessment persistence cannot hold.
-///
-/// The unconverged verdict carries no base-branch constraint, and neither does
-/// the seal beside it: a seal is retained from the assessment that earned it
-/// and outlives later ones, so a pull request retargeted after it was sealed
-/// carries that seal beside its new base branch.
-fn operator_status_convergence_base_branch_matches_verdict(
-    item: &OperatorStatusPullRequestConvergenceMessage,
-) -> bool {
-    match item.verdict {
-        OperatorStatusConvergenceVerdict::NotConverged => true,
-        OperatorStatusConvergenceVerdict::MergeReady => {
-            item.base_branch == OPERATOR_STATUS_TRUNK_BASE_BRANCH
-        }
-        OperatorStatusConvergenceVerdict::InternallyConverged => {
-            item.base_branch != OPERATOR_STATUS_TRUNK_BASE_BRANCH
-        }
-    }
-}
-
-/// The singleton axes of one operator-status row, each named at its call site.
-///
-/// The two numeric axes carry one type and mean different things, so they are
-/// supplied by name rather than by position: a pull-request number transposed
-/// with a stack-root pull-request number would otherwise compile silently and
-/// admit rows the singleton grammar refuses.
+/// The singleton axes carried by one operator-status row.
 struct OperatorStatusSingletonAxes<'a> {
     scope: OperatorStatusSingletonScope,
     repository: Option<&'a str>,
@@ -9176,74 +8964,6 @@ fn operator_status_branch_is_valid(value: &str) -> bool {
 /// Holds one slash-separated component of a branch name.
 fn operator_status_branch_component_is_valid(value: &str) -> bool {
     !value.is_empty() && !value.starts_with('.') && !value.ends_with(".lock")
-}
-
-/// Holds the reviewer-login grammar on the wire.
-///
-/// Mirrors the `RepoWatchAuthorLogin` constructor and the durable
-/// `repo_watch_login_is_valid` check: an optional literal App-bot suffix is set
-/// aside, and the base left behind is nonempty, no wider than its own ceiling,
-/// begins and ends with something other than a hyphen, carries no doubled
-/// hyphen, and spells itself in ASCII lowercase letters, digits, hyphens, and
-/// underscores. Both producers lowercase what they admit, so only the
-/// normalized spelling reaches this wire.
-fn operator_status_reviewer_is_valid(value: &str) -> bool {
-    let base = value
-        .strip_suffix(OPERATOR_STATUS_BOT_LOGIN_SUFFIX)
-        .unwrap_or(value);
-    operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES)
-        && !base.is_empty()
-        && base.len() <= MAX_OPERATOR_STATUS_REVIEWER_BASE_UTF8_BYTES
-        && !base.starts_with('-')
-        && !base.ends_with('-')
-        && !base.contains("--")
-        && base.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
-}
-
-fn serialize_operator_status_check_names<SerializerT>(
-    names: &[String],
-    serializer: SerializerT,
-) -> Result<SerializerT::Ok, SerializerT::Error>
-where
-    SerializerT: Serializer,
-{
-    let mut sequence = serializer.serialize_seq(Some(names.len()))?;
-    for name in names {
-        sequence.serialize_element(&STANDARD_BASE64.encode(name.as_bytes()))?;
-    }
-    sequence.end()
-}
-
-fn deserialize_operator_status_check_names<'de, DeserializerT>(
-    deserializer: DeserializerT,
-) -> Result<Vec<String>, DeserializerT::Error>
-where
-    DeserializerT: Deserializer<'de>,
-{
-    Vec::<String>::deserialize(deserializer)?
-        .into_iter()
-        .map(|encoded| {
-            let decoded = STANDARD_BASE64.decode(encoded.as_bytes()).map_err(|_| {
-                serde::de::Error::custom("operator-status check name is not canonical base64")
-            })?;
-            if STANDARD_BASE64.encode(&decoded) != encoded {
-                return Err(serde::de::Error::custom(
-                    "operator-status check name is not canonical base64",
-                ));
-            }
-            String::from_utf8(decoded)
-                .map_err(|_| serde::de::Error::custom("operator-status check name is not UTF-8"))
-        })
-        .collect()
-}
-
-fn operator_status_sha_is_valid(value: &str) -> bool {
-    value.len() == OPERATOR_STATUS_COMMIT_SHA_LENGTH
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn operator_status_blocker_rank(blocker: OperatorStatusHeldSlotBlocker) -> u8 {
@@ -10208,13 +9928,10 @@ mod tests {
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ModelCapabilities,
         ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
         ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
-        OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict, OperatorStatusEndMessage,
-        OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
-        OperatorStatusLifecycleDeadlineViolationMessage, OperatorStatusLifecycleState,
-        OperatorStatusLifecycleWeekMessage, OperatorStatusMergeableState, OperatorStatusMessage,
-        OperatorStatusPendingStaleReviewClearanceMessage,
-        OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
-        OperatorStatusReviewDecision, OperatorStatusSingletonScope, PROTOCOL_VERSION,
+        OperatorStatusEndMessage, OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage,
+        OperatorStatusHeldSlotOrigin, OperatorStatusLifecycleDeadlineViolationMessage,
+        OperatorStatusLifecycleState, OperatorStatusLifecycleWeekMessage, OperatorStatusMessage,
+        OperatorStatusQueuedObligationMessage, OperatorStatusSingletonScope, PROTOCOL_VERSION,
         PositiveCanonicalU64, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
         ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
         ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
@@ -10668,44 +10385,6 @@ mod tests {
         )?;
         assert_server_message_round_trip(
             request(1)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(OperatorStatusPullRequestConvergenceMessage {
-                    repository: String::from("example/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    head_sha: String::from("1111111111111111111111111111111111111111"),
-                    base_branch: String::from("main"),
-                    base_revision: String::from("2222222222222222222222222222222222222222"),
-                    mergeable_state: OperatorStatusMergeableState::Mergeable,
-                    review_decision: OperatorStatusReviewDecision::Approved,
-                    unresolved_thread_count: CanonicalU64::new(0),
-                    gating_check_count: CanonicalU64::new(2),
-                    non_green_gating_checks: Vec::new(),
-                    verdict: OperatorStatusConvergenceVerdict::MergeReady,
-                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
-                    assessed_seconds_ago: CanonicalU64::new(12),
-                }),
-            ))),
-            r#"{"type":"operator_status","kind":"pull_request_convergence","repository":"example/repo","pull_request_number":"41","head_sha":"1111111111111111111111111111111111111111","base_branch":"main","base_revision":"2222222222222222222222222222222222222222","mergeable_state":"mergeable","review_decision":"approved","unresolved_thread_count":"0","gating_check_count":"2","non_green_gating_checks":[],"verdict":"merge_ready","seal":"merge_ready","assessed_seconds_ago":"12"}"#,
-        )?;
-        assert_server_message_round_trip(
-            request(1)?,
-            ServerMessage::OperatorStatus(Box::new(
-                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
-                    OperatorStatusPendingStaleReviewClearanceMessage {
-                        repository: String::from("example/repo"),
-                        pull_request_number: CanonicalU64::new(41),
-                        current_head_sha: String::from("1111111111111111111111111111111111111111"),
-                        review_node_id: String::from("PRR_node"),
-                        reviewer: String::from("reviewer"),
-                        reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
-                        pending_for_seconds: CanonicalU64::new(8),
-                    },
-                )),
-            )),
-            r#"{"type":"operator_status","kind":"pending_stale_review_clearance","repository":"example/repo","pull_request_number":"41","current_head_sha":"1111111111111111111111111111111111111111","review_node_id":"PRR_node","reviewer":"reviewer","reviewed_head_sha":"3333333333333333333333333333333333333333","pending_for_seconds":"8"}"#,
-        )?;
-        assert_server_message_round_trip(
-            request(1)?,
             ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::LifecycleWeek(
                 Box::new(OperatorStatusLifecycleWeekMessage {
                     week_start_date: String::from("2026-08-31"),
@@ -10746,13 +10425,11 @@ mod tests {
                 OperatorStatusEndMessage {
                     held_slot_count: CanonicalU64::new(1),
                     queued_obligation_count: CanonicalU64::new(1),
-                    pull_request_convergence_count: CanonicalU64::new(1),
-                    pending_stale_review_clearance_count: CanonicalU64::new(1),
                     lifecycle_week_count: CanonicalU64::new(1),
                     lifecycle_deadline_violation_count: CanonicalU64::new(1),
                 },
             )))),
-            r#"{"type":"operator_status","kind":"end","held_slot_count":"1","queued_obligation_count":"1","pull_request_convergence_count":"1","pending_stale_review_clearance_count":"1","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1"}"#,
+            r#"{"type":"operator_status","kind":"end","held_slot_count":"1","queued_obligation_count":"1","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1"}"#,
         )?;
         Ok(())
     }
@@ -11096,337 +10773,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn operator_status_allows_a_seal_to_outlive_the_latest_assessment()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let frame = ServerFrame::try_new(
-            request(1)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(OperatorStatusPullRequestConvergenceMessage {
-                    repository: String::from("example/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    head_sha: String::from("1111111111111111111111111111111111111111"),
-                    base_branch: String::from("main"),
-                    base_revision: String::from("2222222222222222222222222222222222222222"),
-                    mergeable_state: OperatorStatusMergeableState::Mergeable,
-                    review_decision: OperatorStatusReviewDecision::Approved,
-                    unresolved_thread_count: CanonicalU64::new(0),
-                    gating_check_count: CanonicalU64::new(1),
-                    non_green_gating_checks: vec![String::from("rust-checks")],
-                    verdict: OperatorStatusConvergenceVerdict::NotConverged,
-                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
-                    assessed_seconds_ago: CanonicalU64::new(1),
-                }),
-            ))),
-        );
-
-        assert!(frame.is_ok());
-        Ok(())
-    }
-
-    /// One merge-ready convergence row: every carried condition clean, beside
-    /// the trunk base branch the durable side pairs that verdict with. Each
-    /// case below restates only the field whose contradiction it names.
-    fn merge_ready_convergence() -> OperatorStatusPullRequestConvergenceMessage {
-        OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/repo"),
-            pull_request_number: CanonicalU64::new(41),
-            head_sha: String::from("1111111111111111111111111111111111111111"),
-            base_branch: String::from("main"),
-            base_revision: String::from("2222222222222222222222222222222222222222"),
-            mergeable_state: OperatorStatusMergeableState::Mergeable,
-            review_decision: OperatorStatusReviewDecision::Approved,
-            unresolved_thread_count: CanonicalU64::new(0),
-            gating_check_count: CanonicalU64::new(2),
-            non_green_gating_checks: Vec::new(),
-            verdict: OperatorStatusConvergenceVerdict::MergeReady,
-            seal: None,
-            assessed_seconds_ago: CanonicalU64::new(1),
-        }
-    }
-
-    /// The same clean evidence beside the release base branch and the verdict
-    /// the durable side pairs that branch with.
-    fn internally_converged_convergence() -> OperatorStatusPullRequestConvergenceMessage {
-        OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1"),
-            verdict: OperatorStatusConvergenceVerdict::InternallyConverged,
-            ..merge_ready_convergence()
-        }
-    }
-
-    /// The same clean evidence beneath the unconverged verdict, which the
-    /// durable side pairs with no base branch at all.
-    fn not_converged_convergence() -> OperatorStatusPullRequestConvergenceMessage {
-        OperatorStatusPullRequestConvergenceMessage {
-            verdict: OperatorStatusConvergenceVerdict::NotConverged,
-            ..merge_ready_convergence()
-        }
-    }
-
-    #[track_caller]
-    fn assert_convergence_admitted(item: OperatorStatusPullRequestConvergenceMessage) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(item),
-            ))),
-        );
-        assert!(frame.is_ok(), "convergence row must be admitted: {frame:?}");
-    }
-
-    #[track_caller]
-    fn assert_convergence_rejected(item: OperatorStatusPullRequestConvergenceMessage) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(item),
-            ))),
-        );
-        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
-    }
-
-    /// A convergence row's verdict is settled by the evidence beside it. The
-    /// durable `repo_watch_convergence_verdict_matches_evidence` constraint
-    /// makes the unconverged verdict exactly the carried-blocker case, so
-    /// either converged verdict is admitted only beside wholly clean evidence:
-    /// no unresolved thread, no non-green check, a mergeable provider state, at
-    /// least one gating check, and no requested change.
-    #[test]
-    fn operator_status_admits_a_converged_verdict_beside_clean_evidence() {
-        assert_convergence_admitted(merge_ready_convergence());
-        assert_convergence_admitted(internally_converged_convergence());
-    }
-
-    /// One rejection per contradiction class the wire carries: an empty gating
-    /// inventory, an unresolved thread, a non-green check, each unmergeable
-    /// provider state, and a requested change.
-    #[test]
-    fn operator_status_rejects_a_merge_ready_verdict_beside_each_contradiction() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            gating_check_count: CanonicalU64::new(0),
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            unresolved_thread_count: CanonicalU64::new(1),
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            non_green_gating_checks: vec![String::from("rust-checks")],
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Conflicting,
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Unknown,
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::ChangesRequested,
-            ..merge_ready_convergence()
-        });
-    }
-
-    /// The same contradiction classes refuse the other converged verdict, which
-    /// the durable evidence constraint treats identically.
-    #[test]
-    fn operator_status_rejects_an_internally_converged_verdict_beside_each_contradiction() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            gating_check_count: CanonicalU64::new(0),
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            unresolved_thread_count: CanonicalU64::new(1),
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            non_green_gating_checks: vec![String::from("rust-checks")],
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Conflicting,
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Unknown,
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::ChangesRequested,
-            ..internally_converged_convergence()
-        });
-    }
-
-    /// A review still awaiting its first decision blocks neither converged
-    /// verdict, since only a requested change is a durable blocker.
-    #[test]
-    fn operator_status_admits_a_converged_verdict_beside_an_undecided_review() {
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::None,
-            ..merge_ready_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::ReviewRequired,
-            ..merge_ready_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::None,
-            ..internally_converged_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::ReviewRequired,
-            ..internally_converged_convergence()
-        });
-    }
-
-    /// The unconverged verdict carries its own blockers freely and stays
-    /// admissible beside wholly clean evidence, because the unsettled provider
-    /// snapshot that alone justifies the latter never crosses this wire.
-    #[test]
-    fn operator_status_admits_an_unconverged_verdict_beside_any_carried_evidence() {
-        assert_convergence_admitted(not_converged_convergence());
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Conflicting,
-            review_decision: OperatorStatusReviewDecision::ChangesRequested,
-            unresolved_thread_count: CanonicalU64::new(3),
-            non_green_gating_checks: vec![String::from("rust-checks")],
-            ..not_converged_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            gating_check_count: CanonicalU64::new(0),
-            ..not_converged_convergence()
-        });
-    }
-
-    /// Two durable constraints sit beside the evidence constraint on the same
-    /// assessment row, and the status projection reads the verdict and the base
-    /// branch from that one row: a merge-ready verdict is settled only against
-    /// `main`, an internally-converged verdict only against another branch. The
-    /// pair is what separates the two converged verdicts, so each is refused on
-    /// the other's branch even beside wholly clean evidence.
-    #[test]
-    fn operator_status_binds_each_converged_verdict_to_its_base_branch() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1"),
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("main"),
-            ..internally_converged_convergence()
-        });
-
-        // The unconverged verdict is settled without consulting the base
-        // branch, so it is admitted on either one.
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("main"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1"),
-            ..not_converged_convergence()
-        });
-
-        // A seal is retained from the assessment that earned it and outlives
-        // later ones, so a pull request retargeted after it was sealed carries
-        // that merge-ready seal beside a branch no merge-ready verdict could be
-        // settled against. The seal therefore takes no base-branch pairing.
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1"),
-            seal: Some(OperatorStatusConvergenceSeal::MergeReady),
-            ..not_converged_convergence()
-        });
-    }
-
-    /// The base branch is a git ref name on the wire, so the grammar the
-    /// `BranchName` constructor and the durable `repo_watch_branch_is_valid`
-    /// check share is mirrored here rather than a bare length bound.
-    #[test]
-    fn operator_status_rejects_a_convergence_base_branch_outside_the_ref_grammar() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from(".."),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release branch"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("-release"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/.hidden"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1.lock"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release@{1}"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release^1"),
-            ..not_converged_convergence()
-        });
-
-        // A slashed, dotted, and hyphenated name is an ordinary ref name.
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/v1.2-rc"),
-            ..not_converged_convergence()
-        });
-    }
-
-    /// A convergence row's repository is a canonical `namespace/name` slug on the
-    /// wire, so the grammar the `RepositorySlug` constructor and the durable
-    /// `repo_watch_repository_is_valid` check share is mirrored here. Both
-    /// producers lowercase what they admit, so an uppercase spelling is refused
-    /// with the malformed ones.
-    #[test]
-    fn operator_status_rejects_a_repository_outside_the_slug_grammar() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("not-a-slug"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/repo/extra"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("/repo"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/.."),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/re po"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("Example/Repo"),
-            ..not_converged_convergence()
-        });
-
-        // Dots, hyphens, and underscores spell an ordinary slug on both sides.
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("ex-am_ple/re.po-1"),
-            ..not_converged_convergence()
-        });
-    }
-
     /// One held slot whose pull-request origin, singleton scope, and singleton
     /// axes all name the same pull request in the same repository, which is the
     /// only identity the projection can produce for a pull-request-scoped hold.
@@ -11516,58 +10862,9 @@ mod tests {
         );
         assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
     }
-
-    /// One stale blocking review whose planned clearance is still unsettled.
-    fn stale_review_clearance_row() -> OperatorStatusPendingStaleReviewClearanceMessage {
-        OperatorStatusPendingStaleReviewClearanceMessage {
-            repository: String::from("example/repo"),
-            pull_request_number: CanonicalU64::new(41),
-            current_head_sha: String::from("1111111111111111111111111111111111111111"),
-            review_node_id: String::from("PRR_node"),
-            reviewer: String::from("reviewer"),
-            reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
-            pending_for_seconds: CanonicalU64::new(8),
-        }
-    }
-
-    #[track_caller]
-    fn assert_stale_review_clearance_admitted(
-        item: OperatorStatusPendingStaleReviewClearanceMessage,
-    ) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(
-                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(item)),
-            )),
-        );
-        assert!(
-            frame.is_ok(),
-            "stale-review clearance row must be admitted: {frame:?}"
-        );
-    }
-
-    #[track_caller]
-    fn assert_stale_review_clearance_rejected(
-        item: OperatorStatusPendingStaleReviewClearanceMessage,
-    ) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(
-                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(item)),
-            )),
-        );
-        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
-    }
-
-    /// The held-slot projection joins each dispatch batch to the very event it
-    /// was admitted from and reads the origin pull request off that row, while
-    /// the batch's singleton was keyed from the same event. A pull-request
-    /// singleton therefore names the very pull request its origin names, and a
-    /// row naming two different ones is an identity persistence cannot hold.
-    ///
-    /// A stack singleton names the root of the open component the origin
-    /// belongs to, which is a different pull request whenever the origin is not
-    /// itself that root, so the stack axis takes no such equality.
+    /// The held-slot projection joins each dispatch batch to the event it was
+    /// admitted from, so a pull-request singleton names its origin pull request.
+    /// A stack singleton may name another pull request at the stack root.
     #[test]
     fn operator_status_binds_a_held_pull_request_singleton_to_its_origin() {
         assert_held_slot_admitted(held_slot_row());
@@ -11684,51 +10981,7 @@ mod tests {
         });
     }
 
-    /// A reviewer login is admitted by the `RepoWatchAuthorLogin` constructor
-    /// and the durable `repo_watch_login_is_valid` check: an optional App-bot
-    /// suffix is set aside, and the base left behind is nonempty, begins and
-    /// ends with something other than a hyphen, carries no doubled hyphen, and
-    /// spells itself in lowercase letters, digits, hyphens, and underscores.
-    #[test]
-    fn operator_status_rejects_a_reviewer_outside_the_login_grammar() {
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("-bot"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("bot-"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("re--viewer"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("Reviewer"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("rev iewer"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("[bot]"),
-            ..stale_review_clearance_row()
-        });
-
-        assert_stale_review_clearance_admitted(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("rev_iewer-1"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_admitted(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("dependabot[bot]"),
-            ..stale_review_clearance_row()
-        });
-    }
-
-    /// A held slot's branch origin is a git ref name on the same grammar the
-    /// convergence row's base branch takes, so a malformed spelling is refused
-    /// there too rather than passing a bare length bound.
+    /// A held slot's branch origin uses the git ref-name grammar.
     #[test]
     fn operator_status_rejects_a_held_slot_branch_outside_the_ref_grammar() {
         assert_held_slot_rejected(OperatorStatusHeldSlotMessage {
@@ -11758,38 +11011,6 @@ mod tests {
             singleton_pull_request_number: None,
             ..held_slot_row()
         });
-    }
-
-    #[test]
-    fn maximum_operator_status_convergence_inventory_fits_one_frame()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let maximum_check_name = "\u{1}".repeat(256);
-        let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::One,
-            RequestId::try_new(u64::MAX)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(OperatorStatusPullRequestConvergenceMessage {
-                    repository: String::from("example/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    head_sha: String::from("1111111111111111111111111111111111111111"),
-                    base_branch: String::from("main"),
-                    base_revision: String::from("2222222222222222222222222222222222222222"),
-                    mergeable_state: OperatorStatusMergeableState::Mergeable,
-                    review_decision: OperatorStatusReviewDecision::ChangesRequested,
-                    unresolved_thread_count: CanonicalU64::new(10_000),
-                    gating_check_count: CanonicalU64::new(10_000),
-                    non_green_gating_checks: vec![maximum_check_name; 10_000],
-                    verdict: OperatorStatusConvergenceVerdict::NotConverged,
-                    seal: None,
-                    assessed_seconds_ago: CanonicalU64::new(u64::MAX),
-                }),
-            ))),
-        )?;
-
-        let encoded = encode_server_line(&frame)?;
-        assert!(encoded.len() <= super::MAX_FRAME_BYTES);
-        assert_eq!(decode_server_line(&encoded)?, frame);
-        Ok(())
     }
 
     #[test]

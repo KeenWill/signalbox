@@ -54,7 +54,6 @@ mod blob_tools;
 mod blob_upload_runtime;
 mod configuration;
 mod context_guard;
-mod convergence_sweep_runtime;
 mod conversation_introspection;
 mod credential_pools;
 mod daemon_tools;
@@ -92,19 +91,15 @@ pub use blob_tools::{
     BlobToolConstructionError, BlobToolExecutor, BlobToolExecutorError, BlobTools,
 };
 pub use configuration::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, ConvergenceSweepConfiguration,
-    DaemonToolConfiguration, DerivedModelCallCost, FileCredentialAccess, HubModelConfiguration,
-    HubModelConfigurationError, ModelAdapter, ModelBillingRates, NumericBoundsConfiguration,
-    OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
+    FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelAdapter,
+    ModelBillingRates, NumericBoundsConfiguration, OPENAI_CREDENTIAL_REFERENCE,
+    RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
     WorkspaceInstructionConfiguration,
 };
 pub use context_guard::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,
     ReportedUsageCompactionError,
-};
-pub use convergence_sweep_runtime::{
-    ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
-    ConvergenceSweepRuntimeConstructionError,
 };
 pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
@@ -154,8 +149,7 @@ pub use signalbox_tools_basic::{
 };
 pub use signalbox_tools_code_host::{
     CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
-    CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME,
-    CHANGE_REQUEST_CONVERGENCE_STATE_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
+    CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
     CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_REVIEW_THREADS_NAME,
     CHANGE_REQUEST_STACK_STATE_NAME, CHANGE_REQUEST_SUMMARY_NAME,
     CHANGE_REQUEST_THREAD_INVENTORY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
@@ -167,20 +161,17 @@ pub use signalbox_tools_code_host::{
     CodeHostCursor, CodeHostExecutor, CodeHostExecutorError, CodeHostFilePath,
     CodeHostNumericBounds, CodeHostOpaqueId, CodeHostOperation, CodeHostRepository, CodeHostResult,
     CodeHostResultCompleteness, CodeHostRevision, CodeHostTools, CodeHostToolsConstructionError,
-    CodeHostTransport, CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceStateFields,
-    ConvergenceStateResult, ConvergenceVerdict, FilePatchArguments, FilePatchResult,
+    CodeHostTransport, CodeHostTransportFailure, FilePatchArguments, FilePatchResult,
     GitHubCodeHostConstructionError, GitHubCodeHostTransport, REPOSITORY_LIST_DIRECTORY_NAME,
-    REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RepositoryDirectoryEntry,
-    RepositoryFileContentFields, RepositoryLineRange, RepositoryListDirectoryArguments,
-    RepositoryListDirectoryResult, RepositoryObjectKind, RepositoryReadFileArguments,
-    RepositoryReadFileResult, RerunFailedJobsArguments, RerunFailedJobsResult, ReviewAuthorClass,
-    ReviewCheck, ReviewDispositionClass, ReviewGateBlockerCode, ReviewGateCheckArguments,
-    ReviewGateCheckResult, ReviewGatePurpose, ReviewThread, ReviewThreadComment,
-    ReviewThreadFields, ReviewThreadIdentity, ReviewThreadInventoryFields,
+    REPOSITORY_READ_FILE_NAME, RepositoryDirectoryEntry, RepositoryFileContentFields,
+    RepositoryLineRange, RepositoryListDirectoryArguments, RepositoryListDirectoryResult,
+    RepositoryObjectKind, RepositoryReadFileArguments, RepositoryReadFileResult,
+    RerunFailedJobsArguments, RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass,
+    ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
     ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsArguments, ReviewThreadsResult,
-    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, StackStateArguments,
-    StackStateFields, StackStateResult, ThreadInventoryArguments, ThreadInventoryResult,
-    ThreadReplyArguments, ThreadReplyResult, ThreadResolveArguments, ThreadResolveResult,
+    StackStateArguments, StackStateFields, StackStateResult, ThreadInventoryArguments,
+    ThreadInventoryResult, ThreadReplyArguments, ThreadReplyResult, ThreadResolveArguments,
+    ThreadResolveResult,
 };
 pub use signalbox_tools_conversations::{
     CONVERSATION_TOOL_NAMES, ConversationExecutor, ConversationIntrospectionPort,

@@ -7,9 +7,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use signalbox_application::{
-    InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind, RepoWatchConvergenceVerdict,
-    RepoWatchPullRequestLifecycle, RepoWatchReviewDecision, RepoWatchThreadState,
-    SearchContentClass, UsageCallKind, UsageProvenance,
+    InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind, RepoWatchPullRequestLifecycle,
+    RepoWatchThreadState, SearchContentClass, UsageCallKind, UsageProvenance,
 };
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
@@ -508,174 +507,7 @@ pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
-use crate::repo_watch::{
-    RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome,
-    RepoWatchStaleReviewClearanceReason,
-};
-
-use crate::{
-    approval_judge::FailedApprovalJudgeDisposition,
-    convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
-    outbox::DispatchedRunnerState,
-};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ConvergenceSweepStateStorageKind {
-    Observed,
-    RetryWait,
-    Parked,
-}
-
-pub(crate) const fn convergence_sweep_state_to_str(
-    value: ConvergenceSweepStateStorageKind,
-) -> &'static str {
-    match value {
-        ConvergenceSweepStateStorageKind::Observed => "observed",
-        ConvergenceSweepStateStorageKind::RetryWait => "retry_wait",
-        ConvergenceSweepStateStorageKind::Parked => "parked",
-    }
-}
-
-pub(crate) fn convergence_sweep_state_from_str(
-    value: &str,
-) -> Option<ConvergenceSweepStateStorageKind> {
-    match value {
-        "observed" => Some(ConvergenceSweepStateStorageKind::Observed),
-        "retry_wait" => Some(ConvergenceSweepStateStorageKind::RetryWait),
-        "parked" => Some(ConvergenceSweepStateStorageKind::Parked),
-        _ => None,
-    }
-}
-
-pub(crate) const fn convergence_sweep_failure_to_str(
-    value: ConvergenceSweepFailureKind,
-) -> &'static str {
-    match value {
-        ConvergenceSweepFailureKind::FactsFetch => "facts_fetch",
-        ConvergenceSweepFailureKind::CommissionRefused => "commission_refused",
-        ConvergenceSweepFailureKind::TemplateDrift => "template_drift",
-        ConvergenceSweepFailureKind::NoModelActivity => "no_model_activity",
-        ConvergenceSweepFailureKind::StateAccess => "state_access",
-    }
-}
-
-pub(crate) fn convergence_sweep_failure_from_str(
-    value: &str,
-) -> Option<ConvergenceSweepFailureKind> {
-    match value {
-        "facts_fetch" => Some(ConvergenceSweepFailureKind::FactsFetch),
-        "commission_refused" => Some(ConvergenceSweepFailureKind::CommissionRefused),
-        "template_drift" => Some(ConvergenceSweepFailureKind::TemplateDrift),
-        "no_model_activity" => Some(ConvergenceSweepFailureKind::NoModelActivity),
-        "state_access" => Some(ConvergenceSweepFailureKind::StateAccess),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ConvergenceSweepOutcomeStorageKind {
-    Dispatched,
-    Converged,
-    CoolingOff,
-    LiveSession,
-    FactsFetchFailed,
-    CommissionRefused,
-    TemplateDrift,
-    NoModelActivity,
-    StateAccessFailed,
-}
-
-pub(crate) const fn convergence_sweep_outcome_to_str(
-    value: ConvergenceSweepOutcomeStorageKind,
-) -> &'static str {
-    match value {
-        ConvergenceSweepOutcomeStorageKind::Dispatched => "dispatched",
-        ConvergenceSweepOutcomeStorageKind::Converged => "converged",
-        ConvergenceSweepOutcomeStorageKind::CoolingOff => "cooling_off",
-        ConvergenceSweepOutcomeStorageKind::LiveSession => "live_session",
-        ConvergenceSweepOutcomeStorageKind::FactsFetchFailed => "facts_fetch_failed",
-        ConvergenceSweepOutcomeStorageKind::CommissionRefused => "commission_refused",
-        ConvergenceSweepOutcomeStorageKind::TemplateDrift => "template_drift",
-        ConvergenceSweepOutcomeStorageKind::NoModelActivity => "no_model_activity",
-        ConvergenceSweepOutcomeStorageKind::StateAccessFailed => "state_access_failed",
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn convergence_sweep_outcome_from_str(
-    value: &str,
-) -> Option<ConvergenceSweepOutcomeStorageKind> {
-    match value {
-        "dispatched" => Some(ConvergenceSweepOutcomeStorageKind::Dispatched),
-        "converged" => Some(ConvergenceSweepOutcomeStorageKind::Converged),
-        "cooling_off" => Some(ConvergenceSweepOutcomeStorageKind::CoolingOff),
-        "live_session" => Some(ConvergenceSweepOutcomeStorageKind::LiveSession),
-        "facts_fetch_failed" => Some(ConvergenceSweepOutcomeStorageKind::FactsFetchFailed),
-        "commission_refused" => Some(ConvergenceSweepOutcomeStorageKind::CommissionRefused),
-        "template_drift" => Some(ConvergenceSweepOutcomeStorageKind::TemplateDrift),
-        "no_model_activity" => Some(ConvergenceSweepOutcomeStorageKind::NoModelActivity),
-        "state_access_failed" => Some(ConvergenceSweepOutcomeStorageKind::StateAccessFailed),
-        _ => None,
-    }
-}
-
-pub(crate) const fn convergence_sweep_failure_outcome(
-    value: ConvergenceSweepFailureKind,
-) -> ConvergenceSweepOutcomeStorageKind {
-    match value {
-        ConvergenceSweepFailureKind::FactsFetch => {
-            ConvergenceSweepOutcomeStorageKind::FactsFetchFailed
-        }
-        ConvergenceSweepFailureKind::CommissionRefused => {
-            ConvergenceSweepOutcomeStorageKind::CommissionRefused
-        }
-        ConvergenceSweepFailureKind::TemplateDrift => {
-            ConvergenceSweepOutcomeStorageKind::TemplateDrift
-        }
-        ConvergenceSweepFailureKind::NoModelActivity => {
-            ConvergenceSweepOutcomeStorageKind::NoModelActivity
-        }
-        ConvergenceSweepFailureKind::StateAccess => {
-            ConvergenceSweepOutcomeStorageKind::StateAccessFailed
-        }
-    }
-}
-
-pub(crate) const fn convergence_sweep_operator_need_to_str(
-    value: ConvergenceSweepFailureKind,
-) -> &'static str {
-    match value {
-        ConvergenceSweepFailureKind::FactsFetch => "repair_facts_fetch",
-        ConvergenceSweepFailureKind::CommissionRefused => "repair_commission",
-        ConvergenceSweepFailureKind::TemplateDrift => "repair_template",
-        ConvergenceSweepFailureKind::NoModelActivity => "inspect_inactive_session",
-        ConvergenceSweepFailureKind::StateAccess => "repair_sweep_state",
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn convergence_sweep_operator_need_from_str(
-    value: &str,
-) -> Option<ConvergenceSweepFailureKind> {
-    match value {
-        "repair_facts_fetch" => Some(ConvergenceSweepFailureKind::FactsFetch),
-        "repair_commission" => Some(ConvergenceSweepFailureKind::CommissionRefused),
-        "repair_template" => Some(ConvergenceSweepFailureKind::TemplateDrift),
-        "inspect_inactive_session" => Some(ConvergenceSweepFailureKind::NoModelActivity),
-        "repair_sweep_state" => Some(ConvergenceSweepFailureKind::StateAccess),
-        _ => None,
-    }
-}
-
-pub(crate) const fn convergence_sweep_decision_outcome(
-    value: ConvergenceSweepDecision,
-) -> ConvergenceSweepOutcomeStorageKind {
-    match value {
-        ConvergenceSweepDecision::Converged => ConvergenceSweepOutcomeStorageKind::Converged,
-        ConvergenceSweepDecision::CoolingOff => ConvergenceSweepOutcomeStorageKind::CoolingOff,
-        ConvergenceSweepDecision::LiveSession => ConvergenceSweepOutcomeStorageKind::LiveSession,
-    }
-}
+use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
 
 /// Closed evaluation-corpus source discriminators stored by PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2247,7 +2079,6 @@ pub(crate) fn repo_watch_lifecycle_cutoff_disposition_from_str(
 pub(crate) enum RepoWatchEvaluationOutcomeStorageKind {
     NotMatched,
     TargetClosed,
-    TargetConverged,
     Occupied,
     Coalesced,
     Cooldown,
@@ -2260,7 +2091,6 @@ pub(crate) const fn repo_watch_evaluation_outcome_to_str(
     match value {
         RepoWatchEvaluationOutcomeStorageKind::NotMatched => "not_matched",
         RepoWatchEvaluationOutcomeStorageKind::TargetClosed => "target_closed",
-        RepoWatchEvaluationOutcomeStorageKind::TargetConverged => "target_converged",
         RepoWatchEvaluationOutcomeStorageKind::Occupied => "occupied",
         RepoWatchEvaluationOutcomeStorageKind::Coalesced => "coalesced",
         RepoWatchEvaluationOutcomeStorageKind::Cooldown => "cooldown",
@@ -2274,7 +2104,6 @@ pub(crate) fn repo_watch_evaluation_outcome_from_str(
     match value {
         "not_matched" => Some(RepoWatchEvaluationOutcomeStorageKind::NotMatched),
         "target_closed" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed),
-        "target_converged" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetConverged),
         "occupied" => Some(RepoWatchEvaluationOutcomeStorageKind::Occupied),
         "coalesced" => Some(RepoWatchEvaluationOutcomeStorageKind::Coalesced),
         "cooldown" => Some(RepoWatchEvaluationOutcomeStorageKind::Cooldown),
@@ -2288,7 +2117,6 @@ pub(crate) fn repo_watch_evaluation_outcome_from_str(
 pub(crate) enum RepoWatchObligationSettlementStorageKind {
     Deactivated,
     TargetClosed,
-    TargetConverged,
     Dispatched,
 }
 
@@ -2298,7 +2126,6 @@ pub(crate) const fn repo_watch_obligation_settlement_to_str(
     match value {
         RepoWatchObligationSettlementStorageKind::Deactivated => "deactivated",
         RepoWatchObligationSettlementStorageKind::TargetClosed => "target_closed",
-        RepoWatchObligationSettlementStorageKind::TargetConverged => "target_converged",
         RepoWatchObligationSettlementStorageKind::Dispatched => "dispatched",
     }
 }
@@ -2309,7 +2136,6 @@ pub(crate) fn repo_watch_obligation_settlement_from_str(
     match value {
         "deactivated" => Some(RepoWatchObligationSettlementStorageKind::Deactivated),
         "target_closed" => Some(RepoWatchObligationSettlementStorageKind::TargetClosed),
-        "target_converged" => Some(RepoWatchObligationSettlementStorageKind::TargetConverged),
         "dispatched" => Some(RepoWatchObligationSettlementStorageKind::Dispatched),
         _ => None,
     }
@@ -2444,113 +2270,6 @@ pub(crate) fn repo_watch_mergeable_state_from_str(value: &str) -> Option<Mergeab
         "mergeable" => Some(MergeableState::Mergeable),
         "conflicting" => Some(MergeableState::Conflicting),
         "unknown" => Some(MergeableState::Unknown),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_review_decision_to_str(
-    value: RepoWatchReviewDecision,
-) -> &'static str {
-    match value {
-        RepoWatchReviewDecision::None => "none",
-        RepoWatchReviewDecision::Approved => "approved",
-        RepoWatchReviewDecision::ReviewRequired => "review_required",
-        RepoWatchReviewDecision::ChangesRequested => "changes_requested",
-    }
-}
-
-pub fn repo_watch_review_decision_from_str(value: &str) -> Option<RepoWatchReviewDecision> {
-    match value {
-        "none" => Some(RepoWatchReviewDecision::None),
-        "approved" => Some(RepoWatchReviewDecision::Approved),
-        "review_required" => Some(RepoWatchReviewDecision::ReviewRequired),
-        "changes_requested" => Some(RepoWatchReviewDecision::ChangesRequested),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_stale_review_clearance_outcome_to_str(
-    value: RepoWatchStaleReviewClearanceOutcome,
-) -> &'static str {
-    match value {
-        RepoWatchStaleReviewClearanceOutcome::Dismissed => "dismissed",
-        RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed => "already_dismissed",
-        RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere => "cleared_elsewhere",
-        RepoWatchStaleReviewClearanceOutcome::Superseded => "superseded",
-    }
-}
-
-pub fn repo_watch_stale_review_clearance_outcome_from_str(
-    value: &str,
-) -> Option<RepoWatchStaleReviewClearanceOutcome> {
-    match value {
-        "dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
-        "already_dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
-        "cleared_elsewhere" => Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
-        "superseded" => Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_stale_review_clearance_reason_to_str(
-    value: RepoWatchStaleReviewClearanceReason,
-) -> &'static str {
-    match value {
-        RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks => "only_stale_review_blocks",
-    }
-}
-
-pub(crate) fn repo_watch_stale_review_clearance_reason_from_str(
-    value: &str,
-) -> Option<RepoWatchStaleReviewClearanceReason> {
-    match value {
-        "only_stale_review_blocks" => {
-            Some(RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_observed_review_state_to_str(
-    value: RepoWatchObservedReviewState,
-) -> &'static str {
-    match value {
-        RepoWatchObservedReviewState::Approved => "approved",
-        RepoWatchObservedReviewState::ChangesRequested => "changes_requested",
-        RepoWatchObservedReviewState::Commented => "commented",
-        RepoWatchObservedReviewState::Dismissed => "dismissed",
-        RepoWatchObservedReviewState::Pending => "pending",
-    }
-}
-
-pub fn repo_watch_observed_review_state_from_str(
-    value: &str,
-) -> Option<RepoWatchObservedReviewState> {
-    match value {
-        "approved" => Some(RepoWatchObservedReviewState::Approved),
-        "changes_requested" => Some(RepoWatchObservedReviewState::ChangesRequested),
-        "commented" => Some(RepoWatchObservedReviewState::Commented),
-        "dismissed" => Some(RepoWatchObservedReviewState::Dismissed),
-        "pending" => Some(RepoWatchObservedReviewState::Pending),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_convergence_verdict_to_str(
-    value: RepoWatchConvergenceVerdict,
-) -> &'static str {
-    match value {
-        RepoWatchConvergenceVerdict::NotConverged => "not_converged",
-        RepoWatchConvergenceVerdict::InternallyConverged => "internally_converged",
-        RepoWatchConvergenceVerdict::MergeReady => "merge_ready",
-    }
-}
-
-pub fn repo_watch_convergence_verdict_from_str(value: &str) -> Option<RepoWatchConvergenceVerdict> {
-    match value {
-        "not_converged" => Some(RepoWatchConvergenceVerdict::NotConverged),
-        "internally_converged" => Some(RepoWatchConvergenceVerdict::InternallyConverged),
-        "merge_ready" => Some(RepoWatchConvergenceVerdict::MergeReady),
         _ => None,
     }
 }
@@ -3523,8 +3242,7 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_application::{
         InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
-        RepoWatchConvergenceVerdict, RepoWatchPullRequestLifecycle, RepoWatchReviewDecision,
-        RepoWatchThreadState,
+        RepoWatchPullRequestLifecycle, RepoWatchThreadState,
     };
     use signalbox_domain::{
         AcceptedInputId, BoundChildAction, CheckConclusion, ChecksOutcome,
@@ -3541,16 +3259,11 @@ mod tests {
     };
     use sqlx::types::Uuid;
 
-    use crate::{
-        convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
-        outbox::DispatchedRunnerState,
-        repo_watch::{RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome},
-    };
+    use crate::outbox::DispatchedRunnerState;
 
     use super::{
         ActiveTurnPhaseStorageKind, ApprovalJudgeStateStorageKind,
         ApprovalJudgeTerminalDispositionStorageKind, BlobReadRejectionStorageKind,
-        ConvergenceSweepOutcomeStorageKind, ConvergenceSweepStateStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
         EvaluationCorpusSourceStorageKind, PlanEventStorageKind, PositiveOrdinalMappingError,
@@ -3566,11 +3279,6 @@ mod tests {
         approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
         approval_judge_terminal_disposition_to_str, blob_read_rejection_from_str,
         blob_read_rejection_to_str, bound_child_action_from_str, bound_child_action_to_str,
-        convergence_sweep_decision_outcome, convergence_sweep_failure_from_str,
-        convergence_sweep_failure_outcome, convergence_sweep_failure_to_str,
-        convergence_sweep_operator_need_from_str, convergence_sweep_operator_need_to_str,
-        convergence_sweep_outcome_from_str, convergence_sweep_outcome_to_str,
-        convergence_sweep_state_from_str, convergence_sweep_state_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric,
         delegation_message_direction_from_str, delegation_message_direction_to_str,
         delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
@@ -3592,19 +3300,15 @@ mod tests {
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
         plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_convergence_verdict_from_str,
-        repo_watch_convergence_verdict_to_str, repo_watch_evaluation_outcome_from_str,
+        repo_watch_checks_outcome_to_str, repo_watch_evaluation_outcome_from_str,
         repo_watch_evaluation_outcome_to_str, repo_watch_event_kind_from_str,
         repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
         repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
         repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
-        repo_watch_obligation_settlement_to_str, repo_watch_observed_review_state_from_str,
-        repo_watch_observed_review_state_to_str, repo_watch_pull_request_lifecycle_from_str,
+        repo_watch_obligation_settlement_to_str, repo_watch_pull_request_lifecycle_from_str,
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_review_decision_from_str,
-        repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_from_str,
-        repo_watch_stale_review_clearance_outcome_to_str, repo_watch_thread_state_from_str,
+        repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
+        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
         repo_watch_thread_state_to_str, runner_loss_propagation_state_from_str,
         runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
         runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
@@ -3797,90 +3501,6 @@ mod tests {
         assert_eq!(
             workspace_instruction_authority_from_placement_state("unknown"),
             None
-        );
-    }
-
-    #[test]
-    fn convergence_sweep_state_mapping_is_closed() {
-        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::Observed);
-        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::RetryWait);
-        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::Parked);
-        assert_eq!(convergence_sweep_state_from_str("unknown"), None);
-    }
-
-    #[track_caller]
-    fn assert_convergence_sweep_state_mapping(value: ConvergenceSweepStateStorageKind) {
-        assert_eq!(
-            convergence_sweep_state_from_str(convergence_sweep_state_to_str(value)),
-            Some(value)
-        );
-    }
-
-    #[test]
-    fn convergence_sweep_failure_mappings_are_closed() {
-        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::FactsFetch);
-        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::CommissionRefused);
-        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::TemplateDrift);
-        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::NoModelActivity);
-        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::StateAccess);
-        assert_eq!(convergence_sweep_failure_from_str("unknown"), None);
-        assert_eq!(convergence_sweep_operator_need_from_str("unknown"), None);
-    }
-
-    #[track_caller]
-    fn assert_convergence_sweep_failure_mappings(failure: ConvergenceSweepFailureKind) {
-        assert_eq!(
-            convergence_sweep_failure_from_str(convergence_sweep_failure_to_str(failure)),
-            Some(failure)
-        );
-        let outcome = convergence_sweep_failure_outcome(failure);
-        assert_eq!(
-            convergence_sweep_outcome_from_str(convergence_sweep_outcome_to_str(outcome)),
-            Some(outcome)
-        );
-        assert_eq!(
-            convergence_sweep_operator_need_from_str(convergence_sweep_operator_need_to_str(
-                failure
-            )),
-            Some(failure)
-        );
-    }
-
-    #[test]
-    fn convergence_sweep_outcome_mapping_is_closed() {
-        assert_convergence_sweep_outcome_mapping(ConvergenceSweepOutcomeStorageKind::Dispatched);
-        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
-            ConvergenceSweepDecision::Converged,
-        ));
-        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
-            ConvergenceSweepDecision::CoolingOff,
-        ));
-        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
-            ConvergenceSweepDecision::LiveSession,
-        ));
-        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
-            ConvergenceSweepFailureKind::FactsFetch,
-        ));
-        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
-            ConvergenceSweepFailureKind::CommissionRefused,
-        ));
-        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
-            ConvergenceSweepFailureKind::TemplateDrift,
-        ));
-        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
-            ConvergenceSweepFailureKind::NoModelActivity,
-        ));
-        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
-            ConvergenceSweepFailureKind::StateAccess,
-        ));
-        assert_eq!(convergence_sweep_outcome_from_str("unknown"), None);
-    }
-
-    #[track_caller]
-    fn assert_convergence_sweep_outcome_mapping(value: ConvergenceSweepOutcomeStorageKind) {
-        assert_eq!(
-            convergence_sweep_outcome_from_str(convergence_sweep_outcome_to_str(value)),
-            Some(value)
         );
     }
 
@@ -5000,134 +4620,6 @@ mod tests {
         );
         assert_eq!(runner_placement_loss_source_from_str("unknown"), None);
     }
-
-    #[test]
-    fn repository_watch_review_decision_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
-                RepoWatchReviewDecision::None,
-            )),
-            Some(RepoWatchReviewDecision::None),
-        );
-        assert_eq!(
-            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
-                RepoWatchReviewDecision::Approved,
-            )),
-            Some(RepoWatchReviewDecision::Approved),
-        );
-        assert_eq!(
-            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
-                RepoWatchReviewDecision::ReviewRequired,
-            )),
-            Some(RepoWatchReviewDecision::ReviewRequired),
-        );
-        assert_eq!(
-            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
-                RepoWatchReviewDecision::ChangesRequested,
-            )),
-            Some(RepoWatchReviewDecision::ChangesRequested),
-        );
-        assert_eq!(repo_watch_review_decision_from_str("unknown"), None);
-    }
-
-    #[test]
-    fn repository_watch_convergence_verdict_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
-                RepoWatchConvergenceVerdict::NotConverged,
-            )),
-            Some(RepoWatchConvergenceVerdict::NotConverged),
-        );
-        assert_eq!(
-            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
-                RepoWatchConvergenceVerdict::InternallyConverged,
-            )),
-            Some(RepoWatchConvergenceVerdict::InternallyConverged),
-        );
-        assert_eq!(
-            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
-                RepoWatchConvergenceVerdict::MergeReady,
-            )),
-            Some(RepoWatchConvergenceVerdict::MergeReady),
-        );
-        assert_eq!(repo_watch_convergence_verdict_from_str("unknown"), None);
-    }
-
-    #[test]
-    fn repository_watch_review_clearance_outcome_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str(
-                repo_watch_stale_review_clearance_outcome_to_str(
-                    RepoWatchStaleReviewClearanceOutcome::Dismissed,
-                ),
-            ),
-            Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
-        );
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str(
-                repo_watch_stale_review_clearance_outcome_to_str(
-                    RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
-                ),
-            ),
-            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
-        );
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str(
-                repo_watch_stale_review_clearance_outcome_to_str(
-                    RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
-                ),
-            ),
-            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
-        );
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str(
-                repo_watch_stale_review_clearance_outcome_to_str(
-                    RepoWatchStaleReviewClearanceOutcome::Superseded,
-                ),
-            ),
-            Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
-        );
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str("unknown"),
-            None
-        );
-    }
-
-    #[test]
-    fn repository_watch_observed_review_state_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::Approved,
-            )),
-            Some(RepoWatchObservedReviewState::Approved),
-        );
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::ChangesRequested,
-            ),),
-            Some(RepoWatchObservedReviewState::ChangesRequested),
-        );
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::Commented,
-            )),
-            Some(RepoWatchObservedReviewState::Commented),
-        );
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::Dismissed,
-            )),
-            Some(RepoWatchObservedReviewState::Dismissed),
-        );
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::Pending,
-            )),
-            Some(RepoWatchObservedReviewState::Pending),
-        );
-        assert_eq!(repo_watch_observed_review_state_from_str("unknown"), None);
-    }
-
     #[test]
     fn runner_sandbox_mapping_is_closed() {
         assert_eq!(

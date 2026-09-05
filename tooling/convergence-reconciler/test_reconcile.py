@@ -102,6 +102,12 @@ class ConvergencePredicateTests(unittest.TestCase):
                     "context": "codecov/patch",
                     "state": "PENDING",
                 },
+                {
+                    "__typename": "CheckRun",
+                    "name": "OpenAI smoke compatibility",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                },
             ],
         }
 
@@ -118,8 +124,22 @@ class ConvergencePredicateTests(unittest.TestCase):
             [
                 {"name": "Comment the coverage report", "state": "FAILURE"},
                 {"name": "codecov/patch", "state": "PENDING"},
+                {"name": "OpenAI smoke compatibility", "state": "FAILURE"},
             ],
         )
+
+    def test_incomplete_review_thread_census_fails_closed(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "_review_thread_nodes": [{"id": "thread-1"}],
+            "_thread_total_count": 2,
+            "_thread_page": {"hasNextPage": False, "endCursor": None},
+            "_check_page": {"hasNextPage": False, "endCursor": None},
+            "_file_page": {"hasNextPage": False, "endCursor": None},
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "incomplete census"):
+            client._finish_paginated_connections([pull_request])
 
     def test_unresolved_review_thread_blocks_convergence(self) -> None:
         pull_request = {
@@ -1850,6 +1870,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             "headRepository": {"nameWithOwner": "OWNER/REPOSITORY"},
             "mergeable": "MERGEABLE",
             "reviewThreads": {
+                "totalCount": 0,
                 "nodes": [],
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
             },

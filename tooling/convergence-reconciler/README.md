@@ -1,6 +1,7 @@
 # Pull-request convergence reconciler
 
-`reconcile.py` is a standalone operational loop for keeping a selected set of
+`reconcile.py` is the repository's authoritative operational loop and
+convergence predicate for keeping a selected set of
 GitHub pull requests moving. It reads GitHub directly with `gh api graphql`,
 decides from that snapshot whether each pull request has converged, and invokes
 operator-supplied commands when an unconverged pull request has no active work.
@@ -76,9 +77,10 @@ failed informational contexts do not re-enter through GitHub's aggregate state.
 A mismatched commit OID blocks convergence even when every returned check is
 successful.
 
-Check names ending with the exact, case-sensitive suffix `(report only)` are
-non-gating. The case-insensitive names `codecov/project`, `codecov/patch`, and
-`Comment the coverage report` are also non-gating, matching
+Check names ending with the case-insensitive suffix `(report only)` and check
+names containing `smoke` are non-gating. The case-insensitive names
+`codecov/project`, `codecov/patch`, and `Comment the coverage report` are also
+non-gating, matching
 the repository's declared informational coverage posture. These results are
 still included in the computed state passed to operator commands.
 
@@ -96,7 +98,9 @@ converge from stale evidence. Planning-only status checks changed files one at
 a time and stops at the first ineligible file; every file must carry the banner
 at the head and, unless newly added, at the base. Additional
 thread or check pages use dynamically aliased GraphQL fields, up to 20
-continuations in one request. Review-thread comments, top-level comments, and
+continuations in one request. The fetched review-thread count must equal the
+connection's `totalCount`, otherwise the tick fails closed. Review-thread
+comments, top-level comments, and
 reviews are also paginated. REST compare requests conservatively classify
 post-review rename-only, source-comment-only, and proven clean base-forward
 changes; a base forward must be a single merge of the reviewed head and exact

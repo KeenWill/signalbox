@@ -131,7 +131,7 @@ pub enum RepoWatchReviewStatus {
     ChangesRequested,
 }
 
-/// Automation convergence and seal state for the current pull-request head.
+/// Automation dispatch and settlement state for the current pull-request head.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchAutomationStatus {
     Unattempted,
@@ -199,7 +199,7 @@ pub struct RepoWatchPullRequestOperations {
 }
 
 impl RepoWatchPullRequestOperations {
-    /// Projects provider state without guessing automation convergence.
+    /// Projects provider state without guessing automation settlement.
     #[must_use]
     pub fn from_state(
         state: &RepoWatchPullRequestState,
