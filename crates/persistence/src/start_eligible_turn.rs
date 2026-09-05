@@ -436,7 +436,7 @@ impl StartEligibleTurnRepository {
             .await
             .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
         }
-        model_calls
+        let _ = model_calls
             .checkpoint_counted_activation_in_transaction(
                 &mut transaction,
                 &activated,

@@ -119,6 +119,123 @@ async fn model_call_outbox_order_guard_is_available(
     Ok(available)
 }
 
+/// A pool member quarantined after prospective counting closes the activation
+/// as call-free pool exhaustion instead of rolling back the definitive result.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xcd50_0000_u128;
+    let pool_name = "counted-attachment-race-pool";
+    let member = "counted-attachment-member";
+    let (observed_session, observed_turn, repository) =
+        active_credential_pool_fixture(&pool, seed, pool_name, &[member]).await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 3));
+    let target_session = SessionId::from_uuid(Uuid::from_u128(seed + 50));
+    let target_turn = TurnId::from_uuid(Uuid::from_u128(seed + 51));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 52,
+            seed + 50,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 53,
+                seed + 50,
+                "attachment failure races pool quarantine",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 54)),
+            Some(target_turn),
+        )
+        .await?;
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            target_session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 55)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 56)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 57)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 58)),
+            ),
+        )
+        .await?
+        .expect("the target turn has an activation preview");
+    let prospective_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 59));
+    let prospective = repository
+        .preview_activation_operation(preview.prepared(), prospective_call)
+        .await?
+        .expect("the member is available during prospective counting");
+
+    let (observed_call, observed_reference) =
+        prepare_and_authorize_pool_call(&repository, observed_session, seed + 100).await?;
+    assert_eq!(observed_reference, member);
+    sqlx::query(
+        "INSERT INTO credential_pool_member_action
+            (pool_name, credential_reference, action_kind,
+             observed_session_id, observed_turn_id,
+             observation_model_call_id, cause_kind)
+         VALUES ($1, $2, 'quarantine', $3, $4, $5, 'credential_rejected')",
+    )
+    .bind(pool_name)
+    .bind(member)
+    .bind(observed_session.into_uuid())
+    .bind(observed_turn.into_uuid())
+    .bind(observed_call.observation_correlation().call().into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let outcome = activation
+        .commit_counted_attachment_failure_preview(
+            preview,
+            prospective,
+            &repository,
+            AttachmentPreparationFailure::Missing,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 60)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 61)),
+            ),
+            None,
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        CommitCountedAttachmentFailurePreviewOutcome::Failed(target_turn)
+    );
+    let durable: (String, Option<String>, i64, i64) = sqlx::query_as(
+        "SELECT lifecycle.state_kind, lifecycle.terminal_cause_kind,
+                (SELECT count(*) FROM model_call
+                  WHERE session_id = $1 AND turn_id = $2),
+                (SELECT count(*) FROM credential_pool_terminal_exhaustion
+                  WHERE session_id = $1 AND turn_id = $2)
+           FROM turn_lifecycle AS lifecycle
+          WHERE lifecycle.session_id = $1 AND lifecycle.turn_id = $2",
+    )
+    .bind(target_session.into_uuid())
+    .bind(target_turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            String::from("terminal"),
+            Some(String::from("credential_pool_exhausted")),
+            0,
+            1,
+        )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn prepare_and_authorize_pool_call(
     repository: &PostgresModelCallRepository,
     session: SessionId,
