@@ -11,8 +11,9 @@ use signalbox_domain::{
 use signalbox_model_runtime::{
     CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference, DeliveryMode,
     ModelOperation, ModelRuntime, ModelSettings, NoDomainConstraints, Observation,
-    PreparationOutcome, ProviderReportedModel, RequestedTarget, ResolvedTarget,
-    StructuredOutputContract, TerminalEvidence, TokenUsage, UnsentCause, decode_structured,
+    PreparationOutcome, ProviderCompactionMode, ProviderReportedModel, RequestedTarget,
+    ResolvedTarget, StructuredOutputContract, TerminalEvidence, TokenUsage, UnsentCause,
+    decode_structured,
 };
 
 use crate::{ProviderTargetRelation, RuntimeModelCatalog, relate_provider_target};
@@ -240,6 +241,7 @@ where
             operation.system = Some(request.system_prompt);
             operation.output_contract = Some(contract.clone());
             operation.delivery = DeliveryMode::Buffered;
+            operation.provider_compaction = ProviderCompactionMode::Suppressed;
             let preparation = self
                 .runtime
                 .prepare(operation, CancellationSignal::never())
@@ -605,8 +607,8 @@ mod tests {
     };
     use signalbox_model_runtime::{
         AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, Observation,
-        ObservationFact, ProviderReportedModel, Script, ScriptedModel, TerminalEvidence,
-        TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        ObservationFact, ProviderCompactionMode, ProviderReportedModel, Script, ScriptedModel,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
     use uuid::Uuid;
 
@@ -777,6 +779,22 @@ mod tests {
         assert_eq!(
             result.usage.cache_read_input_tokens,
             Some(CACHE_READ_INPUT_TOKENS)
+        );
+    }
+
+    #[tokio::test]
+    async fn dedicated_approval_judge_suppresses_provider_compaction() {
+        let runtime = ScriptedModel::<ModelCallId>::single(approval_completion());
+        let receipt = runtime.clone();
+        let model = RuntimeApprovalJudgeModel::new(runtime, catalog());
+
+        execute(&model)
+            .await
+            .expect("the typed decision is admitted");
+
+        assert_eq!(
+            receipt.received_operations()[0].provider_compaction,
+            ProviderCompactionMode::Suppressed
         );
     }
 
