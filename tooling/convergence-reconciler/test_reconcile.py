@@ -21,6 +21,7 @@ from reconcile import (
     configured_path,
     evaluate_convergence,
     is_codex_review_request,
+    load_config,
     load_state,
     normalize_pull_request,
     normalize_review_threads,
@@ -111,7 +112,16 @@ class ConvergencePredicateTests(unittest.TestCase):
             ],
         }
 
-        computed = evaluate_convergence(pull_request)
+        computed = evaluate_convergence(
+            pull_request,
+            (
+                "*(report only)",
+                "*smoke*",
+                "codecov/patch",
+                "codecov/project",
+                "comment the coverage report",
+            ),
+        )
 
         self.assertTrue(computed["converged"])
         self.assertEqual(computed["reasons"], [])
@@ -129,7 +139,9 @@ class ConvergencePredicateTests(unittest.TestCase):
         )
 
     def test_incomplete_review_thread_census_fails_closed(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "_review_thread_nodes": [{"id": "thread-1"}],
             "_thread_total_count": 2,
@@ -139,6 +151,21 @@ class ConvergencePredicateTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(RuntimeError, "incomplete census"):
+            client._finish_paginated_connections([pull_request])
+
+    def test_review_thread_census_limit_fails_closed(self) -> None:
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 1
+        )
+        pull_request = {
+            "_review_thread_nodes": [{"id": "thread-1"}, {"id": "thread-2"}],
+            "_thread_total_count": 2,
+            "_thread_page": {"hasNextPage": False, "endCursor": None},
+            "_check_page": {"hasNextPage": False, "endCursor": None},
+            "_file_page": {"hasNextPage": False, "endCursor": None},
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "configured limit"):
             client._finish_paginated_connections([pull_request])
 
     def test_unresolved_review_thread_blocks_convergence(self) -> None:
@@ -481,6 +508,32 @@ class DecisionTests(unittest.TestCase):
 
 
 class InputValidationTests(unittest.TestCase):
+    def test_repository_specific_predicate_values_load_from_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                """{
+  "repository": "OWNER/REPOSITORY",
+  "reviewer_login": "reviewer-bot",
+  "non_gating_check_patterns": ["*(report only)", "*smoke*"],
+  "review_thread_limit": 250,
+  "active_command": ["session-control", "is-active"],
+  "dry_run": true
+}
+""",
+                encoding="utf-8",
+            )
+            with mock.patch.dict("reconcile.os.environ", {}, clear=True):
+                config = load_config(["--config", str(path), "--once"])
+
+        self.assertEqual(config.reviewer_login, "reviewer-bot")
+        self.assertEqual(
+            config.non_gating_check_patterns,
+            ("*(report only)", "*smoke*"),
+        )
+        self.assertEqual(config.review_thread_limit, 250)
+        self.assertTrue(config.once)
+
     def test_non_path_configuration_is_rejected_as_value_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "state_file"):
             configured_path([], "state_file")
@@ -547,7 +600,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertFalse(eligible)
 
     def test_persisted_review_requires_the_same_review_id(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "_persisted_record": {
                 "authenticated_review_head": "head",
@@ -568,7 +623,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
     def test_persisted_review_is_invalidated_by_description_edit(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "_persisted_record": {
                 "authenticated_review_head": "head",
@@ -589,7 +646,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
     def test_persisted_review_survives_same_head_check_rerun(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "_persisted_record": {
                 "authenticated_review_head": "head",
@@ -628,7 +687,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         )
 
     def test_persisted_review_not_restored_when_no_longer_live(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "_persisted_record": {
                 "authenticated_review_head": "head",
@@ -663,7 +724,9 @@ class GitHubGraphQLTests(unittest.TestCase):
     def test_persisted_review_not_restored_when_rerun_checks_still_failing(
         self,
     ) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "_persisted_record": {
                 "authenticated_review_head": "head",
@@ -694,7 +757,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
     def test_material_base_forward_resets_escalation_wave_count(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         reviews = [
             {
                 "id": "review-1",
@@ -756,7 +821,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertFalse(thread["isEscalated"])
 
     def test_base_only_advance_preserves_review_waves(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "_persisted_record": {
                 "head_oid": "unchanged-head",
@@ -782,7 +849,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["review_wave_ids"], ["review-1"])
 
     def test_description_edit_after_review_invalidates_fresh_evidence(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         head = "a" * 40
         pull_request = {
             "head_oid": head,
@@ -813,7 +882,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
     def test_fixing_commit_verification_failure_aborts_snapshot(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "head_oid": "head",
             "review_threads": [
@@ -833,7 +904,9 @@ class GitHubGraphQLTests(unittest.TestCase):
     def test_missing_fixing_commit_is_invalid_disposition_not_snapshot_abort(
         self,
     ) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "head_oid": "head",
             "review_threads": [
@@ -857,7 +930,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertIsNone(thread["fixingCommit"])
 
     def test_one_missing_fixing_commit_does_not_abort_other_threads(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "head_oid": "head",
             "review_threads": [
@@ -975,7 +1050,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertFalse(comment_only_patch(changed_file))
 
     def test_edited_rename_is_not_review_exempt(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         comparison = {
             "total_commits": 1,
             "commits": [{"sha": "head"}],
@@ -996,7 +1073,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertFalse(exempt)
 
     def test_unverified_merge_commit_is_not_review_exempt(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         comparison = {
             "total_commits": 1,
             "commits": [
@@ -1019,7 +1098,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertFalse(exempt)
 
     def test_exact_clean_base_forward_is_review_exempt(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         base_delta = {
             "filename": "workflow.yml",
             "status": "modified",
@@ -1055,7 +1136,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertTrue(exempt)
 
     def test_merge_forward_with_conflict_edit_is_not_review_exempt(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         comparison = {
             "total_commits": 1,
             "commits": [
@@ -1102,7 +1185,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertFalse(exempt)
 
     def test_unreachable_review_commit_does_not_abort_exemption_loading(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "authenticated_quiet_review_oids": ["reviewed", "unreachable"],
             "base_oid": "base",
@@ -1120,7 +1205,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(review_exempt_change.call_count, 2)
 
     def test_transient_review_compare_failure_aborts_exemption_loading(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "authenticated_quiet_review_oids": ["reviewed"],
             "base_oid": "base",
@@ -1136,7 +1223,9 @@ class GitHubGraphQLTests(unittest.TestCase):
                 client._load_review_exempt_status([pull_request])
 
     def test_change_request_review_is_only_wave_evidence(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         head = "a" * 40
         pull_request = {
             "head_oid": head,
@@ -1172,7 +1261,9 @@ class GitHubGraphQLTests(unittest.TestCase):
     def test_codex_review_without_authenticated_request_is_not_wave_evidence(
         self,
     ) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         head = "a" * 40
         pull_request = {
             "head_oid": head,
@@ -1197,7 +1288,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["observed_codex_reviews"], {})
 
     def test_oid_revalidation_can_abort_on_change(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "node_id": "node",
             "base_oid": "base",
@@ -1211,7 +1304,9 @@ class GitHubGraphQLTests(unittest.TestCase):
                 client._verify_snapshot_oids([pull_request], raise_on_change=True)
 
     def test_all_declined_review_completes_terminal_wave(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         head = "a" * 40
         pull_request = {
             "head_oid": head,
@@ -1249,7 +1344,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["quiet_review_head_oids"], [head])
 
     def test_dismissed_review_is_not_quiet_review_evidence(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         head = "a" * 40
         pull_request = {
             "head_oid": head,
@@ -1281,7 +1378,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["observed_codex_reviews"], {})
 
     def test_review_requests_and_reviews_are_paginated(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "node_id": "pull-request-node",
             "_review_comments": [{"body": "first comment"}],
@@ -1415,7 +1514,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertFalse(normalized[0]["isDispositioned"])
 
     def test_thread_comment_pagination_finds_late_disposition(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "author_login": "owner",
             "review_threads": [],
@@ -1462,7 +1563,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(execute.call_count, 1)
 
     def test_renamed_planning_file_uses_previous_base_path(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "base_oid": "base",
             "head_oid": "head",
@@ -1492,7 +1595,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertTrue(pull_request["planning_only"])
 
     def test_review_request_before_green_ci_is_not_accepted(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "head_oid": "a" * 40,
             "check_rollup_state": "SUCCESS",
@@ -1527,7 +1632,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
     def test_unavailable_repository_is_a_runtime_error(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         response = {"repository": None, "tracked": []}
         with mock.patch.object(client, "execute", return_value=response):
             with self.assertRaisesRegex(RuntimeError, "repository is unavailable"):
@@ -1673,7 +1780,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         )
 
     def test_thread_comment_pagination_fetches_comment_edit_time(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "author_login": "owner",
             "review_threads": [],
@@ -1782,7 +1891,9 @@ class GitHubGraphQLTests(unittest.TestCase):
     def _assert_escalation_boundary(
         self, *, wave: int, total_waves: int, eligible: bool
     ) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "review_threads": [
                 {
@@ -1812,7 +1923,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         )
 
     def test_advanced_base_invalidates_ancestry_comparison(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "node_id": "node",
             "base_oid": "base-old",
@@ -1831,7 +1944,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(execute.call_count, 2)
 
     def test_existing_banners_make_modified_file_planning_only(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         pull_request = {
             "base_oid": "base",
             "head_oid": "head",
@@ -1926,7 +2041,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         }
 
         pull_request = normalize_pull_request(node)
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         client._finalize_review_evidence([pull_request])
 
         self.assertEqual(
@@ -1935,7 +2052,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         )
 
     def test_graphql_subprocess_timeout_uses_tick_failure_path(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         timeout = subprocess.TimeoutExpired(["gh"], 12)
         with mock.patch("reconcile.subprocess.run", side_effect=timeout) as run:
             with self.assertRaisesRegex(RuntimeError, "GraphQL request timed out"):
@@ -1943,7 +2062,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["timeout"], 12)
 
     def test_matching_fork_pull_request_is_not_detailed(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         listing = {
             "repository": {
                 "pullRequests": {
@@ -1966,7 +2087,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         execute.assert_called_once()
 
     def test_terminal_detail_result_is_recorded_without_processing(self) -> None:
-        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
         listing = {
             "repository": {
                 "pullRequests": {
@@ -2001,7 +2124,9 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(tracked, terminal["nodes"])
 
     def test_repository_identity_matching_ignores_case(self) -> None:
-        client = GitHubGraphQL("owner/repository", 12)
+        client = GitHubGraphQL(
+            "owner/repository", 12, "chatgpt-codex-connector", 10_000
+        )
         listing = {
             "repository": {
                 "pullRequests": {
@@ -2044,6 +2169,9 @@ class DispatchFenceTests(unittest.TestCase):
             state_file = Path(directory) / "state.json"
             config = Config(
                 repository="OWNER/REPOSITORY",
+                reviewer_login="chatgpt-codex-connector",
+                non_gating_check_patterns=("*smoke*",),
+                review_thread_limit=10_000,
                 head_pattern="agent/*",
                 interval_seconds=300,
                 cool_off_seconds=1800,
@@ -2114,6 +2242,9 @@ class DispatchFenceTests(unittest.TestCase):
             state_file = Path(directory) / "state.json"
             config = Config(
                 repository="OWNER/REPOSITORY",
+                reviewer_login="chatgpt-codex-connector",
+                non_gating_check_patterns=("*smoke*",),
+                review_thread_limit=10_000,
                 head_pattern="agent/*",
                 interval_seconds=300,
                 cool_off_seconds=1800,

@@ -132,7 +132,6 @@ query($tracked: [ID!]!) {
 
 GREEN_CHECK_RUN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 GREEN_STATUS_CONTEXT_STATES = frozenset({"SUCCESS"})
-CODEX_REVIEWER_LOGIN = "chatgpt-codex-connector"
 TRUSTED_REVIEW_REQUEST_ASSOCIATIONS = frozenset(
     {"OWNER", "MEMBER", "COLLABORATOR"}
 )
@@ -154,13 +153,6 @@ TRIVIAL_INFORMATIONAL_REPLIES = frozenset(
     {"ack", "acknowledged", "done", "noted", "ok", "okay", "thanks", "thank you"}
 )
 COMPARE_FILE_LIMIT = 300
-NON_GATING_CHECK_NAMES = frozenset(
-    {
-        "codecov/patch",
-        "codecov/project",
-        "comment the coverage report",
-    }
-)
 STATE_VERSION = 1
 PAGINATION_BATCH_SIZE = 20
 DETAIL_BATCH_SIZE = 20
@@ -169,6 +161,9 @@ DETAIL_BATCH_SIZE = 20
 @dataclasses.dataclass(frozen=True)
 class Config:
     repository: str
+    reviewer_login: str
+    non_gating_check_patterns: tuple[str, ...]
+    review_thread_limit: int
     head_pattern: str
     interval_seconds: float
     cool_off_seconds: float
@@ -213,10 +208,20 @@ class JsonLogger:
 
 
 class GitHubGraphQL:
-    def __init__(self, repository: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        repository: str,
+        timeout_seconds: float,
+        reviewer_login: str,
+        review_thread_limit: int,
+        non_gating_check_patterns: Sequence[str] = (),
+    ) -> None:
         self.owner, self.name = split_repository(repository)
         self.repository = repository
         self.timeout_seconds = timeout_seconds
+        self.reviewer_login = reviewer_login
+        self.review_thread_limit = review_thread_limit
+        self.non_gating_check_patterns = tuple(non_gating_check_patterns)
 
     def execute(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         request = json.dumps({"query": query, "variables": variables})
@@ -513,6 +518,7 @@ query($id: ID!, $after: String!) {
                         pull_request["checks"],
                         pull_request["check_rollup_state"],
                         effective_at,
+                        self.non_gating_check_patterns,
                     )
                     and prior_threads_dispositioned_before(
                         pull_request.get("review_threads", []), effective_at
@@ -522,7 +528,7 @@ query($id: ID!, $after: String!) {
                 is_live_codex_review = (
                     author_login(review) is not None
                     and author_login(review).casefold()
-                    == CODEX_REVIEWER_LOGIN.casefold()
+                    == self.reviewer_login.casefold()
                     and isinstance(review_id, str)
                 )
                 if is_live_codex_review:
@@ -556,7 +562,7 @@ query($id: ID!, $after: String!) {
                     and review.get("state") != "CHANGES_REQUESTED"
                     and author_login(review) is not None
                     and author_login(review).casefold()
-                    == CODEX_REVIEWER_LOGIN.casefold()
+                    == self.reviewer_login.casefold()
                     and (
                         review["comments"]["totalCount"] == 0
                         or all_findings_declined
@@ -591,7 +597,7 @@ query($id: ID!, $after: String!) {
             gating_checks = [
                 check
                 for check in pull_request.get("checks", [])
-                if not is_non_gating_check(check)
+                if not is_non_gating_check(check, self.non_gating_check_patterns)
             ]
             checks_currently_green = pull_request.get(
                 "check_rollup_state"
@@ -696,7 +702,7 @@ query($id: ID!, $after: String!) {
                 for review in reviews
                 if author_login(review) is not None
                 and author_login(review).casefold()
-                == CODEX_REVIEWER_LOGIN.casefold()
+                == self.reviewer_login.casefold()
                 and review.get("state") != "DISMISSED"
                 and isinstance(review.get("submittedAt"), str)
             ),
@@ -1066,6 +1072,11 @@ query($owner: String!, $name: String!, $head: String!, $base: String!) {
     def _finish_paginated_connections(self, pull_requests: list[dict[str, Any]]) -> None:
         pending: list[PaginationTask] = []
         for pull_request in pull_requests:
+            thread_total = pull_request["_thread_total_count"]
+            if not isinstance(thread_total, int) or isinstance(thread_total, bool):
+                raise RuntimeError("review thread totalCount is not an integer")
+            if thread_total < 0 or thread_total > self.review_thread_limit:
+                raise RuntimeError("review thread census exceeds its configured limit")
             thread_page = pull_request.pop("_thread_page")
             check_page = pull_request.pop("_check_page")
             file_page = pull_request.pop("_file_page")
@@ -1088,6 +1099,10 @@ query($owner: String!, $name: String!, $head: String!, $base: String!) {
                     )
                 page = pagination_page(node, task.kind)
                 if task.kind == "threads":
+                    if page["totalCount"] != task.pull_request["_thread_total_count"]:
+                        raise RuntimeError(
+                            "review thread totalCount changed during pagination"
+                        )
                     task.pull_request["_review_thread_nodes"].extend(page["nodes"])
                 elif task.kind == "checks":
                     task.pull_request["checks"].extend(page["nodes"])
@@ -1198,10 +1213,15 @@ def checks_green_before_request(
     checks: Sequence[dict[str, Any]],
     rollup_state: str | None,
     requested_at: str,
+    non_gating_check_patterns: Sequence[str] = (),
 ) -> bool:
     if rollup_state is None:
         return False
-    gating_checks = [check for check in checks if not is_non_gating_check(check)]
+    gating_checks = [
+        check
+        for check in checks
+        if not is_non_gating_check(check, non_gating_check_patterns)
+    ]
     for check in gating_checks:
         observed_at = (
             check.get("completedAt")
@@ -1537,13 +1557,13 @@ def check_name(check: dict[str, Any]) -> str:
     return check["context"]
 
 
-def is_non_gating_check(check: dict[str, Any]) -> bool:
-    name = check_name(check)
-    folded_name = name.casefold()
-    return (
-        folded_name.endswith("(report only)")
-        or "smoke" in folded_name
-        or folded_name in NON_GATING_CHECK_NAMES
+def is_non_gating_check(
+    check: dict[str, Any], patterns: Sequence[str]
+) -> bool:
+    folded_name = check_name(check).casefold()
+    return any(
+        fnmatch.fnmatchcase(folded_name, pattern.casefold())
+        for pattern in patterns
     )
 
 
@@ -1562,7 +1582,9 @@ def check_observed_state(check: dict[str, Any]) -> str:
     return check.get("state") or "UNKNOWN"
 
 
-def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
+def evaluate_convergence(
+    pull_request: dict[str, Any], non_gating_check_patterns: Sequence[str] = ()
+) -> dict[str, Any]:
     unresolved_threads = sum(
         1
         for thread in pull_request["review_threads"]
@@ -1578,8 +1600,16 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
         for thread in pull_request["review_threads"]
         if not thread["isDispositioned"]
     )
-    gating_checks = [check for check in pull_request["checks"] if not is_non_gating_check(check)]
-    non_gating_checks = [check for check in pull_request["checks"] if is_non_gating_check(check)]
+    gating_checks = [
+        check
+        for check in pull_request["checks"]
+        if not is_non_gating_check(check, non_gating_check_patterns)
+    ]
+    non_gating_checks = [
+        check
+        for check in pull_request["checks"]
+        if is_non_gating_check(check, non_gating_check_patterns)
+    ]
     reasons: list[str] = []
     if pull_request.get("is_draft", False):
         reasons.append("pull-request-is-draft")
@@ -1689,6 +1719,13 @@ def load_config(argv: Sequence[str] | None = None) -> Config:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", help="JSON configuration file")
     parser.add_argument("--repo", dest="repository")
+    parser.add_argument("--reviewer-login")
+    parser.add_argument(
+        "--non-gating-check-pattern",
+        dest="non_gating_check_patterns",
+        action="append",
+    )
+    parser.add_argument("--review-thread-limit", type=int)
     parser.add_argument("--head-pattern")
     parser.add_argument("--interval-seconds", type=float)
     parser.add_argument("--cool-off-seconds", type=float)
@@ -1715,6 +1752,31 @@ def load_config(argv: Sequence[str] | None = None) -> Config:
     if not repository:
         parser.error("repository is required via --repo, environment, or config")
     split_repository(str(repository))
+    reviewer_login = selected("reviewer_login")
+    if (
+        not isinstance(reviewer_login, str)
+        or not reviewer_login
+        or reviewer_login != reviewer_login.strip()
+    ):
+        parser.error(
+            "reviewer_login must be a nonempty login without surrounding whitespace"
+        )
+    raw_non_gating_patterns = selected("non_gating_check_patterns")
+    if raw_non_gating_patterns is None:
+        parser.error(
+            "non_gating_check_patterns is required via CLI, environment, or config"
+        )
+    non_gating_check_patterns = string_sequence(
+        raw_non_gating_patterns, "non_gating_check_patterns"
+    )
+    if not non_gating_check_patterns:
+        parser.error("at least one non_gating_check_pattern is required")
+    raw_review_thread_limit = selected("review_thread_limit")
+    if raw_review_thread_limit is None:
+        parser.error("review_thread_limit is required via CLI, environment, or config")
+    review_thread_limit = positive_integer(
+        raw_review_thread_limit, "review_thread_limit"
+    )
     dry_run = parse_bool(selected("dry_run", False), "dry_run")
     once = parse_bool(selected("once", False), "once")
     active_command = parse_command(selected("active_command"), "active_command")
@@ -1739,6 +1801,9 @@ def load_config(argv: Sequence[str] | None = None) -> Config:
     )
     return Config(
         repository=str(repository),
+        reviewer_login=reviewer_login,
+        non_gating_check_patterns=non_gating_check_patterns,
+        review_thread_limit=review_thread_limit,
         head_pattern=str(selected("head_pattern", "agent/*")),
         interval_seconds=interval_seconds,
         cool_off_seconds=cool_off_seconds,
@@ -1777,6 +1842,31 @@ def parse_command(value: Any, name: str) -> tuple[str, ...]:
     if isinstance(value, list) and all(isinstance(part, str) for part in value):
         return tuple(value)
     raise ValueError(f"{name} must be a shell-like string or an array of strings")
+
+
+def string_sequence(value: Any, name: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"{name} must be an array of nonempty strings") from error
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item and item == item.strip() for item in value
+    ):
+        raise ValueError(f"{name} must be an array of nonempty strings")
+    return tuple(value)
+
+
+def positive_integer(value: Any, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if str(number) != str(value) or number <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return number
 
 
 def positive_number(value: Any, name: str) -> float:
@@ -2029,7 +2119,9 @@ def process_pull_request(
     base_oid = pull_request.get("base_oid")
     if isinstance(base_oid, str):
         record["review_wave_base_oid"] = base_oid
-    computed = evaluate_convergence(pull_request)
+    computed = evaluate_convergence(
+        pull_request, config.non_gating_check_patterns
+    )
     if computed["converged"]:
         record["last_dispatched_at"] = None
         record["last_dispatched_head"] = None
@@ -2218,7 +2310,13 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
         int(number): record
         for number, record in state["pull_requests"].items()
     }
-    client = GitHubGraphQL(config.repository, config.command_timeout_seconds)
+    client = GitHubGraphQL(
+        config.repository,
+        config.command_timeout_seconds,
+        config.reviewer_login,
+        config.review_thread_limit,
+        config.non_gating_check_patterns,
+    )
     pull_requests, tracked = client.snapshot(
         tracked_node_ids, config.head_pattern, persisted_records
     )
