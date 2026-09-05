@@ -20,8 +20,8 @@ run names one target, one workflow kind, and one frozen policy, and admits at
 most one pass. A pass names its run, its session, and the accepted input that
 carried it; its terminal state is the outcome of the workflow operation, and an
 optional bound result records the one typed effect it produced. A finding is
-immutable proposed content owned by one succeeded read-only-review pass, and its
-status is the tail of an append-only event history. A finding carries two
+immutable proposed content owned by one succeeded read-only-review pass; its
+status is the tail of an append-only event history, and it carries two
 independent confidences: whether the issue exists and merits attention, and
 whether its severity label is correct. An external link correlates a target,
 run, or finding with one object at one code host through a reservation, at most
@@ -101,9 +101,11 @@ producer.
 Accepted and posted transitions compare only is-real confidence against the
 frozen policy minimums; severity-label confidence is never a filter and no
 override exists. Why: uncertainty about whether a real issue is high or medium
-must not suppress the issue. Publication admission is also bound to the
-immutable target head: a moved change request is another target and does not
-authorize posting results produced against the earlier head.
+must not suppress the issue.
+
+Publication admission is bound to the immutable target head: a moved change
+request is another target and does not authorize posting results produced
+against the earlier head.
 
 The event pass's run supplies the exact policy frozen by the finding's producing
 run, so judgment, deduplication, and every later classification stay under one
@@ -170,13 +172,12 @@ belongs to [process protocol](process-protocol.md).
 Refreshing a moving change request creates another target snapshot; it never
 rewrites the revision under an existing run.
 
-An effect-producing terminal pass binds its result once. Equal replay observes
+An effect-producing terminal pass binds its result once: equal replay observes
 the existing effect, and no distinct later effect may cite that pass. A terminal
 pass that produced no typed effect may keep an absent result, but a
 read-only-review pass that completed output admission binds a produced-findings
-result, the empty inventory included. The complete-findings command is the sole
-success path for read-only review, and generic pass completion refuses read-only
-success.
+result, the empty inventory included. Read-only review succeeds only through the
+complete-findings command; generic pass completion refuses read-only success.
 
 The caller-selected external-link identity is the idempotency key: equal replay
 returns the same reservation, and reusing it for a different association,

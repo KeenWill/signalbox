@@ -47,20 +47,20 @@ summarized range. Attachments render as the bounded textual stubs
 
 Context compaction produces its summary through a dedicated physical model call
 with its own durable prepared, in-flight, and terminal lifecycle, separate from
-ordinary calls. A headroom guard runs at two points. Before activating a queued
-turn it may spend one automatic compaction. When that compaction fails, or the
-request still exceeds the window after it, one transaction fails the queued turn
-with no ordinary call prepared. Inside the tool-result continuation transaction
-an exceeded bound commits the tool results, prepares no continuation call, and
-fails the turn with a headroom record. The guard adds the newest reported input
-for the pinned target, a byte allowance for model-visible content that input
-does not cover, and the configured output reservation, and compares the sum with
-the configured context window. The compaction call's own input budget is its
-context window less the output ceiling and the required prompt; when even the
-first safe prefix cannot fit that budget, no call is prepared and one
-transaction fails the turn as a compaction wall. Automatic compaction targets
-the first safe boundary at or beyond half the rendered bytes and falls back to
-the latest safe boundary that fits.
+ordinary calls. The compaction call's own input budget is its context window
+less the output ceiling and the required prompt; when even the first safe prefix
+cannot fit that budget, no call is prepared and one transaction fails the turn
+as a compaction wall. Automatic compaction targets the first safe boundary at or
+beyond half the rendered bytes and falls back to the latest safe boundary that
+fits. At two points a headroom guard adds the newest reported input for the
+pinned target, a byte allowance for model-visible content that input does not
+cover, and the configured output reservation, and compares the sum with the
+configured context window. Before activating a queued turn it may spend one
+automatic compaction; when that compaction fails, or the request still exceeds
+the window after it, one transaction fails the queued turn with no ordinary call
+prepared. Inside the tool-result continuation transaction an exceeded bound
+commits the tool results, prepares no continuation call, and fails the turn with
+a headroom record.
 
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
@@ -275,12 +275,12 @@ again with the credential that failed in that chain. A call whose outcome is
 unknown is never retried automatically; the turn parks for recovery. A CLI
 harness may retry inside itself. Those retries are provider-internal; the daemon
 neither observes nor records them and adds no retries of its own. A migration
-constraint enforces one call per attempt. A `switch_now` failure with proven
-non-acceptance writes a durable chain exclusion for the failed member, and
-successor selection and preparation skip excluded members; that selection, not a
-constraint, enforces no-reuse. The one-shot send capability, the per-attempt
-dispatch gate, the authorize-send commit, and startup parking of an issued call
-enforce at-most-once sending. Only the rule that no code retries a call without
+constraint enforces one call per attempt, and the one-shot send capability, the
+per-attempt dispatch gate, the authorize-send commit, and startup parking of an
+issued call enforce at-most-once sending. No-reuse is enforced by selection, not
+a constraint: a `switch_now` failure with proven non-acceptance writes a durable
+chain exclusion for the failed member, and successor selection and preparation
+skip excluded members. Only the rule that no code retries a call without
 recording the retry is unenforced.
 
 The terminal transition stores the input, output, cache-creation, and cache-read

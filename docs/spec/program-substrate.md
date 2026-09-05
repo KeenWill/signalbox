@@ -23,9 +23,9 @@ deliveries in delivery order, and every row carries one contiguous global
 position, so their interleaving is retained. The request, delivery, and fault
 vocabularies are closed; the domain crate's `RequestKind`, `DeliveryKind`, and
 `FaultCause` and the migration's check constraints fix their members. Only the
-four primitive answerable requests are emitted today. No executor applies
-effects, scope cancellation, terminal admission, capability rejection, or run
-terminalization, and only the nondeterminism fault is produced.
+four primitive answerable requests and only the nondeterminism fault are
+produced today; no executor applies effects, scope cancellation, terminal
+admission, capability rejection, or run terminalization.
 
 Resume discards nothing and restores nothing. A journal that already holds a
 terminal delivery, one that ended the run instead of answering a request, names
@@ -36,10 +36,10 @@ the journal ends. Live requests are answered through the `LiveDeliverySource`
 seam, which receives only the outstanding durable request frames; that seam is
 the boundary later capability executors implement.
 
-The journal's stream row pins only frame-contract version one. It is not a run
+The journal's stream row pins only frame-contract version one and is not a run
 aggregate: no row records a program's registration, grants, or budgets. The
 capability vocabulary is closed and fixed by `ProgramCapability` and the
-migration, and no code grants or exercises a capability. Registration,
+migration. No code grants or exercises a capability, and registration,
 capability executors, event subscriptions, and session driving have no present
 code. A journaled `run_cancel` delivery is terminal: the host returns the
 cancelled outcome and creates no isolate. No present surface initiates a

@@ -37,21 +37,21 @@ the wait's deadline, derived over the exclusions it records by the same
 per-member rule as an exhausted wait's; startup's re-evaluation of retained
 contended waits against current registrations; a durable member-availability
 update; an operator clear of an exclusion. A wake grants eligibility rather than
-release: the rerun of admission that selects a member and prepares its call in
-the same transaction consumes the wait. Where bounded members compete for one
-freed reservation, only the transaction that acquires it consumes the wait. The
-last two wakes matter because the wait also records excluded members, and one
-can become admissible while every bounded member stays saturated. A restart
-alone is not a wake.
+release: the wait is consumed by the rerun of admission that selects a member
+and prepares its call in the same transaction, and where bounded members compete
+for one freed reservation, only by the transaction that acquires it. The last
+two wakes matter because the wait also records excluded members, and one can
+become admissible while every bounded member stays saturated. A restart alone is
+not a wake.
 
 Exhausted-wait: nothing is admissible, nothing was skipped merely for a bound,
 and a wait is selected. The same wait phase with closed cause exhausted, and the
 same attempt disposition. Its wakes are the deadline, a durable
 member-availability update, and an operator clear of an exclusion. The deadline
-is computed per member, not per exclusion. A member becomes admissible by time
+is computed per member, not per exclusion: a member becomes admissible by time
 passage exactly when every one of its active exclusions expires at the reset it
-reports, and it does so at the latest of those resets. The wait's deadline is
-the earliest such time across the members that qualify. A chain exclusion, a
+reports, that is, at the latest of those resets. The wait's deadline is the
+earliest such time across the members that qualify. A chain exclusion, a
 `switch_next_turn` displacement and a profile quarantine never contribute a
 deadline, because none of them expires by time passage. A chain exclusion clears
 at turn end, a displacement when another member is prepared or an operator
@@ -85,7 +85,7 @@ attempt that owns no call; the built failed shape carries a provider cause only
 inside a nonnull terminal model call, so it cannot serve.
 
 Wait selection: `park` and `fail` act through one question, whether this
-exhaustion selects a wait. `fail` never selects one. `park` selects one only
+exhaustion selects a wait; `fail` never selects one, and `park` selects one only
 when some member's every active exclusion is one a wake can clear, so that one
 wake can readmit that whole member. No wake clears a chain exclusion, so a
 member holding one never qualifies, whatever else it holds. A pending
@@ -93,20 +93,20 @@ member holding one never qualifies, whatever else it holds. A pending
 it and publishes the member-availability update that wakes the wait. Where no
 member qualifies, no wait is selected and the exhaustion ends in a failure
 ending exactly as a `fail` pool would. At an admission the failing attempt
-chooses which: pre-call fail when that attempt is call-free, post-failure fail
-when the observation closing a provider failure finds the exhaustion. At a
+chooses which, pre-call fail when that attempt is call-free and post-failure
+fail when the observation closing a provider failure finds the exhaustion; at a
 release, whether this chain has issued a call chooses wait-transition fail (no
 call) or wait-transition fail (after call).
 
-A contended wait that becomes exhausted re-runs the exhaustion policy rather
-than staying parked. When a woken contended waiter finds every formerly bounded
-candidate durably excluded, the pool's configured value decides afresh; a wait
+A contended wait becomes exhausted when a woken waiter finds every formerly
+bounded candidate durably excluded, and then re-runs the exhaustion policy
+rather than staying parked: the pool's configured value decides afresh, a wait
 that is still selected is rewritten in place to the exhausted form, and a `fail`
 pool terminalizes.
 
 Release: releasing a parked wait resumes the chain that parked and re-evaluates
 admission from current state. A chain exclusion stays as the spec page states
-it. Every other exclusion the wait recorded is re-read from its current active
+it; every other exclusion the wait recorded is re-read from its current active
 state at release, so a passed reset or an authorized clear readmits that member.
 The release origin carries the predecessor call, cause and proof exactly where
 this chain had observed a qualifying failure before parking, because the release
