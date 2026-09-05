@@ -87,8 +87,10 @@ INV-tagged test names and attached doc comments.
   retried, and an ambiguous outcome never creates a successor. A proven
   rate-limit, overload, or provider-internal failure may create the S22
   successor on a new attempt against the same target and credential below its
-  bound before the pinned pool action applies. `switch_now` instead creates that
-  successor against a different eligible credential, under
+  bound before the pinned pool action applies. For a failure class with a pinned
+  `switch_now` action, that action instead creates the successor against a
+  different eligible credential; a provider-internal failure terminalizes at the
+  bound. These outcomes follow
   [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
@@ -741,12 +743,13 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Only quota exhaustion, rate limiting, overload, or
   provider-internal failure with distinct non-acceptance evidence may authorize
   the successor. Rate limiting, overload, and provider-internal failure retry
-  the same profile below its bound before the pinned pool action applies;
-  `switch_now` rotates after the bound. Classification alone is insufficient.
-  Ambiguity, refusal, credential resolution failure, and credential rejection
-  never authorize a successor. The successor cannot cross adapters or change the
-  exact target. Exhausting the pool follows its configured durable park or
-  known-failure outcome
+  the same profile below its bound before the pinned pool action applies.
+  `switch_now` rotates a rate-limit, overload, or quota failure when its pinned
+  trigger selects that action; a provider-internal failure terminalizes at the
+  bound. Classification alone is insufficient. Ambiguity, refusal, credential
+  resolution failure, and credential rejection never authorize a successor. The
+  successor cannot cross adapters or change the exact target. Exhausting the
+  pool follows its configured durable park or known-failure outcome
   ([credential pools and selection](spec/configuration-and-credentials.md)). A
   provider-reported mismatch against either call's own target follows the
   accepted timing-sensitive mismatch failure rule
