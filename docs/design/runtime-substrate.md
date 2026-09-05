@@ -31,13 +31,12 @@ neither parses nor rewrites them.
 Codex file delivery. The configuration grammar admits a file delivery for the
 Codex adapter, and composition rejects it as undelivered. Delivery resolves the
 selected profile during preparation and admits only the exact `OPENAI_API_KEY`
-env_key; every forwarded or process-control name is invalid configuration, and
-that env_key restriction already parses. The selected value is an
-operation-scoped child override added after the parent environment is cleared.
-It is absent from argv, logs, debug output, retained evidence and every later
-spawn, and it seeds the adapter's exact-value redaction before any
-provider-controlled output leaves the crate. The override does not weaken
-ambient mode's credential exclusion.
+env_key; every forwarded or process-control name is invalid configuration. The
+selected value is an operation-scoped child override added after the parent
+environment is cleared. It is absent from argv, logs, debug output, retained
+evidence and every later spawn, and it seeds the adapter's exact-value redaction
+before any provider-controlled output leaves the crate. The override does not
+weaken ambient mode's credential exclusion.
 
 Codex OAuth delivery. OAuth delivery gives the adapter a daemon-minted access
 token, the identity token issued with it, and account metadata in a scratch

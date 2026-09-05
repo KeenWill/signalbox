@@ -11,13 +11,13 @@ OpenAI over HTTPS, and the Codex CLI and Claude Code CLI as supervised
 subprocesses. The core crate owns the provider-neutral vocabulary: the
 operation, the observations emitted while a call runs, the terminal evidence a
 call ends in, SSE framing, structured-output and tool-argument decoding, the
-credential access boundary, and `ScriptedModel`, the fixture that replays
-declared evidence through the same surface. Authorization and failure
-classification belong to [model-call-execution](model-call-execution.md),
-credential channels and rotation to
-[configuration-and-credentials](configuration-and-credentials.md), and the
-transcript commit to [sessions-and-transcript](sessions-and-transcript.md). The
-daemon reaches the runtime through the `RuntimeModelCallProvider` bridge in
+credential access boundary, and the `ScriptedModel` fixture. Authorization and
+failure classification belong to
+[model-call-execution](model-call-execution.md), credential channels and
+rotation to [configuration-and-credentials](configuration-and-credentials.md),
+and the transcript commit to
+[sessions-and-transcript](sessions-and-transcript.md). The daemon reaches the
+runtime through the `RuntimeModelCallProvider` bridge in
 `crates/model-provider-runtime`, which implements the application's model-call
 port over any `ModelRuntime`.
 
@@ -29,12 +29,12 @@ provider-reported model is a third fact that the adapter produces and surfaces
 through an observation and the terminal evidence.
 
 `ModelRuntime` has two stages. `prepare` does every check, translation,
-serialization and credential read without provider traffic and returns either an
-opaque one-shot capability or a typed failure. `execute` consumes that
-capability, performs at most one provider interaction and always returns a
-terminal report. The unit of irrevocable dispatch is one HTTPS request for a
-direct adapter and one process spawn for a subprocess adapter. The caller side
-of that boundary is [model-call-execution](model-call-execution.md) scope.
+serialization and credential read without provider traffic and returns an opaque
+one-shot capability or a typed failure. `execute` consumes that capability,
+performs at most one provider interaction and always returns a terminal report.
+The unit of irrevocable dispatch is one HTTPS request for a direct adapter and
+one process spawn for a subprocess adapter. The caller side of that boundary is
+[model-call-execution](model-call-execution.md) scope.
 
 Observations are transient progress facts emitted during execute: the request
 about to reach the transport, the correlated exchange opening, the
@@ -42,19 +42,19 @@ provider-reported model, text, thinking and tool-argument deltas, tool
 proposals, usage and the finish reason. The send-commenced fact marks the
 acceptance boundary: from that point the provider may have accepted the request.
 
-Terminal evidence is typed so a caller classifies without reading strings, and
-it divides three ways. Definitive evidence is a completed response, a provider
-refusal, a classified provider error with its native facts retained, or a
-confirmed cancellation. Proven-unsent evidence says acceptance was impossible:
-cancelled before send, a connection that failed before any request byte, or a
-provably unacceptable incomplete write. Boundary loss says the request crossed
-or may have crossed the acceptance boundary and no definitive response exists;
-it carries a typed loss cause, the partial facts observed before the loss, and
-whether a tool call had opened in the material the adapter decoded. A provider
-error may also carry an adapter-owned proof that the provider never accepted the
-request. [credential-availability](credential-availability.md) decides what that
-proof leads to; this page owns the evidence algebra that carries it. Refusal
-evidence reaches callers only from the Codex CLI adapter.
+Terminal evidence divides three ways. Definitive evidence is a completed
+response, a provider refusal, a classified provider error with its native facts
+retained, or a confirmed cancellation. Proven-unsent evidence says acceptance
+was impossible: cancelled before send, a connection that failed before any
+request byte, or a provably unacceptable incomplete write. Boundary loss says
+the request crossed or may have crossed the acceptance boundary and no
+definitive response exists; it carries a typed loss cause, the partial facts
+observed before the loss, and whether a tool call had opened in the material the
+adapter decoded. A provider error may also carry an adapter-owned proof that the
+provider never accepted the request.
+[credential-availability](credential-availability.md) decides what that proof
+leads to; this page owns the evidence algebra that carries it. Refusal evidence
+reaches callers only from the Codex CLI adapter.
 
 `SseFraming` is the provider-agnostic incremental parser both HTTP adapters
 build on, from transport byte chunks to event-stream records.
@@ -62,8 +62,8 @@ build on, from transport byte chunks to event-stream records.
 generated from a Rust type or supplied explicitly, that every adapter realizes
 as one tool proposal under a reserved name: OpenAI forces it through tool
 choice, Anthropic asks for it by instruction, and Codex renders it into the
-prompt with an outer response schema. One provider-independent decoder then
-enforces exactly one proposal.
+prompt with an outer response schema. One provider-independent decoder enforces
+exactly one proposal.
 
 The Anthropic and OpenAI adapters share one shape: at most one POST per
 operation, hand-written wire types with no provider SDK dependency, and typed
@@ -141,8 +141,8 @@ because `stop` cannot prove a natural stop and `length` cannot prove the output
 ceiling, and collapsing either would invent evidence.
 
 The Codex CLI adapter neither resumes nor persists a Codex thread; each call is
-a fresh ephemeral invocation given the complete conversation frontier, so
-provider session state stays out of memory.
+a fresh invocation given the complete conversation frontier, so provider session
+state stays out of memory.
 
 Unix supervision contains the process group the adapter creates, so construction
 rejects hosts without process-group control; containment beyond that group
@@ -177,7 +177,8 @@ adapter-touching changes, spending one paid exchange per run.
 
 No job-level concurrency group serializes the live exchange, because a fixed
 shared group would let an unrelated run evict a required check's queued slot;
-required-check integrity outweighs serializing a fraction of a cent.
+required-check integrity outweighs the fraction of a cent serialization would
+save.
 
 ## Contracts
 
@@ -202,8 +203,8 @@ send-commenced fact immediately precedes spawn, a spawn failure is proven
 unsent, and after a successful spawn no path respawns the CLI.
 
 In both stages the pending work is polled before the cancellation signal, so a
-result already available in the same poll wins over cancellation, and once a
-provider terminal marker is observed a later cancellation cannot replace that
+result already available in the same poll wins over cancellation. Once a
+provider terminal marker is observed, a later cancellation cannot replace that
 definitive evidence. During execute cancellation is best-effort: the adapter
 stops local work and reports how far the request provably progressed, never
 claiming provider-side work stopped. In a subprocess adapter cancellation before
@@ -279,7 +280,7 @@ Streamed records must agree on identity: a missing or conflicting completion id,
 or a conflicting reported model, is a terminal protocol violation even on a
 mid-stream error record. Under the Claude Code CLI the first assistant event may
 name the provider-resolved model and every later assistant event must repeat
-that same value.
+that value.
 
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
@@ -288,8 +289,7 @@ total, and no cache-creation count is fabricated.
 
 Framing results never depend on how the transport fragments bytes into chunks,
 and records completed before a failure in the same chunk are delivered alongside
-the failure, so evidence observed before a fault does not depend on transport
-batching.
+the failure.
 
 The structured-output contract is a request constraint, not a response
 guarantee: a nonconforming response can carry zero or several proposals, and the
