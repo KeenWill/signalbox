@@ -121,8 +121,9 @@ The accepted-input part order and the textual stub projection stay as
 blob-storage defines them, and nothing assumes a rendered user message is
 text-only.
 
-The runtime operation's tool list stays a function of preparation, and the
-bridge accepts tool-call parts only for tools in that list.
+The runtime operation's tool list stays a function of preparation, and a
+tool-call part naming a tool outside that list stays an unknown proposal that
+enters the confirmation path instead of a bridge rejection.
 
 Later attachment ranges in a turn reverify until the turn-scoped inventory above
 lands, and nothing caches a verification without an immutable-generation token.
