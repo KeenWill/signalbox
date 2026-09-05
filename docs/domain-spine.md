@@ -10214,8 +10214,6 @@ impl<
 ## application: scheduler
 
 ```rust
-pub const fn scheduler_ordinary_pass_limit(max_in_flight_passes: usize) -> usize;
-
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
     pub fn try_new(
@@ -13106,7 +13104,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 20 (+1 free fn) (incl. 7 traits) |
+| application: scheduler                             | 20 (incl. 7 traits)              |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
@@ -13115,4 +13113,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 16                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **434 (+30 free fn)**            |
+| **signalbox-application total**                    | **434 (+29 free fn)**            |
