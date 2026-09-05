@@ -87,8 +87,7 @@ INV-tagged test names and attached doc comments.
   retried, and an ambiguous outcome never creates a successor. When pool policy
   selects `switch_now`, a proven availability failure may create the S22
   successor on a new attempt against the same target and a different credential
-  profile, under
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  profile, under [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
   No partial draft becomes final content. A later authorized call must retain
@@ -717,7 +716,7 @@ INV-tagged test names and attached doc comments.
   the session-pinned pool policy; create a distinct successor attempt and model
   call that pin the same target, a different eligible profile from that pool,
   the predecessor call, and the qualifying cause, as owned by
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
 - **State transitions:** Predecessor call → known availability failure and
@@ -725,8 +724,7 @@ INV-tagged test names and attached doc comments.
   attempt/call → terminal. Each availability-successor chain is bounded to at
   most one call per pool member; a successful call ends that chain before later
   continuation, while releasing a parked wait resumes the chain the wait belongs
-  to
-  ([availability successor calls](spec/model-call-execution.md#availability-successor-calls)).
+  to ([availability successor calls](spec/model-call-execution.md)).
 - **Transient updates:** No current client update announces that a successor is
   being considered or selected. The predecessor, cause, and successor are
   committed future durable evidence that no present migration or repository

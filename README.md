@@ -89,7 +89,7 @@ file's undated family names such as `claude-haiku-4-5`. The spelling a
 [configuration and credentials](docs/spec/configuration-and-credentials.md), and
 how a reported identity is related back to it, including the dated snapshot a
 family name resolves to, in
-[provider-target identity](docs/spec/model-call-execution.md#provider-target-identity).
+[provider-target identity](docs/spec/model-call-execution.md).
 
 The process socket is `$DEVENV_RUNTIME/signalbox/signalboxd.sock`, because the
 daemon accepts only a socket parent meeting the ownership and permission rules
