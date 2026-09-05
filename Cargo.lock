@@ -4166,6 +4166,7 @@ dependencies = [
  "divan",
  "expect-test",
  "gungraun",
+ "hex",
  "regex",
  "rpds",
  "serde",
