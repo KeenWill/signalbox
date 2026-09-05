@@ -3443,7 +3443,7 @@ pub enum CommissionedSessionFence {
     },
 }
 
-/// Whether a creation holds its start gate (§7).
+/// Whether a creation holds its start gate.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartGate {
@@ -3454,7 +3454,7 @@ pub enum StartGate {
     Held,
 }
 
-/// Whether the daemon holds a liveness obligation for the session (§6).
+/// Whether the daemon holds a liveness obligation for the session.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionOwnership {
@@ -3465,7 +3465,7 @@ pub enum SessionOwnership {
     Unmonitored,
 }
 
-/// Closed finish condition an owned session owes (§7).
+/// Closed finish condition an owned session owes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FinishCondition {
@@ -3478,7 +3478,7 @@ pub enum FinishCondition {
     },
 }
 
-/// The §7 lifecycle members of a creation: omission means an open gate, an
+/// The lifecycle members of a creation: omission means an open gate, an
 /// unmonitored conversation, and no finish condition.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3501,7 +3501,7 @@ impl SessionLifecycleMembers {
     }
 }
 
-/// The standing failure cause a parked session closes with (§2).
+/// The standing failure cause a parked session closes with.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionFailureCause {
@@ -3516,7 +3516,7 @@ pub enum SessionFailureCause {
     ModerationBlock,
 }
 
-/// Closed session-lifecycle command rejection vocabulary (§7).
+/// Closed session-lifecycle command rejection vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLifecycleCommandRejection {
@@ -3572,7 +3572,7 @@ pub enum ClientRequest {
         /// Explicit opt-in placement, defaulting to legacy pathless behavior.
         #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
         placement: SessionPlacement,
-        /// §7 start gate, ownership, and finish condition.
+        /// Start gate, ownership, and finish condition.
         #[serde(default, skip_serializing_if = "SessionLifecycleMembers::is_default")]
         lifecycle: SessionLifecycleMembers,
     },
@@ -3585,7 +3585,7 @@ pub enum ClientRequest {
         /// Explicit opt-in placement, defaulting to legacy pathless behavior.
         #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
         placement: SessionPlacement,
-        /// §7 start gate, ownership, and finish condition.
+        /// Start gate, ownership, and finish condition.
         #[serde(default, skip_serializing_if = "SessionLifecycleMembers::is_default")]
         lifecycle: SessionLifecycleMembers,
     },
@@ -3661,7 +3661,7 @@ pub enum ClientRequest {
         /// Newly commissioned immutable statement.
         statement: String,
     },
-    /// Close a session `stopped{sticky}` from any non-terminal state (§7).
+    /// Close a session `stopped{sticky}` from any non-terminal state.
     StopSession {
         command_id: CommandId,
         session_id: CanonicalUuid,
