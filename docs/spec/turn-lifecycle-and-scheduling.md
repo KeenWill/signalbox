@@ -1304,15 +1304,14 @@ scan. It then initializes every configured blob store against its recorded
 namespace binding, verifies every currently routed S3 namespace marker and
 multipart lifecycle rule under the blob contract's aggregate startup deadline,
 resolves the one-time imported display-title backfill
-([conversation-import](conversation-import.md#derived-display-titles)), and
-marks every prior-process nonterminal runner connection lost. Blob
-initialization failure stops startup before the backfill, either socket binding,
-or scheduling; unrouted historical S3 bindings retain their lazy runtime check.
-It then establishes each `codex_home` profile's credential-home identity,
-resolves every prior-process capacity reservation, resolves every retained OAuth
-refresh-in-progress marker to a replacement token or a quarantine, scavenges
-every crash-left OAuth scratch home, and runs the legacy family-to-policy
-backfill
+([conversation-import](conversation-import.md)), and marks every prior-process
+nonterminal runner connection lost. Blob initialization failure stops startup
+before the backfill, either socket binding, or scheduling; unrouted historical
+S3 bindings retain their lazy runtime check. It then establishes each
+`codex_home` profile's credential-home identity, resolves every prior-process
+capacity reservation, resolves every retained OAuth refresh-in-progress marker
+to a replacement token or a quarantine, scavenges every crash-left OAuth scratch
+home, and runs the legacy family-to-policy backfill
 ([configuration and credentials](configuration-and-credentials.md#credential-deliveries)).
 Those five gates sit after the recovery scan so a failure cannot block recovery
 of acknowledged work, and before any socket binding or scheduling so no request
