@@ -158,7 +158,8 @@ for the exec supervisor, so first materialize a runtime copy with the host
 executable that Cargo builds (inside `devenv shell`):
 
 ```console
-supervisor="$(cargo run --quiet -p signalbox-cargo-bin-resolver -- \
+host_target="$(rustc -vV | sed -n 's/^host: //p')"
+supervisor="$(cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
   "$PWD/Cargo.toml" signalbox-tools-exec signalbox-exec-supervisor)"
 signalbox-materialize-config config/signalboxd.example.toml \
   target/signalboxd.live.toml "$supervisor"
