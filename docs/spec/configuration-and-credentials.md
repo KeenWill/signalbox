@@ -943,8 +943,7 @@ minted Git push destination is keyed by it, so two spellings of one directory
 cannot become two scopes. The root is canonicalized once, when the record is
 minted, and stored in canonical form; no later comparison normalizes anything.
 The tiers that mint these records, and the one grant that currently uses them,
-are stated under
-[remote destination authority](git-authority-threat-model.md#remote-destination-authority).
+are stated under [remote destination authority](git-authority-threat-model.md).
 
 Provisioning that directory is deployment work: creating a direct main worktree
 there is what makes a session use it. Only a reported absence at the derived
