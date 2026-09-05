@@ -76,9 +76,9 @@ appended only after that call's observation commits, so the call's own entries
 precede it and the prefix-only law holds. The entry copies no runner
 advertisement, workspace path, credential fact, or tool output; the placement
 record remains its content authority, and the checked placement transactions are
-its only producers. The provider projection resolves the record to the injected
-placement event that [model-call-execution](../spec/model-call-execution.md)
-owns.
+its only producers. The provider projection resolves the record to a rendered
+placement event; that rendering is planned on
+[model-call-execution](../spec/model-call-execution.md).
 
 Delegation terminal-result reconstitution. A durable reconstitution surface
 yields one sealed projection of an ended call and its turn. Result sealing

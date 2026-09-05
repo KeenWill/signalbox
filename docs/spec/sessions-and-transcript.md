@@ -437,16 +437,18 @@ covers a request closed by turn end before ordinary execution, including
 undecided and approved-but-unattempted requests; a crash-lost attempt is
 terminal known-failed evidence and gets a result entry instead.
 
-The activation transaction commits the one origin entry together with the
-starting context snapshot, lineage, and activation facts. A steer accepted while
-its source turn is active returns the accepted-input identity, its acceptance
-position, and the source turn immediately, and creates no turn or entry.
-Immediately before an initial or continuation call is prepared, one transaction
-appends one steering entry per pending input in acceptance order, derives one
-frontier extending the frontier that call starts from, marks every input
-consumed, and inserts the prepared call against the extended frontier; the four
-effects commit or roll back together. An initial call starts from the turn's
-starting frontier and a continuation from the tool-result continuation frontier.
+An accepted-input activation commits one origin entry together with the starting
+context snapshot, lineage, and activation facts. A delegation-wake activation
+commits every coalesced delivery entry, in delivery-sequence order, with those
+same facts. A steer accepted while its source turn is active returns the
+accepted-input identity, its acceptance position, and the source turn
+immediately, and creates no turn or entry. Immediately before an initial or
+continuation call is prepared, one transaction appends one steering entry per
+pending input in acceptance order, derives one frontier extending the frontier
+that call starts from, marks every input consumed, and inserts the prepared call
+against the extended frontier; the four effects commit or roll back together. An
+initial call starts from the turn's starting frontier and a continuation from
+the tool-result continuation frontier.
 
 Tool-use entries become history with the producing call's completed observation;
 tool-result entries become history only at the all-resolved continuation or
