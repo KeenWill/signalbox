@@ -40,7 +40,14 @@ def check_manifest(path: Path) -> list[str]:
     for table in dependency_tables(manifest):
         for name, configured in table.items():
             normalized = name.replace("_", "-")
-            if normalized.startswith("signalbox-") and normalized != "signalbox-ownership-seam":
+            package = configured.get("package") if isinstance(configured, dict) else None
+            normalized_package = package.replace("_", "-") if isinstance(package, str) else ""
+            dependency_names = (normalized, normalized_package)
+            if any(
+                candidate.startswith("signalbox-")
+                and candidate != "signalbox-ownership-seam"
+                for candidate in dependency_names
+            ):
                 failures.append(f"{path}: forbidden Signalbox dependency {name}")
             if isinstance(configured, dict) and isinstance(configured.get("path"), str):
                 target = (path.parent / configured["path"]).resolve()
@@ -80,10 +87,11 @@ def main() -> int:
     for root in (ROOT / "crates", ROOT / "apps"):
         if not root.is_dir():
             continue
-        for source in sorted(root.glob("**/*.rs")):
+        for source in sorted(root.glob("**/*")):
             if MODULE_ROOT in source.parents:
                 continue
-            failures.extend(check_core_source(source))
+            if source.suffix in {".rs", ".sql"}:
+                failures.extend(check_core_source(source))
 
     if failures:
         print("ownership-seam check failed:", file=sys.stderr)

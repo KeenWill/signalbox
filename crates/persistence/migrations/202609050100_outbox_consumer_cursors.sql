@@ -6,7 +6,6 @@ SET check_function_bodies = false;
 CREATE TABLE outbox_consumer_cursor (
     consumer_name text NOT NULL,
     delivered_through numeric(20,0) NOT NULL,
-    updated_at timestamptz NOT NULL,
     last_delivery_xid xid8,
     CONSTRAINT outbox_consumer_cursor_pkey PRIMARY KEY (consumer_name),
     CONSTRAINT outbox_delivery_consumer_closed CHECK (
@@ -42,7 +41,6 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     NEW.last_delivery_xid := pg_current_xact_id();
-    NEW.updated_at := statement_timestamp();
     IF NOT EXISTS (
         SELECT 1 FROM outbox_event
          WHERE event_sequence = NEW.delivered_through
@@ -104,14 +102,14 @@ CREATE TRIGGER outbox_consumer_cursor_cannot_be_truncated
     FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
 
 INSERT INTO outbox_consumer_cursor
-    (consumer_name, delivered_through, updated_at, last_delivery_xid)
-SELECT 'process_protocol', delivered_through, statement_timestamp(), last_delivery_xid
+    (consumer_name, delivered_through, last_delivery_xid)
+SELECT 'process_protocol', delivered_through, last_delivery_xid
   FROM outbox_delivery_state
  WHERE singleton;
 
 INSERT INTO outbox_consumer_cursor
-    (consumer_name, delivered_through, updated_at, last_delivery_xid)
-VALUES ('repo_watch', 0, statement_timestamp(), NULL);
+    (consumer_name, delivered_through, last_delivery_xid)
+VALUES ('repo_watch', 0, NULL);
 
 DROP TABLE outbox_delivery_state;
 DROP FUNCTION require_next_outbox_delivery();
