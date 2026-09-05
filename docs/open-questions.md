@@ -30,8 +30,8 @@ specification diff. Accepted cross-component and wire contracts live in the
 - **Selectable native transcript-frontier boundaries.** Which terminal native
   semantic boundaries a client may select as a `TranscriptFrontier` remains
   open; imported-frontier selection is already owned by
-  [conversation-import](spec/conversation-import.md#imported-frontier-points).
-  Blocks native fork selection. (S17)
+  [conversation-import](spec/conversation-import.md). Blocks native fork
+  selection. (S17)
 
 ## Accepted-input content
 
@@ -145,16 +145,15 @@ per-turn provenance. The following extensions remain undecided:
 - **Import operational surfaces beyond explicit file and directory scans.** The
   user terminal's explicit-format, one-file and recursive directory-scan
   operations are implemented in
-  [conversation-import](spec/conversation-import.md#operational-surface), and
-  the single-conversation inspection read is implemented in
-  [conversation-import](spec/conversation-import.md#imported-conversation-inspection).
-  File watching, source-size admission beyond the inherited process-frame bound,
-  raw-record access, and any authorization beyond the owner-private local socket
-  remain undecided. Listing across imported conversations is implemented by the
-  unified conversation listing in
-  [process protocol](spec/process-protocol.md#client-requests); filesystem
-  discovery of unimported sources beyond the explicit directory scan is not.
-  (S28)
+  [conversation-import](spec/conversation-import.md), and the
+  single-conversation inspection read is implemented in
+  [conversation-import](spec/conversation-import.md). File watching, source-size
+  admission beyond the inherited process-frame bound, raw-record access, and any
+  authorization beyond the owner-private local socket remain undecided. Listing
+  across imported conversations is implemented by the unified conversation
+  listing in [process protocol](spec/process-protocol.md#client-requests);
+  filesystem discovery of unimported sources beyond the explicit directory scan
+  is not. (S28)
 
 ## Transcript ancestry
 
