@@ -655,7 +655,7 @@ fn redact_json(raw: String, credential: &CredentialValue) -> String {
     if key.is_empty() {
         return raw;
     }
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Ok(_) = serde_json::from_str::<serde_json::Value>(&raw) else {
         // A partial or malformed JSON value can encode a credential or its
         // trailing prefix with escapes that literal replacement cannot see.
         // Reuse the streaming decoder, then fail closed on any held prefix;
@@ -666,31 +666,88 @@ fn redact_json(raw: String, credential: &CredentialValue) -> String {
         }
         return redacted;
     };
-    redact_json_value(&mut value, key);
-    value.to_string()
+    let token = raw.trim();
+    let Ok(redacted) = redact_json_value(token, key) else {
+        return "\"[redacted]\"".to_string();
+    };
+    let leading = raw.len() - raw.trim_start().len();
+    format!(
+        "{}{}{}",
+        &raw[..leading],
+        redacted,
+        &raw[leading + token.len()..]
+    )
 }
 
-fn redact_json_value(value: &mut serde_json::Value, credential: &str) {
-    match value {
-        serde_json::Value::String(text) => {
-            *text = text.replace(credential, "[redacted]");
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                redact_json_value(value, credential);
+/// Borrows object keys and values in source order, including duplicate members.
+struct RawJsonChildren<'a>(Vec<&'a serde_json::value::RawValue>);
+
+impl<'de> serde::Deserialize<'de> for RawJsonChildren<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ChildrenVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ChildrenVisitor {
+            type Value = RawJsonChildren<'de>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object or array")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut children = Vec::new();
+                while let Some(value) = sequence.next_element()? {
+                    children.push(value);
+                }
+                Ok(RawJsonChildren(children))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut object: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut children = Vec::new();
+                while let Some((key, value)) = object.next_entry()? {
+                    children.push(key);
+                    children.push(value);
+                }
+                Ok(RawJsonChildren(children))
             }
         }
-        serde_json::Value::Object(object) => {
-            let entries = std::mem::take(object);
-            for (key, mut value) in entries {
-                redact_json_value(&mut value, credential);
-                object.insert(key.replace(credential, "[redacted]"), value);
+
+        deserializer.deserialize_any(ChildrenVisitor)
+    }
+}
+
+fn redact_json_value(raw: &str, credential: &str) -> Result<String, serde_json::Error> {
+    match raw.as_bytes().first() {
+        Some(b'{' | b'[') => {
+            let RawJsonChildren(children) = serde_json::from_str(raw)?;
+            let mut redacted = String::with_capacity(raw.len());
+            let mut remaining = raw;
+            for child in children {
+                let token = child.get();
+                // RawValue borrows its exact token from this source document.
+                let offset = token.as_ptr() as usize - remaining.as_ptr() as usize;
+                redacted.push_str(&remaining[..offset]);
+                redacted.push_str(&redact_json_value(token, credential)?);
+                remaining = &remaining[offset + token.len()..];
+            }
+            redacted.push_str(remaining);
+            Ok(redacted)
+        }
+        Some(b'"') => {
+            let text: String = serde_json::from_str(raw)?;
+            if text.contains(credential) {
+                serde_json::to_string(&text.replace(credential, "[redacted]"))
+            } else {
+                Ok(raw.to_string())
             }
         }
-        primitive if primitive.to_string().contains(credential) => {
-            *primitive = serde_json::Value::String("[redacted]".to_string());
-        }
-        _ => {}
+        _ if raw.contains(credential) => Ok("\"[redacted]\"".to_string()),
+        _ => Ok(raw.to_string()),
     }
 }
 
@@ -969,14 +1026,31 @@ mod tests {
     }
 
     #[test]
-    fn json_redaction_traverses_the_deserialized_value() {
+    fn json_redaction_preserves_unredacted_tokens_and_duplicate_members() {
         let key = credential("key_loop");
         let raw = r#"{"token":"key_loop","id":184467440737095516160,"dup":1,"dup":2}"#;
 
         assert_eq!(
             redact_json(raw.to_string(), &key),
-            r#"{"dup":2,"id":184467440737095516160,"token":"[redacted]"}"#
+            r#"{"token":"[redacted]","id":184467440737095516160,"dup":1,"dup":2}"#
         );
+    }
+
+    #[test]
+    fn json_redaction_preserves_whitespace_escapes_and_numeric_spellings() {
+        let key = credential("key_loop");
+        let raw = r#"  { "dup": 1e+02, "dup": -0, "escaped": "\u0061", "nested": [ { "key_\u006coop": "key_loop" } ] }  "#;
+        assert_eq!(
+            redact_json(raw.to_string(), &key),
+            r#"  { "dup": 1e+02, "dup": -0, "escaped": "\u0061", "nested": [ { "[redacted]": "[redacted]" } ] }  "#,
+        );
+    }
+
+    #[test]
+    fn json_without_a_credential_remains_verbatim() {
+        let key = credential("key_loop");
+        let raw = r#" { "dup": 1, "dup": 2, "escaped": "\u0061", "number": 1e+02 } "#;
+        assert_eq!(redact_json(raw.to_string(), &key), raw);
     }
 
     #[test]
