@@ -23,15 +23,16 @@ An availability chain begins at a fresh admission inside one turn and holds the
 call that admission prepares, if any, and every successor that follows a
 qualifying failure. [Model-call execution](model-call-execution.md) owns what
 bounds a chain, when a turn starts a fresh one, and the rule that no attempt is
-ever sent again with the credential that failed.
+ever sent again with the credential that failed in that chain.
 
 The durable records are the policy snapshot pinned to each call, one exclusion
 row for each member a qualifying failure in the turn removed, one successor row
-linking a successor call to its predecessor and cause, and one exhaustion header
-when a turn fails because the pool admitted no member. Members are also removed
-by the exclusions the pool's trigger policy writes, which
-[configuration and credentials](configuration-and-credentials.md) owns; the
-operator surface that clears them is on [process protocol](process-protocol.md).
+linking a prepared successor attempt to the predecessor call and its cause, and
+one exhaustion header when a turn fails because the pool admitted no member.
+Members are also removed by the exclusions the pool's trigger policy writes,
+which [configuration and credentials](configuration-and-credentials.md) owns;
+the operator surface that clears them is on
+[process protocol](process-protocol.md).
 
 A selection attempt reaches one of five endings: selected, pre-call fail,
 post-failure fail, successor and terminal. They split on whether selection

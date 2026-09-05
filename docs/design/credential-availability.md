@@ -159,10 +159,10 @@ spec page states.
 
 ## Acceptance
 
-- A `park` pool whose exhaustion snapshot holds at least one expiring exclusion
-  enters exhausted-wait, keeps its slot, appends no `TurnFailed`, and is
-  released at the computed deadline; the released chain admits the readmitted
-  member and reaches selected.
+- A `park` pool whose exhaustion snapshot holds a member whose every active
+  exclusion expires enters exhausted-wait, keeps its slot, appends no
+  `TurnFailed`, and is released at the computed deadline; the released chain
+  admits that member and reaches selected.
 - A `park` pool whose members are excluded only by chain exclusions of this turn
   fails rather than parking: post-failure fail at a fresh admission,
   wait-transition fail (after call) at a release.
