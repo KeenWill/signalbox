@@ -63,6 +63,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 format!("offline responses {responses_path} are not valid response JSON: {source}"),
             )
         })?;
+    if responses.responses.len() != corpus.cases.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "offline response count {} differs from corpus case count {}",
+                responses.responses.len(),
+                corpus.cases.len(),
+            ),
+        )
+        .into());
+    }
     let scripts = responses.responses.iter().map(response_script);
     let (model, binding) = offline_model(scripts)?;
     let scorecard = score_corpus(&model, &binding, &corpus).await?;

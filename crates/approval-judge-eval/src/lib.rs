@@ -18,15 +18,10 @@ use signalboxd::approval_judge_eval::{
     ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, judge_eval_case, render_eval_case,
 };
 
-/// The only corpus format this pre-alpha harness currently accepts.
-pub const CORPUS_FORMAT_VERSION: u32 = 1;
-
-/// A versioned collection of labeled approval-judge cases.
+/// A collection of labeled approval-judge cases.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalJudgeCorpus {
-    /// Corpus representation version.
-    pub format_version: u32,
     /// Cases in replay order.
     pub cases: Vec<ApprovalJudgeCase>,
 }
@@ -525,6 +520,21 @@ mod tests {
             })],
             usage: TokenUsage::unreported(),
         }))
+    }
+
+    #[tokio::test]
+    async fn scorer_preflights_every_case_before_model_execution() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let invalid_case_id = corpus.cases[1].id.clone();
+        corpus.cases[1].request.tool = String::new();
+        let (model, binding) = fixture_model([]);
+
+        let error = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect_err("the later inadmissible case fails before the first model call");
+
+        assert_eq!(error.case_id(), invalid_case_id);
     }
 
     #[test]

@@ -688,7 +688,7 @@ jobs:
   # Persistence is sharded according to its measured test-execution cost; every
   # other suite runs whole because it fits well inside the job timeout.
   #
-  # The run matrix currently expands to eleven shards after the one shared
+  # The run matrix currently expands to ten shards after the one shared
   # build.
   # The shards compile nothing and run for minutes; the build's single cache
   # key replaces the old per-suite keys that evicted one another.

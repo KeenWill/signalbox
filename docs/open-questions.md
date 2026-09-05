@@ -59,11 +59,8 @@ interactive prompting and later client-form choices remain owned by
 [Client approval presentation](#client-scope). The following related questions
 also require owner rulings:
 
-- **Corpus governance.** Approval corpora follow the digest contract owned by
-  [evaluation system](spec/eval-system.md); their identity and admitted storage
-  forms are defined by `CorpusManifest` in the approval-judge evaluation crate.
-  Which admitted storage form this corpus uses remains undecided, together with
-  access, redaction, retention, and deletion rules.
+- **Corpus governance.** Corpus storage, access, redaction, retention, and
+  deletion rules remain undecided.
 
 - **Promotion bounds.** The maximum false-allow rate, minimum acceptable
   improvement, minimum labeled case count, required slices, and statistical

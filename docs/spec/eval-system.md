@@ -19,8 +19,8 @@ consumed directly as opaque evaluation input after JSON shape decoding.
 
 The library loads a corpus, replays each case through the judge, and scores the
 verdicts into a scorecard. The offline entry point replays recorded provider
-responses in corpus order through a scripted model adapter and prints the
-scorecard as JSON.
+responses in corpus order through a scripted model adapter, requires one
+response per corpus case, and prints the scorecard as JSON.
 
 The live-provider runner in the daemon is not part of the harness. It reads its
 own JSONL case file in its own case shape, sends each case to a configured
@@ -35,8 +35,8 @@ decision path. Why: the harness measures the deployed judge, not a fork of it.
 
 Evaluation verdicts gate nothing; every evaluation surface is report-only.
 
-The checked-in seed manifest, corpus, and response file contain synthetic
-strings only, so no real request data enters the repository.
+The checked-in seed corpus and response file contain synthetic strings only, so
+no real request data enters the repository.
 
 The live-provider runner is an operator-driven surface outside the offline
 harness, because it spends provider quota.

@@ -677,38 +677,6 @@ pub(crate) const fn convergence_sweep_decision_outcome(
     }
 }
 
-/// Closed evaluation-corpus source discriminators stored by PostgreSQL.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EvaluationCorpusSourceStorageKind {
-    /// Cases originated in a repository checkout.
-    Repository,
-    /// Cases were authored directly into the instance database.
-    DatabaseNative,
-    /// Cases are addressed through a blob-store binding.
-    BlobReference,
-}
-
-/// Encodes an evaluation-corpus source as its closed PostgreSQL spelling.
-pub const fn evaluation_corpus_source_to_str(
-    value: EvaluationCorpusSourceStorageKind,
-) -> &'static str {
-    match value {
-        EvaluationCorpusSourceStorageKind::Repository => "repository",
-        EvaluationCorpusSourceStorageKind::DatabaseNative => "database_native",
-        EvaluationCorpusSourceStorageKind::BlobReference => "blob_reference",
-    }
-}
-
-/// Decodes an evaluation-corpus source from its closed PostgreSQL spelling.
-pub fn evaluation_corpus_source_from_str(value: &str) -> Option<EvaluationCorpusSourceStorageKind> {
-    match value {
-        "repository" => Some(EvaluationCorpusSourceStorageKind::Repository),
-        "database_native" => Some(EvaluationCorpusSourceStorageKind::DatabaseNative),
-        "blob_reference" => Some(EvaluationCorpusSourceStorageKind::BlobReference),
-        _ => None,
-    }
-}
-
 /// Which filesystem owns workspace discovery for a stored placement state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkspaceInstructionAuthorityStorageKind {
@@ -3553,25 +3521,24 @@ mod tests {
         ConvergenceSweepOutcomeStorageKind, ConvergenceSweepStateStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        EvaluationCorpusSourceStorageKind, PlanEventStorageKind, PositiveOrdinalMappingError,
-        RepoWatchEvaluationOutcomeStorageKind, RepoWatchLifecycleCutoffDispositionStorageKind,
-        RepoWatchObligationSettlementStorageKind, RunnerLossPropagationStateStorageKind,
-        SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
-        SessionPlacementResultStorageKind, StoredModelSettingsError,
-        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
-        TurnDispositionStorageKind, WorkspaceInstructionAuthorityStorageKind,
-        accepted_input_id_from_uuid, accepted_input_id_to_uuid, active_turn_phase_from_str,
-        active_turn_phase_to_str, approval_judge_recommendation_from_str,
-        approval_judge_recommendation_to_str, approval_judge_state_from_str,
-        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
-        approval_judge_terminal_disposition_to_str, blob_read_rejection_from_str,
-        blob_read_rejection_to_str, bound_child_action_from_str, bound_child_action_to_str,
-        convergence_sweep_decision_outcome, convergence_sweep_failure_from_str,
-        convergence_sweep_failure_outcome, convergence_sweep_failure_to_str,
-        convergence_sweep_operator_need_from_str, convergence_sweep_operator_need_to_str,
-        convergence_sweep_outcome_from_str, convergence_sweep_outcome_to_str,
-        convergence_sweep_state_from_str, convergence_sweep_state_to_str,
-        defaults_version_from_numeric, defaults_version_to_numeric,
+        PlanEventStorageKind, PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
+        RepoWatchLifecycleCutoffDispositionStorageKind, RepoWatchObligationSettlementStorageKind,
+        RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
+        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
+        StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
+        ToolAttemptDispositionStorageKind, TurnDispositionStorageKind,
+        WorkspaceInstructionAuthorityStorageKind, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, active_turn_phase_from_str, active_turn_phase_to_str,
+        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
+        approval_judge_state_from_str, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
+        blob_read_rejection_from_str, blob_read_rejection_to_str, bound_child_action_from_str,
+        bound_child_action_to_str, convergence_sweep_decision_outcome,
+        convergence_sweep_failure_from_str, convergence_sweep_failure_outcome,
+        convergence_sweep_failure_to_str, convergence_sweep_operator_need_from_str,
+        convergence_sweep_operator_need_to_str, convergence_sweep_outcome_from_str,
+        convergence_sweep_outcome_to_str, convergence_sweep_state_from_str,
+        convergence_sweep_state_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
         delegation_message_direction_from_str, delegation_message_direction_to_str,
         delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
         delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
@@ -3583,8 +3550,7 @@ mod tests {
         delegation_wake_subject_from_str, delegation_wake_subject_to_str,
         dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
-        durable_command_kind_to_str, evaluation_corpus_source_from_str,
-        evaluation_corpus_source_to_str, input_position_from_numeric, input_position_to_numeric,
+        durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
         instruction_bundle_kind_from_str, instruction_bundle_kind_to_str,
         instruction_finding_kind_from_str, instruction_finding_kind_to_str,
         instruction_root_kind_from_str, instruction_root_kind_to_str,
@@ -3882,29 +3848,6 @@ mod tests {
             convergence_sweep_outcome_from_str(convergence_sweep_outcome_to_str(value)),
             Some(value)
         );
-    }
-
-    #[test]
-    fn evaluation_corpus_source_mapping_is_closed() {
-        assert_eq!(
-            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
-                EvaluationCorpusSourceStorageKind::Repository,
-            )),
-            Some(EvaluationCorpusSourceStorageKind::Repository)
-        );
-        assert_eq!(
-            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
-                EvaluationCorpusSourceStorageKind::DatabaseNative,
-            )),
-            Some(EvaluationCorpusSourceStorageKind::DatabaseNative)
-        );
-        assert_eq!(
-            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
-                EvaluationCorpusSourceStorageKind::BlobReference,
-            )),
-            Some(EvaluationCorpusSourceStorageKind::BlobReference)
-        );
-        assert_eq!(evaluation_corpus_source_from_str("unknown"), None);
     }
 
     #[test]
