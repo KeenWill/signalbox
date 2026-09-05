@@ -14,12 +14,14 @@ transitions between them. The turn machine that
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md) owns runs
 beneath the session machine. For a session that is not parked, the session state
 is a projection of its live turn: a running turn makes the session active, a
-turn awaiting approval or a child makes it waiting, a turn in any recovery phase
-makes it recovering, and a blocked goal with no live turn makes it blocked;
-active also covers a session that has run and has no live turn, which the
-attention classifier reads as idle. Core writes the session state in the same
-transaction as the turn or goal transition that changes the projection, so the
-two machines never disagree.
+turn awaiting approval or a child makes it waiting, and a turn in any recovery
+phase makes it recovering. A blocked goal with no live turn makes the session
+blocked. With no live turn and no blocked goal, the held state and whether a
+turn is queued decide: created becomes dispatched once a turn is queued,
+dispatched holds until a turn activates, and every other session reads active,
+which the attention classifier reads as idle. Core writes the session state in
+the same transaction as the turn or goal transition that changes the projection,
+so the two machines never disagree.
 
 Waiting carries a typed kind and the party expected to end the wait. Only an
 owned session carries a deadline, and its state sets the kind: admission covers
@@ -149,8 +151,9 @@ turn left active would block its next input.
 Release never interrupts a live operation: a running turn completes to its
 boundary under the resources already held.
 
-Core mints every lifecycle identity; no module pre-allocates a turn, input, or
-frontier identity inside its own transaction.
+Core mints every lifecycle identity except the caller-supplied durable command
+identity; no module pre-allocates a turn, input, or frontier identity inside its
+own transaction.
 
 Ownership is advisory: an owner module observes events and issues commands like
 any other client, and it never sits between core and the session; a

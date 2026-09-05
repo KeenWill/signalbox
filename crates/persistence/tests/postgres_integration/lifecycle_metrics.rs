@@ -784,7 +784,7 @@ async fn backdate_park(
     Ok(())
 }
 
-/// Finding F9's immediate half: a wall is counted in the week it happened.
+/// A wall is counted in the week it happened.
 ///
 /// A wall parks the session and leaves its turn suspended, so at the
 /// moment the alarm most needs to page there is no terminal turn to read. The

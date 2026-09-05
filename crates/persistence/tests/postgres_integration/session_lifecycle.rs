@@ -686,10 +686,10 @@ async fn a_closure_over_a_live_turn_is_refused() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Codex finding F1: session terminalization settles the live goal
-/// generation in the same closure. Goal state is the sole
-/// continuation-stopping condition in the goal contract, so a pursuing goal
-/// beneath a terminal session would keep scheduling work no one owns.
+/// Session terminalization settles the live goal generation in the same
+/// closure. Goal state is the sole continuation-stopping condition in the
+/// goal contract, so a pursuing goal beneath a terminal session would keep
+/// scheduling work no one owns.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_closure_settles_the_live_goal_generation() -> Result<(), Box<dyn Error>> {
