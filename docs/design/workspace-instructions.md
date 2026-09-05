@@ -33,12 +33,15 @@ resolve it.
 The transaction that records a turn-start manifest copies the exact ordered
 eligibility list under the session scheduler lock and records its versioned
 SHA-256 hash in that manifest. The snapshot is immutable for the turn; a
-replacement affects only later activations. Installed eligibility is revalidated
-against the live configured-root catalog at activation and at startup recovery,
-and a root the configuration no longer declares closes its entries to listing,
-preview, and new admission, including for a turn retained active across the
-restart; an admission already recorded keeps its stored wrapper. A registered
-bundle absent from the snapshot cannot be enumerated, previewed, or admitted.
+replacement affects only later activations. A replacement that removes an
+identity already admitted, or one the active turn's frozen snapshot can still
+admit, is rejected, because unload remains the only mechanism that removes an
+admission. Installed eligibility is revalidated against the live configured-root
+catalog at activation and at startup recovery, and a root the configuration no
+longer declares closes its entries to listing, preview, and new admission,
+including for a turn retained active across the restart; an admission already
+recorded keeps its stored wrapper. A registered bundle absent from the snapshot
+cannot be enumerated, previewed, or admitted.
 
 Three tools expose the snapshot to the model. `instructions_list` enumerates the
 snapshot by cursor; a page carries a fixed maximum entry count within a fixed
