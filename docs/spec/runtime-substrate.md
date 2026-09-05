@@ -232,7 +232,8 @@ loss because the adapter cannot prove the full frontier reached the CLI.
 Settings are provider-enforced request controls unless an adapter records a
 capability-limited advisory exception; an adapter never presents prompt
 instructions as hard transport controls. Under the Anthropic adapter, any-tool
-and named tool choice and the output contract are advisory. Under the Codex CLI
+and named tool choice and the output contract are advisory, and a temperature or
+top-p setting fails preparation rather than being dropped. Under the Codex CLI
 adapter, the output-token ceiling, temperature, top-p and stop sequences are
 rendered into the prompt as advisory context. Under the Claude Code CLI adapter,
 temperature, top-p and stop sequences are advisory, the output-token ceiling is
@@ -260,13 +261,15 @@ Terminal evidence is typed so the caller classifies without string matching;
 strings appear only as retained detail inside already-classified variants. Each
 adapter owns an exhaustive native mapping into the shared provider-error kind,
 which lives in the core crate, and unknown material classifies as unrecognized
-with its native facts retained rather than guessed at. An error record that
-follows the provider's finish marker and names no classifiable failure is
-stream-protocol loss, while a classified one stays definitive and outranks the
-finish. A provider-directed retry delay, decoded from the HTTP `Retry-After`
-header or the Codex CLI's rendered retry phrase, rides the provider-error
-evidence, and the bridge carries it into the durable failure observation that
-feeds the availability-successor backoff.
+with its native facts retained rather than guessed at. In both HTTP adapters an
+unauthorized status is credential rejection before the body is consulted, and
+otherwise a recognized native code outranks a recognized type, which outranks
+the status. An error record that follows the provider's finish marker and names
+no classifiable failure is stream-protocol loss, while a classified one stays
+definitive and outranks the finish. A provider-directed retry delay, decoded
+from the HTTP `Retry-After` header or the Codex CLI's rendered retry phrase,
+rides the provider-error evidence, and the bridge carries it into the durable
+failure observation that feeds the availability-successor backoff.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
 never inferred from the error kind, status retryability or provider prose. An
@@ -287,11 +290,14 @@ loss in both HTTP adapters. A stream that ends in any way other than its
 protocol's terminal marker is incomplete-stream evidence, never silent success:
 a Codex CLI exit of zero without the turn-completed event is boundary loss, and
 under the Claude Code CLI only a terminal result event establishes success or
-refusal, never prose. A finish reason observed before a stream loss is retained
-as a reported finish but is not completion or refusal evidence. Within one
-adapter the buffered and streamed decoders never disagree about the same
-response; an output-ceiling finish inside accumulated tool content is an
-observed fact in both, not an envelope defect.
+refusal, never prose. A Codex turn that completes without a streamed agent
+message takes its response from the CLI's separately written final-message file
+under the same size and redaction checks, and a streamed message outranks it. A
+finish reason observed before a stream loss is retained as a reported finish but
+is not completion or refusal evidence. Within one adapter the buffered and
+streamed decoders never disagree about the same response; an output-ceiling
+finish inside accumulated tool content is an observed fact in both, not an
+envelope defect.
 
 The tool-calls-at-loss fact reports the decoded prefix and nothing beyond it:
 none-opened says no tool call opened in what the adapter decoded, never that the
@@ -362,9 +368,11 @@ violation. Malformed or over-depth JSON in a success body is
 unintelligible-response boundary loss. In the HTTP and Claude Code CLI decoders,
 over-depth streamed material and malformed known-event JSON are stream protocol
 violations; the Codex CLI decoder fails both closed as an unrecognized provider
-error. A malformed or over-depth body attached to a definitive error status
-cannot erase that exchange: the adapter falls back to status classification with
-bounded sanitized native material.
+error. Both CLI decoders reject a syntactically valid record that repeats an
+object member, at any nesting depth, as a stream protocol violation. A malformed
+or over-depth body attached to a definitive error status cannot erase that
+exchange: the adapter falls back to status classification with bounded sanitized
+native material.
 
 Each CLI adapter mechanically disables every native facility of the pinned CLI
 that could add a model-visible tool, an instruction source, an external
@@ -413,7 +421,10 @@ the adapter reads neither store. An ambient Claude Code adapter likewise accepts
 only its one configured reference. Under file delivery the Claude Code adapter
 replaces only the already allowlisted configuration-directory variable with a
 private request-scoped directory, never adds the API-key variable to the child
-environment, and removes the directory when the capability drops.
+environment, and removes the directory when the capability drops. It creates the
+credential, settings and helper files owner-only, and the helper that delivers
+the key runs under a fixed shell interpreter using only builtins, never an
+executable resolved through the search path.
 
 Provider-controlled text is credential-sanitized before it leaves the adapter.
 An adapter that reads the credential value redacts that exact value from the
