@@ -59,8 +59,8 @@ external state from the publication result.
 ## Constraints on present code
 
 Adapter success keeps returning typed evidence that names the exact target,
-policy, run, pass, session, and template inputs, so a concrete adapter drops
-into the ports without a new evidence shape.
+policy, run, pass, session, and template inputs, so a concrete adapter fits the
+ports without a new evidence shape.
 
 A finding proposal stays typed content, and no path from assistant text to a
 finding is added.

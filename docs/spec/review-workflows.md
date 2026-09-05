@@ -22,26 +22,24 @@ carried it; its terminal state is the outcome of the workflow operation, and an
 optional bound result records the one typed effect it produced. A finding is
 immutable proposed content owned by one succeeded read-only-review pass, and its
 status is the tail of an append-only event history. A finding carries two
-independent confidence values: `is_real_confidence` states whether the issue
-exists and merits attention, and `severity_label_confidence` states whether its
-severity classification is correct. An external link correlates a target, run,
-or finding with one object at one code host through a reservation, at most one
-attachment, and append-only observations of the object's reported state.
+independent confidences: whether the issue exists and merits attention, and
+whether its severity label is correct. An external link correlates a target,
+run, or finding with one object at one code host through a reservation, at most
+one attachment, and append-only observations of the object's reported state.
 
 References nest. A run reference binds a run to its target, a pass reference
 binds a pass to its run and target, and a finding reference (`ReviewFindingRef`)
-binds a finding to its producing pass and so to its run and target. Every child
-record carries the complete reference.
+binds a finding to its producing pass and so to its run and target.
 
 Above these primitives, the application orchestration boundary in
 `crates/application/src/review_orchestration.rs` runs one attempt: import
 external context, fan out one read-only-review pass per concern, judge the
 complete finding set, repair the accepted findings, and publish the survivors.
-It adds sequencing and does not replace the lifecycle, finding-state,
-publication-reservation, or frozen-policy rules of the primitives. The daemon
-drives that service through a client-fed adapter whose closed operations each
-supply one stage result. A closed review library of prompt templates, resolved
-at startup under the catalog rules
+It sequences the primitives and does not replace their lifecycle, finding-state,
+publication-reservation, or frozen-policy rules. The daemon drives that service
+through a client-fed adapter whose closed operations each supply one stage
+result. A closed review library of prompt templates, resolved at startup under
+the catalog rules
 [configuration and credentials](configuration-and-credentials.md) states,
 supplies the session templates each stage uses. The
 [process protocol](process-protocol.md) and the terminal client expose the
@@ -77,11 +75,10 @@ reconstructible without depending on the executing binary's defaults. An unknown
 policy version fails closed until a later contract revision adds its exact
 tuple, and supporting that version changes only later runs.
 
-A pass is recorded only after its orchestration input has been durably accepted;
-an optional session identifier is not a substitute for execution evidence.
-Executable orchestration is neither inferred nor scheduled automatically: the
-caller-driven process surface admits a pass only after its accepted input and
-origin turn exist, then binds activation to that exact turn.
+A pass is recorded only after its orchestration input has been durably accepted
+and its origin turn exists, and activation binds to that exact turn; an optional
+session identifier is not a substitute for execution evidence. Executable
+orchestration is caller-driven, never inferred or scheduled automatically.
 
 Pass terminal state is the workflow-operation outcome; turn outcome
 authenticates the execution boundary and does not decide that outcome by itself,
@@ -145,8 +142,8 @@ uncommitted output. Why: a concurrent member holds the least authority it needs.
 
 When one fan-out member fails, blocks, or is cancelled, the successful members'
 findings remain valid evidence but no judgment, repair, or publication work is
-eligible. The service never drops a concern, silently retargets, or publishes a
-partial successful subset as complete.
+eligible. The service never drops a concern, silently retargets, or publishes
+the successful subset as complete.
 
 Until every planned judgment event is durably admitted, repair and publication
 stay ineligible; a crash resumes the sealed plan rather than asking a model for
@@ -156,10 +153,10 @@ A cross-run duplicate or superseded reference keeps one pass per run and the
 original evidence chain: each finding retains its original reference and is
 never copied, reparented, or promoted into the judgment run.
 
-Each client-fed mutation supplies exactly one stage result while every other
-runner port reports that it awaits client input, so the service may derive and
-seal every newly eligible durable stage but cannot substitute model output or
-advance through a stage the client did not supply.
+Each client-fed mutation supplies exactly one stage result, and every other
+runner port reports that it awaits client input. The service may derive and seal
+every newly eligible durable stage but cannot substitute model output or advance
+through a stage the client did not supply.
 
 Finding events and external-link attachments bind their exact pass result in the
 transaction that appends or attaches the effect, so every committed point is an
