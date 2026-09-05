@@ -3,6 +3,8 @@
 //! `SIGNALBOX_CODEX_CLI_VERSION` build environment variable the adapter and
 //! its pin test compare against.
 
+mod version_pin;
+
 use std::path::PathBuf;
 
 const PIN_MANIFEST: &str = "../../tooling/codex-cli/package.json";
@@ -31,9 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 manifest_path.display()
             ))
         })?;
-    if semver::Version::parse(pinned).is_err() {
+    if !version_pin::is_exact_pin(pinned) {
         return Err(std::io::Error::other(format!(
-            "{} must pin {PIN_PACKAGE} at an exact SemVer version",
+            "{} must pin {PIN_PACKAGE} at an exact major.minor.patch release",
             manifest_path.display()
         ))
         .into());

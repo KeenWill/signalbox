@@ -31,7 +31,7 @@ fn the_pin_manifest_uses_an_exact_version() {
 
     assert!(
         is_exact_pin(&pinned),
-        "package.json must pin {PIN_PACKAGE} at an exact SemVer \
+        "package.json must pin {PIN_PACKAGE} at an exact release \
          version, not the range, tag, or alias {pinned}"
     );
 }
@@ -65,10 +65,9 @@ fn the_lockfile_root_dependency_matches_the_manifest() {
     );
 }
 
-/// Whether `version` is one exact SemVer rather than an npm range or tag.
-fn is_exact_pin(version: &str) -> bool {
-    semver::Version::parse(version).is_ok()
-}
+#[path = "../version_pin.rs"]
+mod version_pin;
+use version_pin::is_exact_pin;
 
 #[test]
 fn exact_pin_accepts_major_minor_patch() {
@@ -106,8 +105,8 @@ fn exact_pin_rejects_an_empty_component() {
 }
 
 #[test]
-fn exact_pin_accepts_a_prerelease() {
-    assert!(is_exact_pin("2.1.220-beta.1"));
+fn exact_pin_rejects_a_prerelease() {
+    assert!(!is_exact_pin("2.1.220-beta.1"));
 }
 
 /// The manifest's declared dependency version, as the single value every
@@ -125,4 +124,9 @@ fn manifest_dependency() -> String {
 fn read_lockfile() -> serde_json::Value {
     serde_json::from_str(include_str!("../package-lock.json"))
         .expect("package-lock.json is valid JSON")
+}
+
+#[test]
+fn exact_pin_rejects_build_metadata() {
+    assert!(!is_exact_pin("2.1.220+build.1"));
 }

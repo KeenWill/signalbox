@@ -33,15 +33,14 @@ fn the_pin_manifest_uses_an_exact_version() {
 
     assert!(
         is_exact_pin(pinned),
-        "{PIN_MANIFEST} must pin {PIN_PACKAGE} at an exact SemVer \
+        "{PIN_MANIFEST} must pin {PIN_PACKAGE} at an exact release \
          version, not the range, tag, or alias {pinned}"
     );
 }
 
-/// Whether `version` is one exact SemVer rather than an npm range or tag.
-fn is_exact_pin(version: &str) -> bool {
-    semver::Version::parse(version).is_ok()
-}
+#[path = "../version_pin.rs"]
+mod version_pin;
+use version_pin::is_exact_pin;
 
 #[test]
 fn exact_pin_accepts_major_minor_patch() {
@@ -79,8 +78,8 @@ fn exact_pin_rejects_an_empty_component() {
 }
 
 #[test]
-fn exact_pin_accepts_a_prerelease() {
-    assert!(is_exact_pin("0.145.0-beta.1"));
+fn exact_pin_rejects_a_prerelease() {
+    assert!(!is_exact_pin("0.145.0-beta.1"));
 }
 
 fn read_pin_manifest() -> serde_json::Value {
@@ -97,4 +96,9 @@ fn workspace_root() -> std::path::PathBuf {
         .nth(2)
         .expect("this crate sits two directories below the workspace root")
         .to_path_buf()
+}
+
+#[test]
+fn exact_pin_rejects_build_metadata() {
+    assert!(!is_exact_pin("0.145.0+build.1"));
 }
