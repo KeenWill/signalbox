@@ -222,9 +222,10 @@ stops local work and reports how far the request provably progressed, never
 claiming provider-side work stopped. In a subprocess adapter cancellation before
 spawn is proven unsent; after spawn the adapter interrupts the process group,
 holds the unreaped leader through a grace period, kills the group and reports
-boundary loss. After a stdin write failure a provider failure remains
-definitive, but a nominal completion becomes boundary loss because the adapter
-cannot prove the full frontier reached the CLI.
+boundary loss; dropping the execution after spawn kills the still-owned process
+group before the child handle drops. After a stdin write failure a provider
+failure remains definitive, but a nominal completion becomes boundary loss
+because the adapter cannot prove the full frontier reached the CLI.
 
 Settings are provider-enforced request controls unless an adapter records a
 capability-limited advisory exception; an adapter never presents prompt
@@ -304,7 +305,8 @@ provider-resolved model and every later assistant event must repeat that value.
 Usage is provider-stated only, never estimated. Each decoded usage field is
 independently optional: an omitted field stays unreported rather than becoming
 zero, a total-only report records nothing because no adapter distributes a
-total, and no cache-creation count is fabricated.
+total, and no cache-creation count is fabricated. A later usage report replaces
+the fields it carries and preserves the fields it omits.
 
 The shared framer bounds every line and each record's retained content, makes a
 framing failure terminal for the stream, and distinguishes a truncated final
