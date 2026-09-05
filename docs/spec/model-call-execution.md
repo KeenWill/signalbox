@@ -102,12 +102,11 @@ also carries an applied-interrupt proof, the turn instead terminalizes as
 reconciliation required, with the wait set, an interrupt-requires-reconciliation
 marker, and a reconciliation outbox record, and releases the slot.
 
-A `KnownFailed` call whose cause is one of the three availability causes (quota
-exhausted, rate limited, or overloaded) and whose pool configures `switch_now`
-for that cause may be followed by a successor call: a distinct call on a
-successor turn attempt against the next admitted member of the same pool.
-`AvailabilitySuccessorModelCallTurn` is the aggregate transition that authorizes
-it.
+A `KnownFailed` call with proven non-acceptance may be followed by a successor
+call when the bounded same-credential retry below admits it or when its pinned
+pool action is `switch_now`. The latter uses the next admitted member of the
+same pool. `AvailabilitySuccessorModelCallTurn` is the aggregate transition that
+authorizes either distinct call on a successor turn attempt.
 
 Usage evidence is a projection of terminal physical model calls that never
 materializes the transcript; `UsageReader` in `crates/application/src/usage.rs`
@@ -358,14 +357,15 @@ while a successor or wait keeps the turn active;
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) owns
 reclassification at terminal outcomes. A concurrently accepted stop is
 serialized by the session-scheduler lock, so one commit can never both
-terminalize the turn and authorize a successor. The successor pins the same
-resolved target and a different credential reference, so no call changes
-identity mid-flight. For each admitted availability cause the adapter must
-supply distinct typed evidence that the request was not accepted; classification
-as quota, rate limit, or overload alone is insufficient. Without the exact
-applied-interrupt proof a physical cancellation is an unstopped known failure,
-and a stop-requested attempt whose call ends known-failed still fails and cannot
-admit a successor, because the physical result has not proven cancellation.
+terminalize the turn and authorize a successor. Every successor pins the same
+resolved target; a same-credential retry retains the credential reference, and a
+rotation successor pins a different one, so no call changes identity mid-flight.
+For each admitted availability cause the adapter must supply distinct typed
+evidence that the request was not accepted; classification as quota, rate limit,
+or overload alone is insufficient. Without the exact applied-interrupt proof a
+physical cancellation is an unstopped known failure, and a stop-requested
+attempt whose call ends known-failed still fails and cannot admit a successor,
+because the physical result has not proven cancellation.
 
 `Completed` admits only text and tool-call parts: empty text and empty thinking
 blocks are dropped, while thinking with text and redacted thinking fail the
