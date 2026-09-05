@@ -9,7 +9,8 @@ The process protocol is the wire boundary between a local client process and
 request, message, event, and field shapes; that set is the whole wire surface
 the daemon implements. The daemon side of the boundary is
 `apps/signalboxd/src/process_runtime.rs`; the client side is the `signalbox`
-terminal binary in `apps/client`.
+terminal binary in `apps/client` and the native macOS client's
+`SignalboxProcessClient` in `clients/native`, which opens the same socket.
 
 The transport is one Unix domain stream socket. The daemon reads the socket path
 from `SIGNALBOX_SOCKET_PATH`, and the terminal client reads the same variable
@@ -161,11 +162,10 @@ mutation at a time and releases the inbound frame slot after acquiring that
 permit and before application handling.
 
 Every accepted non-review mutation, import transport request, or blob transport
-request produces exactly one receipt message or an error, except a chunked
-import or blob request that crosses its non-resetting deadline and is closed
-without one. A mutation whose commit outcome is unknown returns
-`commit_ambiguous`; an infrastructure failure known to precede the commit
-returns `unavailable`.
+request produces exactly one receipt message or an error, except an import or
+blob request that crosses its non-resetting deadline and is closed without one.
+A mutation whose commit outcome is unknown returns `commit_ambiguous`; an
+infrastructure failure known to precede the commit returns `unavailable`.
 
 The client, never the server, supplies a durable-command mutation's command
 identity, so an equal retransmission reaches the replay boundary in

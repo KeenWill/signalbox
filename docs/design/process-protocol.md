@@ -2,7 +2,8 @@
 
 This design is not built; it extends
 [process-protocol.md](../spec/process-protocol.md) with the wire surfaces the
-owner has committed and the daemon and terminal client do not implement.
+owner has committed and the daemon and terminal client do not implement, apart
+from the terminal client's existing `spawn_session` half.
 
 ## Goal
 
@@ -95,16 +96,18 @@ daemon-actionable set the runner wire carries, member for member, so every
 retained failure is serializable. The daemon bounds the detail and reproduces it
 without interpretation, following the `operation_failed` contract in
 [runner-protocol.md](../spec/runner-protocol.md). The detail is untrusted
-runner-authored text; the daemon does not inspect it for host paths, repository
-URLs, or credential facts. The event notifies a follower of each live runner
-transition above its snapshot cursor; the snapshot's runner projection carries
-the current state on reconnect. The event family is the extension point for
-later runner facts: a new fact adds a state and its members to this event kind,
-never a second kind. A snapshot's session summary carries the same runner
-object, with connection health present exactly for a pinned placement.
-`replace_lost_runner`, `abandon_lost_runner`, and `promote_pending_runner` are
-planned wire commands whose durable request, replay, and recovery semantics stay
-in [identity-and-commands.md](../spec/identity-and-commands.md) and
+runner-authored text, and the projection applies the diagnostic-evidence
+redaction in [process-protocol.md](../spec/process-protocol.md), removing host
+and credential paths, before exposing it. The event notifies a follower of each
+live runner transition above its snapshot cursor; the snapshot's runner
+projection carries the current state on reconnect. The event family is the
+extension point for later runner facts: a new fact adds a state and its members
+to this event kind, never a second kind. A snapshot's session summary carries
+the same runner object, with connection health present exactly for a pinned
+placement. `replace_lost_runner`, `abandon_lost_runner`, and
+`promote_pending_runner` are planned wire commands whose durable request,
+replay, and recovery semantics stay in
+[identity-and-commands.md](../spec/identity-and-commands.md) and
 [runner-protocol.md](../spec/runner-protocol.md).
 
 `spawn_session` carries a bounded `task` and the closed relationship object and
