@@ -23,7 +23,7 @@ use signalbox_file_media_runtime::{
 use zip::{CompressionMethod, ZipArchive};
 
 const PROVIDER_NAME: &str = "archives";
-const READER_REVISION: &str = "zip8-tar04-gz1-zstd013-v1";
+const READER_REVISION: &str = "zip8-tar04-gz1-zstd013-v2";
 const ENTRIES_VIEW: &str = "entries";
 const MALFORMED_REASON: &str = "malformed_archive";
 const ENTRY_COUNT_REASON: &str = "entry_count_limit";
@@ -721,10 +721,33 @@ fn structurally_valid_gzip(bytes: &[u8]) -> bool {
 }
 
 fn structurally_valid_zstd(bytes: &[u8]) -> bool {
+    if dictionary_zstd_frames(bytes) {
+        return true;
+    }
     let Ok(mut decoder) = zstd_decoder(bytes) else {
         return false;
     };
     reader_decode_status(&mut decoder) != DecodeStatus::Malformed
+}
+
+// The decoder cannot validate dictionary-dependent payloads without the dictionary.
+// zstd-safe owns frame boundaries and dictionary IDs for structural recursion detection.
+fn dictionary_zstd_frames(mut bytes: &[u8]) -> bool {
+    let mut has_dictionary = false;
+    while !bytes.is_empty() {
+        let Ok(length) = zstd::zstd_safe::find_frame_compressed_size(bytes) else {
+            return false;
+        };
+        if length == 0 {
+            return false;
+        }
+        has_dictionary |= zstd::zstd_safe::get_dict_id_from_frame(bytes).is_some();
+        let Some(remaining) = bytes.get(length..) else {
+            return false;
+        };
+        bytes = remaining;
+    }
+    has_dictionary
 }
 
 fn structurally_valid_tar(bytes: &[u8]) -> bool {
@@ -848,7 +871,18 @@ fn zstd_header(bytes: &[u8]) -> bool {
 }
 
 fn tar_header(bytes: &[u8]) -> bool {
-    empty_tar(bytes) || bytes.get(257..262) == Some(b"ustar")
+    if empty_tar(bytes) || bytes.get(257..262) == Some(b"ustar") {
+        return true;
+    }
+    let Some(block) = bytes.get(..512) else {
+        return false;
+    };
+    let mut header = tar::Header::from_byte_slice(block).clone();
+    let Ok(expected) = header.cksum() else {
+        return false;
+    };
+    header.set_cksum();
+    header.cksum().is_ok_and(|actual| actual == expected)
 }
 
 fn empty_tar(bytes: &[u8]) -> bool {

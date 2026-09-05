@@ -157,6 +157,21 @@ async fn generated_tar_validates_and_enumerates() -> Result<(), Box<dyn Error>> 
 }
 
 #[tokio::test]
+async fn v7_tar_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(valid_inventory(ArchiveFixture::v7_tar()?).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn disguised_dictionary_zstd_is_rejected_as_recursive() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::disguised_dictionary_zstd()?).await?,
+        "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn concatenated_tar_segments_are_all_inspected() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::concatenated_tar_with_hostile_second_segment()?)
