@@ -533,6 +533,40 @@ class ConvergencePredicateTests(unittest.TestCase):
 
         self.assertEqual(computed["reasons"], ["pull-request-is-draft"])
 
+    def test_changes_requested_review_blocks_convergence(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-review",
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "head_oid": "head-review",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-review"],
+            "review_decision": "CHANGES_REQUESTED",
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertEqual(computed["reasons"], ["review-changes-requested"])
+
+    def test_unsettled_check_inventory_blocks_convergence(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-checks",
+            "check_inventory_stable": False,
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "head_oid": "head-checks",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-checks"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertEqual(computed["reasons"], ["check-inventory-unsettled"])
+
     def test_open_escalation_marker_does_not_block_convergence(self) -> None:
         pull_request = {
             "base_commits_not_in_head": 0,
@@ -1463,15 +1497,91 @@ class GitHubGraphQLTests(unittest.TestCase):
         )
         pull_request = {
             "node_id": "node",
+            "base_ref": "main",
             "base_oid": "base",
+            "head_ref": "agent/work",
             "head_oid": "old-head",
+            "is_draft": False,
+            "body": "body",
+            "body_last_edited_at": None,
+            "mergeable": "MERGEABLE",
+            "review_decision": None,
         }
         response = {
-            "item0": {"baseRefOid": "base", "headRefOid": "new-head"}
+            "item0": {
+                "state": "OPEN",
+                "baseRefName": "main",
+                "baseRefOid": "base",
+                "headRefName": "agent/work",
+                "headRefOid": "new-head",
+                "isDraft": False,
+                "body": "body",
+                "lastEditedAt": None,
+                "mergeable": "MERGEABLE",
+                "reviewDecision": None,
+            }
         }
         with mock.patch.object(client, "execute", return_value=response):
             with self.assertRaisesRegex(RuntimeError, "changed after"):
                 client._verify_snapshot_oids([pull_request], raise_on_change=True)
+
+    def test_final_revalidation_detects_description_change(self) -> None:
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
+        pull_request = {
+            "node_id": "node",
+            "base_ref": "main",
+            "base_oid": "base",
+            "head_ref": "agent/work",
+            "head_oid": "head",
+            "is_draft": False,
+            "body": "old body",
+            "body_last_edited_at": "2026-09-05T00:00:00Z",
+            "mergeable": "MERGEABLE",
+            "review_decision": None,
+        }
+        response = {
+            "item0": {
+                "state": "OPEN",
+                "baseRefName": "main",
+                "baseRefOid": "base",
+                "headRefName": "agent/work",
+                "headRefOid": "head",
+                "isDraft": False,
+                "body": "new body",
+                "lastEditedAt": "2026-09-05T00:01:00Z",
+                "mergeable": "MERGEABLE",
+                "reviewDecision": None,
+            }
+        }
+
+        with mock.patch.object(client, "execute", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "changed after"):
+                client._verify_snapshot_oids(
+                    [pull_request], raise_on_change=True
+                )
+
+    def test_check_inventory_requires_same_nonempty_consecutive_set(self) -> None:
+        client = GitHubGraphQL(
+            "OWNER/REPOSITORY", 12, "chatgpt-codex-connector", 10_000
+        )
+        pull_request = {
+            "_prior_check_inventory": ["CheckRun:required"],
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required",
+                }
+            ],
+        }
+
+        client._finalize_check_inventory([pull_request])
+
+        self.assertEqual(
+            pull_request["check_inventory"], ["CheckRun:required"]
+        )
+        self.assertTrue(pull_request["check_inventory_stable"])
 
     def test_all_declined_review_completes_terminal_wave(self) -> None:
         client = GitHubGraphQL(
