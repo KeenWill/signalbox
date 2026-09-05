@@ -121,14 +121,14 @@ deployment identity. Deferred design; see
 ## Runner property evidence
 
 The declared, configured, verified, and effective evidence distinctions used
-when selecting and explaining a runner. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners).
+when selecting and explaining a runner. Planned design; see
+[runner protocol design](design/runner-protocol.md).
 
 ## Execution boundary
 
 The actual identity and isolation properties of a runner deployment, such as OS
-user, container, sandbox, and filesystem scope. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners).
+user, container, sandbox, and filesystem scope. Planned design; see
+[runner protocol design](design/runner-protocol.md).
 
 ## Tool policy
 
@@ -145,8 +145,8 @@ as presented to the user. Deferred design; see
 ## Executor placement
 
 The selected location for a physical tool attempt: a daemon-local executor or a
-runner-local executor on an identified runner. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners).
+runner-local executor on an identified runner. Planned design; see
+[runner protocol design](design/runner-protocol.md).
 
 ## Known failure
 
