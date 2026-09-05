@@ -95,9 +95,9 @@ transaction, and every explicit row lock recorded in the inventory.
 
 ## Acceptance criteria
 
-Replacement and abandonment each commit in one transaction with one
-runner-state-transition event per affected session, and the placement snapshot
-writer is unchanged.
+Replacement and abandonment each apply the placement move and one
+runner-state-transition event per affected session in one terminal transaction,
+and the placement snapshot writer is unchanged.
 
 After a runner is lost, no workspace release that runner held stays
 unacknowledged; a daemon transaction has retired it. Releases held by reachable
