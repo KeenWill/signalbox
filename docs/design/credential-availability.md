@@ -34,11 +34,12 @@ transcript entry, and is not terminal. Five wakes make it eligible to re-run
 admission: a reservation release by one of the bounded members the wait names;
 the wait's deadline; startup's re-evaluation of retained contended waits against
 current registrations; a durable member-availability update; an operator clear
-of an exclusion. A wake grants eligibility rather than release: only the
-transaction that acquires the freed reservation consumes the wait. The last two
-wakes matter because the wait also records excluded members, and one can become
-admissible while every bounded member stays saturated. A restart alone is not a
-wake.
+of an exclusion. A wake grants eligibility rather than release: the rerun of
+admission that selects a member and prepares its call in the same transaction
+consumes the wait. Where bounded members compete for one freed reservation, only
+the transaction that acquires it consumes the wait. The last two wakes matter
+because the wait also records excluded members, and one can become admissible
+while every bounded member stays saturated. A restart alone is not a wake.
 
 Exhausted-wait: nothing is admissible, nothing was skipped merely for a bound,
 and a wait is selected. The same wait phase with closed cause exhausted, and the
@@ -122,14 +123,14 @@ conflated: the admission that finds every candidate at its bound and inserts the
 wait; the reservation completion that frees capacity and makes the waiters it
 wakes eligible; the evidence rewrite by which a woken transaction that still
 finds every candidate at its bound replaces the wait's reservation identities
-and stays parked; and the release, the call preparation that acquires the freed
-reservation with the selected member's Prepared call on a fresh successor
-attempt and consumes the wait in that same transaction. An exhausted wait has
-four: the admission; the rewrite from a contended wait; the evidence rewrite by
-which a woken transaction that reruns admission and still selects an exhausted
-wait replaces the wait's exclusion evidence and deadline from current state and
-stays parked, so a past deadline never wakes it again; and the release. Lock
-order is [persistence protocol](../spec/persistence-protocol.md)'s.
+and stays parked; and the release, the call preparation that takes the selected
+member's reservation with its Prepared call on a fresh successor attempt and
+consumes the wait in that same transaction. An exhausted wait has four: the
+admission; the rewrite from a contended wait; the evidence rewrite by which a
+woken transaction that reruns admission and still selects an exhausted wait
+replaces the wait's exclusion evidence and deadline from current state and stays
+parked, so a past deadline never wakes it again; and the release. Lock order is
+[persistence protocol](../spec/persistence-protocol.md)'s.
 
 Wire: a parked turn projects an active transcript turn state that retains the
 turn and its slot, never a terminal one, and no rejection detail. Pre-call fail
@@ -165,8 +166,9 @@ spec page states.
   completed tool-bearing calls and runner-recovery waits already write; the wait
   row, not the disposition, identifies a credential-availability park, and no
   reader may infer one from the disposition alone.
-- The pre-call exhaustion header row keeps its present shape; member evidence
-  rows attach to it in a new table rather than replacing it.
+- The pre-call exhaustion header row gains the resolved pool-policy identity and
+  otherwise keeps its present shape; member evidence rows attach to it in a new
+  table rather than replacing it.
 - The pre-call producer's commit shape, a `TurnFailed` appended after the ended
   attempt's starting frontier in the terminalizing transaction, is reused
   unchanged by wait-transition fail (no call).
@@ -178,11 +180,11 @@ spec page states.
 
 ## Acceptance criteria
 
-- A `park` pool whose exhaustion snapshot holds a member whose every active
-  exclusion expires enters exhausted-wait, keeps its slot, appends no
-  `TurnFailed`, and becomes eligible to rerun admission at the computed
-  deadline; absent a competing state change that rerun admits that member and
-  reaches selected.
+- A `park` pool whose exhaustion snapshot skips no member only for its
+  concurrency bound and holds a member whose every active exclusion expires
+  enters exhausted-wait, keeps its slot, appends no `TurnFailed`, and becomes
+  eligible to rerun admission at the computed deadline; absent a competing state
+  change that rerun admits that member and reaches selected.
 - A `park` pool in which every member holds a chain exclusion of this turn,
   alone or beside an expiring exclusion, fails rather than parking: post-failure
   fail at a fresh admission, wait-transition fail (after call) at a release.
