@@ -4844,7 +4844,7 @@ async fn merged_pull_request_ends_the_commissioned_goal() -> Result<(), Box<dyn 
     assert_eq!(goal.current().state(), &GoalState::UserStopped);
     assert_eq!(cutoff_goal_count, 1);
     assert_eq!(release_count(&fixture).await?, 1);
-    // The composed stop is repository watch's own command (§6), and the
+    // The composed stop is repository watch's own command, and the
     // envelope says so for every projection that reads it.
     let issuer: (String, Option<String>) = sqlx::query_as(
         "SELECT issuer_kind, issuer_module FROM durable_command WHERE command_id = $1",
