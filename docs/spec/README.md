@@ -13,10 +13,11 @@ A normative claim about a subsystem lives in exactly one of three places;
 [architecture.md](../architecture.md) and [target-model.md](../target-model.md)
 are orientation documents outside that rule. `docs/spec/` states built behavior
 only. `docs/design/` holds one document per subsystem with committed but unbuilt
-design, written for the agent that will build it; the document is deleted when
-its feature lands. [open-questions.md](../open-questions.md) holds undecided
-items. Nothing on a spec page describes behavior the code lacks except the lines
-under Planned. Two normative surfaces sit outside those homes:
+design, written for the agent that will build it; landed material is removed as
+it lands, and the document is deleted when no planned capability remains.
+[open-questions.md](../open-questions.md) holds undecided items. Nothing on a
+spec page describes behavior the code lacks except the lines under Planned. Two
+normative surfaces sit outside those homes:
 [domain-spine.md](../domain-spine.md) mirrors the public API shapes of the
 domain and application crates, and [invariants.md](../invariants.md) indexes the
 INV-tagged tests.
@@ -59,18 +60,19 @@ design document. Nothing else about unbuilt design appears on the page.
 ## Prose standard
 
 Sentences are plain and declarative, about twenty words, one idea each. Pages
-carry no rationale narrative, no metaphor, no hedges, no provenance, no history,
-and no pull-request or branch names. A version number stays when it defines a
-wire or storage contract, and goes when it only records when behavior changed. A
-page says what the system does, not what a reader should do. Code identifiers
-appear only where the map names a core mechanism, a decision names the thing it
-decides, or a contract names its enforcer. A contract also names an identifier
-that is itself contract data, such as a field name, a discriminator, or a
-preimage. Prose carries no INV tags; invariants are tests, and a contract names
-its enforcer by source path, crate, type, or function. Pages have no Open edges
-section and no paragraph labelled as committed but unimplemented. Every link
-targets a page, never an anchor, unless the anchor is a heading on the linking
-page.
+carry no rationale narrative, no metaphor, no hedges, no editorial or
+decision-source provenance, no history, and no pull-request or branch names.
+Provenance a subsystem records is behavior and stays on the page. A version
+number stays when it defines a wire or storage contract, and goes when it only
+records when behavior changed. A page says what the system does, not what a
+reader should do. Code identifiers appear only where the map names a core
+mechanism, a decision names the thing it decides, or a contract names its
+enforcer. A contract also names an identifier that is itself contract data, such
+as a field name, a discriminator, or a preimage. Prose carries no INV tags;
+invariants are tests, and a contract names its enforcer by source path, crate,
+type, or function. Pages have no Open edges section and no paragraph labelled as
+committed but unimplemented. Every link targets a page, never an anchor, unless
+the anchor is a heading on the linking page.
 
 ## Pages
 
