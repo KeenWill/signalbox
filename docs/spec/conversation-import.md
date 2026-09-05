@@ -1,53 +1,55 @@
 # Conversation import
 
 Conversation import stores a transcript another program produced as an immutable
-record whose entry boundaries a session can later be created from.
+record, and a session can later be created from any of its entry boundaries.
 
 ## Map
 
 An imported conversation (`ImportedConversation`) is one snapshot of an external
 transcript. The daemon mints its identity; its content identity is a digest over
-the converter's format and the sequence of raw source records. Two sequences
-live under one header: the raw records, the nonempty physical JSONL records of
-the source preserved verbatim as content-addressed blobs, and the normalized
-entries derived from them. Each normalized entry references the raw record it
-came from, so every conversion decision is traceable to exact source bytes.
+the converter's format and the sequence of raw source records. One header holds
+two sequences: the raw records, the nonempty physical JSONL records of the
+source preserved verbatim as content-addressed blobs, and the normalized entries
+derived from them. Each normalized entry references the raw record it came from,
+so every conversion decision is traceable to exact source bytes.
 
 Every source field on an entry is recorded as attested with a value, attested
 absent, or not attested; a JSON null is attested absence and an omitted member
 is not attested. The normalized content vocabulary (`ImportedTranscriptContent`)
-is closed. It has one variant per recognized message content kind, one typed
-absence for a message without content, and generic variants that retain a
-source-defined record or block whose kind has no more specific variant.
+is closed: one variant per recognized message content kind, one typed absence
+for a message without content, and generic variants that retain a source-defined
+record or block whose kind has no more specific variant.
 
 Every normalized entry boundary is one immutable, addressable
 `ImportedTranscriptFrontier` naming its conversation and the inclusive final
-entry. Frontiers are what the rest of Signalbox consumes: creating a session
-that resumes or forks from one is described in
-[sessions-and-transcript](sessions-and-transcript.md), and how imported entries
-reach a model is described in [model-call-execution](model-call-execution.md).
+entry. Frontiers are what the rest of Signalbox consumes:
+[sessions-and-transcript](sessions-and-transcript.md) describes creating a
+session that resumes or forks from one, and
+[model-call-execution](model-call-execution.md) describes how imported entries
+reach a model.
 
 `ImportedConversationConverter` is the application-facing seam that turns source
 bytes into a checked aggregate. A converter consumes the bytes, one
 caller-supplied conversation identity, and a total lazy callback that supplies
-entry identities, and it declares a closed `ImportedConversationFormat` carrying
+entry identities; it declares a closed `ImportedConversationFormat` carrying
 both the source family and the Signalbox converter version. Two converters
 exist. `ClaudeCodeJsonlConverter` reads Claude Code session JSONL and produces
 converter version 2; version 1 remains the interpretation for stored version-1
 snapshots. `CodexRolloutJsonlConverter` reads Codex rollout JSONL and produces
-converter version 1. `ImportConversationService` runs a converter and calls the
-append-only Postgres import store once, after complete conversion. The store
-keeps raw bytes in the blob store under their content hash
-([blob-storage](blob-storage.md)) and keeps the header, raw-record occurrences,
-and normalized entries in relational tables. Each header also carries a display
-title derived once from the preserved records, so the unified conversation
-listing in [process-protocol](process-protocol.md) can show imported rows by
-name.
+converter version 1.
+
+`ImportConversationService` runs a converter and calls the append-only Postgres
+import store once, after complete conversion. The store keeps raw bytes in the
+blob store under their content hash ([blob-storage](blob-storage.md)) and keeps
+the header, raw-record occurrences, and normalized entries in relational tables.
+Each header also carries a display title derived once from the preserved
+records, so the unified conversation listing in
+[process-protocol](process-protocol.md) can show imported rows by name.
 
 Three surfaces reach the store. The user terminal imports one named file or
-every candidate file under a directory; a source that fits one frame travels as
+every candidate file under a directory; a source that fits one frame is sent as
 a single request, and a larger one is assembled on the daemon through a chunked
-begin, append, and commit sequence. The one operator knob,
+begin, append, and commit sequence. The one operator setting,
 `conversation_import.max_source_bytes`, bounds the assembled source and defaults
 to 256 MiB. An inspection read lists the normalized entries of one import with
 their positions, so a user can choose the position a session continues from. A
@@ -74,7 +76,7 @@ Neither the importer nor a converter derives an identity, lineage evidence, or a
 missing value from a filename, source path, neighboring record, another field,
 wall clock, or import-time context.
 
-The verified blob is the raw-byte authority; PostgreSQL stores only the blob
+The verified blob is the raw-byte authority; Postgres stores only the blob
 digest and occurrence relationships, never a second `bytea` copy.
 
 Imported structured values use a source-neutral JSON algebra rather than
@@ -139,9 +141,10 @@ Errors, logs, and evidence contain classes, counts, and identifiers the daemon
 generated. They never contain source bytes, file paths, provider payloads, SQL,
 or user content.
 
-An imported conversation is durable record, never execution. Ingestion performs
-no session, scheduler, slot, turn, attempt, model-call, tool, durable-command,
-or outbox transition, and it neither creates nor mutates a session.
+An imported conversation is a durable record, never execution. Ingestion
+performs no session, scheduler, slot, turn, attempt, model-call, tool,
+durable-command, or outbox transition, and it neither creates nor mutates a
+session.
 
 Every nonempty physical JSONL record is preserved verbatim before normalization.
 A non-message record produces a typed source event rather than being dropped or

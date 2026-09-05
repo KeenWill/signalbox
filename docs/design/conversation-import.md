@@ -5,10 +5,10 @@ This document describes work that is not built; it extends
 
 ## Goal
 
-Two capabilities. Imported entries can carry the usage a source attested, priced
-at read time and never stored as money. A converter can consume a blob-backed
-source directly from the blob substrate as a stream, so a source need not be
-assembled in memory before conversion.
+Imported entries can carry the usage a source attested, priced at read time and
+never stored as money. A converter can consume a blob-backed source directly
+from the blob substrate as a stream, so a source need not be assembled in memory
+before conversion.
 
 ## Shape
 
