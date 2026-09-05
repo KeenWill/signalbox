@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use bstr::ByteSlice;
+
 /// Longest admitted remote name in bytes.
 ///
 /// The push executor's `ConfiguredGitRemote` bounds the same name, so both
@@ -28,9 +30,6 @@ pub const fn max_git_remote_name_bytes() -> usize {
 pub const fn max_git_remote_url_bytes() -> usize {
     MAX_GIT_REMOTE_URL_BYTES
 }
-
-/// Reference component suffix Git refuses.
-const REFUSED_NAME_SUFFIX: &str = ".lock";
 
 /// The only admitted destination scheme.
 const REQUIRED_URL_SCHEME: &str = "https://";
@@ -90,78 +89,6 @@ fn validate_text(value: &str, maximum: usize) -> Result<(), GitRemoteTextError> 
     Ok(())
 }
 
-/// Returns whether one URL authority names a host an HTTPS transport could
-/// dispatch to.
-///
-/// The admitted shape mirrors the SQL predicate byte for byte: a host of
-/// unreserved name bytes, then an optional numeric port. A scheme-only
-/// destination such as `https://?` carries an empty authority and is refused
-/// here.
-///
-/// A `userinfo@` prefix is refused. A minted destination is recorded in an
-/// append-only column, so `https://user:token@example.test/repo` would durably
-/// publish that token to every database reader and every backup with no later
-/// act able to remove it. The credential policy for a push is undecided, and
-/// admitting userinfo here would settle it by accident; the grammar can be
-/// widened once credentials have an approved representation, whereas a stored
-/// secret cannot be recalled.
-///
-/// Accepted cost: a bracketed IP-literal host is refused outright rather than
-/// parsed. Admitting one would need a real IPv6 parser on this side and an
-/// equivalent one in the SQL predicate, and a POSIX regular expression cannot
-/// express that grammar — so the two sides would agree only by accident. A
-/// destination is expected to name a host, and this bound is stated rather
-/// than approximated.
-fn authority_names_a_host(authority: &str) -> bool {
-    if authority.contains('@') {
-        return false;
-    }
-    let (host, port) = authority
-        .split_once(':')
-        .map_or((authority, None), |(host, port)| (host, Some(port)));
-    !host.is_empty()
-        && host
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'~'))
-        && port.is_none_or(port_is_numeric)
-}
-
-/// Longest admitted port, in digits.
-///
-/// The bound exists so this rule and the SQL predicate admit the same strings.
-/// A zero-padded port such as `000001` parses to a legal `u16` while the
-/// predicate's five-digit grammar refuses it, which would let an operator mint
-/// a destination the durable `CHECK` then rejects.
-const MAX_PORT_DIGITS: usize = 5;
-
-/// Returns whether one port is a run of digits inside the TCP range.
-///
-/// A port above 65535 names no TCP endpoint, so a destination carrying one
-/// could never be dispatched however well-formed its host is. The parse bounds
-/// the value; the digit test keeps a leading sign out, which `u16::from_str`
-/// would otherwise accept.
-///
-/// Port zero is refused for the same reason as an out-of-range port: it is
-/// reserved and never identifies a listening HTTPS service, so an explicit
-/// `:0` names a destination no push could reach. An omitted port stays legal.
-fn port_is_numeric(port: &str) -> bool {
-    !port.is_empty()
-        && port.len() <= MAX_PORT_DIGITS
-        && port.bytes().all(|byte| byte.is_ascii_digit())
-        && port.parse::<u16>().is_ok_and(|value| value >= 1)
-}
-
-/// Returns whether what follows the authority is a bare path.
-///
-/// A query or fragment is refused for the same reason as `userinfo@`. A
-/// destination such as `https://example.test/repository?access_token=secret`
-/// writes a credential into an append-only column that no later act can clear,
-/// and the push credential policy is undecided. Neither component carries
-/// meaning for a Git remote, so refusing both costs a destination nothing.
-fn is_bare_path(path: &str) -> bool {
-    !path.contains(['?', '#'])
-}
-
 /// One stable operator-chosen remote name.
 ///
 /// The admitted shape is deliberately narrower than Git's own reference
@@ -178,20 +105,14 @@ fn is_bare_path(path: &str) -> bool {
 pub struct GitRemoteName(String);
 
 impl GitRemoteName {
-    /// Admits one bounded alphanumeric, dot, dash, or underscore name that is
-    /// also a legal Git reference component.
+    /// Admits one bounded registry token that is also a legal Git reference component.
     pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
         validate_text(&value, MAX_GIT_REMOTE_NAME_BYTES)?;
         if !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        {
-            return Err(GitRemoteTextError::Malformed);
-        }
-        if value.starts_with('.')
-            || value.ends_with('.')
-            || value.contains("..")
-            || value.ends_with(REFUSED_NAME_SUFFIX)
+            || value.contains('/')
+            || gix_validate::reference::name_partial(value.as_bytes().as_bstr()).is_err()
         {
             return Err(GitRemoteTextError::Malformed);
         }
@@ -227,19 +148,32 @@ impl GitRemoteUrl {
     /// so both sides judge the same bytes.
     pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
         validate_text(&value, MAX_GIT_REMOTE_URL_BYTES)?;
-        let Some(remainder) = value.strip_prefix(REQUIRED_URL_SCHEME) else {
+        if !value.starts_with(REQUIRED_URL_SCHEME) {
             return Err(GitRemoteTextError::UnsupportedScheme);
-        };
+        }
         if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
             return Err(GitRemoteTextError::Malformed);
         }
-        let (authority, path) = remainder
-            .find(['/', '?', '#'])
-            .map_or((remainder, ""), |offset| remainder.split_at(offset));
-        if !authority_names_a_host(authority) {
-            return Err(GitRemoteTextError::Malformed);
-        }
-        if !is_bare_path(path) {
+        let parsed = url::Url::parse(&value).map_err(|_| GitRemoteTextError::Malformed)?;
+        let authority = value[REQUIRED_URL_SCHEME.len()..]
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default();
+        if parsed.scheme() != "https"
+            || parsed.host().is_none()
+            || authority.is_empty()
+            || authority.contains('@')
+            || authority.ends_with(':')
+            || !authority.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'~' | b':')
+            })
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || parsed.port() == Some(0)
+            || explicit_port_is_too_long(&value)
+        {
             return Err(GitRemoteTextError::Malformed);
         }
         Ok(Self(value))
@@ -254,6 +188,14 @@ impl GitRemoteUrl {
     pub fn into_string(self) -> String {
         self.0
     }
+}
+
+fn explicit_port_is_too_long(value: &str) -> bool {
+    value[REQUIRED_URL_SCHEME.len()..]
+        .split(['/', '?', '#'])
+        .next()
+        .and_then(|authority| authority.rsplit_once(':'))
+        .is_some_and(|(_, port)| port.len() > 5)
 }
 
 impl fmt::Debug for GitRemoteUrl {
@@ -419,7 +361,8 @@ mod tests {
     fn assert_destination_is_refused(candidate: &str) {
         assert_eq!(
             GitRemoteUrl::try_new(candidate.to_owned()),
-            Err(GitRemoteTextError::Malformed)
+            Err(GitRemoteTextError::Malformed),
+            "candidate: {candidate}"
         );
     }
 
@@ -489,6 +432,45 @@ mod tests {
     fn a_destination_naming_a_host_is_admitted() {
         assert_destination_is_admitted("https://example.test:8443/namespace/project.git");
         assert_destination_is_admitted("https://example.test");
+        assert_destination_is_admitted("https://1");
+    }
+
+    #[test]
+    fn invalid_numeric_hosts_are_refused() {
+        assert_destination_is_refused("https://1.2.3.999/repo");
+        assert_destination_is_refused("https://4294967296/repo");
+        assert_destination_is_refused("https://1.2.65536/repo");
+        assert_destination_is_refused("https://1.16777216/repo");
+        assert_destination_is_refused("https://1.2.3.4.5/repo");
+        assert_destination_is_refused("https://256.1/repo");
+        assert_destination_is_refused("https://09/repo");
+        assert_destination_is_refused("https://1.09/repo");
+        assert_destination_is_refused("https://0x100000000/repo");
+        assert_destination_is_refused("https://example.1/repo");
+        assert_destination_is_refused("https://1..2/repo");
+        assert_destination_is_refused("https://1.2.3.999./repo");
+    }
+
+    #[test]
+    fn valid_numeric_hosts_are_admitted() {
+        assert_destination_is_admitted("https://1/repo");
+        assert_destination_is_admitted("https://4294967295/repo");
+        assert_destination_is_admitted("https://1.2.65535/repo");
+        assert_destination_is_admitted("https://1.16777215/repo");
+        assert_destination_is_admitted("https://127.0.0.1/repo");
+        assert_destination_is_admitted("https://127.1./repo");
+        assert_destination_is_admitted("https://0x7f.1/repo");
+        assert_destination_is_admitted("https://0177.1/repo");
+        assert_destination_is_admitted("https://0x/repo");
+        assert_destination_is_admitted("https://0xFFFFFFFF/repo");
+        assert_destination_is_admitted("https://1.0x/repo");
+        assert_destination_is_admitted("https://example.0xg/repo");
+    }
+
+    #[test]
+    fn a_destination_requiring_url_normalization_is_refused() {
+        assert_destination_is_refused("https://example%2etest/repository.git");
+        assert_destination_is_refused(r"https://example.test\repository.git");
     }
 
     /// A query string is the other common credential channel a URL offers, and
