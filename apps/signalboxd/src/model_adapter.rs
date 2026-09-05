@@ -626,7 +626,7 @@ service_tiers = ["priority"]
     }
 
     #[tokio::test]
-    async fn exact_input_count_routes_only_anthropic_targets() {
+    async fn provider_input_estimate_routes_only_anthropic_targets() {
         let invocations = Arc::new(AtomicUsize::new(0));
         let runtime = ConfiguredModelRuntime {
             anthropic: Some(Arc::new(RecordingInputCounter {

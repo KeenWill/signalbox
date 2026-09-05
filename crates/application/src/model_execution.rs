@@ -1384,23 +1384,23 @@ pub enum ModelCallCapabilityPreparation<Capability> {
     AttachmentFailure(AttachmentPreparationFailure),
 }
 
-/// Outcome of one exact provider-native prospective input count.
+/// Outcome of one provider-native prospective input-token estimate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelCallInputTokenCount {
-    /// Exact provider-reported count for the rendered operation.
+    /// Provider-reported estimate for the rendered operation.
     Counted(u64),
     /// Authority or caller cancellation won before a count completed.
     Cancelled,
-    /// The selected adapter has no exact provider-native count operation.
+    /// No trustworthy provider-native estimate is available.
     Unavailable,
 }
 
-/// Provider adapter boundary for exact prospective input counting.
+/// Provider adapter boundary for prospective input-token estimation.
 pub trait ModelCallInputTokenCounter {
     /// Sanitized adapter-specific classified failure.
     type Error: ClassifyOperatorFailure;
 
-    /// Counts the same provider-native operation shape later prepared for send.
+    /// Estimates the same provider-native operation shape later prepared for send.
     fn count_input_tokens<Cancellation>(
         &self,
         operation: PreparedModelOperation,

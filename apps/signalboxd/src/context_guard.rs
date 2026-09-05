@@ -385,7 +385,7 @@ impl ReportedUsageCompaction {
 /// Exact-guard failure before activation or during the resulting execution.
 #[derive(Debug)]
 pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
-    /// Reported-usage preflight for an adapter without exact counting failed.
+    /// Reported-usage preflight for an adapter without provider estimation failed.
     ReportedUsageCompaction(ReportedUsageCompactionError),
     /// Read-only activation preview or exact guarded commit failed.
     Activation {
@@ -408,7 +408,7 @@ pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
         /// Typed frontier-rendering failure.
         source: signalbox_application::ModelFrontierRenderingError,
     },
-    /// Provider-native exact counting failed.
+    /// Provider-native token estimation failed.
     Count {
         /// Selected turn.
         turn: TurnId,
@@ -590,7 +590,7 @@ impl<Counter, Catalog, Execution> ContextGuardedTurnPass<Counter, Catalog, Execu
         }
     }
 
-    /// Keeps the reported-usage preflight for adapters without exact counting.
+    /// Keeps the reported-usage preflight for adapters without provider estimation.
     pub fn with_reported_usage_compaction(mut self, compaction: ReportedUsageCompaction) -> Self {
         self.reported_usage_compaction = Some(compaction);
         self
