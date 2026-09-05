@@ -6,18 +6,20 @@ when the work lands.
 
 ## Goal
 
-Ten capabilities extend the session and transcript subsystem. Instruction-aware
-defaults replacement keeps a session's model selection compatible with its
-admitted workspace instructions. Program creation causes let registered programs
-create sessions under the [program substrate](../spec/program-substrate.md). The
-browser follow route is used only by the open workspace. The timeline reports
-referenced blob facts from a durable relation. Search producers publish
-attachment and derived-text classes through the projection-writer port. A
-relocation boundary entry records every session move in the transcript.
-Delegation result sealing consumes a durable reconstituted terminal result. A
-spawned child defaults into its parent's directory. A static eligible-failure
-producer terminalizes a turn at eligibility. Further semantic entry variants
-cover refusal, reconciliation, mismatch, accepted risk, and approval events.
+Eleven capabilities extend the session and transcript subsystem.
+Instruction-aware defaults replacement keeps a session's model selection
+compatible with its admitted workspace instructions. Program creation causes let
+registered programs create sessions under the
+[program substrate](../spec/program-substrate.md). The browser follow route is
+used only by the open workspace. The timeline reports referenced blob facts from
+a durable relation. Search producers publish attachment and derived-text classes
+through the projection-writer port. A relocation boundary entry records every
+session move in the transcript. Delegation result sealing consumes a durable
+reconstituted terminal result. A spawned child defaults into its parent's
+directory. A static eligible-failure producer terminalizes a turn at
+eligibility, and a wait-transition failure producer terminalizes a turn whose
+predecessor model call already issued. Further semantic entry variants cover
+refusal, reconciliation, mismatch, accepted risk, and approval events.
 
 ## Shape
 
@@ -94,6 +96,16 @@ failed marker together and emits the turn-failed update event atomically, under
 the same marker-uniqueness and turn-state agreement rules as the three present
 producers.
 
+Wait-transition failure. A turn whose frozen credential pool is exhausted when
+its durable wait releases, and whose predecessor model call already issued, is
+terminalized by one transaction that consumes the wait, opens and ends a fresh
+call-free attempt, appends the failed marker, and emits the turn-failed update
+event atomically. That marker names the predecessor call as the source of its
+cause; the earlier model-call known-failure closure committed without
+terminalizing and cannot serve a transition happening now. The release and
+exhaustion conditions belong to
+[credential-availability](../spec/credential-availability.md).
+
 Further entry variants. Refusal, reconciliation, mismatch, accepted-risk, and
 approval-event entries join the closed payload set as reference-bearing facts,
 each naming the durable record that owns its content.
@@ -113,9 +125,9 @@ placement-frontier pointer, or an entry for a queued turn; the semantic payload
 set stays closed until a migration widens it. No present surface exposes
 terminal-result reconstitution, and no new delegation path may seal a result
 from raw identities. No present delegation or placement surface derives the
-parent-directory default. The static eligible-failure path has no producer, and
-every present failed-turn producer keeps emitting the turn-failed event
-atomically with the marker.
+parent-directory default. The static eligible-failure and wait-transition
+failure paths have no producer, and every present failed-turn producer keeps
+emitting the turn-failed event atomically with the marker.
 
 ## Acceptance
 
@@ -138,5 +150,8 @@ reads one sealed projection and has no raw-identity path. A spawned child
 without an explicit placement sits in its parent's directory and copies no other
 placement axis. A turn that fails at eligibility carries one origin entry and
 one failed marker committed together with a turn-failed event and no attempt
-row. Every new entry variant references its owning record and decodes
-fail-closed under the existing corruption rule.
+row. A turn released from a wait with an exhausted pool and an already-issued
+predecessor call carries one failed marker committed with a fresh call-free
+ended attempt, a turn-failed event, and no terminal model call. Every new entry
+variant references its owning record and decodes fail-closed under the existing
+corruption rule.

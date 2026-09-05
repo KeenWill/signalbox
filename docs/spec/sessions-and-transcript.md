@@ -172,9 +172,9 @@ session transcript.
 There is no generic text, role, metadata, or other payload; every entry kind is
 a closed semantic fact. Entries reference accepted input and never copy its
 content, because two authoritative copies could diverge and would need a
-precedence rule. An accepted input becomes transcript history at eligibility,
-not at acceptance, because acceptance has not fixed lineage or the snapshot that
-consumes the entry and eligibility fixes both atomically.
+precedence rule. An accepted origin input becomes transcript history at
+eligibility, not at acceptance, because acceptance has not fixed lineage or the
+snapshot that consumes the entry and eligibility fixes both atomically.
 
 A later ordinary turn cannot opt back into an uncompacted projection; continuing
 from a boundary before the summary creates a different session whose ancestry
@@ -246,11 +246,12 @@ and the unused candidate is discarded.
 The committing transaction of either family inserts the session row, its
 lifecycle satellite carrying the start gate, ownership, and finish condition,
 its scheduler registration, defaults version one, the current-defaults pointer,
-the typed command record, the registry claim, any initial placement record, and
-the session-created outbox event together. A visible session never names a
-placement its creation command did not carry, and a carried placement is never
-dropped between the claim and the session. Every table in this set is
-append-only except the current-defaults pointer.
+the typed command record, the registry claim, placement version one and its
+current-placement pointer, and the session-created outbox event together. A
+visible session never names a placement its creation command did not carry, and
+a carried placement is never dropped between the claim and the session. Every
+table in this set is append-only except the current-defaults and
+current-placement pointers.
 
 The daemon resolves the addressed imported aggregate to its canonical sealed
 frontier before constructing the command; the frontier names its own imported
@@ -445,13 +446,15 @@ terminal-stop boundary, as [tool-loop](tool-loop.md) describes.
 
 Entry and turn-state agreement is a durable schema invariant checked in both
 directions at every commit by the deferred constraint triggers around
-`assert_turn_lifecycle_final_state`. A failed, completed, or cancelled turn's
-terminal frontier extends its latest call or starting frontier by the exact
-terminal tool-result suffix when one exists and then by exactly its own marker.
-A refused turn's terminal frontier is a distinct equal-content copy of its
-latest call frontier; a reconciliation-required turn over a model call carries
-the same distinct copy, and one over a tool attempt extends the producing call's
-frontier by its terminal tool-result suffix.
+`assert_turn_lifecycle_final_state`. A failed or cancelled turn's terminal
+frontier extends its latest call or starting frontier by the exact terminal
+tool-result suffix when one exists and then by exactly its own marker. A
+completed turn's terminal frontier extends its call frontier by that call's
+ordered assistant entries and then the completion marker. A refused turn's
+terminal frontier is a distinct equal-content copy of its latest call frontier;
+a reconciliation-required turn over a model call carries the same distinct copy,
+and one over a tool attempt extends the producing call's frontier by its
+terminal tool-result suffix.
 
 The failed-turn marker has three producers: the model-call known-failure
 closure, startup recovery, and pre-call credential-pool exhaustion, which
@@ -565,5 +568,7 @@ may return after the parent has stopped or cancelled.
   ([design](../design/sessions-and-transcript.md)).
 - Static eligible-failure producer terminalizing a turn at eligibility without
   an attempt ([design](../design/sessions-and-transcript.md)).
+- Wait-transition failed-turn producer for a turn whose predecessor model call
+  already issued ([design](../design/sessions-and-transcript.md)).
 - Semantic entry variants for refusal, reconciliation, mismatch, accepted risk,
   and approval events ([design](../design/sessions-and-transcript.md)).
