@@ -122,14 +122,14 @@ conflated: the admission that finds every candidate at its bound and inserts the
 wait; the reservation completion that frees capacity and makes the waiters it
 wakes eligible; the evidence rewrite by which a woken transaction that still
 finds every candidate at its bound replaces the wait's reservation identities
-and stays parked; and the release, the preparation that acquires the freed
-reservation with a fresh Prepared successor attempt and consumes the wait in
-that same transaction. An exhausted wait has four: the admission; the rewrite
-from a contended wait; the evidence rewrite by which a woken transaction that
-reruns admission and still selects an exhausted wait replaces the wait's
-exclusion evidence and deadline from current state and stays parked, so a past
-deadline never wakes it again; and the release. Lock order is
-[persistence protocol](../spec/persistence-protocol.md)'s.
+and stays parked; and the release, the call preparation that acquires the freed
+reservation with the selected member's Prepared call on a fresh successor
+attempt and consumes the wait in that same transaction. An exhausted wait has
+four: the admission; the rewrite from a contended wait; the evidence rewrite by
+which a woken transaction that reruns admission and still selects an exhausted
+wait replaces the wait's exclusion evidence and deadline from current state and
+stays parked, so a past deadline never wakes it again; and the release. Lock
+order is [persistence protocol](../spec/persistence-protocol.md)'s.
 
 Wire: a parked turn projects an active transcript turn state that retains the
 turn and its slot, never a terminal one, and no rejection detail. Pre-call fail
