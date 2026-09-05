@@ -57,11 +57,12 @@ callers only from the Codex CLI adapter.
 
 `SseFraming` is the provider-agnostic incremental parser both HTTP adapters
 build on, from transport byte chunks to event-stream records.
-`StructuredOutputContract` carries a name, description and JSON Schema that
-every adapter realizes as one tool proposal under a reserved name: OpenAI forces
-it through tool choice, Anthropic asks for it by instruction, and Codex renders
-it into the prompt with an outer response schema. One provider-independent
-decoder enforces exactly one proposal.
+`StructuredOutputContract` carries a name, description and JSON Schema,
+generated from a Rust type or supplied explicitly, that every adapter realizes
+as one tool proposal under a reserved name: OpenAI forces it through tool
+choice, Anthropic asks for it by instruction, and Codex renders it into the
+prompt with an outer response schema. One provider-independent decoder enforces
+exactly one proposal.
 
 The Anthropic and OpenAI adapters share one shape: at most one POST per
 operation, hand-written wire types with no provider SDK dependency, and typed
