@@ -234,9 +234,9 @@ output is still retrievable; missing or unverifiable output triggers
 reproduction without a new derivation record. Publication to the
 generated-artifact route and catalog registration precede the derivation append.
 
-Derivation runs the current daemon executable through the configured
-filesystem-confined supervisor with no network and fixed deadline and
-concurrency bounds, and the digest of that executable is the implementation
+The thumbnail and preview producer runs the current daemon executable through
+the configured filesystem-confined supervisor with no network and fixed deadline
+and concurrency bounds, and the digest of that executable is its implementation
 provenance. This worker and every content-interpreting reader of
 [file-and-media](file-and-media.md) run inside strong process isolation and
 treat input validation as defense in depth, because parser hardening is never
