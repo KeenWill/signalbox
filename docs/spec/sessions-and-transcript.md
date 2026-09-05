@@ -51,16 +51,17 @@ The transcript is a sequence of semantic entries grouped into frontiers. A
 `SemanticTranscriptEntry` is one immutable semantic-history fact with its own
 identity, a source session, and a closed payload. Payloads reference rather than
 copy: an origin or steering entry names the accepted input, a tool-use entry
-names the completed producing call, and a tool-result entry names the attempt
-that owns the evidence. An assistant-text entry carries the exact assistant text
-and names the call that produced it. A context summary carries the summary text
-its dedicated call produced and the inclusive range it stands for. An imported
-entry carries one normalized imported content value with its speaker
-attestation. A model-identity entry marks where executed history crossed to a
-different frozen model selection. Delegation entries record a delegated task, a
-delegation message, and a delivered result. A completed, cancelled, or failed
-turn ends with exactly one terminal marker; refused, reconciliation-required,
-and retired turns have none.
+names the completed producing call, a tool-execution-result entry names the
+attempt that owns the evidence, and a denial or turn-end closure entry names the
+request. An assistant-text entry carries the exact assistant text and names the
+call that produced it. A context summary carries the summary text its dedicated
+call produced and the inclusive range it stands for. An imported entry carries
+one normalized imported content value with its speaker attestation. A
+model-identity entry marks where executed history crossed to a different frozen
+model selection. Delegation entries record a delegated task, a delegation
+message, and a delivered result. A completed, cancelled, or failed turn ends
+with exactly one terminal marker; refused, reconciliation-required, and retired
+turns have none.
 
 A `ContextCompaction` has five correlated immutable facts: its identity and
 optional predecessor, the source frontier, a dedicated model call, the
@@ -469,10 +470,10 @@ a reconciliation-required turn over a model call carries the same distinct copy,
 and one over a tool attempt extends the producing call's frontier by its
 terminal tool-result suffix.
 
-The failed-turn marker has three producers: the model-call known-failure
-closure, startup recovery, and pre-call credential-pool exhaustion, which
-[credential-availability](credential-availability.md) owns. Each producer emits
-the turn-failed update event atomically with the marker.
+The failed-turn marker has four producers: the model-call known-failure closure,
+startup recovery, headless approval escalation, and pre-call credential-pool
+exhaustion, which [credential-availability](credential-availability.md) owns.
+Each producer emits the turn-failed update event atomically with the marker.
 
 Summary production is its own model call and is not assistant output attributed
 to an accepted-input turn. A compact-session command record begins pending with

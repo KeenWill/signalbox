@@ -92,7 +92,7 @@ complete placement. The session-placement surface implements it.
 Static eligible failure. A turn that fails at eligibility, before any attempt
 exists, is terminalized by one transaction that commits its origin entry and its
 failed marker together and emits the turn-failed update event atomically, under
-the same marker-uniqueness and turn-state agreement rules as the three present
+the same marker-uniqueness and turn-state agreement rules as the four present
 producers.
 
 Wait-transition failure. A turn whose frozen credential pool is exhausted when
@@ -145,12 +145,11 @@ addresses only after their source committed. Every successor placement
 installation appends exactly one relocation entry, the next model call reads a
 frontier containing it, each fail-closed case is rejected, and the entry carries
 no runner, workspace, credential, or tool content. Delegation result sealing
-reads one sealed projection and has no raw-identity path. A spawned child
-without an explicit placement sits in its parent's directory and copies no other
-placement axis. A turn that fails at eligibility carries one origin entry and
-one failed marker committed together with a turn-failed event and no attempt
-row. A turn released from a wait with an exhausted pool and an already-issued
-predecessor call carries one failed marker committed with a fresh call-free
-ended attempt, a turn-failed event, and no terminal model call. Every new entry
-variant references its owning record and decodes fail-closed under the existing
-corruption rule.
+reads one sealed projection and has no raw-identity path. A spawned child sits
+in its parent's directory and copies no other placement axis. A turn that fails
+at eligibility carries one origin entry and one failed marker committed together
+with a turn-failed event and no attempt row. A turn released from a wait with an
+exhausted pool and an already-issued predecessor call carries one failed marker
+committed with a fresh call-free ended attempt, a turn-failed event, and no
+terminal model call. Every new entry variant references its owning record and
+decodes fail-closed under the existing corruption rule.
