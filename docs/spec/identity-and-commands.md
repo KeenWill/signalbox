@@ -66,8 +66,10 @@ nothing measures the effect.
 
 When the number of identities a transition needs is known only under the
 repository lock, orchestration passes a generator closure into the transaction
-port. Why: the domain transition receives a typed identity, the domain stays
-generation-free and deterministic, and no inventory read precedes the lock.
+port, except the repository-watch dispatch obligation, whose identity the
+recording statement mints. Why: the domain transition receives a typed identity,
+the domain stays generation-free and deterministic, and no inventory read
+precedes the lock.
 
 Each command's comparison payload and result live in typed relational records,
 so they stay reviewable and constraint-checked; there is no universal JSONB or
@@ -151,8 +153,10 @@ A claimed registry row whose typed record is missing, duplicated, of a
 mismatched kind, or undecodable is storage corruption, never an unseen command.
 Why: treating it as unseen would let one identifier acquire a second meaning.
 
-Each stored field is absent before its introducing storage version, so an older
-reader rejects a newer record instead of discarding either decision.
+A storage version earlier than a field's introduction cannot carry the semantic
+choice that field records: such a record reconstructs with the field's defined
+default value, and any other stored value is corruption. An older reader rejects
+a newer record instead of discarding a decision it cannot represent.
 
 Each single-transaction application service calls its atomic transaction port
 exactly once, returns no applied result before that transaction commits, and
