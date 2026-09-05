@@ -667,7 +667,7 @@ nothing here; ambiguity is carried by the recovery wait above. Preflight
 failures that never reach admission — unknown names and argument-decode failures
 — are likewise silent, being model-authored rather than deployment facts.
 Telemetry field rules are owned by
-[identity-and-commands](identity-and-commands.md#durable-command-telemetry-correlation).
+[identity-and-commands](identity-and-commands.md#contracts).
 
 An interrupt against a tool recovery wait does not reinterpret or erase the
 ambiguous attempt. It materializes exactly one reference-only result per request
@@ -1430,7 +1430,7 @@ column are owned by
 Defaults-bearing command records at kind-scoped storage version 1 reconstitute
 with `DangerousToolAutoApproval::Disabled`. The current kind-scoped versions and
 their compatibility gates are owned by
-[identity and commands](identity-and-commands.md#durable-command-records) and
+[identity and commands](identity-and-commands.md) and
 [persistence protocol](persistence-protocol.md#relational-representation).
 Registry inspection validates the supported version set for the selected kind
 rather than applying one global version constant.
