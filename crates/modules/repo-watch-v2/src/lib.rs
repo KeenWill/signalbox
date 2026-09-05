@@ -1219,6 +1219,34 @@ impl RepoWatchStore {
         .bind(first.rule_id().as_str())
         .execute(&mut *transaction)
         .await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                hashtextextended('dispatch:' || $1::text, 0))",
+        )
+        .bind(first.dispatch().into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        let conflicting_dispatch: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM dispatch_ledger WHERE dispatch_ref = $1
+                  AND (repository IS DISTINCT FROM $2
+                       OR rule_id IS DISTINCT FROM $3
+                       OR rule_revision IS DISTINCT FROM $4
+                       OR event_id IS DISTINCT FROM $5
+                       OR trigger_sequence IS DISTINCT FROM $6))",
+        )
+        .bind(first.dispatch().into_uuid())
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .bind(Decimal::from(first.rule_revision().get()))
+        .bind(first.event_id().into_uuid())
+        .bind(first.trigger_sequence().map(Decimal::from))
+        .fetch_one(&mut *transaction)
+        .await?;
+        if conflicting_dispatch {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::ConflictingReuse);
+        }
         let retained_actions: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM dispatch_ledger
               WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3

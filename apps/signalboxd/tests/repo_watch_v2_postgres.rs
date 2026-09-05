@@ -362,7 +362,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     };
     let mut grouped_factory = FixtureSessionFactory { next_command: 42 };
     let grouped = plan_repository_event(
-        &[rule.clone(), second_rule],
+        &[rule.clone(), second_rule.clone()],
         &event,
         &mut grouped_ids,
         &mut grouped_factory,
@@ -380,6 +380,29 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store.record_commands(plans, observed_at).await?,
         DispatchAdmission::Inserted
+    );
+    assert_eq!(
+        store
+            .record_rule(&repository, &second_rule, observed_at)
+            .await?,
+        RuleAdmission::Inserted
+    );
+    let mut colliding_ids = FixedDispatchIds {
+        value: 16,
+        calls: 0,
+    };
+    let mut colliding_factory = FixtureSessionFactory { next_command: 80 };
+    let colliding_batches = plan_repository_event(
+        std::slice::from_ref(&second_rule),
+        &event,
+        &mut colliding_ids,
+        &mut colliding_factory,
+    )?;
+    assert_eq!(
+        store
+            .record_commands(&colliding_batches[0], observed_at)
+            .await?,
+        DispatchAdmission::ConflictingReuse
     );
     let mut replay_ids = FixedDispatchIds {
         value: 30,
