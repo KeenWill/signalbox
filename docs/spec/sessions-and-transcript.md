@@ -383,14 +383,16 @@ nonterminal preparation error, not a recorded rejection.
 
 No metadata string is trimmed, normalized, or case-folded. Admission rejects an
 empty title, tag, or attribute key, U+0000 in any field, and duplicate tags or
-attribute keys, and accepts an empty attribute value. The daemon applies
-deployment-owned tag and attribute count policies before command handling;
-domain reconstitution has no count policy. A successful point read returns the
-root, tags, and attributes from one repeatable-read snapshot. Absence of
-metadata rows is the canonical initial projection: no title, tags, or
-attributes, not archived, and no last-writer stamp. A missing session returns
-the typed absent outcome behind the process boundary's not-found response; only
-an existing session without a metadata root returns the initial projection.
+attribute keys, and accepts an empty attribute value. Tags compare as an
+unordered set and attributes as a map, so equal metadata supplied in a different
+input order replays as equal. The daemon applies deployment-owned tag and
+attribute count policies before command handling; domain reconstitution has no
+count policy. A successful point read returns the root, tags, and attributes
+from one repeatable-read snapshot. Absence of metadata rows is the canonical
+initial projection: no title, tags, or attributes, not archived, and no
+last-writer stamp. A missing session returns the typed absent outcome behind the
+process boundary's not-found response; only an existing session without a
+metadata root returns the initial projection.
 
 `SubmitInput` and `ReplaceSessionMetadata` are the conversational command
 payloads that carry an actor. `SubmitInput` and the process-facing metadata
@@ -519,10 +521,11 @@ terminal-stop boundary, as [tool-loop](tool-loop.md) describes.
 
 Entry and turn-state agreement is a durable schema invariant checked in both
 directions at every commit by the deferred constraint triggers around
-`assert_turn_lifecycle_final_state`. A failed or cancelled turn's terminal
-frontier extends its latest call or starting frontier by the exact terminal
-tool-result suffix when one exists and then by exactly its own marker. A
-completed turn's terminal frontier extends its call frontier by that call's
+`assert_turn_lifecycle_final_state`. While a turn is queued, no attempt, origin,
+failure, or completion fact attaches to it. A failed or cancelled turn's
+terminal frontier extends its latest call or starting frontier by the exact
+terminal tool-result suffix when one exists and then by exactly its own marker.
+A completed turn's terminal frontier extends its call frontier by that call's
 ordered assistant entries and then the completion marker. A refused turn's
 terminal frontier is a distinct equal-content copy of its latest call frontier;
 a reconciliation-required turn over a model call carries the same distinct copy,
