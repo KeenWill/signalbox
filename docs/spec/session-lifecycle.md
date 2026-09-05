@@ -148,9 +148,10 @@ actor: a module principal classifies as that module; otherwise the domain actor
 classifies.
 
 Message injection (operator text, coordinator guidance, steering) is legal in
-every non-terminal state regardless of ownership. An injection is never silently
-lost: every accepted injection settles with a durable injection_settled receipt,
-and pending injections never block terminalization.
+every non-terminal state regardless of ownership, except while a terminal
+outcome is pending: a session in that window rejects injection. An injection is
+never silently lost: every accepted injection settles with a durable
+injection_settled receipt, and pending injections never block terminalization.
 
 On session closure, remaining queued turns retire with cause session_closed and
 an open goal generation closes as session_closed; a user-stopped generation
