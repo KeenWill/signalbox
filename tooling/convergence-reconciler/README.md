@@ -78,7 +78,9 @@ successful.
 
 The configured `non_gating_check_patterns` are case-insensitive shell globs
 matched against check-run and status-context names. Matching results are still
-included in the computed state passed to operator commands.
+included in the computed state passed to operator commands. The repository
+configuration excludes report-only and informational coverage results while
+leaving provider compatibility smoke aggregates gating.
 
 `CONFLICTING` and `UNKNOWN` mergeability both block convergence. Draft pull
 requests also remain unconverged.
@@ -96,9 +98,11 @@ at the head and, unless newly added, at the base. Additional
 thread or check pages use dynamically aliased GraphQL fields, up to 20
 continuations in one request. The fetched review-thread count must equal the
 connection's stable `totalCount` and must not exceed the configured census
-limit; otherwise the tick fails closed. Review-thread comments, top-level
-comments, and
-reviews are also paginated. REST compare requests conservatively classify
+limit; otherwise the tick fails closed. Review-thread
+identity and resolution state and the complete check census are traversed a
+second time and must remain identical before the final OID check. Review-thread
+comments, top-level comments, and reviews are also paginated. REST compare
+requests conservatively classify
 post-review rename-only, source-comment-only, and proven clean base-forward
 changes; a base forward must be a single merge of the reviewed head and exact
 current base whose complete patch matches the base delta. REST pull-request-file
@@ -187,7 +191,6 @@ avoid quoting ambiguity:
   "reviewer_login": "chatgpt-codex-connector",
   "non_gating_check_patterns": [
     "*(report only)",
-    "*smoke*",
     "codecov/project",
     "codecov/patch",
     "Comment the coverage report"
@@ -210,7 +213,7 @@ The equivalent environment-oriented shape is useful under a service manager:
 ```console
 export CONVERGENCE_RECONCILER_REPOSITORY=OWNER/REPOSITORY
 export CONVERGENCE_RECONCILER_REVIEWER_LOGIN=chatgpt-codex-connector
-export CONVERGENCE_RECONCILER_NON_GATING_CHECK_PATTERNS='["*(report only)","*smoke*","codecov/project","codecov/patch","Comment the coverage report"]'
+export CONVERGENCE_RECONCILER_NON_GATING_CHECK_PATTERNS='["*(report only)","codecov/project","codecov/patch","Comment the coverage report"]'
 export CONVERGENCE_RECONCILER_REVIEW_THREAD_LIMIT=10000
 export CONVERGENCE_RECONCILER_ACTIVE_COMMAND='session-control is-active'
 export CONVERGENCE_RECONCILER_DISPATCH_COMMAND='session-control dispatch'

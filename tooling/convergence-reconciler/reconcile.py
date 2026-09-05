@@ -347,6 +347,7 @@ class GitHubGraphQL:
         self._load_planning_only_status(pull_requests)
         self._load_base_ancestry(pull_requests)
         self._revalidate_checks(pull_requests)
+        self._revalidate_review_threads(pull_requests)
         self._verify_snapshot_oids(pull_requests)
         return pull_requests, tracked
 
@@ -604,6 +605,11 @@ query($id: ID!, $after: String!) {
             ) is not None and all(
                 check_is_green(check) for check in gating_checks
             )
+            policy_unchanged = record.get(
+                "authenticated_review_check_policy"
+            ) == sorted(
+                {pattern.casefold() for pattern in self.non_gating_check_patterns}
+            )
             # A rerun of gating checks on the same, unchanged head advances
             # those checks' completion timestamps, so the fresh recomputation
             # in `_finalize_review_evidence` can stop finding a qualifying
@@ -611,16 +617,22 @@ query($id: ID!, $after: String!) {
             # meaningful changed. Reconfirm the persisted review directly
             # against the live (non-dismissed) review set and the checks'
             # current state rather than losing the evidence outright.
-            review_still_valid = isinstance(persisted_review_id, str) and (
-                record.get("authenticated_review_body") == pull_request["body"]
-            ) and (
-                pull_request["observed_codex_reviews"].get(persisted_review_id)
-                == persisted_head
-                or (
-                    persisted_head == pull_request["head_oid"]
-                    and live_codex_review_oids.get(persisted_review_id)
+            review_still_valid = (
+                isinstance(persisted_review_id, str)
+                and policy_unchanged
+                and record.get("authenticated_review_body")
+                == pull_request["body"]
+                and (
+                    pull_request["observed_codex_reviews"].get(
+                        persisted_review_id
+                    )
                     == persisted_head
-                    and checks_currently_green
+                    or (
+                        persisted_head == pull_request["head_oid"]
+                        and live_codex_review_oids.get(persisted_review_id)
+                        == persisted_head
+                        and checks_currently_green
+                    )
                 )
             )
             if (
@@ -953,43 +965,131 @@ query($id: ID!) {
 }
 """
         for pull_request in pull_requests:
-            data = self.execute(query, {"id": pull_request["node_id"]})
-            node = data.get("node")
-            if node is None:
-                raise RuntimeError("pull request became unavailable during check revalidation")
+            first = self._read_check_census(pull_request, query)
+            second = self._read_check_census(pull_request, query)
+            if first != second:
+                pull_request["checked_head_oid"] = None
+                pull_request["base_commits_not_in_head"] = None
+                continue
+            base_oid, head_oid, checked_head_oid, rollup_state, checks = first
             if (
-                node["baseRefOid"] != pull_request["base_oid"]
-                or node["headRefOid"] != pull_request["head_oid"]
+                base_oid != pull_request["base_oid"]
+                or head_oid != pull_request["head_oid"]
             ):
                 pull_request["checked_head_oid"] = None
                 pull_request["base_commits_not_in_head"] = None
                 continue
-            commit_nodes = node["commits"]["nodes"]
-            commit = commit_nodes[0]["commit"] if commit_nodes else None
-            rollup = commit.get("statusCheckRollup") if commit else None
-            contexts = (
-                rollup["contexts"]
-                if rollup
-                else {"nodes": [], "pageInfo": empty_page_info()}
-            )
-            pull_request["checked_head_oid"] = commit.get("oid") if commit else None
-            pull_request["check_rollup_state"] = (
-                rollup.get("state") if rollup else None
-            )
-            pull_request["checks"] = list(contexts["nodes"])
-            page = contexts["pageInfo"]
-            while page["hasNextPage"]:
-                task = PaginationTask("checks", pull_request, page["endCursor"])
-                page_query, variables = pagination_query([task])
-                page_data = self.execute(page_query, variables)
-                page_node = page_data.get("item0")
-                if page_node is None:
+            pull_request["checked_head_oid"] = checked_head_oid
+            pull_request["check_rollup_state"] = rollup_state
+            pull_request["checks"] = checks
+
+    def _read_check_census(
+        self, pull_request: dict[str, Any], query: str
+    ) -> tuple[str, str, str | None, str | None, list[dict[str, Any]]]:
+        data = self.execute(query, {"id": pull_request["node_id"]})
+        node = data.get("node")
+        if node is None:
+            raise RuntimeError("pull request became unavailable during check revalidation")
+        commit_nodes = node["commits"]["nodes"]
+        commit = commit_nodes[0]["commit"] if commit_nodes else None
+        rollup = commit.get("statusCheckRollup") if commit else None
+        contexts = (
+            rollup["contexts"]
+            if rollup
+            else {"nodes": [], "pageInfo": empty_page_info()}
+        )
+        checks = list(contexts["nodes"])
+        page = contexts["pageInfo"]
+        while page["hasNextPage"]:
+            page_target = {
+                "node_id": pull_request["node_id"],
+                "checks": checks,
+            }
+            task = PaginationTask("checks", page_target, page["endCursor"])
+            page_query, variables = pagination_query([task])
+            page_data = self.execute(page_query, variables)
+            page_node = page_data.get("item0")
+            if page_node is None:
+                raise RuntimeError(
+                    "pull request became unavailable during check revalidation"
+                )
+            next_page = pagination_page(page_node, "checks")
+            checks.extend(next_page["nodes"])
+            page = next_page["pageInfo"]
+        return (
+            node["baseRefOid"],
+            node["headRefOid"],
+            commit.get("oid") if commit else None,
+            rollup.get("state") if rollup else None,
+            checks,
+        )
+
+    def _revalidate_review_threads(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        query = """
+query($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on PullRequest {
+      baseRefOid
+      headRefOid
+      reviewThreads(first: 100, after: $after) {
+        totalCount
+        nodes { id isResolved }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+        for pull_request in pull_requests:
+            expected = [
+                (thread.get("id"), thread["isResolved"])
+                for thread in pull_request["review_threads"]
+            ]
+            observed: list[tuple[str, bool]] = []
+            after: str | None = None
+            total_count: int | None = None
+            while True:
+                data = self.execute(
+                    query, {"id": pull_request["node_id"], "after": after}
+                )
+                node = data.get("node")
+                if node is None:
                     raise RuntimeError(
-                        "pull request became unavailable during check revalidation"
+                        "pull request became unavailable during thread revalidation"
                     )
-                next_page = pagination_page(page_node, "checks")
-                pull_request["checks"].extend(next_page["nodes"])
-                page = next_page["pageInfo"]
+                if (
+                    node["baseRefOid"] != pull_request["base_oid"]
+                    or node["headRefOid"] != pull_request["head_oid"]
+                ):
+                    pull_request["checked_head_oid"] = None
+                    pull_request["base_commits_not_in_head"] = None
+                    break
+                page = node["reviewThreads"]
+                page_total = page["totalCount"]
+                if not isinstance(page_total, int) or isinstance(page_total, bool):
+                    raise RuntimeError("review thread totalCount is not an integer")
+                if total_count is None:
+                    total_count = page_total
+                elif page_total != total_count:
+                    raise RuntimeError(
+                        "review thread totalCount changed during revalidation"
+                    )
+                observed.extend(
+                    (thread["id"], thread["isResolved"])
+                    for thread in page["nodes"]
+                )
+                if not page["pageInfo"]["hasNextPage"]:
+                    if len(observed) != total_count:
+                        raise RuntimeError(
+                            "review thread revalidation returned an incomplete census"
+                        )
+                    if observed != expected:
+                        pull_request["checked_head_oid"] = None
+                        pull_request["base_commits_not_in_head"] = None
+                    break
+                after = page["pageInfo"]["endCursor"]
 
     def _verify_snapshot_oids(
         self,
@@ -1943,6 +2043,12 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
                 or not all(isinstance(item, str) for item in value)
             ):
                 raise ValueError(f"unsupported or malformed state file: {path}")
+        check_policy = record.get("authenticated_review_check_policy")
+        if check_policy is not None and (
+            not isinstance(check_policy, list)
+            or not all(isinstance(pattern, str) for pattern in check_policy)
+        ):
+            raise ValueError(f"unsupported or malformed state file: {path}")
         review_wave_base_oid = record.get("review_wave_base_oid")
         if review_wave_base_oid is not None and not isinstance(
             review_wave_base_oid, str
@@ -2089,6 +2195,9 @@ def process_pull_request(
     if pull_request["head_oid"] in pull_request["quiet_review_head_oids"]:
         record["authenticated_review_head"] = pull_request["head_oid"]
         record["authenticated_review_body"] = pull_request.get("body", "")
+        record["authenticated_review_check_policy"] = sorted(
+            {pattern.casefold() for pattern in config.non_gating_check_patterns}
+        )
         review_id = pull_request.get("authenticated_review_ids", {}).get(
             pull_request["head_oid"]
         )
