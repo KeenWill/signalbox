@@ -4,7 +4,7 @@ Session lifecycle gives every session one durable state, an ownership bit,
 deadlines, and a closed set of terminal outcomes; its goal is that every owned
 session reaches an outcome or a human.
 
-## Map
+## Overview
 
 Every session is in exactly one of eight lifecycle states: created, dispatched,
 active, waiting, recovering, blocked, parked, and terminal. The state is a
@@ -61,7 +61,7 @@ the transactional outbox that [persistence protocol](persistence-protocol.md)
 owns; the other outbox kinds are core-internal. The compaction funnel and the
 five lifecycle metrics are read-only views over durable columns.
 
-## Decisions
+## Design decisions
 
 The admission deadline is the one deadline whose expiry terminalizes: it retires
 the session, because before first activity nothing live is guarded and no human
@@ -90,7 +90,7 @@ from the operator queue.
 The lifecycle metrics are read-only views; targets and the decision to start
 substrate work are owner decisions made outside the daemon.
 
-## Contracts
+## Boundary contracts
 
 Order comes from commit-ordered sequences, never from comparing wall-clock
 times. A liveness check that cannot query some kind of evidence skips the turn
@@ -162,7 +162,7 @@ applied, and failed are each stamped.
 
 The five lifecycle metrics are defined on durable columns, never on proxies.
 
-## Not built
+## Planned
 
 - Failure parking of owned sessions: a structural failure, an unknown failure,
   or an exhausted retry budget on a live owned session parks it with the typed

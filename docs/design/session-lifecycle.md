@@ -15,7 +15,7 @@ the session, a repo-watch achievement is verified against its gate, a sticky
 stop holds off redispatch, and a closure removes the worktree and container the
 session held.
 
-## Shape
+## Design
 
 A structural failure, an unknown failure, or an exhausted retry budget on a live
 owned session moves the session to parked with the matching park cause
@@ -77,7 +77,7 @@ redispatch reads the sticky flag on a stopped predecessor and dispatches nothing
 for that source until the source is updated. A closure whose outcome releases
 resources removes the session's worktree and container.
 
-## Constraints on present code
+## Compatibility constraints
 
 No path terminalizes an owned session on a structural failure, an unknown
 failure, or an exhausted retry budget; a path that today ends the run as a
@@ -96,7 +96,7 @@ of the four.
 
 No new dispatch path splits the payload from the creation command.
 
-## Acceptance
+## Acceptance criteria
 
 A structural failure, an unknown failure, or an exhausted retry budget on a live
 owned session leaves the session parked with the matching cause and standing
