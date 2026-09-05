@@ -380,7 +380,7 @@ expected terminal variant:
   forced-tool decode.
 - Provider error: each `ProviderErrorKind` the adapter maps, including
   `CredentialRejected` via both the status route and the native-token route
-  (precedence rules: [Provider adapters](../spec/runtime-substrate.md)); refusal
+  (precedence rules: [Terminal evidence](../spec/runtime-substrate.md)); refusal
   without complete-upload proof, asserting the spec-owned downgrade rather than
   surfaced `Refused` evidence.
 - Proven unsent: pre-send cancellation proving zero requests; connect refused
