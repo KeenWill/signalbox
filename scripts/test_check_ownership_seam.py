@@ -14,7 +14,12 @@ CHECKER = Path(__file__).resolve().parent / "check_ownership_seam.py"
 
 class OwnershipSeamCheckerTests(unittest.TestCase):
     def run_checker(
-        self, manifest: str, source: str, core: str = "", module_sql: str | None = None
+        self,
+        manifest: str,
+        source: str,
+        core: str = "",
+        module_sql: str | None = None,
+        core_sql: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -29,6 +34,10 @@ class OwnershipSeamCheckerTests(unittest.TestCase):
             (root / "crates" / "persistence" / "src" / "lib.rs").write_text(
                 core, encoding="utf-8"
             )
+            if core_sql is not None:
+                (root / "crates" / "persistence" / "src" / "query.sql").write_text(
+                    core_sql, encoding="utf-8"
+                )
             return subprocess.run(
                 [sys.executable, str(CHECKER)],
                 cwd=root,
@@ -67,6 +76,16 @@ signalbox-persistence = { path = "../../persistence" }
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden Signalbox dependency", result.stderr)
 
+    def test_renamed_signalbox_dependency_is_rejected(self) -> None:
+        result = self.run_checker(
+            """[dependencies]
+core_store = { package = "signalbox-persistence", git = "https://example.invalid/repo" }
+""",
+            "",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Signalbox dependency", result.stderr)
+
     def test_direct_import_and_public_join_are_rejected(self) -> None:
         result = self.run_checker(
             "[dependencies]\n",
@@ -90,6 +109,16 @@ signalbox-persistence = { path = "../../persistence" }
             "[dependencies]\n",
             "",
             'const SQL: &str = "SELECT * FROM mod_repo_watch.frontier";\n',
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("core SQL names a module relation", result.stderr)
+
+    def test_external_core_sql_module_join_is_rejected(self) -> None:
+        result = self.run_checker(
+            "[dependencies]\n",
+            "",
+            'const QUERY: &str = include_str!("query.sql");\n',
+            core_sql="SELECT * FROM mod_repo_watch.frontier;\n",
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("core SQL names a module relation", result.stderr)

@@ -53,6 +53,7 @@ is linked, never restated.
 - [Configuration and credentials](configuration-and-credentials.md)
 - [Credential availability](credential-availability.md)
 - [Process protocol](process-protocol.md)
+- [Ownership seam](ownership-seam.md)
 - [Repository watch and event dispatch](repo-watch.md)
 - [Workspace instructions and skills](workspace-instructions.md)
 - [Program substrate](program-substrate.md)
