@@ -114,10 +114,10 @@ generation fence is unsupported.
 
 ## Contracts
 
-Errors, logs, and diagnostic evidence contain classes, counts, and identifiers
-the daemon generated. They never contain source bytes, file paths, provider
-payloads, SQL, or user content. Retained source content, such as an imported
-transcript entry, is not diagnostic evidence.
+Errors, logs, and diagnostic evidence contain classes, counts, and canonical
+identifiers. They never contain source bytes, file paths, provider payloads,
+SQL, or user content. Retained source content, such as an imported transcript
+entry, is not diagnostic evidence.
 
 The transport is local-machine and single-user; the protocol has no
 authentication, no authorization exchange, and no remote transport.
@@ -204,16 +204,20 @@ A metadata request that violates shape, cardinality, or byte bounds is a
 malformed frame, refused before application construction; `invalid_request` is
 reserved for the fail-closed mapping case.
 
-Every database-backed read is one repeatable-read, read-only transaction over
-the authoritative tables, with no materialized view, cache, or analytical
-artifact, and it takes no lock any writer waits on; this holds for a transcript
-snapshot, the conversation list, and the review-orchestration projection alike.
-A read answered from deployment configuration opens no transaction. A transcript
-snapshot observes the outbox cursor, the session's semantic frontier, and every
-turn in acceptance order together. The conversation list orders by conversation
-identity value, a native session before an imported conversation of equal value.
-Every reported duration is clamped nonnegative and sampled against the database
-transaction timestamp, not a client clock.
+Every database-backed read is served from the authoritative tables, with no
+materialized view, cache, or analytical artifact, and takes no lock any writer
+waits on. A read whose answer must be coherent across statements is one
+repeatable-read, read-only transaction; a transcript snapshot, the conversation
+list, and the review-orchestration projection each answer from one such
+snapshot. A single-statement read, such as session defaults or a blob catalog
+entry, runs directly on a pooled connection, and the review-findings listing
+takes its run and its findings from separate transactions. A read answered from
+deployment configuration opens no transaction. A transcript snapshot observes
+the outbox cursor, the session's semantic frontier, and every turn in acceptance
+order together. The conversation list orders by conversation identity value, a
+native session before an imported conversation of equal value. Every reported
+duration is clamped nonnegative and sampled against the database transaction
+timestamp, not a client clock.
 
 Every read that holds a pooled connection across more than one statement takes
 one snapshot-reader admission; the single-statement defaults read takes none.
