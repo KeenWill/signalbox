@@ -411,15 +411,18 @@ snapshot atomically without a reader observing two documents.
   POST per attempt, never replayed after an ambiguous exchange, quarantined on
   tuple mismatch or rejected refresh, and its scratch home never holds a refresh
   token.
-- `max_concurrent_invocations`, `round_robin`, `least_used`, and headroom
-  reserves are admitted only together with the capacity observation that gives
-  them effect.
+- `max_concurrent_invocations` is admitted together with the reservation that
+  gives it effect, `round_robin` selects through its durable cursor, and
+  `least_used` and headroom reserves are admitted only once an adapter reports
+  remaining capacity.
 - An exclusion with a reported reset clears when it passes, an operator clear or
-  zero-cost probe ends an indefinite generation, and repeated triggers of one
+  zero-cost probe ends an indefinite policy-origin generation while a
+  delivery-origin one ends only by re-provisioning, and repeated triggers of one
   origin coalesce onto one generation.
 - Session credential history carries the complete pool policy, each call pins
-  its policy id, and every existing entry migrates to a singleton policy that
-  resolves the same credential it did before.
+  its policy id, every existing entry whose profile is still registered migrates
+  to a singleton policy that resolves the same credential it did before, and an
+  entry naming no current registration blocks scheduling.
 - An explicit credential update appends one event and advances the head by one.
 - A runner injects a granted credential only under the configured environment
   name inside the sandbox, the Git helper answers only the matching canonical

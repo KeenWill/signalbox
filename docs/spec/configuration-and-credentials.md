@@ -17,13 +17,16 @@ uses it.
 
 The environment supplies a fixed set of deployment values: the database URL, the
 catalog paths, the socket paths, the paths of the two integration credential
-files, and the optional browser bind address. `DATABASE_URL` is the whole
-database channel, and a deployment carries every connection parameter in the
-URL. Model-provider credential paths come from `file` profiles in the catalog;
-`ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An absent
-`SIGNALBOX_WEB_BIND` binds a loopback default, and an explicit socket must be a
-loopback address or configuration fails. The browser HTTP listener shares that
-bind with the static web build and the `/api` routes. The DTOs and schemas under
+files, and the optional browser bind address and static-asset root.
+`DATABASE_URL` is the whole database channel, and a deployment carries every
+connection parameter in the URL. Model-provider credential paths come from
+`file` profiles in the catalog; `ANTHROPIC_API_KEY_FILE` and
+`OPENAI_API_KEY_FILE` are not read. An absent `SIGNALBOX_WEB_BIND` binds a
+loopback default, and an explicit socket must be a loopback address or
+configuration fails. The daemon's browser listener serves the `/api` routes on
+that bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names a production web build, the
+static files under that root; an empty root fails configuration and an absent
+one answers every other path 404. The DTOs and schemas under
 `crates/web-contract` are the authority for that surface, and the checked-in
 JavaScript decoders and TypeScript declarations are generated from them.
 
@@ -334,9 +337,10 @@ appears in a log, an error, or a durable record. The daemon redacts the exact
 credential value from provider text before it truncates that text. A credential
 for one repository never authorizes a request to another.
 
-Errors, logs, and evidence contain classes, counts, and identifiers the daemon
-generated. They never contain source bytes, file paths, provider payloads, SQL,
-or user content.
+Errors, logs, and diagnostic evidence contain classes, counts, and identifiers
+the daemon generated. They never contain source bytes, file paths, provider
+payloads, SQL, or user content. Retained source content, such as an imported
+transcript entry, is not diagnostic evidence.
 
 `HOME` locates the default PostgreSQL password file and must be a nonempty
 absolute path when a template uses a `$HOME/` prompt reference. The
@@ -409,11 +413,11 @@ URLs, or values. The daemon, client, database, transcript, workspace manifest,
 and runner wire never receive a runner credential path or value.
 
 A catalog parse error is a typed sanitized value and no file content appears in
-its text. The typed rejection is `UnknownField` or `InvalidField`, and neither
-carries the offending field name, so `config/signalboxd.example.toml` is the
-operator's guide. A profile name is opaque to code: no build-provided constant
-is compared against it. Every catalog is read once at startup; a change takes
-effect at the next restart and never rewrites evidence already recorded.
+its text. An unknown or invalid field is rejected without its name, so
+`config/signalboxd.example.toml` is the operator's guide. A profile name is
+opaque to code: no build-provided constant is compared against it. Every catalog
+is read once at startup; a change takes effect at the next restart and never
+rewrites evidence already recorded.
 
 Every serving record states its family, and the adapter mapping rather than the
 selectable record pointing at it supplies its adapter and credential pool. Input
