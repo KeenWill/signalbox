@@ -75,9 +75,9 @@ incompatible shape requires a new protocol version.
 
 Runner placement facts are a paged `read_runner_status` read beside the built
 `runner_state_transition` event. The read carries `page_size` 1 through 100 and
-an exclusive keyset `after`, and returns `runner_status` only for a null
-`after`, then `runner_operation_failure` and `runner_workspace_leak` messages
-followed by
+an exclusive keyset `after`, and opens with `runner_status_start`, then returns
+`runner_status` only for a null `after`, then `runner_operation_failure` and
+`runner_workspace_leak` messages followed by
 `runner_status_end { runner_count, failure_count, leak_count, next_after }`.
 `after` and `next_after` are null or one tagged cursor object naming the last
 row the page emitted. The projection carries a pending provisioning-only
@@ -182,7 +182,8 @@ mutation names, and a cleared record is retained inactive rather than deleted.
 
 Every request and message above decodes under version 1 with unknown fields
 rejected, and each surface ships with its daemon handler and the terminal-client
-consumer it lacks.
+consumer it lacks; a follower-visible addition also ships the native client's
+decoder and projection updates.
 
 The exclusion listing and the clear mutation agree on what is clearable for
 every exclusion origin, and a delivery-origin OAuth-refresh quarantine is

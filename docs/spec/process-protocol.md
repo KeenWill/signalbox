@@ -348,19 +348,20 @@ advance the follow connection's observed cursor; only events consumed from the
 subscribed connection do.
 
 The terminal client reads submitted input from standard input, never from
-process arguments; only the delegation message and spawn task flags accept their
-text on the command line or from a file. It sends no local source path over the
-wire; a recorded review finding carries its repository-relative path. When no
-command identity is given, it generates a fresh one and prints it to standard
-error before any socket I/O; every client-generated or server-discovered
-recovery value is printed before the commit it belongs to can become ambiguous,
-each recovery set is printed all or none, and the client never substitutes a new
-command identity for an ambiguous attempt. Its ambiguity diagnostic never echoes
-standard-input content and never synthesizes a shell command. It renders every
-C0 control code point, DEL, and every C1 code point in process-derived text as a
-visible escape, preserving a line feed only in flowing text and escaping it in a
-single-line field such as a provider delta or a metadata title or tag. A single
-explicit raw-output option is the only opt-in to unescaped text.
+process arguments; only the delegation message, spawn task, and goal text flags
+accept their text on the command line or from a file. It sends no local source
+path over the wire; a recorded review finding carries its repository-relative
+path. When no command identity is given, it generates a fresh one and prints it
+to standard error before any socket I/O; every client-generated or
+server-discovered recovery value is printed before the commit it belongs to can
+become ambiguous, each recovery set is printed all or none, and the client never
+substitutes a new command identity for an ambiguous attempt. Its ambiguity
+diagnostic never echoes standard-input content and never synthesizes a shell
+command. It renders every C0 control code point, DEL, and every C1 code point in
+process-derived text as a visible escape, preserving a line feed only in flowing
+text and escaping it in a single-line field such as a provider delta or a
+metadata title or tag. A single explicit raw-output option is the only opt-in to
+unescaped text.
 
 ## Planned
 
@@ -369,7 +370,7 @@ explicit raw-output option is the only opt-in to unescaped text.
 - Configuration reload request: [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).
-- Runner placement on the wire and the runner status read with its failure
+- Runner creation, status, and recovery requests, and the status read's failure
   evidence: [design](../design/process-protocol.md).
 - `spawn_session` creation of a delegated child:
   [design](../design/process-protocol.md).
