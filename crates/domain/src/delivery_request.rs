@@ -148,10 +148,10 @@ mod tests {
         )
     }
 
-    /// S01 / INV-008 / INV-028: no-active-turn input carries one complete
+    /// S01: no-active-turn input carries one complete
     /// version-bound configuration choice for its new logical work.
     #[test]
-    fn s01_inv008_inv028_start_request_carries_version_bound_choices() {
+    fn s01_start_request_carries_version_bound_choices() {
         let expected_version = first_version();
         let model = ModelSelectionOverride::UseSessionDefault;
         let configuration = PerInputConfigurationChoices::new(expected_version, model);
@@ -171,10 +171,10 @@ mod tests {
         assert_eq!(configuration.model(), model);
     }
 
-    /// S07 / INV-008 / INV-028: interrupt payloads bind both the exact active
+    /// S07: interrupt payloads bind both the exact active
     /// predecessor and the successor's complete configuration choice.
     #[test]
-    fn s07_inv008_inv028_interrupt_carries_target_and_choices() {
+    fn s07_interrupt_carries_target_and_choices() {
         let expected_active_turn = turn_id(1);
         let configuration = choices();
         let descendant_scope = DescendantTerminationScope::ParentAlone;
@@ -197,10 +197,10 @@ mod tests {
         assert_eq!(carried_configuration, configuration);
     }
 
-    /// S08 / INV-028: next-safe-point steering binds to the exact active turn
+    /// S08: next-safe-point steering binds to the exact active turn
     /// and has no independent configuration field.
     #[test]
-    fn s08_inv028_next_safe_point_carries_only_its_target() {
+    fn s08_next_safe_point_carries_only_its_target() {
         let expected_active_turn = turn_id(1);
         let request = DeliveryRequest::NextSafePoint {
             expected_active_turn,
@@ -215,10 +215,10 @@ mod tests {
         assert_eq!(carried_turn, expected_active_turn);
     }
 
-    /// S09 / INV-008 / INV-028: after-current input binds the exact active
+    /// S09: after-current input binds the exact active
     /// turn and the queued origin's complete configuration choice.
     #[test]
-    fn s09_inv008_inv028_after_current_carries_target_and_choices() {
+    fn s09_after_current_carries_target_and_choices() {
         let expected_active_turn = turn_id(1);
         let configuration = choices();
         let request = DeliveryRequest::AfterCurrentTurn {
@@ -237,11 +237,11 @@ mod tests {
         assert_eq!(carried_configuration, configuration);
     }
 
-    /// S01 / S07 / S08 / S09 / INV-012: canonical comparison includes every
+    /// S01 / S07 / S08 / S09: canonical comparison includes every
     /// delivery discriminator, target turn, expected defaults version, and
     /// override.
     #[test]
-    fn s01_s07_s08_s09_inv012_delivery_payload_equality_is_structural() {
+    fn s01_s07_s08_s09_delivery_payload_equality_is_structural() {
         let configuration = choices();
         let later_configuration = PerInputConfigurationChoices::new(
             first_version()

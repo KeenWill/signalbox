@@ -376,11 +376,11 @@ mod tests {
         }
     }
 
-    /// S27 / INV-006: one open logical dependency and one
+    /// S27: one open logical dependency and one
     /// unclassified issued operation are exact blockers, while independently
     /// derived `U` still retains the known blocking ambiguity.
     #[test]
-    fn s27_inv006_unfinished_owned_work_derives_exact_blockers() {
+    fn s27_unfinished_owned_work_derives_exact_blockers() {
         let owned_call = model_call_id(1);
         let open_request = OwnedLogicalDependencyRef::ToolRequest(tool_request_id(1));
         let unclassified = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
@@ -423,12 +423,12 @@ mod tests {
         assert!(remainder.contains(ambiguous));
     }
 
-    /// S27 / INV-006 / INV-025 / INV-026: when every owned fact is classified
+    /// S27: when every owned fact is classified
     /// and no blocking ambiguity remains, closure is a candidate for direct
     /// failure; resolved and accepted-risk physical ambiguities are excluded
     /// without being rewritten.
     #[test]
-    fn s27_inv006_inv025_inv026_closed_without_blocking_ambiguity_is_exact() {
+    fn s27_closed_without_blocking_ambiguity_is_exact() {
         let owned_call = model_call_id(1);
         let resolved = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
         let accepted = IssuedOperationRef::ToolAttempt(tool_attempt_id(3));
@@ -471,10 +471,10 @@ mod tests {
         assert!(facts.blocking_ambiguities().is_none());
     }
 
-    /// S27 / INV-006 / INV-014 / INV-025 / INV-026: the primary scenario's
+    /// S27: the primary scenario's
     /// closed `{Y}` remainder is derived exactly and canonically.
     #[test]
-    fn s27_inv006_inv014_inv025_inv026_closed_remainder_is_exact() {
+    fn s27_closed_remainder_is_exact() {
         let owned_call = model_call_id(1);
         let y = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
         let fact = nonterminal_fact(owned_call, 1);
@@ -505,11 +505,11 @@ mod tests {
         assert!(remainder.contains(y));
     }
 
-    /// S07 / S27 / INV-014 / INV-029: prior failures, the new trusted failure,
+    /// S07 / S27: prior failures, the new trusted failure,
     /// and the exact applied interrupt are retained by canonical idempotent
     /// union.
     #[test]
-    fn s07_s27_inv014_inv029_complete_f_unions_causes_and_interrupt() {
+    fn s07_s27_complete_f_unions_causes_and_interrupt() {
         let owned_call = model_call_id(1);
         let new_fact = nonterminal_fact(owned_call, 2);
         let cancellation_only = projection(
@@ -591,11 +591,11 @@ mod tests {
         assert_eq!(replayed.causes().interrupt(), facts.causes().interrupt());
     }
 
-    /// S21 / INV-014 / INV-025 / INV-026: resolving mismatch evidence changes
+    /// S21: resolving mismatch evidence changes
     /// only the ambiguous call's turn treatment, so another blocking operation
     /// remains exact while the physical call stays ambiguous.
     #[test]
-    fn s21_inv014_inv025_inv026_terminal_resolution_removes_only_resolved_call() {
+    fn s21_terminal_resolution_removes_only_resolved_call() {
         let resolved_call = model_call_id(1);
         let x = IssuedOperationRef::ModelCall(resolved_call);
         let y = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
@@ -629,11 +629,11 @@ mod tests {
         );
     }
 
-    /// S21 / S27 / INV-006 / INV-014 / INV-025 / INV-026: all three trusted
+    /// S21 / S27: all three trusted
     /// effects accept exactly their compatible physical predecessor states.
     /// Every other effect/state pair rejects with both inputs unchanged.
     #[test]
-    fn s21_s27_inv006_inv014_inv025_inv026_effect_state_matrix_is_exhaustive() {
+    fn s21_s27_effect_state_matrix_is_exhaustive() {
         let call = model_call_id(1);
         let operation = IssuedOperationRef::ModelCall(call);
         let known_failed = nonterminal_fact(call, 1);
@@ -827,9 +827,9 @@ mod tests {
         .to_string()
     }
 
-    /// INV-006 / INV-014: a missing affected call preserves both inputs.
+    /// a missing affected call preserves both inputs.
     #[test]
-    fn inv006_inv014_missing_call_rejects_unchanged() {
+    fn missing_call_rejects_unchanged() {
         let unowned_call = model_call_id(1);
         let no_operations: [(IssuedOperationRef, IssuedOperationClosure); 0] = [];
         let fact = nonterminal_fact(unowned_call, 1);

@@ -403,7 +403,7 @@ struct Verdict {
     accepted: bool,
 }
 
-/// INV-025, INV-026: one completed call crosses exactly one process-spawn
+/// , : one completed call crosses exactly one process-spawn
 /// dispatch boundary.
 #[tokio::test]
 async fn buffered_completion_is_terminal_only_after_turn_completed() {
@@ -509,11 +509,11 @@ async fn completed_turn_recovers_the_clis_independently_retained_final_message()
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a final message recovered from the CLI-owned file still follows
+/// a final message recovered from the CLI-owned file still follows
 /// the preceding JSONL redaction state; the second channel cannot bypass a
 /// credential marker retained from an earlier event.
 #[tokio::test]
-async fn inv_035_output_last_message_consults_the_jsonl_redaction_state() {
+async fn output_last_message_consults_the_jsonl_redaction_state() {
     let result = execute_scenario(
         "output_last_message_split_credential",
         DeliveryMode::Buffered,
@@ -571,10 +571,10 @@ async fn streamed_completion_emits_redacted_progress_in_order() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential token split across reasoning items cannot be
+/// a credential token split across reasoning items cannot be
 /// reconstructed by concatenating streamed provider text.
 #[tokio::test]
-async fn inv_035_split_credential_across_reasoning_items_is_redacted() {
+async fn split_credential_across_reasoning_items_is_redacted() {
     let result = execute_scenario(
         "split_stream_credential_between_reasoning_items",
         DeliveryMode::Streamed,
@@ -589,10 +589,10 @@ async fn inv_035_split_credential_across_reasoning_items_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: changing from reasoning to final text cannot flush a held
+/// changing from reasoning to final text cannot flush a held
 /// credential prefix as provider-controlled bytes.
 #[tokio::test]
-async fn inv_035_split_credential_before_final_text_is_redacted() {
+async fn split_credential_before_final_text_is_redacted() {
     let result = execute_scenario(
         "split_stream_credential_before_final_text",
         DeliveryMode::Streamed,
@@ -614,10 +614,10 @@ async fn inv_035_split_credential_before_final_text_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential header split between reasoning and final text keeps
+/// a credential header split between reasoning and final text keeps
 /// redacting through the value, not just through the marker.
 #[tokio::test]
-async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
+async fn split_authorization_value_before_final_text_is_redacted() {
     let result = execute_scenario(
         "split_stream_authorization_before_final_text",
         DeliveryMode::Streamed,
@@ -637,12 +637,12 @@ async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: buffered delivery drops reasoning from the output, but a
+/// buffered delivery drops reasoning from the output, but a
 /// credential marker inside the dropped bytes still marks the final text's
 /// value as a secret — the same bytes the streamed path suppresses must not
 /// surface verbatim in buffered completion evidence.
 #[tokio::test]
-async fn inv_035_buffered_reasoning_marker_suppresses_the_final_text_value() {
+async fn buffered_reasoning_marker_suppresses_the_final_text_value() {
     let result = execute_scenario(
         "split_stream_authorization_before_final_text",
         DeliveryMode::Buffered,
@@ -657,11 +657,11 @@ async fn inv_035_buffered_reasoning_marker_suppresses_the_final_text_value() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: the dropped-reasoning marker also governs buffered tool
+/// the dropped-reasoning marker also governs buffered tool
 /// arguments, which reach terminal evidence without passing through streamed
 /// deltas.
 #[tokio::test]
-async fn inv_035_buffered_reasoning_marker_suppresses_tool_arguments() {
+async fn buffered_reasoning_marker_suppresses_tool_arguments() {
     let result = execute_scenario(
         "split_stream_authorization_before_tool_arguments",
         DeliveryMode::Buffered,
@@ -685,12 +685,12 @@ async fn inv_035_buffered_reasoning_marker_suppresses_tool_arguments() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential header split between streamed reasoning and the
+/// a credential header split between streamed reasoning and the
 /// final envelope's tool arguments keeps redacting through the value: the
 /// argument bytes consult the held lookbehind state before the streamed
 /// argument delta and the terminal proposal are built.
 #[tokio::test]
-async fn inv_035_split_authorization_value_before_tool_arguments_is_redacted() {
+async fn split_authorization_value_before_tool_arguments_is_redacted() {
     let result = execute_scenario(
         "split_stream_authorization_before_tool_arguments",
         DeliveryMode::Streamed,
@@ -705,11 +705,11 @@ async fn inv_035_split_authorization_value_before_tool_arguments_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential marker held from streamed reasoning also governs a
+/// a credential marker held from streamed reasoning also governs a
 /// tool-call id, so an id that extends the marker is replaced with a safe
 /// surrogate instead of leaking through the proposal or terminal content.
 #[tokio::test]
-async fn inv_035_split_authorization_value_before_tool_id_is_redacted() {
+async fn split_authorization_value_before_tool_id_is_redacted() {
     let result = execute_scenario(
         "split_stream_authorization_before_tool_id",
         DeliveryMode::Streamed,
@@ -724,11 +724,11 @@ async fn inv_035_split_authorization_value_before_tool_id_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a tool argument continuing a credential marker at the end of the
+/// a tool argument continuing a credential marker at the end of the
 /// same-envelope final text is redacted in both the streamed delta and the
 /// terminal proposal, not only when the marker came from earlier reasoning.
 #[tokio::test]
-async fn inv_035_final_text_marker_before_tool_arguments_is_redacted() {
+async fn final_text_marker_before_tool_arguments_is_redacted() {
     let result = execute_scenario(
         "final_text_marker_before_tool_arguments",
         DeliveryMode::Streamed,
@@ -743,12 +743,12 @@ async fn inv_035_final_text_marker_before_tool_arguments_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential marker ending the final envelope text also governs
+/// a credential marker ending the final envelope text also governs
 /// the agent-message item id — the same same-envelope context the tool-call id
 /// path consults — so an id carrying the marker's continuation never surfaces
 /// as `ProviderMessageId` beside the independently redacted text.
 #[tokio::test]
-async fn inv_035_final_text_marker_before_message_id_is_redacted() {
+async fn final_text_marker_before_message_id_is_redacted() {
     let result = execute_scenario(
         "final_text_marker_before_message_id",
         DeliveryMode::Streamed,
@@ -763,13 +763,13 @@ async fn inv_035_final_text_marker_before_message_id_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a thread id ending in a credential-marker prefix (`api_`) seeds
+/// a thread id ending in a credential-marker prefix (`api_`) seeds
 /// the lookbehind when it is emitted in `ExchangeEstablished`, so streamed
 /// text carrying the marker's continuation (`key=value`) is suppressed
 /// instead of emitted beside the id, where the two records would reconstruct
 /// the credential.
 #[tokio::test]
-async fn inv_035_thread_id_marker_prefix_suppresses_streamed_continuation() {
+async fn thread_id_marker_prefix_suppresses_streamed_continuation() {
     let result = execute_scenario(
         "credential_prefix_thread_id_before_text",
         DeliveryMode::Streamed,
@@ -787,11 +787,11 @@ async fn inv_035_thread_id_marker_prefix_suppresses_streamed_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: the same reconstruction is caught in buffered delivery, where the
+/// the same reconstruction is caught in buffered delivery, where the
 /// final text reaches terminal evidence without passing through streamed
 /// deltas — the buffered text consults the emitted thread-id context too.
 #[tokio::test]
-async fn inv_035_thread_id_marker_prefix_suppresses_buffered_continuation() {
+async fn thread_id_marker_prefix_suppresses_buffered_continuation() {
     let result = execute_scenario(
         "credential_prefix_thread_id_before_text",
         DeliveryMode::Buffered,
@@ -806,11 +806,11 @@ async fn inv_035_thread_id_marker_prefix_suppresses_buffered_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential marker inside a dropped error item governs the
+/// a credential marker inside a dropped error item governs the
 /// streamed final text that follows — the marker appears in no record, but
 /// the value completing it is a secret the stream must suppress.
 #[tokio::test]
-async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
+async fn error_item_marker_suppresses_streamed_continuation() {
     let result = execute_scenario(
         "credential_split_across_error_item",
         DeliveryMode::Streamed,
@@ -825,11 +825,11 @@ async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: two independent object fields each ending in a distinct credential
+/// two independent object fields each ending in a distinct credential
 /// marker fail closed — a following value could complete either, and the
 /// single dropped chain cannot track both.
 #[tokio::test]
-async fn inv_035_two_independent_sibling_markers_fail_closed() {
+async fn two_independent_sibling_markers_fail_closed() {
     let result = execute_scenario(
         "two_independent_sibling_markers",
         DeliveryMode::Buffered,
@@ -844,10 +844,10 @@ async fn inv_035_two_independent_sibling_markers_fail_closed() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an additive credential marker on a `thread.started` event governs
+/// an additive credential marker on a `thread.started` event governs
 /// the following final text.
 #[tokio::test]
-async fn inv_035_thread_started_additive_field_marker_suppresses_the_value() {
+async fn thread_started_additive_field_marker_suppresses_the_value() {
     let result = execute_scenario(
         "credential_split_across_thread_started_field",
         DeliveryMode::Buffered,
@@ -934,11 +934,11 @@ async fn duplicate_response_envelope_members_are_stream_protocol_violations() {
     assert!(detail.contains("response envelope"));
 }
 
-/// INV-035: a marker-bearing object field that sorts before a benign sibling
+/// a marker-bearing object field that sorts before a benign sibling
 /// (so a key-sorted concatenation would drop the marker) still governs the
 /// following final text — sibling fields are seeded as independent units.
 #[tokio::test]
-async fn inv_035_sibling_object_field_marker_is_not_erased() {
+async fn sibling_object_field_marker_is_not_erased() {
     let result = execute_scenario(
         "credential_split_across_sibling_object_fields",
         DeliveryMode::Buffered,
@@ -953,10 +953,10 @@ async fn inv_035_sibling_object_field_marker_is_not_erased() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an additive credential marker on an otherwise-accepted
+/// an additive credential marker on an otherwise-accepted
 /// `turn.started` event governs the following final text.
 #[tokio::test]
-async fn inv_035_turn_started_additive_field_marker_suppresses_the_value() {
+async fn turn_started_additive_field_marker_suppresses_the_value() {
     let result = execute_scenario(
         "credential_split_across_turn_started_field",
         DeliveryMode::Buffered,
@@ -971,11 +971,11 @@ async fn inv_035_turn_started_additive_field_marker_suppresses_the_value() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a retained agent message ending in a marker, superseded by a
+/// a retained agent message ending in a marker, superseded by a
 /// `turn.failed` whose message supplies the value, is folded so the failure
 /// message's value is suppressed in native error evidence.
 #[tokio::test]
-async fn inv_035_retained_agent_message_folds_before_failure() {
+async fn retained_agent_message_folds_before_failure() {
     let result = execute_scenario(
         "credential_split_across_agent_message_then_failure",
         DeliveryMode::Buffered,
@@ -990,11 +990,11 @@ async fn inv_035_retained_agent_message_folds_before_failure() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential marker ending an agent message superseded by a later
+/// a credential marker ending an agent message superseded by a later
 /// one, with the value in the final message, is folded into the lookbehind and
 /// suppressed rather than reconstructed across the discard.
 #[tokio::test]
-async fn inv_035_superseded_agent_message_marker_suppresses_the_value() {
+async fn superseded_agent_message_marker_suppresses_the_value() {
     let result = execute_scenario(
         "credential_split_across_superseded_agent_message",
         DeliveryMode::Buffered,
@@ -1009,10 +1009,10 @@ async fn inv_035_superseded_agent_message_marker_suppresses_the_value() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential marker carried by an ignored lifecycle event's
+/// a credential marker carried by an ignored lifecycle event's
 /// additive field governs the following final text.
 #[tokio::test]
-async fn inv_035_lifecycle_event_marker_suppresses_the_value() {
+async fn lifecycle_event_marker_suppresses_the_value() {
     let result = execute_scenario(
         "credential_split_across_lifecycle_event",
         DeliveryMode::Buffered,
@@ -1027,10 +1027,10 @@ async fn inv_035_lifecycle_event_marker_suppresses_the_value() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential marker in an additively-tolerated unknown top-level
+/// a credential marker in an additively-tolerated unknown top-level
 /// event governs the following final text.
 #[tokio::test]
-async fn inv_035_unknown_event_marker_suppresses_the_value() {
+async fn unknown_event_marker_suppresses_the_value() {
     let result = execute_scenario(
         "credential_split_across_unknown_event",
         DeliveryMode::Buffered,
@@ -1045,11 +1045,11 @@ async fn inv_035_unknown_event_marker_suppresses_the_value() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an unmodeled item's ordered-array leaves that jointly form a
+/// an unmodeled item's ordered-array leaves that jointly form a
 /// marker (`["api", "_key="]`) seed the lookbehind in document order, so the
 /// following value is suppressed even though no single leaf is a marker.
 #[tokio::test]
-async fn inv_035_ordered_unsupported_leaves_form_a_marker() {
+async fn ordered_unsupported_leaves_form_a_marker() {
     let result = execute_scenario(
         "credential_split_across_ordered_unsupported_leaves",
         DeliveryMode::Buffered,
@@ -1064,11 +1064,11 @@ async fn inv_035_ordered_unsupported_leaves_form_a_marker() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an agent-message id ending in a credential-marker prefix whose
+/// an agent-message id ending in a credential-marker prefix whose
 /// continuation opens the final text is redacted, breaking the credential
 /// reconstruction across the id and content fields of terminal evidence.
 #[tokio::test]
-async fn inv_035_message_id_prefixing_final_text_is_redacted() {
+async fn message_id_prefixing_final_text_is_redacted() {
     let result = execute_scenario(
         "message_id_prefixes_final_text",
         DeliveryMode::Buffered,
@@ -1114,13 +1114,13 @@ async fn assert_identity_marker_suppresses_the_continuation(
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a bare lifecycle event is dropped whole after its identity is only
+/// a bare lifecycle event is dropped whole after its identity is only
 /// validated as nonempty, so an `id` ending in a credential-marker prefix
 /// (`api_`) is dropped provider text that seeds the lookbehind — the value
 /// opening the text that follows (`key=<secret>`) is suppressed instead of
 /// crossing the boundary in retained evidence.
 #[tokio::test]
-async fn inv_035_lifecycle_item_id_marker_suppresses_the_continuation() {
+async fn lifecycle_item_id_marker_suppresses_the_continuation() {
     assert_identity_marker_suppresses_the_continuation(
         "lifecycle_item_id_marker",
         DeliveryMode::Streamed,
@@ -1133,11 +1133,11 @@ async fn inv_035_lifecycle_item_id_marker_suppresses_the_continuation() {
     .await;
 }
 
-/// INV-035: the same boundary one field over. A lifecycle event's item `type`
+/// the same boundary one field over. A lifecycle event's item `type`
 /// is matched against nothing the adapter chose, so a `type` ending in the
 /// marker prefix seeds the lookbehind exactly as the id does.
 #[tokio::test]
-async fn inv_035_lifecycle_item_type_marker_suppresses_the_continuation() {
+async fn lifecycle_item_type_marker_suppresses_the_continuation() {
     assert_identity_marker_suppresses_the_continuation(
         "lifecycle_item_type_marker",
         DeliveryMode::Streamed,
@@ -1150,11 +1150,11 @@ async fn inv_035_lifecycle_item_type_marker_suppresses_the_continuation() {
     .await;
 }
 
-/// INV-035: an unsupported item's `type` selected the catch-all arm rather than
+/// an unsupported item's `type` selected the catch-all arm rather than
 /// one of the adapter's literals, so it is provider-chosen text the adapter
 /// drops, and a marker prefix ending it governs the text that follows.
 #[tokio::test]
-async fn inv_035_unsupported_item_type_marker_suppresses_the_continuation() {
+async fn unsupported_item_type_marker_suppresses_the_continuation() {
     assert_identity_marker_suppresses_the_continuation(
         "unsupported_item_type_marker",
         DeliveryMode::Streamed,
@@ -1167,11 +1167,11 @@ async fn inv_035_unsupported_item_type_marker_suppresses_the_continuation() {
     .await;
 }
 
-/// INV-035: a modeled reasoning item interprets its `type` (the adapter's own
+/// a modeled reasoning item interprets its `type` (the adapter's own
 /// literal) and its text, but never retains the id. The dropped id carries the
 /// marker prefix that the item's own `key=` and the final-text value complete.
 #[tokio::test]
-async fn inv_035_reasoning_item_id_marker_suppresses_the_continuation() {
+async fn reasoning_item_id_marker_suppresses_the_continuation() {
     assert_identity_marker_suppresses_the_continuation(
         "reasoning_item_id_marker",
         DeliveryMode::Streamed,
@@ -1184,10 +1184,10 @@ async fn inv_035_reasoning_item_id_marker_suppresses_the_continuation() {
     .await;
 }
 
-/// INV-035: the same shape on the dropped error item, whose message is
+/// the same shape on the dropped error item, whose message is
 /// interpreted while its id is not.
 #[tokio::test]
-async fn inv_035_error_item_id_marker_suppresses_the_continuation() {
+async fn error_item_id_marker_suppresses_the_continuation() {
     assert_identity_marker_suppresses_the_continuation(
         "error_item_id_marker",
         DeliveryMode::Streamed,
@@ -1253,12 +1253,12 @@ async fn streamed_benign_item_identity_leaves_the_answer_verbatim() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an unsupported (unmodeled) streamed item whose text ends in a
+/// an unsupported (unmodeled) streamed item whose text ends in a
 /// credential marker prefix (`api_`) seeds the dropped lookbehind, so a final
 /// text beginning with the continuation (`key=<secret>`) is suppressed rather
 /// than releasing the credential the adapter never surfaced the item for.
 #[tokio::test]
-async fn inv_035_streamed_unsupported_item_marker_suppresses_the_continuation() {
+async fn streamed_unsupported_item_marker_suppresses_the_continuation() {
     let result = execute_scenario(
         "credential_split_across_unsupported_item",
         DeliveryMode::Streamed,
@@ -1273,10 +1273,10 @@ async fn inv_035_streamed_unsupported_item_marker_suppresses_the_continuation() 
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: the same unsupported-item marker governs the buffered final text,
+/// the same unsupported-item marker governs the buffered final text,
 /// which reaches terminal evidence without streamed deltas.
 #[tokio::test]
-async fn inv_035_buffered_unsupported_item_marker_suppresses_the_continuation() {
+async fn buffered_unsupported_item_marker_suppresses_the_continuation() {
     let result = execute_scenario(
         "credential_split_across_unsupported_item",
         DeliveryMode::Buffered,
@@ -1291,12 +1291,12 @@ async fn inv_035_buffered_unsupported_item_marker_suppresses_the_continuation() 
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential split as dropped `api_`, a held streamed `key` (safe
+/// a credential split as dropped `api_`, a held streamed `key` (safe
 /// alone but unsafe as a continuation of `api_`), a dropped `=`, then the
 /// value — the held bytes are treated as unsafe in the dropped context, so the
 /// value is suppressed rather than emitted verbatim.
 #[tokio::test]
-async fn inv_035_context_dependent_held_bytes_stay_in_the_dropped_chain() {
+async fn context_dependent_held_bytes_stay_in_the_dropped_chain() {
     let result = execute_scenario(
         "credential_split_across_dropped_pending_and_error_separator",
         DeliveryMode::Streamed,
@@ -1311,11 +1311,11 @@ async fn inv_035_context_dependent_held_bytes_stay_in_the_dropped_chain() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential marker in a non-standard field of an unsupported
+/// a credential marker in a non-standard field of an unsupported
 /// item (not `text`/`message`) still seeds the lookbehind, so a final text
 /// completing it is suppressed.
 #[tokio::test]
-async fn inv_035_unsupported_item_nonstandard_field_seeds_the_lookbehind() {
+async fn unsupported_item_nonstandard_field_seeds_the_lookbehind() {
     let result = execute_scenario(
         "unsupported_item_marker_in_nonstandard_field",
         DeliveryMode::Buffered,
@@ -1330,11 +1330,11 @@ async fn inv_035_unsupported_item_nonstandard_field_seeds_the_lookbehind() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an unsupported item's benign field must not erase the credential
+/// an unsupported item's benign field must not erase the credential
 /// marker another field establishes, so a final text completing that marker is
 /// still suppressed.
 #[tokio::test]
-async fn inv_035_unsupported_item_benign_field_does_not_erase_a_marker() {
+async fn unsupported_item_benign_field_does_not_erase_a_marker() {
     let result = execute_scenario(
         "unsupported_item_marker_beside_benign_field",
         DeliveryMode::Buffered,
@@ -1349,13 +1349,13 @@ async fn inv_035_unsupported_item_benign_field_does_not_erase_a_marker() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a held credential-prefix (`api_` from a reasoning delta) followed
+/// a held credential-prefix (`api_` from a reasoning delta) followed
 /// by an unrelated dropped error item stays adjacent to a later emitted
 /// `key=<secret>` in the output, so the value is suppressed — the redacted
 /// prefix still marks the future value even though the dropped bytes broke
 /// the internal candidate.
 #[tokio::test]
-async fn inv_035_held_prefix_suppresses_value_across_unrelated_error_item() {
+async fn held_prefix_suppresses_value_across_unrelated_error_item() {
     let result = execute_scenario(
         "held_credential_prefix_then_unrelated_error_item",
         DeliveryMode::Streamed,
@@ -1370,13 +1370,13 @@ async fn inv_035_held_prefix_suppresses_value_across_unrelated_error_item() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: held reasoning bytes unrelated to the credential (`Auth`), a
+/// held reasoning bytes unrelated to the credential (`Auth`), a
 /// dropped error marker (`api_`), then a final-text value (`key=<secret>`)
 /// reassemble chronologically as `api_key=<secret>` — the held bytes are
 /// resolved out of the way rather than scanned between the dropped marker and
 /// the value, so the credential is suppressed.
 #[tokio::test]
-async fn inv_035_credential_reassembles_across_held_reasoning_and_error_item() {
+async fn credential_reassembles_across_held_reasoning_and_error_item() {
     let result = execute_scenario(
         "credential_reassembled_across_held_reasoning_and_error_item",
         DeliveryMode::Streamed,
@@ -1391,13 +1391,13 @@ async fn inv_035_credential_reassembles_across_held_reasoning_and_error_item() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a marker held in the stream lookbehind (`Authorization` from a
+/// a marker held in the stream lookbehind (`Authorization` from a
 /// reasoning delta), its separator supplied by an intervening dropped error
 /// item (`:`), and the value in the final text must rejoin chronologically —
 /// the dropped bytes fold through the pending held text rather than being
 /// scanned in isolation, so the value is suppressed.
 #[tokio::test]
-async fn inv_035_error_item_separator_folds_through_held_reasoning() {
+async fn error_item_separator_folds_through_held_reasoning() {
     let result = execute_scenario(
         "credential_split_across_error_item_after_held_reasoning",
         DeliveryMode::Streamed,
@@ -1412,10 +1412,10 @@ async fn inv_035_error_item_separator_folds_through_held_reasoning() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: the dropped error-item marker also governs the buffered final
+/// the dropped error-item marker also governs the buffered final
 /// text, which reaches terminal evidence without streamed deltas.
 #[tokio::test]
-async fn inv_035_error_item_marker_suppresses_buffered_continuation() {
+async fn error_item_marker_suppresses_buffered_continuation() {
     let result = execute_scenario(
         "credential_split_across_error_item",
         DeliveryMode::Buffered,
@@ -1430,11 +1430,11 @@ async fn inv_035_error_item_marker_suppresses_buffered_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential marker held from streamed reasoning also governs the
+/// a credential marker held from streamed reasoning also governs the
 /// agent-message item id, so an id extending the marker never surfaces as
 /// `ProviderMessageId` in terminal evidence.
 #[tokio::test]
-async fn inv_035_split_authorization_value_before_message_id_is_redacted() {
+async fn split_authorization_value_before_message_id_is_redacted() {
     let result = execute_scenario(
         "split_stream_authorization_before_message_id",
         DeliveryMode::Streamed,
@@ -1449,10 +1449,10 @@ async fn inv_035_split_authorization_value_before_message_id_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an undeclared tool name that extends a held credential marker is
+/// an undeclared tool name that extends a held credential marker is
 /// redacted in the resulting boundary-loss detail, not left verbatim.
 #[tokio::test]
-async fn inv_035_split_authorization_value_before_tool_name_is_redacted() {
+async fn split_authorization_value_before_tool_name_is_redacted() {
     let result = execute_scenario(
         "split_stream_authorization_before_tool_name",
         DeliveryMode::Streamed,
@@ -1467,13 +1467,13 @@ async fn inv_035_split_authorization_value_before_tool_name_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: the same rule where no joined-form scan could ever see the pair
+/// the same rule where no joined-form scan could ever see the pair
 /// rejoin — a marker prefix (`api_`) held in the dropped chain and its
 /// continuation (`key=<value>`) quoted inside serde's own prose. The detail is
 /// content-silent while any context is held, so the continuation cannot cross
 /// in the provider error.
 #[tokio::test]
-async fn inv_035_decode_failure_detail_is_silent_while_a_dropped_marker_is_held() {
+async fn decode_failure_detail_is_silent_while_a_dropped_marker_is_held() {
     let result = execute_scenario(
         "dropped_marker_then_malformed_usage",
         DeliveryMode::Buffered,
@@ -1493,7 +1493,7 @@ async fn inv_035_decode_failure_detail_is_silent_while_a_dropped_marker_is_held(
     );
 }
 
-/// INV-035: a decode-failure detail that quotes provider-controlled bytes
+/// a decode-failure detail that quotes provider-controlled bytes
 /// consults the held lookbehind state *before* the adapter prefixes its own
 /// prose, so a credential split between streamed reasoning and a malformed
 /// event's quoted value is suppressed whole. Prefixing first would insert the
@@ -1501,7 +1501,7 @@ async fn inv_035_decode_failure_detail_is_silent_while_a_dropped_marker_is_held(
 /// to rejoin and the continuation intact inside the message; the adapter's own
 /// prose survives because it is not provider-derived.
 #[tokio::test]
-async fn inv_035_decode_failure_detail_consults_held_redaction_state() {
+async fn decode_failure_detail_consults_held_redaction_state() {
     let result = execute_scenario(
         "reasoning_then_malformed_usage",
         DeliveryMode::Streamed,
@@ -1521,12 +1521,12 @@ async fn inv_035_decode_failure_detail_consults_held_redaction_state() {
     );
 }
 
-/// INV-035: a credential header split between streamed reasoning and a
+/// a credential header split between streamed reasoning and a
 /// provider failure message keeps redacting through the value, not just
 /// through the marker: terminal failure evidence carries the stateful
 /// stream redaction, never a stateless re-redaction of the raw message.
 #[tokio::test]
-async fn inv_035_split_authorization_value_before_failure_is_redacted() {
+async fn split_authorization_value_before_failure_is_redacted() {
     let result = execute_scenario(
         "split_stream_authorization_before_failure",
         DeliveryMode::Streamed,
@@ -1918,12 +1918,12 @@ async fn named_tool_choice_rejects_an_extra_declared_tool_proposal() {
     );
 }
 
-/// INV-035: an additively tolerated sibling field on a *known* completed item
+/// an additively tolerated sibling field on a *known* completed item
 /// is discarded by serde, so its credential marker seeds nothing unless the
 /// decoder folds it; the envelope text the same item carries then completes the
 /// marker and would reach observations and terminal evidence verbatim.
 #[tokio::test]
-async fn inv_035_agent_message_additive_field_marker_suppresses_the_continuation() {
+async fn agent_message_additive_field_marker_suppresses_the_continuation() {
     let result = execute_scenario(
         "agent_message_additive_field_marker",
         DeliveryMode::Buffered,
@@ -1938,11 +1938,11 @@ async fn inv_035_agent_message_additive_field_marker_suppresses_the_continuation
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: the same hole on `turn.failed` — an additive field holds the
+/// the same hole on `turn.failed` — an additive field holds the
 /// marker its interpreted failure message completes, and the message is the
 /// text that leaves the adapter as provider-error evidence.
 #[tokio::test]
-async fn inv_035_turn_failed_additive_field_marker_suppresses_the_message() {
+async fn turn_failed_additive_field_marker_suppresses_the_message() {
     let result = execute_scenario(
         "turn_failed_additive_field_marker",
         DeliveryMode::Buffered,
@@ -1957,11 +1957,11 @@ async fn inv_035_turn_failed_additive_field_marker_suppresses_the_message() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a superseded agent message ending in a live marker (`api_`) beside
+/// a superseded agent message ending in a live marker (`api_`) beside
 /// a clean id is folded id-first, in wire order, so the id cannot resolve the
 /// marker away and release the value the replacing envelope text completes.
 #[tokio::test]
-async fn inv_035_superseded_message_marker_survives_a_clean_id() {
+async fn superseded_message_marker_survives_a_clean_id() {
     let result = execute_scenario(
         "superseded_message_marker_before_clean_id",
         DeliveryMode::Buffered,
@@ -1976,11 +1976,11 @@ async fn inv_035_superseded_message_marker_survives_a_clean_id() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an object nested inside an array keeps its fields as independent
+/// an object nested inside an array keeps its fields as independent
 /// dropped units; flattening them into the array's wire-adjacent run lets a
 /// benign sibling erase the marker the other field holds.
 #[tokio::test]
-async fn inv_035_object_inside_an_array_keeps_its_fields_independent() {
+async fn object_inside_an_array_keeps_its_fields_independent() {
     let result = execute_scenario(
         "unsupported_item_object_inside_an_array",
         DeliveryMode::Buffered,
@@ -1995,12 +1995,12 @@ async fn inv_035_object_inside_an_array_keeps_its_fields_independent() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an unknown event's own metadata is dropped provider content — the
+/// an unknown event's own metadata is dropped provider content — the
 /// adapter matched its `type` against no known event and never reads its `id` —
 /// so a credential marker either field holds still governs the final text that
 /// completes it.
 #[tokio::test]
-async fn inv_035_unknown_event_metadata_marker_suppresses_the_continuation() {
+async fn unknown_event_metadata_marker_suppresses_the_continuation() {
     let result = execute_scenario(
         "unknown_event_metadata_marker",
         DeliveryMode::Buffered,
@@ -2340,7 +2340,7 @@ async fn nonzero_signal_exit_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("killed_process", ProviderErrorKind::Unrecognized).await;
 }
 
-/// INV-025, INV-026: losing the CLI terminal marker remains ambiguous and
+/// , : losing the CLI terminal marker remains ambiguous and
 /// never triggers a replacement spawn.
 #[tokio::test]
 async fn exit_zero_without_terminal_marker_is_boundary_loss() {
@@ -2417,7 +2417,7 @@ async fn total_only_usage_does_not_invent_axis_counts() {
     assert_eq!(completed(&result.evidence).usage, TokenUsage::unreported());
 }
 
-/// INV-025, INV-026: pre-dispatch cancellation performs no process spawn.
+/// , : pre-dispatch cancellation performs no process spawn.
 #[tokio::test]
 async fn cancellation_before_spawn_is_proven_unsent() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
@@ -2476,7 +2476,7 @@ async fn missing_cli_binary_is_proven_unsent() {
     assert_eq!(spawn_count(temporary.path()), 0);
 }
 
-/// INV-025, INV-026: post-dispatch cancellation interrupts the original
+/// , : post-dispatch cancellation interrupts the original
 /// process and never respawns it.
 #[tokio::test]
 async fn cancellation_after_spawn_interrupts_once_without_respawn() {
@@ -2964,12 +2964,12 @@ async fn cancellation_after_terminal_with_closed_pipes_preserves_completion_evid
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-pipes-close-group"));
 }
 
-/// INV-035: stderr appended to exit-status detail consults the held
+/// stderr appended to exit-status detail consults the held
 /// lookbehind state before adapter-owned prose is prefixed, so a credential
 /// split between streamed text and stderr cannot reassemble in
 /// provider-error evidence.
 #[tokio::test]
-async fn inv_035_stderr_exit_detail_consults_held_redaction_state() {
+async fn stderr_exit_detail_consults_held_redaction_state() {
     let result = execute_scenario(
         "stderr_credential_continuation",
         DeliveryMode::Streamed,
@@ -3158,13 +3158,13 @@ async fn stderr_deadline_preserves_a_pre_existing_kill_signal_exit() {
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-stderr-kill-group"));
 }
 
-/// INV-035: a `thread_id` that continues a credential marker held from a
+/// a `thread_id` that continues a credential marker held from a
 /// drifted earlier reasoning delta is sanitized against the held state, so it
 /// escapes neither the `ExchangeEstablished` observation nor the terminal
 /// exchange facts.
 #[cfg(unix)]
 #[tokio::test]
-async fn inv_035_drifted_thread_id_is_redacted_against_held_state() {
+async fn drifted_thread_id_is_redacted_against_held_state() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = reasoning_before_thread_started_cli(temporary.path());
     let runtime = runtime(temporary.path(), executable);
@@ -3286,7 +3286,7 @@ async fn cancellation_after_a_nonzero_exit_keeps_provider_error() {
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-cancel-exit-group"));
 }
 
-/// INV-035 / evidence: a leader that wrote a classifiable stderr failure,
+/// evidence: a leader that wrote a classifiable stderr failure,
 /// closed stderr, and exited nonzero keeps that failure's typed kind at the
 /// stdout-cleanup deadline — even while a descendant holds stdout open —
 /// instead of degrading to the synthetic "stderr unavailable" message.
@@ -3546,10 +3546,10 @@ async fn selected_member_home_reaches_each_spawn_and_changes_with_the_reference(
     assert_eq!(delivered_second, second_home.to_string_lossy());
 }
 
-/// INV-035: credential-shaped CLI text and tool JSON are redacted before
+/// credential-shaped CLI text and tool JSON are redacted before
 /// observations or terminal evidence leave the adapter.
 #[tokio::test]
-async fn inv_035_cli_output_is_credential_shape_redacted() {
+async fn cli_output_is_credential_shape_redacted() {
     let result = execute_scenario(
         "redaction",
         DeliveryMode::Streamed,
@@ -3565,10 +3565,10 @@ async fn inv_035_cli_output_is_credential_shape_redacted() {
     assert!(diagnostic.contains("[redacted]"));
 }
 
-/// INV-035: a bare JSON credential member at the start of CLI-controlled text
+/// a bare JSON credential member at the start of CLI-controlled text
 /// is still recognized without an enclosing object delimiter.
 #[tokio::test]
-async fn inv_035_bare_credential_member_is_redacted() {
+async fn bare_credential_member_is_redacted() {
     let result = execute_scenario(
         "bare_credential_text",
         DeliveryMode::Buffered,
@@ -3582,11 +3582,11 @@ async fn inv_035_bare_credential_member_is_redacted() {
     assert!(diagnostic.contains("[redacted]"));
 }
 
-/// INV-035: a credential member whose value is a JSON object is consumed
+/// a credential member whose value is a JSON object is consumed
 /// through its balanced structural close before terminal evidence leaves the
 /// adapter, never released piecewise past its first structural character.
 #[tokio::test]
-async fn inv_035_structured_credential_value_is_redacted_whole() {
+async fn structured_credential_value_is_redacted_whole() {
     let result = execute_scenario(
         "structured_credential_value",
         DeliveryMode::Buffered,
@@ -3600,10 +3600,10 @@ async fn inv_035_structured_credential_value_is_redacted_whole() {
     assert!(diagnostic.contains("[redacted]"));
 }
 
-/// INV-035: a structured credential value split across streamed reasoning
+/// a structured credential value split across streamed reasoning
 /// items cannot be reconstructed by concatenating the emitted deltas.
 #[tokio::test]
-async fn inv_035_split_structured_credential_value_is_redacted() {
+async fn split_structured_credential_value_is_redacted() {
     let result = execute_scenario(
         "split_stream_structured_credential",
         DeliveryMode::Streamed,
@@ -3655,10 +3655,10 @@ async fn prepare_with_cancellation(
     }
 }
 
-/// INV-035: distinct credential-shaped provider ids remain distinct without
+/// distinct credential-shaped provider ids remain distinct without
 /// exposing their raw values.
 #[tokio::test]
-async fn inv_035_redacted_tool_ids_receive_distinct_safe_surrogates() {
+async fn redacted_tool_ids_receive_distinct_safe_surrogates() {
     let result = execute_scenario(
         "sensitive_tool_ids",
         DeliveryMode::Buffered,

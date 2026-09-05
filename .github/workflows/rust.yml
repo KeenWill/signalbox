@@ -77,7 +77,7 @@ jobs:
                 # Binding process/specification prose and generated indexes
                 # run the complete bar even though they are Markdown.
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
-                  | docs/domain-spine.md | docs/invariants.md \
+                  | docs/domain-spine.md \
                   | docs/scenarios.md | docs/style.md)
                   rust=$((rust + 1))
                   ;;
@@ -113,20 +113,18 @@ jobs:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
     timeout-minutes: 10
     steps:
-      # Full history also fetches `refs/remotes/origin/*`, which the docs
-      # checker reads verification provenance from: the first-parent history of
-      # `origin/main`, never a merge the branch under review contributes.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Check generated invariant index
-        run: python3 scripts/generate_invariants.py --check
+      - name: Install Markdown toolchain
+        run: |
+          python3 -m venv /tmp/mdformat-venv
+          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
       - name: Check domain spine sync
         run: python3 scripts/check_domain_spine.py
       - name: Check documentation consistency
-        run: python3 scripts/check_docs_consistency.py
+        run: /tmp/mdformat-venv/bin/python scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
       - name: Check numeric bound declarations
@@ -153,6 +151,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install Markdown toolchain
+        run: |
+          python3 -m venv /tmp/mdformat-venv
+          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
       - name: Test domain-spine checker
         run: python3 scripts/test_check_domain_spine.py
       - name: Test migration version checker
@@ -164,7 +166,7 @@ jobs:
       - name: Test style-rule checker
         run: python3 scripts/test_check_style_rules.py
       - name: Test documentation consistency checker
-        run: python3 scripts/test_check_docs_consistency.py
+        run: /tmp/mdformat-venv/bin/python scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
         run: python3 scripts/test_postgres_integration_suites.py
       - name: Test the convergence reconciler
@@ -183,10 +185,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Markdown formatting
-        run: |
-          python3 -m venv /tmp/mdformat-venv
-          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
-          /tmp/mdformat-venv/bin/mdformat --check *.md docs/
+        run: /tmp/mdformat-venv/bin/mdformat --check *.md docs/
       # Conservative inventory for the recorded session-lock protocols. The
       # checksum makes changes to the small
       # reviewed inventory explicit; the scan rejects strongest-mode row-lock

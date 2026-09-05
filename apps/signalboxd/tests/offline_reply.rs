@@ -279,12 +279,12 @@ fn execution_failure_turn(goal: &Goal) -> TurnId {
     provenance.turn()
 }
 
-/// S01 / S02 / INV-014 / INV-015: the complete offline
+/// S01 / S02: the complete offline
 /// chain creates a session, submits input, lets the scheduler activate it,
 /// invokes the application provider port, and atomically persists the exact
 /// selection, resolved target, consumed frontier, Prepared-to-InFlight
 /// checkpoint sequence, assistant reply, and terminal lifecycle facts.
-/// INV-026: the bridge receives a one-action runtime script, so any repeated
+/// the bridge receives a one-action runtime script, so any repeated
 /// physical interaction exhausts the script and fails the test.
 /// S20: the fixture configures an undated provider-model spelling while the
 /// scripted response echoes that family's canonical dated form, so the chain
@@ -293,8 +293,7 @@ fn execution_failure_turn(goal: &Goal) -> TurnId {
 /// supervisor never raises a fatal signal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply()
--> Result<(), Box<dyn Error>> {
+async fn s01_s02_runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
     let mut create = CreateSessionService::new(
@@ -680,11 +679,11 @@ async fn goal_failure_block_after_success(
     Ok((container, pool, goal))
 }
 
-/// INV-048: a completed goal turn is followed without user input, and an
+/// a completed goal turn is followed without user input, and an
 /// unsuccessful successor blocks with scheduler provenance without a retry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
+async fn s_goal_success_continues_and_unsuccessful_turn_blocks_without_retry()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, goal) =
         goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
@@ -714,7 +713,7 @@ async fn an_unmonitored_sessions_failure_block_schedules_no_resumption()
     Ok(())
 }
 
-/// INV-048: a goal turn whose durable recovery cause requires an operator is
+/// a goal turn whose durable recovery cause requires an operator is
 /// parked by the shared resume planner, not only by the direct disposition
 /// callback that reads the cause.
 ///
@@ -728,7 +727,7 @@ async fn an_unmonitored_sessions_failure_block_schedules_no_resumption()
 /// provenance alone armed a resume into the same impossible compaction.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_reconciled_success_parks_a_durably_non_resumable_failure()
+async fn s_goal_reconciled_success_parks_a_durably_non_resumable_failure()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;

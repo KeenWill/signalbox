@@ -1073,7 +1073,7 @@ const PROXY_URL_VARIABLES: &[&str] = &[
 /// that embeds userinfo — such a credential would transit to the child verbatim
 /// and a CLI that reflects its proxy configuration would hand the password to
 /// output the adapter can only shape-redact, and `redact_text` has no
-/// proxy-userinfo rule (INV-035) — and a `HOME`/`CODEX_HOME` the parent cannot
+/// proxy-userinfo rule — and a `HOME`/`CODEX_HOME` the parent cannot
 /// resolve to an absolute directory, which would point the child's credential
 /// store somewhere under its working directory and select an unintended ambient
 /// login (see [`absolute_credential_home`]). Both must never reach the child.

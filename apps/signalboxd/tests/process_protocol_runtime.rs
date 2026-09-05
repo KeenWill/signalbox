@@ -1230,11 +1230,11 @@ impl CommittedBlobReadFixture {
     }
 }
 
-/// INV-060: the daemon streams exact bytes through one upload lifecycle and
+/// the daemon streams exact bytes through one upload lifecycle and
 /// registers one immutable identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_upload_round_trips_exact_bytes() -> Result<(), Box<dyn Error>> {
+async fn blob_upload_round_trips_exact_bytes() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start_with_blob_storage().await?;
     let bytes = b"exact immutable upload bytes";
     let digest = BlobDigest::digest(bytes);
@@ -1262,11 +1262,11 @@ async fn inv060_blob_upload_round_trips_exact_bytes() -> Result<(), Box<dyn Erro
     runtime.stop().await
 }
 
-/// INV-060: an exact retry against the routed store short-circuits as already
+/// an exact retry against the routed store short-circuits as already
 /// present without accepting another upload body.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_upload_exact_retry_is_already_present() -> Result<(), Box<dyn Error>> {
+async fn blob_upload_exact_retry_is_already_present() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start_with_blob_storage().await?;
     let bytes = b"exact immutable upload retry bytes";
     let wire_digest = CanonicalBlobDigest::from_digest(BlobDigest::digest(bytes));
@@ -1295,12 +1295,12 @@ async fn inv060_blob_upload_exact_retry_is_already_present() -> Result<(), Box<d
     runtime.stop().await
 }
 
-/// INV-060: failure to register after verified publication leaves an orphan
+/// failure to register after verified publication leaves an orphan
 /// object and never a dangling catalog reference.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_registration_failure_after_publication_leaves_only_an_orphan()
--> Result<(), Box<dyn Error>> {
+async fn registration_failure_after_publication_leaves_only_an_orphan() -> Result<(), Box<dyn Error>>
+{
     let runtime = RunningRuntime::start_with_blob_storage().await?;
     let bytes = b"published before unavailable catalog";
     let digest = BlobDigest::digest(bytes);
@@ -1351,11 +1351,11 @@ async fn inv060_registration_failure_after_publication_leaves_only_an_orphan()
     runtime.stop().await
 }
 
-/// INV-060: metadata reports the catalog's exact bounded identity, length, and
+/// metadata reports the catalog's exact bounded identity, length, and
 /// replica count.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_metadata_reports_exact_catalog_facts() -> Result<(), Box<dyn Error>> {
+async fn blob_metadata_reports_exact_catalog_facts() -> Result<(), Box<dyn Error>> {
     let mut fixture = CommittedBlobReadFixture::start(b"metadata blob fixture").await?;
 
     fixture
@@ -1379,11 +1379,11 @@ async fn inv060_blob_metadata_reports_exact_catalog_facts() -> Result<(), Box<dy
     fixture.stop().await
 }
 
-/// INV-060: a direct range returns the exact requested bytes only after the
+/// a direct range returns the exact requested bytes only after the
 /// recorded replica verifies.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_range_returns_exact_verified_bytes() -> Result<(), Box<dyn Error>> {
+async fn blob_range_returns_exact_verified_bytes() -> Result<(), Box<dyn Error>> {
     let mut fixture = CommittedBlobReadFixture::start(b"verified direct blob range").await?;
     let offset_bytes = CanonicalU64::new(9);
     let length_bytes = CanonicalU64::new(6);
@@ -1412,11 +1412,11 @@ async fn inv060_blob_range_returns_exact_verified_bytes() -> Result<(), Box<dyn 
     fixture.stop().await
 }
 
-/// INV-060: an exact range outside the catalog length is rejected before store
+/// an exact range outside the catalog length is rejected before store
 /// access with the typed range facts.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_range_out_of_bounds_is_typed() -> Result<(), Box<dyn Error>> {
+async fn blob_range_out_of_bounds_is_typed() -> Result<(), Box<dyn Error>> {
     let mut fixture = CommittedBlobReadFixture::start(b"out of bounds blob fixture").await?;
     let offset_bytes = CanonicalU64::new(u64::MAX);
     let length_bytes = CanonicalU64::new(1);
@@ -1448,10 +1448,10 @@ async fn inv060_blob_range_out_of_bounds_is_typed() -> Result<(), Box<dyn Error>
     fixture.stop().await
 }
 
-/// INV-060: an absent recorded object returns the content-silent missing code.
+/// an absent recorded object returns the content-silent missing code.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_read_missing_replica_is_typed() -> Result<(), Box<dyn Error>> {
+async fn blob_read_missing_replica_is_typed() -> Result<(), Box<dyn Error>> {
     let mut fixture = CommittedBlobReadFixture::start(b"missing replica blob fixture").await?;
     fs::remove_file(fixture.object_path())?;
 
@@ -1478,11 +1478,11 @@ async fn inv060_blob_read_missing_replica_is_typed() -> Result<(), Box<dyn Error
     fixture.stop().await
 }
 
-/// INV-060: a recorded object whose bytes no longer match the catalog returns
+/// a recorded object whose bytes no longer match the catalog returns
 /// the content-silent corruption code.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_read_corrupt_replica_is_typed() -> Result<(), Box<dyn Error>> {
+async fn blob_read_corrupt_replica_is_typed() -> Result<(), Box<dyn Error>> {
     let mut fixture = CommittedBlobReadFixture::start(b"corrupt replica blob fixture").await?;
     fs::write(fixture.object_path(), b"corrupt")?;
 
@@ -1509,11 +1509,11 @@ async fn inv060_blob_read_corrupt_replica_is_typed() -> Result<(), Box<dyn Error
     fixture.stop().await
 }
 
-/// INV-060: a digest absent from the catalog returns the content-silent
+/// a digest absent from the catalog returns the content-silent
 /// not-found code without store access.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_metadata_absent_catalog_entry_is_not_found() -> Result<(), Box<dyn Error>> {
+async fn blob_metadata_absent_catalog_entry_is_not_found() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start_with_blob_storage().await?;
     let absent_digest = CanonicalBlobDigest::from_bytes([0xcd; 32]);
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -1761,12 +1761,11 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
     Ok(())
 }
 
-/// INV-048: process goal commands preserve immutable supersession lineage and
+/// process goal commands preserve immutable supersession lineage and
 /// show returns the complete ordered event stream with its current projection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s_goal_inv048_process_protocol_supersession_history_round_trips()
--> Result<(), Box<dyn Error>> {
+async fn s_goal_process_protocol_supersession_history_round_trips() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -3240,7 +3239,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     }
 }
 
-/// Issue #1027 / INV-034: killing the daemon with a full fleet in model
+/// Issue #1027: killing the daemon with a full fleet in model
 /// execution leaves every model call ambiguous. Ambiguous-operation
 /// reconciliation must release local scheduler ownership and then resume or
 /// terminalize every such turn once a replacement daemon takes over, without
@@ -3628,12 +3627,12 @@ async fn complete_active_text_turn(
     Ok(())
 }
 
-/// S28 / INV-038: the user-visible operation distinguishes first insertion
+/// S28: the user-visible operation distinguishes first insertion
 /// from exact-snapshot reimport while retaining the winner's identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s28_inv038_single_shot_and_chunked_import_resolve_the_same_snapshot()
--> Result<(), Box<dyn Error>> {
+async fn s28_single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<(), Box<dyn Error>>
+{
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let source = ConversationImportSource::new(
@@ -4031,13 +4030,13 @@ async fn s28_continuation_names_an_absent_imported_conversation() -> Result<(), 
     runtime.stop().await
 }
 
-/// S28 / INV-012: the imported wire address resolves against the immutable
+/// S28: the imported wire address resolves against the immutable
 /// aggregate before settings admission, so an absent conversation and an
 /// out-of-range position each win over an explicit setting the selected model
 /// cannot support.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s28_inv012_imported_address_precedes_settings_validation() -> Result<(), Box<dyn Error>> {
+async fn s28_imported_address_precedes_settings_validation() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
     let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0x28f0));
@@ -4331,13 +4330,12 @@ async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(),
     runtime.stop().await
 }
 
-/// S33 / INV-008 / INV-012 / INV-046: one complete replacement
+/// S33: one complete replacement
 /// request through the durable command boundary and validates catalog input
 /// before claiming a new command identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_defaults()
--> Result<(), Box<dyn Error>> {
+async fn s33_process_runtime_replaces_session_model_defaults() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -4425,7 +4423,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
     runtime.stop().await
 }
 
-/// INV-033: metadata wire-shape failures are malformed frames, not application
+/// metadata wire-shape failures are malformed frames, not application
 /// request rejections.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
@@ -4454,10 +4452,10 @@ async fn metadata_shape_failure_is_a_malformed_frame() -> Result<(), Box<dyn Err
     runtime.stop().await
 }
 
-/// INV-033: version four exposes the canonical initial metadata projection.
+/// version four exposes the canonical initial metadata projection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_inv033_reads_initial_metadata_projection() -> Result<(), Box<dyn Error>> {
+async fn s01_reads_initial_metadata_projection() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let first_session = create_alias_session(&mut connection).await?;
@@ -4491,14 +4489,14 @@ async fn s01_inv033_reads_initial_metadata_projection() -> Result<(), Box<dyn Er
     runtime.stop().await
 }
 
-/// INV-033: a durable snapshot whose last writer is tool execution projects onto
+/// a durable snapshot whose last writer is tool execution projects onto
 /// both metadata read surfaces. The tool-facing replacement constructor is
 /// production-registered, so this row shape exists in ordinary operation; a
 /// missing wire projection would fail the read as an encode invariant, which is
 /// fatal to the daemon and repeats on every later read of the same row.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv033_reads_back_tool_written_metadata() -> Result<(), Box<dyn Error>> {
+async fn reads_back_tool_written_metadata() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session = create_alias_session(&mut connection).await?;
@@ -4613,11 +4611,11 @@ async fn inv033_reads_back_tool_written_metadata() -> Result<(), Box<dyn Error>>
     runtime.stop().await
 }
 
-/// INV-012: one metadata command identity applies once, replays exactly, and
+/// one metadata command identity applies once, replays exactly, and
 /// rejects a structurally different reuse.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv012_enforces_metadata_command_identity() -> Result<(), Box<dyn Error>> {
+async fn enforces_metadata_command_identity() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let first_session = create_alias_session(&mut connection).await?;
@@ -4693,11 +4691,11 @@ async fn inv012_enforces_metadata_command_identity() -> Result<(), Box<dyn Error
     runtime.stop().await
 }
 
-/// INV-013: the default metadata list applies exact filters while excluding an
+/// the default metadata list applies exact filters while excluding an
 /// archived match.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv013_metadata_list_applies_default_visibility_filters() -> Result<(), Box<dyn Error>> {
+async fn metadata_list_applies_default_visibility_filters() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let first_session = create_alias_session(&mut connection).await?;
@@ -5064,11 +5062,11 @@ async fn s28_lists_native_and_imported_conversations() -> Result<(), Box<dyn Err
     runtime.stop().await
 }
 
-/// INV-033: a metadata read returns the complete current wire
+/// a metadata read returns the complete current wire
 /// projection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv033_reads_current_metadata_projection() -> Result<(), Box<dyn Error>> {
+async fn reads_current_metadata_projection() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let first_session = create_alias_session(&mut connection).await?;
@@ -5130,7 +5128,7 @@ async fn inv033_reads_current_metadata_projection() -> Result<(), Box<dyn Error>
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv033_metadata_read_maps_a_missing_session() -> Result<(), Box<dyn Error>> {
+async fn metadata_read_maps_a_missing_session() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0xdead));
@@ -5155,7 +5153,7 @@ async fn inv033_metadata_read_maps_a_missing_session() -> Result<(), Box<dyn Err
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv033_metadata_replace_maps_a_missing_session() -> Result<(), Box<dyn Error>> {
+async fn metadata_replace_maps_a_missing_session() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0xdead));
@@ -5179,11 +5177,11 @@ async fn inv033_metadata_replace_maps_a_missing_session() -> Result<(), Box<dyn 
     runtime.stop().await
 }
 
-/// INV-013: replacing an archived snapshot with `archived = false` returns the
+/// replacing an archived snapshot with `archived = false` returns the
 /// same session to the default list.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv013_metadata_restore_returns_session_to_default_list() -> Result<(), Box<dyn Error>> {
+async fn metadata_restore_returns_session_to_default_list() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let first_session = create_alias_session(&mut connection).await?;
@@ -5547,7 +5545,7 @@ async fn park_turn_on_ambiguous_model_call(
     Ok(())
 }
 
-/// S04 / S07 / INV-029: a turn parked on an ambiguous model call refuses
+/// S04 / S07: a turn parked on an ambiguous model call refuses
 /// ordinary input until the user reconciliation decision releases the slot.
 ///
 /// The refusal and the release are one contract: proving the release means
@@ -5555,8 +5553,7 @@ async fn park_turn_on_ambiguous_model_call(
 /// same durable state in the same execution (testing-style rule 17).
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
--> Result<(), Box<dyn Error>> {
+async fn s04_reconcile_turn_releases_a_wedged_ambiguous_session() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -5654,7 +5651,7 @@ async fn sole_terminal_call_disposition(
     .await?)
 }
 
-/// S04 / INV-029: a live streamed provider exchange that fails its stream
+/// S04: a live streamed provider exchange that fails its stream
 /// integrity check parks the turn on an unstopped ambiguous model call —
 /// exactly the wedge a mid-stream protocol violation produces — and the
 /// reconciliation verb releases the session with a queued
@@ -5667,8 +5664,7 @@ async fn sole_terminal_call_disposition(
 /// startup-scan fixture.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s04_inv029_streamed_protocol_violation_parks_then_reconciles() -> Result<(), Box<dyn Error>>
-{
+async fn s04_streamed_protocol_violation_parks_then_reconciles() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut commands = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut commands).await?;
@@ -5740,13 +5736,12 @@ async fn connection_reconciles_the_parked_turn(
     Ok(())
 }
 
-/// S04 / INV-029: the reconciliation request is refused, without recording a
+/// S04: the reconciliation request is refused, without recording a
 /// command, for every turn that owes no reconciliation decision — so the verb
 /// never becomes a general active-turn stop.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
--> Result<(), Box<dyn Error>> {
+async fn s04_reconcile_turn_refuses_a_turn_that_owes_no_decision() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -5819,12 +5814,12 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
     runtime.stop().await
 }
 
-/// INV-012: a reconciliation decision that already committed replays its exact
+/// a reconciliation decision that already committed replays its exact
 /// recorded successor, because a claimed command identity reaches the durable
 /// replay boundary before the current-state precondition is applied.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<dyn Error>> {
+async fn reconcile_turn_replays_a_committed_decision() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -5859,12 +5854,11 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
     runtime.stop().await
 }
 
-/// S37 / INV-053: reconciliation records the explicit per-call contribution
+/// S37: reconciliation records the explicit per-call contribution
 /// with the successor origin instead of dropping it at the daemon boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s37_inv053_reconcile_turn_records_its_per_call_model_settings()
--> Result<(), Box<dyn Error>> {
+async fn s37_reconcile_turn_records_its_per_call_model_settings() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -5904,7 +5898,7 @@ async fn s37_inv053_reconcile_turn_records_its_per_call_model_settings()
     runtime.stop().await
 }
 
-/// INV-012: two overlapping requests carrying one reconciliation command
+/// two overlapping requests carrying one reconciliation command
 /// identity both land on the committed decision.
 ///
 /// The claim probe and the precondition read are separate statements, so the
@@ -5913,7 +5907,7 @@ async fn s37_inv053_reconcile_turn_records_its_per_call_model_settings()
 /// execution because the race is the requirement (testing-style rule 17).
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv012_overlapping_equal_reconciliations_both_reach_the_committed_decision()
+async fn overlapping_equal_reconciliations_both_reach_the_committed_decision()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut setup = Connection::connect(runtime.socket()).await?;
@@ -6038,7 +6032,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
     runtime.stop().await
 }
 
-/// S24 / INV-032: a follow subscription formed before its snapshot observes
+/// S24: a follow subscription formed before its snapshot observes
 /// the next committed outbox event strictly above that snapshot's cursor.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
@@ -6122,10 +6116,10 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
     runtime.stop().await
 }
 
-/// S24 / INV-032 / INV-033: followers receive the ephemeral provider-text stream.
+/// S24: followers receive the ephemeral provider-text stream.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s24_inv032_inv033_inherits_provider_text_streaming() -> Result<(), Box<dyn Error>> {
+async fn s24_inherits_provider_text_streaming() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut commands = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut commands).await?;
@@ -6160,13 +6154,13 @@ async fn s24_inv032_inv033_inherits_provider_text_streaming() -> Result<(), Box<
     runtime.stop().await
 }
 
-/// S01 / S02 / S24 / INV-032 / INV-035: the provider bridge asks the scripted
+/// S01 / S02 / S24: the provider bridge asks the scripted
 /// runtime for streamed delivery, and three already-attached followers each
 /// observe the exact already-redacted deltas before durable terminal entries
 /// expose the same complete assistant reply.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_three_followers_then_durable_truth()
+async fn s01_s02_s24_streamed_reply_reaches_three_followers_then_durable_truth()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut commands = Connection::connect(runtime.socket()).await?;
@@ -6215,7 +6209,7 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_three_followers_then_d
     runtime.stop().await
 }
 
-/// S24 / INV-032: a follower that cannot keep up with ephemeral provider
+/// S24: a follower that cannot keep up with ephemeral provider
 /// deltas receives the existing resynchronization error, loses some deltas,
 /// and recovers the exact completed assistant reply from durable transcript
 /// truth without any delta persistence or replay.
@@ -6257,10 +6251,10 @@ async fn s24_streaming_lag_resync_loses_deltas_and_reads_complete_transcript()
     runtime.stop().await
 }
 
-/// S24 / INV-033: followers receive the ephemeral delta stream.
+/// S24: followers receive the ephemeral delta stream.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s24_inv033_followers_inherit_the_streamed_deltas() -> Result<(), Box<dyn Error>> {
+async fn s24_followers_inherit_the_streamed_deltas() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut commands = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut commands).await?;
@@ -6544,12 +6538,12 @@ fn decided_receipt(message: &ServerMessage) -> (CanonicalUuid, ToolDecision) {
     }
 }
 
-/// S07 / INV-029: the stop verb applies the accepted interrupt treatment — a
+/// S07: the stop verb applies the accepted interrupt treatment — a
 /// running turn with no prepared call cancels directly through the existing
 /// lifecycle while the stop's content becomes the queued immediate successor.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successor()
+async fn s07_stop_turn_cancels_the_activated_turn_and_queues_its_successor()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -6595,12 +6589,12 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
     runtime.stop().await
 }
 
-/// S07 / INV-029: stopping an issued call records the durable cancellation
+/// S07: stopping an issued call records the durable cancellation
 /// request and retains the slot for lifecycle closure, and a distinct second
 /// stop is refused with the exact prior stop authority named.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_once()
+async fn s07_stop_turn_requests_cancellation_of_an_issued_call_exactly_once()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -6907,11 +6901,11 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
     runtime.stop().await
 }
 
-/// INV-012: an equal stop replay returns its recorded successor, never a
+/// an equal stop replay returns its recorded successor, never a
 /// second interrupt or a refusal.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn Error>> {
+async fn stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -6947,11 +6941,11 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
     runtime.stop().await
 }
 
-/// S37 / INV-053: stopping a turn records the explicit per-call contribution
+/// S37: stopping a turn records the explicit per-call contribution
 /// with the successor origin instead of dropping it at the daemon boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s37_inv053_stop_turn_records_its_per_call_model_settings() -> Result<(), Box<dyn Error>> {
+async fn s37_stop_turn_records_its_per_call_model_settings() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -6992,7 +6986,7 @@ async fn s37_inv053_stop_turn_records_its_per_call_model_settings() -> Result<()
     runtime.stop().await
 }
 
-/// S07 / S10 / INV-029: a stop racing an active tool round never wedges the
+/// S07 / S10: a stop racing an active tool round never wedges the
 /// session. Against the parked approval wait the stop is refused fail-closed
 /// with the wait intact; after the pending request is denied through its
 /// canonical decision command, the stop cancels the turn with the denial
@@ -7000,7 +6994,7 @@ async fn s37_inv053_stop_turn_records_its_per_call_model_settings() -> Result<()
 /// replays cleanly.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_and_stop_release()
+async fn s07_s10_stop_against_a_tool_round_stays_fail_closed_then_deny_and_stop_release()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -7297,7 +7291,7 @@ async fn s10_decide_tool_request_refuses_an_unsafe_denial_reason_before_recordin
     runtime.stop().await
 }
 
-/// INV-012: one durable decision identity has one recorded meaning — an equal
+/// one durable decision identity has one recorded meaning — an equal
 /// replay returns the exact recorded receipt, a different payload under the
 /// same identity is conflicting reuse, and reusing an identity claimed by
 /// another command kind is conflicting reuse too. The steps share one recorded
@@ -7305,7 +7299,7 @@ async fn s10_decide_tool_request_refuses_an_unsafe_denial_reason_before_recordin
 /// execution.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv012_decide_tool_request_replays_equally_and_refuses_conflicting_reuse()
+async fn decide_tool_request_replays_equally_and_refuses_conflicting_reuse()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -7742,13 +7736,12 @@ async fn s03_queued_input_survives_process_restart_and_startup_scan() -> Result<
     runtime.stop().await
 }
 
-/// S34 / INV-012 / INV-033 / INV-046: a prompted session exposes exact current
+/// S34: a prompted session exposes exact current
 /// and named defaults epochs and replaces the prompt forward-only with the
 /// complete installed echo.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_prompt()
--> Result<(), Box<dyn Error>> {
+async fn s34_process_runtime_carries_the_session_system_prompt() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let prompt = SystemPromptText::try_new(String::from("exact review instructions"))
@@ -7889,12 +7882,11 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
     runtime.stop().await
 }
 
-/// S37 / INV-051: an explicit unsupported replacement value is a typed caller
+/// S37: an explicit unsupported replacement value is a typed caller
 /// error even when changing models would have adjusted an inherited value.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s37_inv051_model_change_rejects_an_explicit_unsupported_setting()
--> Result<(), Box<dyn Error>> {
+async fn s37_model_change_rejects_an_explicit_unsupported_setting() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let requested_reasoning = ReasoningLevel::Low;
@@ -7941,13 +7933,12 @@ async fn s37_inv051_model_change_rejects_an_explicit_unsupported_setting()
     runtime.stop().await
 }
 
-/// S37 / INV-052 / INV-053: defaults replacement carries the prior session
+/// S37: defaults replacement carries the prior session
 /// layer across a model change, clears an inherited incompatible value, and
 /// emits the exact automatic adjustment as durable follower evidence.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s37_inv052_inv053_model_change_clamps_inherited_session_settings()
--> Result<(), Box<dyn Error>> {
+async fn s37_model_change_clamps_inherited_session_settings() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let requested_reasoning = ReasoningLevel::Low;
@@ -8019,12 +8010,11 @@ async fn s37_inv052_inv053_model_change_clamps_inherited_session_settings()
     runtime.stop().await
 }
 
-/// S01 / INV-012: an equal explicit-creation replay is decided from its
+/// S01: an equal explicit-creation replay is decided from its
 /// durable command before the current deployment revalidates model settings.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_inv012_create_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>>
-{
+async fn s01_create_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let command_id = command()?;
     let requested_settings = ModelSettingsOverlay {
@@ -8080,12 +8070,11 @@ async fn s01_inv012_create_session_replays_after_capability_removal() -> Result<
     runtime.stop().await
 }
 
-/// S28 / INV-012: an equal imported-continuation replay is decided from its
+/// S28: an equal imported-continuation replay is decided from its
 /// durable command before the current deployment revalidates model settings.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s28_inv012_imported_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>>
-{
+async fn s28_imported_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
     let command_id = command()?;
@@ -8142,12 +8131,11 @@ async fn s28_inv012_imported_session_replays_after_capability_removal() -> Resul
     runtime.stop().await
 }
 
-/// S37 / INV-012: an equal defaults-replacement replay returns its durable
+/// S37: an equal defaults-replacement replay returns its durable
 /// result before the current deployment revalidates model settings.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s37_inv012_defaults_replacement_replays_after_capability_removal()
--> Result<(), Box<dyn Error>> {
+async fn s37_defaults_replacement_replays_after_capability_removal() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let (session_id, _) = create_direct_session_with_settings(
@@ -8213,12 +8201,12 @@ async fn s37_inv012_defaults_replacement_replays_after_capability_removal()
     runtime.stop().await
 }
 
-/// S37 / INV-012: a stale replacement records and replays its authoritative
+/// S37: a stale replacement records and replays its authoritative
 /// version mismatch before current capability validation can reject settings.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s37_inv012_stale_defaults_replacement_precedes_settings_validation()
--> Result<(), Box<dyn Error>> {
+async fn s37_stale_defaults_replacement_precedes_settings_validation() -> Result<(), Box<dyn Error>>
+{
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let expected_version = CanonicalU64::new(1);
@@ -8281,12 +8269,12 @@ async fn s37_inv012_stale_defaults_replacement_precedes_settings_validation()
     runtime.stop().await
 }
 
-/// S37 / INV-012: an unknown replacement selection is the read-only catalog
+/// S37: an unknown replacement selection is the read-only catalog
 /// error even when the same frame names an epoch the session has not reached,
 /// and it leaves the command identity available for the corrected request.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s37_inv012_unknown_replacement_model_precedes_defaults_version_mismatch()
+async fn s37_unknown_replacement_model_precedes_defaults_version_mismatch()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -8345,12 +8333,12 @@ async fn s37_inv012_unknown_replacement_model_precedes_defaults_version_mismatch
     runtime.stop().await
 }
 
-/// S37 / INV-012: an absent session reaches the durable replacement boundary
+/// S37: an absent session reaches the durable replacement boundary
 /// before compatibility validation and replays its recorded terminal result.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s37_inv012_absent_defaults_replacement_precedes_settings_validation()
--> Result<(), Box<dyn Error>> {
+async fn s37_absent_defaults_replacement_precedes_settings_validation() -> Result<(), Box<dyn Error>>
+{
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let absent_session_id = CanonicalUuid::from_uuid(Uuid::from_u128(0x3701));
@@ -8381,14 +8369,13 @@ async fn s37_inv012_absent_defaults_replacement_precedes_settings_validation()
     runtime.stop().await
 }
 
-/// S01 / S03 / INV-005 / INV-014 / INV-015: explicit compaction uses a
+/// S01 / S03: explicit compaction uses a
 /// dedicated scripted call, retains the complete transcript and exact usage /
 /// range provenance, survives startup scan, and projects summary plus suffix
 /// into the next ordinary scripted call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_projects()
--> Result<(), Box<dyn Error>> {
+async fn s01_s03_explicit_compaction_survives_restart_and_projects() -> Result<(), Box<dyn Error>> {
     let usage = TokenUsage {
         input_tokens: Some(41),
         output_tokens: Some(7),
@@ -8821,12 +8808,11 @@ async fn explicit_compaction_over_limit_retains_usage_without_summary() -> Resul
     runtime.stop().await
 }
 
-/// INV-012 / INV-014 / INV-015: exact authorization, completion, and failure
+/// exact authorization, completion, and failure
 /// retries replay their durable outcomes without duplicate summary evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv012_inv014_inv015_compaction_lifecycle_retries_are_exact() -> Result<(), Box<dyn Error>>
-{
+async fn compaction_lifecycle_retries_are_exact() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let (connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
     let repository = ContextCompactionRepository::new(runtime.pool.clone());
@@ -8922,11 +8908,11 @@ async fn inv012_inv014_inv015_compaction_lifecycle_retries_are_exact() -> Result
     runtime.stop().await
 }
 
-/// INV-012: concurrent reuse of one user-global command identity elects one
+/// concurrent reuse of one user-global command identity elects one
 /// claimant and makes the loser inspect the committed winner exactly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv012_concurrent_compaction_command_claim_has_one_winner() -> Result<(), Box<dyn Error>> {
+async fn concurrent_compaction_command_claim_has_one_winner() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let (connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xde01));
@@ -8957,13 +8943,12 @@ async fn inv012_concurrent_compaction_command_claim_has_one_winner() -> Result<(
     runtime.stop().await
 }
 
-/// INV-009 / INV-014: compaction preparation and turn activation share the
+/// compaction preparation and turn activation share the
 /// scheduler lock, so exactly one can claim the session boundary and the loser
 /// reconstitutes the winner before committing any conflicting lifecycle.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv009_inv014_compaction_preparation_serializes_turn_activation()
--> Result<(), Box<dyn Error>> {
+async fn compaction_preparation_serializes_turn_activation() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let (mut connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
     connection
@@ -9035,14 +9020,13 @@ async fn inv009_inv014_compaction_preparation_serializes_turn_activation()
     runtime.stop().await
 }
 
-/// S01 / S03 / INV-014 / INV-015: an exact provider-native count above the
+/// S01 / S03: an exact provider-native count above the
 /// input plus its reserved maximum output above the operator-declared context
 /// window compacts before activation, recounts the
 /// projected summary-plus-suffix input, and sends only that fitting operation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
--> Result<(), Box<dyn Error>> {
+async fn s01_s03_automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -9167,15 +9151,14 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
     runtime.stop().await
 }
 
-/// S01 / S03 / INV-014 / INV-015: provider-reported preflight rechecks the
+/// S01 / S03: provider-reported preflight rechecks the
 /// completed summary and closes the queued candidate call-free when reserved
 /// headroom is still unavailable. The compaction retains its summary output,
 /// not the source input that summary replaced, so a summary larger than the
 /// window is what leaves the queued turn unservable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
--> Result<(), Box<dyn Error>> {
+async fn s01_s03_reported_usage_rechecks_compaction_headroom() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -9288,14 +9271,13 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
     runtime.stop().await
 }
 
-/// S01 / S03 / INV-014 / INV-015: the provider-reported preflight scores the
+/// S01 / S03: the provider-reported preflight scores the
 /// queued turn's own input. Reported usage that fits on its own exhausts the
 /// reserved headroom once the waiting input is counted, and the daemon compacts
 /// that queued turn before activating it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s03_inv014_inv015_reported_usage_preflight_counts_the_queued_input()
--> Result<(), Box<dyn Error>> {
+async fn s01_s03_reported_usage_preflight_counts_the_queued_input() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -9429,13 +9411,12 @@ async fn s01_s03_inv014_inv015_reported_usage_preflight_counts_the_queued_input(
     runtime.stop().await
 }
 
-/// S01 / S03 / INV-014 / INV-015: a failed automatic compaction closes the
+/// S01 / S03: a failed automatic compaction closes the
 /// queued candidate call-free, so a later eligibility pass cannot dispatch
 /// the known-oversized ordinary request.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s03_inv014_inv015_failed_automatic_compaction_closes_turn_call_free()
--> Result<(), Box<dyn Error>> {
+async fn s01_s03_failed_automatic_compaction_closes_turn_call_free() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -9650,14 +9631,14 @@ impl ModelCallInputTokenCounter for CommitAmbiguousCounter {
     }
 }
 
-/// S03 / INV-034: the production guarded pass reports post-activation failure
+/// S03: the production guarded pass reports post-activation failure
 /// for the declared ambiguous-commit class, so the daemon stops scheduling and
 /// startup recovery regains authority over durable state whose outcome ordinary
 /// scheduler retry cannot decide.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
--> Result<(), Box<dyn Error>> {
+async fn s03_ambiguous_guarded_stage_raises_the_fatal_recovery_signal() -> Result<(), Box<dyn Error>>
+{
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -9727,7 +9708,7 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
     drop(connection);
     runtime.stop().await
 }
-/// S03 / INV-012 / INV-015: a daemon-minted compaction result identity that
+/// S03: a daemon-minted compaction result identity that
 /// already names a durable record is reminted before the provider is called,
 /// exactly as a colliding call identity already is. Discovering it in
 /// `complete` instead would cost a paid summary and admit no remint, because
@@ -9735,8 +9716,8 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
 /// rolls back so the reminting caller can reuse its user-global command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s03_inv012_inv015_taken_compaction_result_identities_remint_before_sending()
--> Result<(), Box<dyn Error>> {
+async fn s03_taken_compaction_result_identities_remint_before_sending() -> Result<(), Box<dyn Error>>
+{
     let mut runtime = RunningRuntime::start().await?;
     let (connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
     let repository = ContextCompactionRepository::new(runtime.pool.clone());
@@ -9814,7 +9795,7 @@ async fn s03_inv012_inv015_taken_compaction_result_identities_remint_before_send
     runtime.stop().await
 }
 
-/// S03 / INV-012 / INV-015: a result identity taken after preparation fails the
+/// S03: a result identity taken after preparation fails the
 /// completion closed rather than surfacing as a retryable database failure.
 ///
 /// `complete_context_compaction_until_resolved` retries exactly the database
@@ -9825,8 +9806,8 @@ async fn s03_inv012_inv015_taken_compaction_result_identities_remint_before_send
 /// executor stopped.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s03_inv012_inv015_late_result_identity_collision_fails_completion_closed()
--> Result<(), Box<dyn Error>> {
+async fn s03_late_result_identity_collision_fails_completion_closed() -> Result<(), Box<dyn Error>>
+{
     let mut runtime = RunningRuntime::start().await?;
     let (connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
     let repository = ContextCompactionRepository::new(runtime.pool.clone());

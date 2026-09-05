@@ -826,9 +826,9 @@ mod tests {
         .source_digest()
     }
 
-    /// INV-038: first ingestion converts once and commits one complete candidate.
+    /// first ingestion converts once and commits one complete candidate.
     #[tokio::test]
-    async fn s28_inv038_first_ingestion_returns_inserted_candidate() {
+    async fn s28_first_ingestion_returns_inserted_candidate() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -860,10 +860,10 @@ mod tests {
         assert_eq!(store.observed[0].id(), candidate);
     }
 
-    /// S28 / INV-038: partial ingestion returns the checked accepted aggregate
+    /// S28: partial ingestion returns the checked accepted aggregate
     /// and every loss without claiming the incomplete source is durable.
     #[tokio::test]
-    async fn s28_inv038_resilient_ingestion_reports_exact_skips_without_storage() {
+    async fn s28_resilient_ingestion_reports_exact_skips_without_storage() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -901,10 +901,10 @@ mod tests {
         assert!(store.observed.is_empty());
     }
 
-    /// S28 / INV-038: a resilient conversion with no losses may use the same
+    /// S28: a resilient conversion with no losses may use the same
     /// exact-source durable resolution as strict conversion.
     #[tokio::test]
-    async fn s28_inv038_resilient_complete_ingestion_stores_with_no_skips() {
+    async fn s28_resilient_complete_ingestion_stores_with_no_skips() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -946,10 +946,10 @@ mod tests {
         assert_eq!(store.observed.len(), 1);
     }
 
-    /// S28 / INV-038: all-invalid nonempty input reports every loss without
+    /// S28: all-invalid nonempty input reports every loss without
     /// minting entry identities or attempting a durable write.
     #[tokio::test]
-    async fn s28_inv038_resilient_ingestion_with_no_valid_records_never_stores() {
+    async fn s28_resilient_ingestion_with_no_valid_records_never_stores() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -983,10 +983,10 @@ mod tests {
         assert!(store.observed.is_empty());
     }
 
-    /// INV-038: exact reingestion discards candidates and returns the existing
+    /// exact reingestion discards candidates and returns the existing
     /// immutable imported-conversation identity.
     #[tokio::test]
-    async fn s28_inv038_exact_reingestion_returns_existing_identity() {
+    async fn s28_exact_reingestion_returns_existing_identity() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let existing = conversation(99);
@@ -1015,7 +1015,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_inv038_conversion_failure_never_reaches_store() {
+    async fn s28_conversion_failure_never_reaches_store() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -1042,7 +1042,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_inv001_inv038_converter_identity_mismatch_never_reaches_store() {
+    async fn s28_converter_identity_mismatch_never_reaches_store() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let converted = conversation(9);
@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_inv001_converter_unissued_entry_identity_never_reaches_store() {
+    async fn s28_converter_unissued_entry_identity_never_reaches_store() {
         let candidate = conversation(1);
         let issued_entries = [entry(2), entry(3)];
         let unissued_entry = entry(9);
@@ -1091,7 +1091,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_inv001_converter_reordered_entry_identities_never_reach_store() {
+    async fn s28_converter_reordered_entry_identities_never_reach_store() {
         let candidate = conversation(1);
         let issued_entries = [entry(2), entry(3)];
         let mut service = service(
@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_inv001_converter_extra_identity_request_never_reaches_store() {
+    async fn s28_converter_extra_identity_request_never_reaches_store() {
         let candidate = conversation(1);
         let issued_entries = [entry(2), entry(3)];
         let mut service = service(
@@ -1137,7 +1137,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_inv038_store_source_digest_mismatch_fails_closed() {
+    async fn s28_store_source_digest_mismatch_fails_closed() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let expected_digest = candidate_digest(candidate, entries);
@@ -1160,7 +1160,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_inv038_store_inserted_identity_mismatch_fails_closed() {
+    async fn s28_store_inserted_identity_mismatch_fails_closed() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let wrong_identity = conversation(99);
@@ -1182,7 +1182,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_inv038_store_failure_is_not_retried() {
+    async fn s28_store_failure_is_not_retried() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(candidate, entries, Err(FakeStoreError::Unavailable));
@@ -1205,10 +1205,10 @@ mod tests {
         assert!(!value.is_max());
     }
 
-    /// INV-001: production generators supply fresh UUIDv7 values for both
+    /// production generators supply fresh UUIDv7 values for both
     /// imported identity kinds.
     #[test]
-    fn inv001_production_generator_supplies_distinct_uuid_v7_candidates() {
+    fn production_generator_supplies_distinct_uuid_v7_candidates() {
         let mut ids = UuidV7ImportedConversationIdGenerator;
         let first_conversation = ids.next_conversation_id().into_uuid();
         let second_conversation = ids.next_conversation_id().into_uuid();

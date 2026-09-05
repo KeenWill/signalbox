@@ -2987,7 +2987,7 @@ fn validate_dispatch(
 /// recorded against the delegate denial the request re-proposes. Both are
 /// per-request user agency exercised before dispatch. The frozen session
 /// blanket is excluded: it is standing daemon-local automation and never
-/// runner-dispatch authority (INV-035, INV-045).
+/// runner-dispatch authority.
 const fn confirmed_by_user(source: ToolDecisionSource) -> bool {
     matches!(
         source,
@@ -4550,7 +4550,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_catalog_rejects_duplicate_capability_class() {
+    fn s30_catalog_rejects_duplicate_capability_class() {
         assert_eq!(
             RunnerCatalog::try_new([class(), class()], [], [], [], []),
             Err(RunnerDomainError::DuplicateCapabilityClass(class()))
@@ -4558,7 +4558,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_catalog_rejects_duplicate_sandbox_profile() {
+    fn s30_catalog_rejects_duplicate_sandbox_profile() {
         assert_eq!(
             RunnerCatalog::try_new(
                 [],
@@ -4574,7 +4574,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_catalog_rejects_duplicate_workspace_capability() {
+    fn s30_catalog_rejects_duplicate_workspace_capability() {
         assert_eq!(
             RunnerCatalog::try_new(
                 [],
@@ -4593,7 +4593,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv001_logical_enrollment_retains_distinct_typed_identities() {
+    fn s30_logical_enrollment_retains_distinct_typed_identities() {
         let enrollment = RunnerEnrollment::new(
             runner_enrollment_id(ENROLLMENT),
             runner_id(RUNNER),
@@ -4612,7 +4612,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_unknown_advertised_tool_rejects_the_complete_registration() {
+    fn s30_unknown_advertised_tool_rejects_the_complete_registration() {
         let enrollment = RunnerEnrollment::new(
             runner_enrollment_id(ENROLLMENT),
             runner_id(RUNNER),
@@ -4628,7 +4628,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_catalog_rejects_tool_selector_for_undeclared_class() {
+    fn s30_catalog_rejects_tool_selector_for_undeclared_class() {
         let declaration = RunnerToolDeclaration::new(
             tool("specialized"),
             model_definition("specialized"),
@@ -4646,7 +4646,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_catalog_rejects_idempotent_tool_with_daemon_locus() {
+    fn s30_catalog_rejects_idempotent_tool_with_daemon_locus() {
         let declaration = RunnerToolDeclaration::new(
             tool("sync"),
             model_definition("sync"),
@@ -4666,7 +4666,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_advertised_class_requires_enrollment_and_catalog_authority() {
+    fn s30_advertised_class_requires_enrollment_and_catalog_authority() {
         let enrollment = RunnerEnrollment::new(
             runner_enrollment_id(ENROLLMENT),
             runner_id(RUNNER),
@@ -4684,7 +4684,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_daemon_only_tool_rejects_the_complete_registration() {
+    fn s30_daemon_only_tool_rejects_the_complete_registration() {
         let enrollment = RunnerEnrollment::new(
             runner_enrollment_id(ENROLLMENT),
             runner_id(RUNNER),
@@ -4709,7 +4709,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_tool_selector_must_match_advertised_runner_capability() {
+    fn s30_tool_selector_must_match_advertised_runner_capability() {
         let enrollment = RunnerEnrollment::new(
             runner_enrollment_id(ENROLLMENT),
             runner_id(RUNNER),
@@ -4736,7 +4736,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_registration_rejects_unadvertised_sandbox_profile() {
+    fn s30_registration_rejects_unadvertised_sandbox_profile() {
         let advertisement =
             RunnerAdvertisement::new([class()], [], [], [], [RunnerSandboxProfile::Ambient], []);
         let restricted_catalog = RunnerCatalog::try_new(
@@ -4757,7 +4757,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_registration_rejects_repository_profile_outside_advertisement() {
+    fn s30_registration_rejects_repository_profile_outside_advertisement() {
         let advertisement = RunnerAdvertisement::new(
             [class()],
             [],
@@ -4779,7 +4779,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_registration_rejects_oversized_repository_inventory() {
+    fn s30_registration_rejects_oversized_repository_inventory() {
         let repositories = (0..=RunnerAdvertisement::MAX_REPOSITORIES).map(|index| {
             RunnerRepositoryEntry::new(
                 WorkspaceRepositoryKey::try_new(format!("repository_{index}"))
@@ -4796,7 +4796,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_revoked_enrollment_cannot_register() {
+    fn s30_revoked_enrollment_cannot_register() {
         let enrollment = RunnerEnrollment::new(
             runner_enrollment_id(ENROLLMENT),
             runner_id(RUNNER),
@@ -4813,7 +4813,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_outstanding_preparation_excludes_concurrent_registration() {
+    fn s30_outstanding_preparation_excludes_concurrent_registration() {
         let enrollment = enrollment();
         let outstanding = enrollment
             .prepare_registration(advertisement(), &catalog())
@@ -4831,7 +4831,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_committed_preparation_releases_the_exclusive_fence() {
+    fn s30_committed_preparation_releases_the_exclusive_fence() {
         let enrollment = enrollment();
         let first = enrollment
             .prepare_registration(advertisement(), &catalog())
@@ -4846,7 +4846,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_enrollment_reports_its_last_issued_registration_revision() {
+    fn s30_enrollment_reports_its_last_issued_registration_revision() {
         let enrollment = enrollment();
         assert_eq!(enrollment.last_issued_registration_revision(), None);
 
@@ -4860,7 +4860,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv042_revoked_enrollment_cannot_authorize_a_later_lease() {
+    fn s31_revoked_enrollment_cannot_authorize_a_later_lease() {
         let (registration, pin) = pinned("readonly");
         let revoked = enrollment()
             .revoke()
@@ -4883,7 +4883,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv042_inv045_revocation_invalidates_registration_for_grant_transition() {
+    fn s32_revocation_invalidates_registration_for_grant_transition() {
         let enrollment = enrollment();
         let registration = enrollment
             .register(advertisement(), &catalog())
@@ -4922,7 +4922,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv042_lease_rejects_a_foreign_active_enrollment() {
+    fn s31_lease_rejects_a_foreign_active_enrollment() {
         let (registration, pin) = pinned("readonly");
         let foreign = enrollment_for(runner_id(REPLACEMENT_RUNNER));
 
@@ -4943,7 +4943,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_registration_attaches_daemon_policy_not_runner_policy() {
+    fn s30_registration_attaches_daemon_policy_not_runner_policy() {
         let registration = registration();
         let declaration = registration
             .tool(&tool("deploy"))
@@ -4954,7 +4954,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_inv043_reregistration_retires_prior_registration_authority() {
+    fn s30_reregistration_retires_prior_registration_authority() {
         let enrollment = enrollment();
         let initial = enrollment
             .register(advertisement(), &catalog())
@@ -4999,7 +4999,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv001_enrollment_reconstitution_rejects_cross_wired_runner() {
+    fn s30_enrollment_reconstitution_rejects_cross_wired_runner() {
         let mut input = enrollment_reconstitution_input();
         input.recorded_runner = runner_id(REPLACEMENT_RUNNER);
 
@@ -5010,7 +5010,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_enrollment_reconstitution_rejects_cross_wired_class_inventory() {
+    fn s30_enrollment_reconstitution_rejects_cross_wired_class_inventory() {
         let mut input = enrollment_reconstitution_input();
         input.recorded_allowed_classes = BTreeSet::new();
 
@@ -5021,7 +5021,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_enrollment_reconstitution_rejects_cross_wired_state() {
+    fn s30_enrollment_reconstitution_rejects_cross_wired_state() {
         let mut input = enrollment_reconstitution_input();
         input.recorded_state = RunnerEnrollmentState::Revoked;
 
@@ -5032,7 +5032,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_enrollment_reconstitution_restores_registration_revision() {
+    fn s30_enrollment_reconstitution_restores_registration_revision() {
         let mut input = enrollment_reconstitution_input();
         let restored_revision = RunnerGeneration::try_from_u64(2).expect("two is positive");
         input.registration_revision = Some(restored_revision);
@@ -5051,7 +5051,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_enrollment_reconstitution_rejects_cross_wired_registration_revision() {
+    fn s30_enrollment_reconstitution_rejects_cross_wired_registration_revision() {
         let mut input = enrollment_reconstitution_input();
         input.registration_revision = Some(RunnerGeneration::one());
         input.recorded_registration_revision =
@@ -5064,7 +5064,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_unclaimed_side_effecting_loss_is_releasable() {
+    fn s31_unclaimed_side_effecting_loss_is_releasable() {
         let attempt = tool_attempt_id(ATTEMPT);
         let (registration, placement, grant, batch, lease) = offered_from_batch("deploy");
         let preexisting_clone = batch.clone();
@@ -5114,7 +5114,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_unclaimed_retry_preparation_is_single_use_across_batch_copies() {
+    fn s31_unclaimed_retry_preparation_is_single_use_across_batch_copies() {
         let (_, _, _, batch, lease) = offered_from_batch("deploy");
         let retained_batch = batch.clone();
         let proof = no_execution_proof(&lease);
@@ -5136,7 +5136,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_unclaimed_retry_authority_is_rejected_by_ordinary_offer() {
+    fn s31_unclaimed_retry_authority_is_rejected_by_ordinary_offer() {
         let (registration, placement, grant, batch, lease) = offered_from_batch("deploy");
         let proof = no_execution_proof(&lease);
         let loss = lease
@@ -5162,7 +5162,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv025_inv026_inv043_offered_side_effecting_loss_without_proof_is_ambiguous() {
+    fn s31_offered_side_effecting_loss_without_proof_is_ambiguous() {
         let (_, _, _, offered) = offered("deploy", tool_attempt_id(ATTEMPT));
         let expected_attempt = offered.attempt();
 
@@ -5175,7 +5175,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv004_inv043_claimed_pure_retry_requires_fresh_physical_attempt() {
+    fn s31_claimed_pure_retry_requires_fresh_physical_attempt() {
         let expected_tool = tool("inspect");
         let retry_attempt = tool_attempt_id(RETRY_ATTEMPT);
         let (registration, placement, grant, offered) =
@@ -5230,7 +5230,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_claimed_retry_rejects_cross_wired_lost_lease_correlation() {
+    fn s31_claimed_retry_rejects_cross_wired_lost_lease_correlation() {
         let (registration, placement, grant, offered) =
             offered("inspect", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
@@ -5267,7 +5267,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv004_inv043_later_retry_rejects_retired_attempt_identity() {
+    fn s31_later_retry_rejects_retired_attempt_identity() {
         let (registration, placement, grant, offered) =
             offered("inspect", tool_attempt_id(ATTEMPT));
         let retired_identity = offered.attempt();
@@ -5312,7 +5312,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv004_inv043_claimed_retry_rejects_attempt_identity_reuse() {
+    fn s31_claimed_retry_rejects_attempt_identity_reuse() {
         let (_, _, _, offered) = offered("sync", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
         let claimed = offered
@@ -5333,7 +5333,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv004_inv043_claimed_retry_rejects_a_different_request() {
+    fn s31_claimed_retry_rejects_a_different_request() {
         let (_, _, _, offered) = offered("sync", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
         let claimed = offered
@@ -5353,7 +5353,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv004_inv043_claimed_retry_rejects_cross_wired_issuing_attempt() {
+    fn s31_claimed_retry_rejects_cross_wired_issuing_attempt() {
         let (_, _, _, offered) = offered("sync", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
         let claimed = offered
@@ -5375,7 +5375,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv004_inv043_unclaimed_retry_cannot_mint_a_fresh_attempt() {
+    fn s31_unclaimed_retry_cannot_mint_a_fresh_attempt() {
         let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
         let proof = no_execution_proof(&offered);
         let loss = offered
@@ -5394,7 +5394,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv004_inv043_claimed_retry_authority_preserves_effect_class() {
+    fn s31_claimed_retry_authority_preserves_effect_class() {
         let (_, _, _, offered) = offered("sync", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
         let claimed = offered
@@ -5417,7 +5417,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv004_inv043_claimed_retry_rejects_standalone_same_request_authority() {
+    fn s31_claimed_retry_rejects_standalone_same_request_authority() {
         let (registration, placement, grant, offered) =
             offered("inspect", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
@@ -5445,7 +5445,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv025_inv026_inv043_claimed_side_effecting_loss_requires_crash_classification() {
+    fn s31_claimed_side_effecting_loss_requires_crash_classification() {
         let (_, _, _, offered) = offered("deploy", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
         let expected_attempt = correlation.dispatch.attempt();
@@ -5460,7 +5460,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv021_inv043_stale_generation_cannot_claim() {
+    fn s31_stale_generation_cannot_claim() {
         let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
         let stale = RunnerLeaseCorrelation {
             generation: RunnerGeneration::try_from_u64(2).expect("two is positive"),
@@ -5474,7 +5474,7 @@ mod tests {
     }
 
     #[test]
-    fn s12_inv021_inv043_cross_wired_attempt_dispatch_cannot_claim() {
+    fn s12_cross_wired_attempt_dispatch_cannot_claim() {
         let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
         let stale = RunnerLeaseCorrelation {
             dispatch: authorized(
@@ -5494,7 +5494,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv027_inv043_lease_requires_matching_authorized_attempt_effect() {
+    fn s31_lease_requires_matching_authorized_attempt_effect() {
         let (registration, pin) = pinned("readonly");
 
         assert_eq!(
@@ -5514,7 +5514,7 @@ mod tests {
     }
 
     #[test]
-    fn s12_inv043_lease_requires_the_authorized_request_tool() {
+    fn s12_lease_requires_the_authorized_request_tool() {
         let (registration, pin) = pinned("readonly");
 
         assert_eq!(
@@ -5534,7 +5534,7 @@ mod tests {
     }
 
     #[test]
-    fn s12_inv043_attempt_authorization_rejects_a_cross_wired_request() {
+    fn s12_attempt_authorization_rejects_a_cross_wired_request() {
         let approved = approved_request("inspect");
         let deploy = approved_request("deploy");
         let authorized = deploy
@@ -5553,7 +5553,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_lease_reconstitution_rejects_cross_wired_fence() {
+    fn s31_lease_reconstitution_rejects_cross_wired_fence() {
         let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_correlation = RunnerLeaseCorrelation {
@@ -5568,7 +5568,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_lease_reconstitution_rejects_cross_wired_effect() {
+    fn s31_lease_reconstitution_rejects_cross_wired_effect() {
         let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_effect = RunnerToolEffectClass::SideEffecting;
@@ -5580,7 +5580,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_lease_reconstitution_binds_effect_to_registration_declaration() {
+    fn s31_lease_reconstitution_binds_effect_to_registration_declaration() {
         let (registration, _, _, offered) = offered("deploy", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
         let claimed = offered
@@ -5598,7 +5598,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_lease_reconstitution_rejects_cross_wired_authorization() {
+    fn s31_lease_reconstitution_rejects_cross_wired_authorization() {
         let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_credential_authorization = None;
@@ -5610,7 +5610,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_session() {
+    fn s31_lease_reconstitution_rejects_foreign_credential_session() {
         let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         let authorization = input
@@ -5627,7 +5627,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_runner() {
+    fn s31_lease_reconstitution_rejects_foreign_credential_runner() {
         let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         let authorization = input
@@ -5644,7 +5644,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_tool() {
+    fn s31_lease_reconstitution_rejects_foreign_credential_tool() {
         let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         let authorization = input
@@ -5660,7 +5660,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_lease_reconstitution_rejects_cross_wired_session() {
+    fn s31_lease_reconstitution_rejects_cross_wired_session() {
         let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_session = session_id(SESSION + 1);
@@ -5672,7 +5672,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_lease_reconstitution_rejects_cross_wired_state() {
+    fn s31_lease_reconstitution_rejects_cross_wired_state() {
         let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_state = RunnerLeaseState::Claimed;
@@ -5684,7 +5684,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_first_execution_pins_the_exact_runner() {
+    fn s30_first_execution_pins_the_exact_runner() {
         let registration = registration();
         let placement = SessionRunnerPlacement::new(
             session_id(SESSION),
@@ -5729,7 +5729,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_placement_reconstitution_accepts_raw_pinned_facts() {
+    fn s30_placement_reconstitution_accepts_raw_pinned_facts() {
         let (registration, pin) = pinned("readonly");
         let expected_state = pin.placement.state().clone();
         let input = placement_reconstitution_input(pin.placement);
@@ -5746,7 +5746,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_placement_reconstitution_rejects_missing_grant_lineage() {
+    fn s30_placement_reconstitution_rejects_missing_grant_lineage() {
         let (registration, pin) = pinned("readonly");
         let corrupted = placement_without_grant_lineage(pin.placement);
         let input = placement_reconstitution_input(corrupted);
@@ -5763,7 +5763,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_generation_one_profiled_placement_rejects_later_grant_revision() {
+    fn s30_generation_one_profiled_placement_rejects_later_grant_revision() {
         let (registration, pin) = pinned("readonly");
         let corrupted = placement_with_grant_lineage(
             pin.placement,
@@ -5786,7 +5786,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_placement_rejects_grant_lineage_newer_than_its_revision() {
+    fn s30_placement_rejects_grant_lineage_newer_than_its_revision() {
         let (registration, pin) = pinned("readonly");
         let mut placement = pin.placement;
         placement.revision = RunnerGeneration::try_from_u64(2).expect("two is positive");
@@ -5810,7 +5810,7 @@ mod tests {
         );
     }
     #[test]
-    fn s30_inv044_generation_one_profileless_placement_rejects_grant_lineage() {
+    fn s30_generation_one_profileless_placement_rejects_grant_lineage() {
         let registration = registration();
         let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
             .pin_and_offer_lease(
@@ -5847,7 +5847,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_placement_reconstitution_rejects_cross_wired_session() {
+    fn s30_placement_reconstitution_rejects_cross_wired_session() {
         let (registration, pin) = pinned("readonly");
         let input = placement_reconstitution_input(pin.placement);
 
@@ -5863,7 +5863,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_placement_reconstitution_rejects_missing_required_tool() {
+    fn s30_placement_reconstitution_rejects_missing_required_tool() {
         let (registration, pin) = pinned("readonly");
         let corrupted = placement_without_required_tool(pin.placement, &tool("deploy"));
         let input = placement_reconstitution_input(corrupted);
@@ -5880,7 +5880,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_placement_reconstitution_requires_complete_runner_only_set() {
+    fn s30_placement_reconstitution_requires_complete_runner_only_set() {
         let (registration, mut pin) = pinned("readonly");
         omit_runner_required_tool(&mut pin.placement, &tool("deploy"));
         let input = placement_reconstitution_input(pin.placement);
@@ -5897,7 +5897,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_inv044_reregistration_additions_do_not_widen_a_pinned_snapshot() {
+    fn s30_reregistration_additions_do_not_widen_a_pinned_snapshot() {
         let narrow_registration = enrollment()
             .register(
                 RunnerAdvertisement::new(
@@ -5951,7 +5951,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_inv044_reregistration_omission_reconciles_to_runner_loss() {
+    fn s30_reregistration_omission_reconciles_to_runner_loss() {
         let (_, pin_for_offer) = pinned("readonly");
         let (_, pin_for_reconciliation) = pinned("readonly");
         let (_, pin_for_expected_state) = pinned("readonly");
@@ -5997,7 +5997,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_inv044_reconciliation_rejects_a_stale_registration() {
+    fn s30_reconciliation_rejects_a_stale_registration() {
         let enrollment = enrollment();
         let retained = enrollment
             .register(advertisement(), &catalog())
@@ -6041,7 +6041,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_reconciliation_rejects_a_foreign_runner_registration() {
+    fn s30_reconciliation_rejects_a_foreign_runner_registration() {
         let (_, pin) = pinned("readonly");
         let foreign = registration_for(runner_id(REPLACEMENT_RUNNER));
 
@@ -6052,7 +6052,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_inv044_combined_tool_omission_retains_daemon_fallback() {
+    fn s30_combined_tool_omission_retains_daemon_fallback() {
         let (_, pin) = pinned("readonly");
         let expected_state = pin.placement.state().clone();
         let expected_revision = pin.placement.revision();
@@ -6174,7 +6174,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv042_inv044_combined_tool_override_omission_retains_daemon_fallback() {
+    fn s30_combined_tool_override_omission_retains_daemon_fallback() {
         let registration = registration();
         let mut request = placement_request(profile("readonly"));
         request.permission_overrides = RunnerToolPermissionOverrides::try_new([(
@@ -6219,7 +6219,7 @@ mod tests {
     }
 
     #[test]
-    fn s30_inv044_lost_placement_cannot_offer_another_lease() {
+    fn s30_lost_placement_cannot_offer_another_lease() {
         let (registration, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
         let lost = pin
@@ -6244,7 +6244,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_replacement_is_explicit_and_advances_revision() {
+    fn s32_replacement_is_explicit_and_advances_revision() {
         let initial = registration();
         let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = SessionRunnerPlacement::new(
@@ -6292,7 +6292,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_lost_before_pin_requires_the_exact_selected_runner() {
+    fn s32_lost_before_pin_requires_the_exact_selected_runner() {
         let selected = runner_id(RUNNER);
         let foreign = runner_id(REPLACEMENT_RUNNER);
         let capability_selected =
@@ -6311,7 +6311,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_pre_pin_replacement_advances_unpinned_without_pinned_facts() {
+    fn s32_pre_pin_replacement_advances_unpinned_without_pinned_facts() {
         let selected = runner_id(RUNNER);
         let replacement_registration = registration_for(runner_id(REPLACEMENT_RUNNER));
         let initial_request = exact_placement_request(selected);
@@ -6336,7 +6336,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_pre_pin_replacement_requires_repository_workspace_capability() {
+    fn s32_pre_pin_replacement_requires_repository_workspace_capability() {
         let selected = runner_id(RUNNER);
         let replacement_runner = runner_id(REPLACEMENT_RUNNER);
         let replacement_registration = enrollment_for(replacement_runner)
@@ -6374,7 +6374,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_connection_loss_rejects_same_runner_replacement() {
+    fn s32_connection_loss_rejects_same_runner_replacement() {
         let (registration, mut pin) = pinned("readonly");
         let prior_grant = pin.grant.take().expect("the pin carries its grant");
         let request = pin.placement.request().clone();
@@ -6396,7 +6396,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_registration_loss_label_does_not_authorize_same_runner_replacement() {
+    fn s32_registration_loss_label_does_not_authorize_same_runner_replacement() {
         let (registration, mut pin) = pinned("readonly");
         let prior_grant = pin.grant.take().expect("the pin carries its grant");
         let request = pin.placement.request().clone();
@@ -6443,7 +6443,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_abandonment_retires_the_exact_lost_pre_pin_state() {
+    fn s32_abandonment_retires_the_exact_lost_pre_pin_state() {
         let selected = runner_id(RUNNER);
         let lost =
             SessionRunnerPlacement::new(session_id(SESSION), exact_placement_request(selected))
@@ -6462,7 +6462,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_unpinned_successor_reconstitution_requires_pre_pin_history() {
+    fn s32_unpinned_successor_reconstitution_requires_pre_pin_history() {
         let selected = runner_id(RUNNER);
         let replacement_registration = registration_for(runner_id(REPLACEMENT_RUNNER));
         let lost =
@@ -6504,7 +6504,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_pre_pin_reconstitution_rejects_a_truncated_predecessor_chain() {
+    fn s32_pre_pin_reconstitution_rejects_a_truncated_predecessor_chain() {
         let second_runner = runner_id(REPLACEMENT_RUNNER);
         let third_runner = runner_id(THIRD_RUNNER);
         let second_request = exact_placement_request(second_runner);
@@ -6532,7 +6532,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_lost_before_pin_reconstitution_requires_an_identity_selector() {
+    fn s32_lost_before_pin_reconstitution_requires_an_identity_selector() {
         let selected = runner_id(RUNNER);
         let input = SessionRunnerPlacementReconstitutionInput {
             session: session_id(SESSION),
@@ -6551,7 +6551,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_replacement_advances_a_revoked_grant_revision() {
+    fn s32_replacement_advances_a_revoked_grant_revision() {
         let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = pinned("readonly").1;
         let prior_grant = pin
@@ -6589,7 +6589,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_replacement_change_retains_policy_only_request_change() {
+    fn s32_replacement_change_retains_policy_only_request_change() {
         let registration = registration();
         let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let before_request = placement_request(profile("readonly"));
@@ -6639,7 +6639,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_profileless_replacement_retains_grant_lineage() {
+    fn s32_profileless_replacement_retains_grant_lineage() {
         let registration = registration();
         let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = pinned("readonly").1;
@@ -6689,7 +6689,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_inv045_profileless_placement_reconstitutes_with_exact_tombstone() {
+    fn s32_profileless_placement_reconstitutes_with_exact_tombstone() {
         let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = pinned("readonly").1;
         let prior_grant = pin
@@ -6735,7 +6735,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_inv045_cross_runner_profileless_placement_reconstitutes_with_tombstone() {
+    fn s32_cross_runner_profileless_placement_reconstitutes_with_tombstone() {
         let initial = registration();
         let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = SessionRunnerPlacement::new(
@@ -6790,7 +6790,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_profileless_lineage_rejects_an_omitted_tombstone() {
+    fn s32_profileless_lineage_rejects_an_omitted_tombstone() {
         let registration = registration();
         let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = pinned("readonly").1;
@@ -6837,7 +6837,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_workspace_cannot_cross_runner_ownership() {
+    fn s32_workspace_cannot_cross_runner_ownership() {
         let registration = registration();
         let request = SessionRunnerPlacementRequest {
             selector: RunnerSelector::CapabilityClass(class()),
@@ -6891,7 +6891,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv035_inv045_profile_pair_resolves_automatic_without_a_value() {
+    fn s32_profile_pair_resolves_automatic_without_a_value() {
         let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let authorization = lease
             .credential_authorization()
@@ -6902,7 +6902,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_workspace_rejects_nondeterministic_relative_path() {
+    fn s32_workspace_rejects_nondeterministic_relative_path() {
         let registration = registration();
         let request = SessionRunnerPlacementRequest {
             selector: RunnerSelector::CapabilityClass(class()),
@@ -6994,7 +6994,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_exact_confirm_override_precedes_ambient_pure_auto() {
+    fn s32_exact_confirm_override_precedes_ambient_pure_auto() {
         let (registration, pin) = pinned_with_confirm_override("admin");
         let lease = pin
             .placement
@@ -7021,7 +7021,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_exact_confirm_override_rejects_automatic_approval() {
+    fn s32_exact_confirm_override_rejects_automatic_approval() {
         let (registration, pin) = pinned_with_confirm_override("admin");
 
         assert_eq!(
@@ -7041,7 +7041,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_pair_automatic_accepts_tool_policy_approval() {
+    fn s32_pair_automatic_accepts_tool_policy_approval() {
         let (registration, pin) = pinned("readonly");
         let lease = pin
             .placement
@@ -7068,7 +7068,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv035_inv045_exact_confirm_override_rejects_session_blanket_approval() {
+    fn s32_exact_confirm_override_rejects_session_blanket_approval() {
         let (registration, pin) = pinned_with_confirm_override("admin");
 
         assert_eq!(
@@ -7088,7 +7088,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_exact_confirm_override_accepts_user_override_approval() {
+    fn s32_exact_confirm_override_accepts_user_override_approval() {
         let (registration, pin) = pinned_with_confirm_override("admin");
         let lease = pin
             .placement
@@ -7115,7 +7115,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_revocation_does_not_rewrite_an_already_offered_lease() {
+    fn s32_revocation_does_not_rewrite_an_already_offered_lease() {
         let (_, _, mut grant, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
         let revoked = grant
@@ -7133,7 +7133,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_inv045_revocation_gates_later_lease_creation() {
+    fn s32_revocation_gates_later_lease_creation() {
         let (registration, mut pin) = pinned("readonly");
         let revoked = pin
             .grant
@@ -7159,7 +7159,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_inv045_repository_profile_replacement_requires_reprovisioning() {
+    fn s32_repository_profile_replacement_requires_reprovisioning() {
         let expected_enrollment = enrollment();
         let registration = expected_enrollment
             .register(
@@ -7241,7 +7241,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_inv045_replacement_binds_profile_grant_to_placement() {
+    fn s32_replacement_binds_profile_grant_to_placement() {
         let (registration, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
         let expected_before_tools = grant.tools.clone();
@@ -7271,7 +7271,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv042_inv045_profile_replacement_rejects_stale_registration() {
+    fn s32_profile_replacement_rejects_stale_registration() {
         let (registration, mut pin) = pinned("readonly");
         let retained = registration.clone();
         let current = enrollment_for_registration(&registration)
@@ -7292,7 +7292,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv042_inv045_profile_replacement_rejects_runner_only_omission() {
+    fn s32_profile_replacement_rejects_runner_only_omission() {
         let (_, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
         let narrowed_registration = enrollment()
@@ -7321,7 +7321,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_grant_reconstitution_accepts_raw_active_facts() {
+    fn s32_grant_reconstitution_accepts_raw_active_facts() {
         let (registration, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
         let expected_profile = grant.profile().clone();
@@ -7340,7 +7340,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_grant_reconstitution_rejects_changed_pair_policy() {
+    fn s32_grant_reconstitution_rejects_changed_pair_policy() {
         let (registration, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
         let mut input = grant_reconstitution_input(grant);
@@ -7361,7 +7361,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv045_grant_reconstitution_rejects_cross_wired_session() {
+    fn s32_grant_reconstitution_rejects_cross_wired_session() {
         let (registration, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
         let input = grant_reconstitution_input(grant);
@@ -7378,7 +7378,7 @@ mod tests {
         );
     }
     #[test]
-    fn s31_inv043_profileless_confirm_rejects_policy_auto_authorization() {
+    fn s31_profileless_confirm_rejects_policy_auto_authorization() {
         let registration = registration();
         let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
             .pin_and_offer_lease(
@@ -7412,7 +7412,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv035_inv043_profileless_confirm_rejects_session_blanket_authorization() {
+    fn s31_profileless_confirm_rejects_session_blanket_authorization() {
         let registration = registration();
         let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
             .pin_and_offer_lease(
@@ -7446,7 +7446,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_lost_unclaimed_lease_reconstitutes_retry_authority() {
+    fn s31_lost_unclaimed_lease_reconstitutes_retry_authority() {
         let (registration, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
         let proof = no_execution_proof(&offered);
         let loss = offered
@@ -7473,7 +7473,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_loss_reconstitution_restores_consumed_retry_preparation() {
+    fn s31_loss_reconstitution_restores_consumed_retry_preparation() {
         let (registration, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
         let loss = offered
             .lose()
@@ -7496,7 +7496,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_lost_unclaimed_reconstitution_requires_no_execution_proof() {
+    fn s31_lost_unclaimed_reconstitution_requires_no_execution_proof() {
         let (registration, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
         let proof = no_execution_proof(&offered);
         let loss = offered
@@ -7511,7 +7511,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv025_inv026_inv043_lost_claimed_side_effect_reconstitutes_crash_authority() {
+    fn s31_lost_claimed_side_effect_reconstitutes_crash_authority() {
         let (registration, _, _, offered) = offered("deploy", tool_attempt_id(ATTEMPT));
         let correlation = offered.correlation();
         let expected_attempt = offered.attempt();
@@ -7529,7 +7529,7 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_nonlost_lease_cannot_reconstitute_a_loss_consequence() {
+    fn s31_nonlost_lease_cannot_reconstitute_a_loss_consequence() {
         let (registration, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
         let input = lease_reconstitution_input(offered);
 
@@ -7540,7 +7540,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_inv045_runner_replacement_reports_complete_grant_change() {
+    fn s32_runner_replacement_reports_complete_grant_change() {
         let (registration, mut pin) = pinned("readonly");
         let initial_grant = pin.grant.take().expect("profile selection creates a grant");
         let narrowed = pin

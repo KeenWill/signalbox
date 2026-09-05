@@ -1,7 +1,7 @@
 //! The observation stream an adapter emits while executing one operation.
 //!
 //! Observations are transient progress facts
-//! (docs/spec/sessions-and-transcript.md, INV-032: stream deltas are never
+//! (docs/spec/sessions-and-transcript.md, : stream deltas are never
 //! canonical transcript history); the terminal evidence returned by
 //! [`crate::ModelRuntime::execute`] is the authoritative summary. Every
 //! observation carries the caller's correlation identity verbatim

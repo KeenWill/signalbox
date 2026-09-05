@@ -99,12 +99,11 @@ async fn insert_candidate_inventory(
     Ok(())
 }
 
-/// INV-061: every append-only instruction-evidence table rejects statement-level
+/// every append-only instruction-evidence table rejects statement-level
 /// truncation as well as row mutation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_evidence_has_every_truncate_guard()
--> Result<(), Box<dyn Error>> {
+async fn workspace_instruction_evidence_has_every_truncate_guard() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
     let guard_count = sqlx::query_scalar::<_, i64>(
@@ -130,12 +129,12 @@ async fn inv061_workspace_instruction_evidence_has_every_truncate_guard()
     Ok(())
 }
 
-/// INV-061: inserting the discovery parent seals its complete child inventory
+/// inserting the discovery parent seals its complete child inventory
 /// against later roots, candidates, and findings.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_discovery_parent_seals_its_inventory()
--> Result<(), Box<dyn Error>> {
+async fn workspace_instruction_discovery_parent_seals_its_inventory() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x6870).await?;
     let discovery = Uuid::from_u128(0x6877);
@@ -218,11 +217,10 @@ async fn inv061_workspace_instruction_discovery_parent_seals_its_inventory()
     Ok(())
 }
 
-/// INV-061: finding evidence stores only canonical absolute source paths.
+/// finding evidence stores only canonical absolute source paths.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_finding_rejects_a_noncanonical_path()
--> Result<(), Box<dyn Error>> {
+async fn workspace_instruction_finding_rejects_a_noncanonical_path() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query(
         "INSERT INTO instruction_discovery_finding
@@ -252,11 +250,11 @@ async fn inv061_workspace_instruction_finding_rejects_a_noncanonical_path()
     Ok(())
 }
 
-/// INV-061: sealing authenticates both the stored finding count and contiguous
+/// sealing authenticates both the stored finding count and contiguous
 /// finding ordinals against the exact child inventory.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_discovery_seal_rejects_a_finding_ordinal_gap()
+async fn workspace_instruction_discovery_seal_rejects_a_finding_ordinal_gap()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x6890).await?;
@@ -296,10 +294,10 @@ async fn inv061_workspace_instruction_discovery_seal_rejects_a_finding_ordinal_g
     Ok(())
 }
 
-/// INV-061: a complete discovery cannot retain resource-limit evidence.
+/// a complete discovery cannot retain resource-limit evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_complete_discovery_rejects_a_limit_finding()
+async fn workspace_instruction_complete_discovery_rejects_a_limit_finding()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x68b0).await?;
@@ -339,11 +337,11 @@ async fn inv061_workspace_instruction_complete_discovery_rejects_a_limit_finding
     Ok(())
 }
 
-/// INV-061: an incomplete discovery must end in exactly one terminal resource
+/// an incomplete discovery must end in exactly one terminal resource
 /// limit finding.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_incomplete_discovery_requires_a_terminal_limit()
+async fn workspace_instruction_incomplete_discovery_requires_a_terminal_limit()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x68c0).await?;
@@ -373,11 +371,11 @@ async fn inv061_workspace_instruction_incomplete_discovery_requires_a_terminal_l
     Ok(())
 }
 
-/// INV-061: an append-only manifest cannot bind an incomplete diagnostic scan.
+/// an append-only manifest cannot bind an incomplete diagnostic scan.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_manifest_requires_a_complete_discovery()
--> Result<(), Box<dyn Error>> {
+async fn workspace_instruction_manifest_requires_a_complete_discovery() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x68d0).await?;
     let discovery = Uuid::from_u128(0x68d7);
@@ -433,12 +431,11 @@ async fn inv061_workspace_instruction_manifest_requires_a_complete_discovery()
     Ok(())
 }
 
-/// INV-061: an append-only empty manifest accepts only the canonical hashes
+/// an append-only empty manifest accepts only the canonical hashes
 /// derived from its exact session, turn, and boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_manifest_requires_canonical_hashes()
--> Result<(), Box<dyn Error>> {
+async fn workspace_instruction_manifest_requires_canonical_hashes() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x68f0).await?;
     let discovery = Uuid::from_u128(0x68f7);
@@ -484,10 +481,10 @@ async fn inv061_workspace_instruction_manifest_requires_canonical_hashes()
     Ok(())
 }
 
-/// INV-061: candidate inventory cannot exceed the scan's classified entries.
+/// candidate inventory cannot exceed the scan's classified entries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_candidates_require_classified_entry_usage()
+async fn workspace_instruction_candidates_require_classified_entry_usage()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x68e0).await?;
@@ -520,11 +517,11 @@ async fn inv061_workspace_instruction_candidates_require_classified_entry_usage(
     Ok(())
 }
 
-/// INV-061: candidate inventory cannot exceed charged candidate-source bytes.
+/// candidate inventory cannot exceed charged candidate-source bytes.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_candidates_require_source_byte_usage()
--> Result<(), Box<dyn Error>> {
+async fn workspace_instruction_candidates_require_source_byte_usage() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x68f0).await?;
     let discovery = Uuid::from_u128(0x68f7);
@@ -556,11 +553,11 @@ async fn inv061_workspace_instruction_candidates_require_source_byte_usage()
     Ok(())
 }
 
-/// INV-061: sealing rejects a candidate whose registered authorizing root is
+/// sealing rejects a candidate whose registered authorizing root is
 /// absent from the discovery's own ordered root inventory.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_workspace_instruction_discovery_seal_requires_the_candidate_root()
+async fn workspace_instruction_discovery_seal_requires_the_candidate_root()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_turn(&pool, 0x68a0).await?;

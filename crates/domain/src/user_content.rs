@@ -501,9 +501,9 @@ mod tests {
         assert!(debug.contains("ContainsNull"));
     }
 
-    /// INV-005 / INV-012: content preserves exact scalar spellings.
+    /// content preserves exact scalar spellings.
     #[test]
-    fn inv005_inv012_parts_preserve_exact_scalars() {
+    fn parts_preserve_exact_scalars() {
         let exact = String::from(" \tline one\r\ncafe\u{301}\n ");
         let parts = vec![
             UserContentPart::try_text(exact.clone()).expect("text is valid"),
@@ -514,9 +514,9 @@ mod tests {
         assert_eq!(content.parts(), parts.as_slice());
     }
 
-    /// INV-005 / INV-012: part order participates in structural equality.
+    /// part order participates in structural equality.
     #[test]
-    fn inv005_inv012_part_order_participates_in_equality() {
+    fn part_order_participates_in_equality() {
         let text = UserContentPart::try_text(String::from("before")).expect("text is valid");
         let first = UserContent::try_parts(vec![text.clone(), attachment(Some("chart.png"))])
             .expect("the ordered fixture is valid");
@@ -526,10 +526,10 @@ mod tests {
         assert_ne!(first, reordered);
     }
 
-    /// INV-005 / INV-012: attachment metadata participates in structural
+    /// attachment metadata participates in structural
     /// equality.
     #[test]
-    fn inv005_inv012_attachment_metadata_participates_in_equality() {
+    fn attachment_metadata_participates_in_equality() {
         let first = UserContent::try_parts(vec![
             UserContentPart::try_text(String::from("before")).expect("text is valid"),
             attachment(Some("chart.png")),

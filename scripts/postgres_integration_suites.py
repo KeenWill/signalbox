@@ -9,9 +9,8 @@ reader of it, and it serves two consumers that must never disagree:
   emits the tab-separated rows its build job archives from, and `--matrix`
   emits the JSON its run job expands into a shard matrix. The workflow
   therefore restates no package, no feature, no filter, and no shard count.
-* `scripts/check_docs_consistency.py` imports it. The manifest's rows tell that
-  checker which `#[ignore]`d tests authoritative CI executes, which is what
-  `docs/invariants.md` indexes as enforcement.
+* `scripts/check_docs_consistency.py` imports it to check agreement among the
+  suite manifest, workflow, documentation, and workspace packages.
 
 A manifest both sides read turns ordinary drift into a check failure, and
 `check_docs_consistency.py` gates the agreement so the manifest itself cannot
@@ -54,10 +53,8 @@ What that buys, and what it costs:
   spelling that merely *could* exist is not. The distinction is whether the
   workflow or the documentation actually acquired it.
 
-`check_docs_consistency.py` is what makes the residual risk tolerable: the
-manifest's own agreement with the workspace and with the documented commands is
-checked independently of any of this, and `docs/invariants.md` is regenerated
-from the manifest rather than from the workflow.
+The manifest's own agreement with the workspace and with the documented
+commands is checked independently of the workflow syntax scan.
 """
 
 from __future__ import annotations
@@ -986,8 +983,7 @@ def runs_archived_ignored_tests(
     negative — nothing else may run ignored tests, no suite may lack an
     artifact — and negatives alone are satisfied by a workflow that runs
     nothing at all: delete the run step and the shards pass having merely
-    downloaded their archives, while `docs/invariants.md` goes on claiming
-    those tests are enforced.
+    downloaded their archives while those tests do not execute.
     """
     arguments = cargo_subcommand_arguments(tokens, ("nextest",))
     if not arguments or arguments[0] != "run":

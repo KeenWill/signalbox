@@ -965,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_complete_credential_ending_in_its_own_prefix_is_redacted_in_place() {
+    fn complete_credential_ending_in_its_own_prefix_is_redacted_in_place() {
         let credential = CredentialValue::new(b"synthetic_s".to_vec());
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &credential);

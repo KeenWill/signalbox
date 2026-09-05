@@ -5655,10 +5655,10 @@ mod tests {
         .with_attachment_blob_facts(facts)
     }
 
-    /// S02 / INV-015 / INV-062: model preparation admits immutable catalog
+    /// S02: model preparation admits immutable catalog
     /// facts when they exactly cover every referenced attachment digest.
     #[test]
-    fn s02_inv015_inv062_exact_attachment_catalog_facts_reach_preparation() {
+    fn s02_exact_attachment_catalog_facts_reach_preparation() {
         let digest = BlobDigest::digest(b"attachment fixture bytes");
         let length = NonZeroU64::new(24).expect("the fixture length is positive");
 
@@ -5672,10 +5672,10 @@ mod tests {
         assert_eq!(request.attachment_byte_length(digest), Some(length));
     }
 
-    /// INV-062: model preparation fails closed when the catalog projection
+    /// model preparation fails closed when the catalog projection
     /// omits a referenced attachment digest.
     #[test]
-    fn inv062_missing_attachment_catalog_fact_fails_preparation() {
+    fn missing_attachment_catalog_fact_fails_preparation() {
         let missing = attachment_execution_input(Vec::new())
             .reconstitute()
             .expect_err("a missing attachment catalog fact fails closed");
@@ -6108,10 +6108,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-005 / INV-015: a complete frontier read must preserve exact
+    /// S02: a complete frontier read must preserve exact
     /// semantic order, not merely the same entry membership.
     #[test]
-    fn s02_inv005_inv015_reconstitution_rejects_reordered_frontier_entries() {
+    fn s02_reconstitution_rejects_reordered_frontier_entries() {
         let execution = active_execution();
         let first = SemanticTranscriptEntry::from_validated_parts(
             semantic_transcript_entry_id(20),
@@ -6165,10 +6165,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-009 / INV-015: an execution snapshot must be the exact
+    /// S02: an execution snapshot must be the exact
     /// eligibility-fixed turn start, not another same-content frontier.
     #[test]
-    fn s02_inv009_inv015_reconstitution_rejects_nonstarting_snapshot() {
+    fn s02_reconstitution_rejects_nonstarting_snapshot() {
         let execution = active_execution();
         let other_snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
             execution.session,
@@ -6201,11 +6201,11 @@ mod tests {
         );
     }
 
-    /// S02 / S11 / INV-005 / INV-014 / INV-015 / INV-036: a fresh
+    /// S02 / S11: a fresh
     /// continuation attempt admits its call-free result frontier only inside
     /// the transaction that will insert the prepared continuation call.
     #[test]
-    fn s02_s11_inv005_inv014_inv015_inv036_continuation_reconstitutes_exact_frontier_and_pin() {
+    fn s02_s11_continuation_reconstitutes_exact_frontier_and_pin() {
         let initial = active_execution();
         let request = tool_request_id(30);
         let assistant_tool_use = SemanticTranscriptEntry::from_validated_parts(
@@ -6431,11 +6431,11 @@ mod tests {
         assert_eq!(authorized.call().state(), CurrentModelCallState::InFlight);
     }
 
-    /// S10 / INV-004 / INV-005: each continuation result must name the
+    /// S10: each continuation result must name the
     /// physical attempt that executed its exact request in the producing
     /// model-call batch.
     #[test]
-    fn s10_inv004_inv005_continuation_rejects_duplicate_attempt_for_two_requests() {
+    fn s10_continuation_rejects_duplicate_attempt_for_two_requests() {
         let initial = active_execution();
         let producing_call = model_call_id(70);
         let first_request = tool_request_id(71);
@@ -6533,10 +6533,10 @@ mod tests {
         );
     }
 
-    /// S11 / INV-005 / INV-014: a prepared continuation belongs to the most
+    /// S11: a prepared continuation belongs to the most
     /// recent tool round and cannot reuse results from an earlier round.
     #[test]
-    fn s11_inv005_inv014_continuation_rejects_unresolved_latest_tool_round() {
+    fn s11_continuation_rejects_unresolved_latest_tool_round() {
         let initial = active_execution();
         let earlier_request = tool_request_id(30);
         let latest_request = tool_request_id(40);
@@ -6628,10 +6628,10 @@ mod tests {
         );
     }
 
-    /// S07 / S11 / INV-006 / INV-014: a cancellation-only close marker is
+    /// S07 / S11: a cancellation-only close marker is
     /// terminal history and cannot satisfy ordinary continuation resolution.
     #[test]
-    fn s07_s11_inv006_inv014_continuation_rejects_tool_closed() {
+    fn s07_s11_continuation_rejects_tool_closed() {
         let initial = active_execution();
         let request = tool_request_id(30);
         let attempt = turn_attempt_id(35);
@@ -6709,10 +6709,10 @@ mod tests {
         );
     }
 
-    /// S11 / INV-014: a call-free continuation pin is checked against the
+    /// S11: a call-free continuation pin is checked against the
     /// immutable target catalog before it can authorize the next provider call.
     #[test]
-    fn s11_inv014_continuation_rejects_crosswired_turn_pin() {
+    fn s11_continuation_rejects_crosswired_turn_pin() {
         let initial = active_execution();
         let request = tool_request_id(30);
         let assistant_tool_use = SemanticTranscriptEntry::from_validated_parts(
@@ -6777,10 +6777,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-005 / INV-016: steering correlation considers only the
+    /// S08: steering correlation considers only the
     /// current turn's suffix and ignores steering retained in its start.
     #[test]
-    fn s08_inv005_inv016_reconstitution_ignores_historical_steering() {
+    fn s08_reconstitution_ignores_historical_steering() {
         let execution = active_execution();
         let historical_input = accepted_input_id(20);
         let historical = SemanticTranscriptEntry::from_validated_parts(
@@ -6830,10 +6830,10 @@ mod tests {
             .expect("historical steering is not current-turn consumed steering");
     }
 
-    /// S02 / INV-005 / INV-015 / INV-036: a call that names a distinct
+    /// S02: a call that names a distinct
     /// snapshot must consume a nonempty steering suffix.
     #[test]
-    fn s02_inv005_inv015_inv036_reconstitution_rejects_empty_distinct_call_snapshot() {
+    fn s02_reconstitution_rejects_empty_distinct_call_snapshot() {
         let execution = prepared_execution();
         let call = execution
             .current_call()
@@ -6880,10 +6880,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-014: persisted target facts must still match immutable
+    /// S02: persisted target facts must still match immutable
     /// configured target resolution when an execution is reloaded.
     #[test]
-    fn s02_inv014_reconstitution_rejects_call_target_crosswired_from_turn_pin() {
+    fn s02_reconstitution_rejects_call_target_crosswired_from_turn_pin() {
         let execution = prepared_execution();
         let call = execution
             .current_call()
@@ -6910,10 +6910,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-014: a call row cannot manufacture the durable target that
+    /// S02: a call row cannot manufacture the durable target that
     /// belongs independently to its owning turn.
     #[test]
-    fn s02_inv014_reconstitution_requires_independent_turn_pin() {
+    fn s02_reconstitution_requires_independent_turn_pin() {
         let execution = prepared_execution();
         let call = execution
             .current_call()
@@ -6941,10 +6941,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-014: once a call has durably pinned its exact target, a later
+    /// S02: once a call has durably pinned its exact target, a later
     /// deployment-availability change cannot retarget or strand that call.
     #[test]
-    fn s02_inv014_prepared_call_reloads_after_target_becomes_unavailable() {
+    fn s02_prepared_call_reloads_after_target_becomes_unavailable() {
         let execution = prepared_execution();
         let expected_call = execution
             .current_call()
@@ -6972,10 +6972,10 @@ mod tests {
         assert_eq!(reloaded.current_call(), Some(&expected_call));
     }
 
-    /// S02 / INV-014 / INV-015: target resolution records the frozen
+    /// S02: target resolution records the frozen
     /// selection, target, and exact frontier before send authorization.
     #[test]
-    fn s02_inv014_inv015_preparation_is_a_distinct_checkpoint() {
+    fn s02_preparation_is_a_distinct_checkpoint() {
         let execution = active_execution();
         let prepared = execution
             .prepare_initial_call(model_call_id(9))
@@ -6996,10 +6996,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-036: preparation must supply one fresh semantic identity for
+    /// S08: preparation must supply one fresh semantic identity for
     /// every pending steering input in the complete active acceptance tail.
     #[test]
-    fn s08_inv036_preparation_requires_the_complete_steering_identity_inventory() {
+    fn s08_preparation_requires_the_complete_steering_identity_inventory() {
         let mut execution = active_execution();
         execution.active_turn = execution.active_turn.with_pending_steering_for_test(
             vec![(
@@ -7020,10 +7020,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-005 / INV-036: every pending input is consumed in immutable
+    /// S08: every pending input is consumed in immutable
     /// acceptance order into one prefix extension named by the prepared call.
     #[test]
-    fn s08_inv005_inv036_preparation_consumes_multiple_steering_inputs_in_order() {
+    fn s08_preparation_consumes_multiple_steering_inputs_in_order() {
         let mut execution = active_execution();
         let first = accepted_input_id(20);
         let second = accepted_input_id(21);
@@ -7115,10 +7115,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-006 / INV-014: an immutable-catalog miss is retained as the
+    /// S02: an immutable-catalog miss is retained as the
     /// exact proof authorizing known-failure closure before any call exists.
     #[test]
-    fn s02_inv006_inv014_target_resolution_failure_requires_matching_proof() {
+    fn s02_target_resolution_failure_requires_matching_proof() {
         let mut execution = active_execution();
         execution.targets =
             ModelTargetCatalog::try_from_definitions([]).expect("the empty test catalog is valid");
@@ -7145,10 +7145,10 @@ mod tests {
         assert_eq!(failed.disposition(), &TurnDisposition::Failed);
     }
 
-    /// S02 / INV-006 / INV-014: a catalog miss obtained elsewhere cannot
+    /// S02: a catalog miss obtained elsewhere cannot
     /// discard a turn whose own immutable catalog resolves successfully.
     #[test]
-    fn s02_inv006_inv014_resolvable_turn_rejects_foreign_resolution_failure() {
+    fn s02_resolvable_turn_rejects_foreign_resolution_failure() {
         let execution = active_execution();
         let foreign_proof = ModelTargetCatalog::try_from_definitions([])
             .expect("the empty test catalog is valid")
@@ -7168,10 +7168,10 @@ mod tests {
         assert_eq!(error, ModelCallClosureError::TargetResolutionMismatch);
     }
 
-    /// S02 / INV-005: provider rendering receives the frontier in semantic
+    /// S02: provider rendering receives the frontier in semantic
     /// order and the exact accepted user content keyed by its origin identity.
     #[test]
-    fn s02_inv005_prepared_request_preserves_exact_origin_content() {
+    fn s02_prepared_request_preserves_exact_origin_content() {
         let execution = prepared_execution();
         let request = execution
             .resume_prepared_call()
@@ -7211,10 +7211,10 @@ mod tests {
         assert_eq!(request.model_settings(), expected);
     }
 
-    /// S02 / INV-005: resuming a prepared call renders only content named by
+    /// S02: resuming a prepared call renders only content named by
     /// that call's immutable frontier, excluding steering accepted later.
     #[test]
-    fn s02_inv005_prepared_request_excludes_later_pending_steering_content() {
+    fn s02_prepared_request_excludes_later_pending_steering_content() {
         let mut execution = prepared_execution_consuming_steering();
         let later = accepted_input_id(21);
         execution.active_turn = execution.active_turn.with_pending_steering_for_test(
@@ -7239,10 +7239,10 @@ mod tests {
         assert_eq!(request.origin_contents.len(), 2);
     }
 
-    /// S02 / INV-006 / INV-009: authorization advances the exact attempt and
+    /// S02: authorization advances the exact attempt and
     /// call together without changing identity or frontier.
     #[test]
-    fn s02_inv006_inv009_authorization_advances_attempt_and_call_together() {
+    fn s02_authorization_advances_attempt_and_call_together() {
         let authorized = prepared_execution()
             .authorize_send()
             .expect("prepared execution may authorize send");
@@ -7277,11 +7277,11 @@ mod tests {
         );
     }
 
-    /// S07 / INV-006 / INV-029 / INV-037: interruption before a physical
+    /// S07: interruption before a physical
     /// call exists ends the attempt and turn directly with the sole applied
     /// proof and one explicit cancellation marker.
     #[test]
-    fn s07_inv006_inv029_inv037_interrupt_cancels_unprepared_work_directly() {
+    fn s07_interrupt_cancels_unprepared_work_directly() {
         let execution = active_execution();
         let interrupt = applied_interrupt(&execution);
         let expected_turn = execution.turn();
@@ -7322,10 +7322,10 @@ mod tests {
         ));
     }
 
-    /// S07 / INV-006 / INV-011 / INV-037: an interrupt closes a checkpointed
+    /// S07: an interrupt closes a checkpointed
     /// but unsent tool attempt without inventing send authorization.
     #[test]
-    fn s07_inv006_inv011_inv037_interrupt_closes_prepared_tool_attempt() {
+    fn s07_interrupt_closes_prepared_tool_attempt() {
         let execution = active_execution();
         let request = batch_request(41, &execution);
         let tool_use = SemanticTranscriptEntry::from_validated_parts(
@@ -7412,10 +7412,10 @@ mod tests {
         assert_eq!(*attempt, crash_lost_attempt);
     }
 
-    /// S07 / INV-005 / INV-029: interrupt result projection is bound to the
+    /// S07: interrupt result projection is bound to the
     /// exact yielded frontier identity, not merely equal semantic content.
     #[test]
-    fn s07_inv005_inv029_tool_cancellation_rejects_same_content_foreign_frontier() {
+    fn s07_tool_cancellation_rejects_same_content_foreign_frontier() {
         let execution = active_execution();
         let foreign_yield = ResolvedContextFrontierSnapshot::try_from_candidate(
             execution.session(),
@@ -7458,12 +7458,12 @@ mod tests {
         assert_eq!(error, ModelCallClosureError::InterruptCorrelationMismatch);
     }
 
-    /// S07 / INV-006 / INV-029 / INV-037: an executing-batch cancellation
+    /// S07: an executing-batch cancellation
     /// projection must be bound to the interrupted turn. A projection prepared
     /// for a foreign turn, but reusing this turn's current frontier identity as
     /// its yielded source, cannot terminalize this turn with foreign results.
     #[test]
-    fn s07_inv006_inv029_tool_cancellation_rejects_foreign_turn_projection() {
+    fn s07_tool_cancellation_rejects_foreign_turn_projection() {
         let execution = active_execution();
         let foreign_turn = turn_id(99);
         assert_ne!(foreign_turn, execution.turn());
@@ -7517,10 +7517,10 @@ mod tests {
         assert_eq!(error, ModelCallClosureError::InterruptCorrelationMismatch);
     }
 
-    /// S07 / INV-029: the legitimate same-turn executing-batch cancellation
+    /// S07: the legitimate same-turn executing-batch cancellation
     /// projection remains accepted after the turn binding is added.
     #[test]
-    fn s07_inv029_tool_cancellation_accepts_same_turn_projection() {
+    fn s07_tool_cancellation_accepts_same_turn_projection() {
         let execution = active_execution();
         let expected_turn = execution.turn();
         let expected_prefix = execution.current_snapshot.frontier();
@@ -7575,10 +7575,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-006 / INV-029 / INV-037: a prepared but unsent call closes
+    /// S07: a prepared but unsent call closes
     /// as proof-bearing cancellation without crossing send authorization.
     #[test]
-    fn s07_inv006_inv029_inv037_interrupt_cancels_prepared_call_directly() {
+    fn s07_interrupt_cancels_prepared_call_directly() {
         let execution = prepared_execution();
         let interrupt = applied_interrupt(&execution);
         let outcome = execution
@@ -7613,11 +7613,11 @@ mod tests {
         );
     }
 
-    /// S07 / INV-006 / INV-029 / INV-037: issued work durably records the
+    /// S07: issued work durably records the
     /// same cancellation authority on the attempt and call while retaining
     /// the active slot.
     #[test]
-    fn s07_inv006_inv029_inv037_interrupt_requests_issued_call_cancellation() {
+    fn s07_interrupt_requests_issued_call_cancellation() {
         let execution = in_flight_execution();
         let interrupt = applied_interrupt(&execution);
         let outcome = execution
@@ -7648,11 +7648,11 @@ mod tests {
         assert_eq!(stopped.interrupt(), interrupt.proof());
     }
 
-    /// S07 / INV-006 / INV-029 / INV-037: confirmed physical cancellation
+    /// S07: confirmed physical cancellation
     /// after a durable stop request is the evidence that releases the slot as
     /// `Cancelled`.
     #[test]
-    fn s07_inv006_inv029_inv037_confirmed_cancellation_terminalizes_stopped_call() {
+    fn s07_confirmed_cancellation_terminalizes_stopped_call() {
         let (execution, interrupt) = stop_requested_execution(in_flight_execution());
         let observation =
             correlated_observation(&execution, ModelCallTerminalObservation::Cancelled);
@@ -7690,10 +7690,10 @@ mod tests {
         );
     }
 
-    /// S07 / INV-006 / INV-029: outcome-authoritative completion racing a
+    /// S07: outcome-authoritative completion racing a
     /// stop request wins while retaining the interrupt in attempt history.
     #[test]
-    fn s07_inv006_inv029_completion_race_preserves_outcome_and_stop_history() {
+    fn s07_completion_race_preserves_outcome_and_stop_history() {
         let (execution, interrupt) = stop_requested_execution(in_flight_execution());
         let observation = correlated_observation(
             &execution,
@@ -7726,11 +7726,11 @@ mod tests {
         );
     }
 
-    /// S07 / S11 / INV-006 / INV-027 / INV-029: a tool-using response racing
+    /// S07 / S11: a tool-using response racing
     /// an applied interrupt records its proposals, closes them without
     /// attempts, and terminalizes through the original stop proof.
     #[test]
-    fn s07_s11_inv006_inv027_inv029_tool_response_race_closes_without_execution() {
+    fn s07_s11_tool_response_race_closes_without_execution() {
         let (execution, interrupt) = stop_requested_execution(in_flight_execution());
         let request = tool_request_id(40);
         let expected_turn = execution.turn();
@@ -7783,11 +7783,11 @@ mod tests {
         ));
     }
 
-    /// S04 / S07 / INV-025 / INV-029: an applied interrupt makes
+    /// S04 / S07: an applied interrupt makes
     /// unacknowledged call ambiguity terminal reconciliation, preserving the
     /// exact operation and stop proof while releasing the slot.
     #[test]
-    fn s04_s07_inv025_inv029_stopped_ambiguity_requires_reconciliation() {
+    fn s04_s07_stopped_ambiguity_requires_reconciliation() {
         let pending = accepted_input_id(40);
         let execution = with_pending_steering(in_flight_execution(), pending);
         let source_turn = execution.turn();
@@ -7843,11 +7843,11 @@ mod tests {
         );
     }
 
-    /// S02 / INV-006 / INV-014 / INV-034: an authoritative reread of a durably
+    /// S02: an authoritative reread of a durably
     /// issued call reconstructs the same provider-facing correlation without
     /// authorizing or transitioning it a second time.
     #[test]
-    fn s02_inv006_inv014_inv034_in_flight_reread_reconstructs_exact_authorization() {
+    fn s02_in_flight_reread_reconstructs_exact_authorization() {
         let execution = in_flight_execution();
         let expected_call = execution
             .current_call()
@@ -7871,11 +7871,11 @@ mod tests {
         assert!(prepared_execution().resume_in_flight_call().is_none());
     }
 
-    /// S02 / INV-006 / INV-014: a provider observation remains bound to the
+    /// S02: a provider observation remains bound to the
     /// exact session, turn, attempt, call, target, and frontier that crossed
     /// send authorization.
     #[test]
-    fn s02_inv006_inv014_terminal_observation_rejects_cross_wired_call() {
+    fn s02_terminal_observation_rejects_cross_wired_call() {
         let execution = in_flight_execution();
         let mut observation =
             correlated_observation(&execution, ModelCallTerminalObservation::KnownFailed);
@@ -7894,11 +7894,11 @@ mod tests {
         assert_eq!(error, ModelCallClosureError::ObservationCorrelationMismatch);
     }
 
-    /// S02 / INV-005 / INV-006 / INV-032: successful final text, physical
+    /// S02: successful final text, physical
     /// completion, attempt/turn completion, and the final marker share one
     /// prefix-preserving candidate.
     #[test]
-    fn s02_inv005_inv006_inv032_completion_is_atomic_and_ordered() {
+    fn s02_completion_is_atomic_and_ordered() {
         let execution = in_flight_execution();
         let observation = correlated_observation(
             &execution,
@@ -7962,11 +7962,11 @@ mod tests {
         );
     }
 
-    /// S02 / S10 / INV-005 / INV-006 / INV-019: a tool-using completion
+    /// S02 / S10: a tool-using completion
     /// commits ordered request references, yields its attempt, and parks on
     /// the earliest undecided request without completing the turn.
     #[test]
-    fn s02_s10_inv005_inv006_inv019_tool_round_yields_and_parks_in_order() {
+    fn s02_s10_tool_round_yields_and_parks_in_order() {
         let execution = in_flight_execution();
         let first_request = tool_request_id(20);
         let second_request = tool_request_id(21);
@@ -8072,10 +8072,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-001 / INV-006: a later model round cannot reuse a tool
+    /// S10: a later model round cannot reuse a tool
     /// request identity already present in immutable transcript history.
     #[test]
-    fn s10_inv001_inv006_tool_round_rejects_historical_request_identity() {
+    fn s10_tool_round_rejects_historical_request_identity() {
         let execution = in_flight_execution();
         let request = tool_request_id(20);
         let mut frontier_entries = execution.frontier_entries.to_vec();
@@ -8134,10 +8134,10 @@ mod tests {
         assert_eq!(error, ModelCallClosureError::FrontierDerivationFailed);
     }
 
-    /// S02 / S15 / INV-006 / INV-009: an all-auto batch creates one fresh
+    /// S02 / S15: an all-auto batch creates one fresh
     /// prepared continuation attempt while retaining the same logical turn.
     #[test]
-    fn s02_s15_inv006_inv009_all_auto_tool_round_prepares_continuation() {
+    fn s02_s15_all_auto_tool_round_prepares_continuation() {
         let execution = in_flight_execution();
         let request = tool_request_id(20);
         let continuation = turn_attempt_id(21);
@@ -8176,10 +8176,10 @@ mod tests {
         assert_eq!(current_attempt.state(), &CurrentTurnAttemptState::Prepared);
     }
 
-    /// S08 / INV-016: a definitive response terminalizes its source only
+    /// S08: a definitive response terminalizes its source only
     /// together with ordered, visible reclassification of pending steering.
     #[test]
-    fn s08_inv016_completion_reclassifies_pending_steering_atomically() {
+    fn s08_completion_reclassifies_pending_steering_atomically() {
         let pending = accepted_input_id(20);
         let successor = turn_id(21);
         let execution = with_pending_steering(in_flight_execution(), pending);
@@ -8216,10 +8216,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-016: terminal observation cannot release the source while a
+    /// S08: terminal observation cannot release the source while a
     /// pending input lacks its exact reclassified successor identity.
     #[test]
-    fn s08_inv016_terminal_observation_rejects_missing_reclassification() {
+    fn s08_terminal_observation_rejects_missing_reclassification() {
         let pending = accepted_input_id(20);
         let execution = with_pending_steering(in_flight_execution(), pending);
         let observation =
@@ -8241,10 +8241,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-016: a refusal reclassifies pending steering without adding
+    /// S08: a refusal reclassifies pending steering without adding
     /// response content to the refused turn's terminal frontier.
     #[test]
-    fn s08_inv016_refusal_reclassifies_pending_steering_atomically() {
+    fn s08_refusal_reclassifies_pending_steering_atomically() {
         let pending = accepted_input_id(20);
         let successor = turn_id(21);
         let execution = with_pending_steering(in_flight_execution(), pending);
@@ -8270,10 +8270,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-016: trustworthy pre-send failure releases its source only
+    /// S08: trustworthy pre-send failure releases its source only
     /// together with pending-steering reclassification.
     #[test]
-    fn s08_inv016_prepared_failure_reclassifies_pending_steering_atomically() {
+    fn s08_prepared_failure_reclassifies_pending_steering_atomically() {
         let pending = accepted_input_id(20);
         let successor = turn_id(21);
         let execution = with_pending_steering(prepared_execution(), pending);
@@ -8295,10 +8295,10 @@ mod tests {
         );
     }
 
-    /// S03 / INV-015: a failed required compaction closes the fresh physical
+    /// S03: a failed required compaction closes the fresh physical
     /// attempt without fabricating a provider call.
     #[test]
-    fn s03_inv015_automatic_compaction_failure_closes_call_free_turn() {
+    fn s03_automatic_compaction_failure_closes_call_free_turn() {
         let failure_entry = semantic_transcript_entry_id(10);
         let execution = active_execution();
         let session = execution.session();
@@ -8333,10 +8333,10 @@ mod tests {
         );
     }
 
-    /// S08 / INV-005 / INV-036: a known failure after steering consumption
+    /// S08: a known failure after steering consumption
     /// appends its marker to the call frontier without losing consumed input.
     #[test]
-    fn s08_inv005_inv036_prepared_failure_extends_steering_call_frontier() {
+    fn s08_prepared_failure_extends_steering_call_frontier() {
         let failure_entry = semantic_transcript_entry_id(30);
         let failed = prepared_execution_consuming_steering()
             .fail_prepared_call(FailedModelCallTurnIdentities::new(
@@ -8364,10 +8364,10 @@ mod tests {
         );
     }
 
-    /// S04 / INV-025 / INV-026: ambiguous physical completion ends the live
+    /// S04: ambiguous physical completion ends the live
     /// attempt and retains the exact call in a durable recovery wait.
     #[test]
-    fn s04_inv025_inv026_ambiguity_preserves_call_and_waits() {
+    fn s04_ambiguity_preserves_call_and_waits() {
         let execution = in_flight_execution();
         let observation =
             correlated_observation(&execution, ModelCallTerminalObservation::Ambiguous);
@@ -8394,11 +8394,11 @@ mod tests {
         );
     }
 
-    /// S04 / S08 / INV-016 / INV-034: startup converts an unsent prepared call
+    /// S04 / S08: startup converts an unsent prepared call
     /// to known failure, records the lost attempt, and reclassifies steering
     /// before releasing the source.
     #[test]
-    fn s04_s08_inv016_inv034_restart_closes_prepared_call_and_reclassifies_steering() {
+    fn s04_s08_restart_closes_prepared_call_and_reclassifies_steering() {
         let pending = accepted_input_id(20);
         let successor = turn_id(21);
         let execution = with_pending_steering(prepared_execution(), pending);
@@ -8435,10 +8435,10 @@ mod tests {
         );
     }
 
-    /// S04 / INV-025 / INV-026 / INV-034: startup cannot infer the fate of an
+    /// S04: startup cannot infer the fate of an
     /// issued prior-process call, so it records ambiguity and a lost attempt.
     #[test]
-    fn s04_inv025_inv026_inv034_restart_preserves_in_flight_call_as_ambiguous() {
+    fn s04_restart_preserves_in_flight_call_as_ambiguous() {
         let outcome = in_flight_execution()
             .recover_after_restart(FailedModelCallTurnIdentities::new(
                 semantic_transcript_entry_id(10),
@@ -8466,12 +8466,12 @@ mod tests {
         );
     }
 
-    /// S02 / S04 / INV-006 / INV-014: cancellation-requested call state lacks
+    /// S02 / S04: cancellation-requested call state lacks
     /// the proof-bearing stopped-attempt facts required by
     /// docs/spec/turn-lifecycle-and-scheduling.md, so this evidence-free
     /// execution projection fails closed during reconstitution.
     #[test]
-    fn s02_s04_inv006_inv014_cancellation_requested_reconstitution_fails_closed() {
+    fn s02_s04_cancellation_requested_reconstitution_fails_closed() {
         let in_flight = in_flight_execution();
         let cancellation_requested = in_flight
             .current_call()
@@ -8500,10 +8500,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-006: definitive known failure closes the physical call and
+    /// S02: definitive known failure closes the physical call and
     /// logical turn as failed in one candidate.
     #[test]
-    fn s02_inv006_known_failure_closes_call_attempt_and_turn() {
+    fn s02_known_failure_closes_call_attempt_and_turn() {
         let execution = in_flight_execution();
         let observation =
             correlated_observation(&execution, ModelCallTerminalObservation::KnownFailed);
@@ -8530,10 +8530,10 @@ mod tests {
         assert_eq!(failed.disposition(), &TurnDisposition::Failed);
     }
 
-    /// S02 / INV-006: a cause-free physical cancellation is not a logical
+    /// S02: a cause-free physical cancellation is not a logical
     /// cancellation and closes the logical turn as failed.
     #[test]
-    fn s02_inv006_cause_free_physical_cancellation_fails_turn() {
+    fn s02_cause_free_physical_cancellation_fails_turn() {
         let execution = in_flight_execution();
         let observation =
             correlated_observation(&execution, ModelCallTerminalObservation::Cancelled);
@@ -8562,10 +8562,10 @@ mod tests {
         assert_eq!(failed.disposition(), &TurnDisposition::Failed);
     }
 
-    /// S02 / INV-006: an explicit provider refusal preserves its physical and
+    /// S02: an explicit provider refusal preserves its physical and
     /// logical classifications without manufacturing semantic response text.
     #[test]
-    fn s02_inv006_refusal_closes_call_attempt_and_turn_without_content() {
+    fn s02_refusal_closes_call_attempt_and_turn_without_content() {
         let execution = in_flight_execution();
         let observation = correlated_observation(&execution, ModelCallTerminalObservation::Refused);
         let outcome = execution

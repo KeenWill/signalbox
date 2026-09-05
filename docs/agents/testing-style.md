@@ -143,8 +143,8 @@ Snapshot assertions use
     [How to Test](https://matklad.github.io/2021/05/31/how-to-test.html)
     describes the single check-function, data-driven form these settle into.
 
-10. **Snapshots supplement invariant enforcement; they do not replace it.** An
-    INV-tagged test keeps its precise targeted asserts; a snapshot proves
+10. **Snapshots supplement behavioral enforcement; they do not replace it.** A
+    focused test keeps its precise targeted asserts; a snapshot proves
     output-didn't-change, not invariant-holds.
 
 11. **Read every snapshot diff before blessing it.** Review a snapshot update as
@@ -262,23 +262,21 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
     stays in one test even though its description contains "and". Splitting such
     guarantees across separate executions lets each half pass under a different
     interleaving while no test can detect a violation of the combined contract.
-    Before renaming or splitting any test, preserve its INV tags in the test
-    name or attached doc comment, then regenerate the
-    [invariant test index](../invariants.md). Keep names stable; the binding
-    reference is the file plus its tags.
+    Keep names stable when renaming or splitting a test so review can follow the
+    behavior it exercises.
 
 From the application sweep, `replace_session_defaults.rs` — two behaviors, so a
 split, not an unroll:
 
 ```rust
 // Bad: one loop runs two behaviors under one test name.
-fn s01_inv008_inv012_recorded_applied_and_rejected_results_pass_through() {
+fn s01_recorded_applied_and_rejected_results_pass_through() {
     for (command, recorded) in [(applied_cmd, applied), (rejected_cmd, rejected)] { /* … */ }
 }
 
 // Good: one behavior per test, each named for its behavior.
-fn s01_inv008_inv012_recorded_applied_result_passes_through() { /* … */ }
-fn s01_inv008_inv012_recorded_rejected_result_passes_through() { /* … */ }
+fn s01_recorded_applied_result_passes_through() { /* … */ }
+fn s01_recorded_rejected_result_passes_through() { /* … */ }
 ```
 
 ## Fixture and helper placement
@@ -336,9 +334,7 @@ expect![[r#"
 21. **Tests are explicit declarations, not macro-generated.** A Rust macro does
     not emit or forward `#[test]`, `#[tokio::test]`, or a conditional
     equivalent. Explicit declarations keep each test's name and body visible at
-    its source location (rules 1 and 7), and let the invariant-catalog checker
-    bind every INV-tagged test file deterministically without expanding
-    arbitrary macros.
+    its source location (rules 1 and 7).
 
 ## Example
 
@@ -396,9 +392,8 @@ acceptance cannot pass — the interrupt relation names the predecessor fixture
 itself, and the expected order is spelled in fixture values, so the assertion
 cannot silently diverge from the setup.
 
-Because this is an INV-tagged test, the exact assert above is decisive and stays
-(rule 10). A snapshot may supplement it to make the derived shape reviewable at
-a glance (rules 9 and 12):
+The exact assert above is decisive and stays (rule 10). A snapshot may
+supplement it to make the derived shape reviewable at a glance (rules 9 and 12):
 
 ```rust
 expect![[r#"

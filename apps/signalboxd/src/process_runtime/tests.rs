@@ -652,12 +652,12 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: every stop refusal the interrupt treatment records reaches the
+    /// every stop refusal the interrupt treatment records reaches the
     /// wire as its recorded typed rejection, not as an encode invariant that
     /// closes the connection; the racing-target projections are covered by the
     /// reconciliation test below.
     #[test]
-    fn inv033_stop_rejections_have_wire_projections() -> Result<(), Box<dyn Error>> {
+    fn stop_rejections_have_wire_projections() -> Result<(), Box<dyn Error>> {
         let session = SessionId::from_uuid(Uuid::from_u128(1));
         let actual_active_turn = TurnId::from_uuid(Uuid::from_u128(3));
         let existing_command = DurableCommandId::from_uuid(Uuid::from_u128(4));
@@ -703,11 +703,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the receipt projection is exact — the wire
+    /// the receipt projection is exact — the wire
     /// surface records only reason-bearing denials, so a reason-free denial
     /// fails closed instead of fabricating an empty reason.
     #[test]
-    fn inv033_reason_free_denial_has_no_wire_receipt() -> Result<(), Box<dyn Error>> {
+    fn reason_free_denial_has_no_wire_receipt() -> Result<(), Box<dyn Error>> {
         assert_eq!(
             wire_tool_decision(&ToolApprovalDecision::Approve)?,
             ToolDecision::Approve {}
@@ -752,13 +752,13 @@ mod tests {
         );
     }
 
-    /// INV-033: the metadata last-writer projection is total over the domain
+    /// the metadata last-writer projection is total over the domain
     /// agencies durable metadata records, and each carried reference lands in
     /// its own member. A projection gap here is not a degraded field: both
     /// callers propagate it as an encode invariant, which is fatal to the
     /// daemon and re-fires on every read of the durable row.
     #[test]
-    fn inv033_metadata_last_writer_projects_every_domain_agency() {
+    fn metadata_last_writer_projects_every_domain_agency() {
         let turn = TurnId::from_uuid(Uuid::from_u128(2));
         let request = ToolRequestId::from_uuid(Uuid::from_u128(3));
 
@@ -783,7 +783,7 @@ mod tests {
         SessionId::from_uuid(Uuid::from_u128(1))
     }
 
-    /// S03 / INV-034: an explicit compaction whose commit outcome cannot be
+    /// S03: an explicit compaction whose commit outcome cannot be
     /// decided raises the same fatal recovery signal its automatic sibling
     /// raises through the scheduler pass, and still answers the client with the
     /// stable ambiguous code.
@@ -794,7 +794,7 @@ mod tests {
     /// and the startup scan that does reconcile this state only runs in the
     /// next incarnation.
     #[tokio::test]
-    async fn s03_inv034_ambiguous_explicit_compaction_commit_raises_the_fatal_recovery_signal()
+    async fn s03_ambiguous_explicit_compaction_commit_raises_the_fatal_recovery_signal()
     -> Result<(), Box<dyn Error>> {
         let (supervisor, signal) = FatalExecutionSupervisor::new(());
         let reporter = supervisor.recovery_reporter();
@@ -824,11 +824,11 @@ mod tests {
         Ok(())
     }
 
-    /// S03 / INV-034: a failure proven to precede the commit boundary is
+    /// S03: a failure proven to precede the commit boundary is
     /// ordinary unavailability and raises no recovery signal, so the reaction
     /// stays scoped to the one declared class that needs it.
     #[tokio::test]
-    async fn s03_inv034_decided_explicit_compaction_failure_raises_no_recovery_signal()
+    async fn s03_decided_explicit_compaction_failure_raises_no_recovery_signal()
     -> Result<(), Box<dyn Error>> {
         let (supervisor, signal) = FatalExecutionSupervisor::new(());
         let reporter = supervisor.recovery_reporter();
@@ -906,10 +906,10 @@ mod tests {
         );
     }
 
-    /// INV-060: direct blob-read admission exposes one fixed non-waiting
+    /// direct blob-read admission exposes one fixed non-waiting
     /// process-wide capacity.
     #[test]
-    fn inv060_blob_read_admission_has_fixed_nonwaiting_capacity() -> Result<(), Box<dyn Error>> {
+    fn blob_read_admission_has_fixed_nonwaiting_capacity() -> Result<(), Box<dyn Error>> {
         let budget = Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS));
         let held = Arc::clone(&budget)
             .try_acquire_many_owned(u32::try_from(MAX_CONCURRENT_BLOB_READS)?)
@@ -937,11 +937,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a reconciliation decision that lost its race to another
+    /// a reconciliation decision that lost its race to another
     /// decision reaches the wire as its recorded typed rejection, not as an
     /// encode invariant that closes the connection.
     #[test]
-    fn inv033_racing_reconciliation_rejections_have_wire_projections() -> Result<(), Box<dyn Error>>
+    fn racing_reconciliation_rejections_have_wire_projections() -> Result<(), Box<dyn Error>>
     {
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
         let expected_active_turn = TurnId::from_uuid(uuid::Uuid::from_u128(2));
@@ -995,7 +995,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv033_frame_reader_accepts_the_exact_cap_and_rejects_the_next_byte()
+    async fn frame_reader_accepts_the_exact_cap_and_rejects_the_next_byte()
     -> Result<(), Box<dyn Error>> {
         let mut exact = vec![b'x'; MAX_FRAME_BYTES];
         exact[MAX_FRAME_BYTES - 1] = b'\n';
@@ -1419,10 +1419,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: an expired active bulk-ingest deadline releases a frame held
+    /// an expired active bulk-ingest deadline releases a frame held
     /// while a review mutation waits for its separate admission budget.
     #[tokio::test(start_paused = true)]
-    async fn inv060_expired_bulk_ingest_deadline_cancels_review_admission()
+    async fn expired_bulk_ingest_deadline_cancels_review_admission()
     -> Result<(), Box<dyn Error>> {
         let frame_budget = Arc::new(Semaphore::new(1));
         let review_budget = Arc::new(Semaphore::new(1));
@@ -1739,10 +1739,10 @@ mod tests {
         ));
     }
 
-    /// INV-060: each chunked bulk-ingest kind rejects every lifecycle request
+    /// each chunked bulk-ingest kind rejects every lifecycle request
     /// belonging to the other kind while preserving its own lifecycle.
     #[test]
-    fn inv060_cross_kind_bulk_ingest_requests_are_classified_before_admission() {
+    fn cross_kind_bulk_ingest_requests_are_classified_before_admission() {
         let append_blob = ClientRequest::AppendBlobUpload {
             chunk: signalbox_process_protocol::BlobChunk::new(vec![1]),
         };
@@ -1768,10 +1768,10 @@ mod tests {
         ));
     }
 
-    /// INV-060: inactivity resets after accepted lifecycle output while the
+    /// inactivity resets after accepted lifecycle output while the
     /// whole-session deadline stays anchored to permit acquisition.
     #[tokio::test(start_paused = true)]
-    async fn inv060_bulk_ingest_deadlines_have_independent_monotonic_anchors()
+    async fn bulk_ingest_deadlines_have_independent_monotonic_anchors()
     -> Result<(), Box<dyn Error>> {
         let started_at = Instant::now();
         let permit = Arc::new(Semaphore::new(1)).acquire_owned().await?;
@@ -1805,10 +1805,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: an active upload classifies every second begin as the sole
+    /// an active upload classifies every second begin as the sole
     /// nonterminal duplicate-begin refusal before inspecting its new length.
     #[test]
-    fn inv060_active_blob_upload_precedes_duplicate_begin_length_validation()
+    fn active_blob_upload_precedes_duplicate_begin_length_validation()
     -> Result<(), Box<dyn Error>> {
         let detail = blob_upload_begin_preflight(true, CanonicalU64::new(0), 8)
             .ok_or_else(|| io::Error::other("the active upload must reject a second begin"))?;
@@ -3008,10 +3008,10 @@ mod tests {
         );
     }
 
-    /// INV-033: a recorded session settings change reaches the wire as its
+    /// a recorded session settings change reaches the wire as its
     /// typed projection without losing either settings snapshot.
     #[test]
-    fn inv033_session_model_settings_change_projects_to_the_closed_wire_shape() {
+    fn session_model_settings_change_projects_to_the_closed_wire_shape() {
         let session = SessionId::from_uuid(Uuid::from_u128(1));
         let command = DurableCommandId::from_uuid(Uuid::from_u128(2));
         let prior_selection = DirectModelSelection::from_uuid(Uuid::from_u128(3));
@@ -3135,10 +3135,10 @@ mod tests {
         );
     }
 
-    /// INV-033: a recorded per-turn settings resolution reaches the wire with
+    /// a recorded per-turn settings resolution reaches the wire with
     /// its requested alias and exact resolved-settings evidence.
     #[test]
-    fn inv033_turn_model_settings_resolution_projects_to_the_closed_wire_shape() {
+    fn turn_model_settings_resolution_projects_to_the_closed_wire_shape() {
         let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
         let turn = TurnId::from_uuid(Uuid::from_u128(6));
         let requested_alias = ModelAlias::from_uuid(Uuid::from_u128(3));
@@ -3274,10 +3274,10 @@ mod tests {
         );
     }
 
-    /// S17 / INV-032: committing an internal delivery wake makes the exact
+    /// S17: committing an internal delivery wake makes the exact
     /// recipient eligible without projecting the wake onto follow streams.
     #[test]
-    fn s17_inv032_internal_delegation_wake_nudges_exact_recipient() {
+    fn s17_internal_delegation_wake_nudges_exact_recipient() {
         let recipient = SessionId::from_uuid(Uuid::from_u128(10));
         let spawning_request = ToolRequestId::from_uuid(Uuid::from_u128(11));
         let nudge = RecordingEligibilityNudge::default();
@@ -3746,10 +3746,10 @@ mod tests {
         );
     }
 
-    /// INV-032 / INV-044: the daemon preserves every bounded runner-placement
+    /// the daemon preserves every bounded runner-placement
     /// fact while projecting one dispatched outbox transition to the wire.
     #[test]
-    fn inv032_inv044_runner_state_transition_projects_to_the_closed_wire_shape() {
+    fn runner_state_transition_projects_to_the_closed_wire_shape() {
         let runner = RunnerId::from_uuid(Uuid::from_u128(7));
         let placement_revision =
             RunnerGeneration::try_from_u64(9).expect("the fixture revision is positive");

@@ -491,7 +491,7 @@ model_call_cause_tokens! {
 ///
 /// A projection of the runtime's `LossCause` down to a stable token: the
 /// runtime's own variants retain provider-controlled transport and parser
-/// text, which never reaches operator telemetry (INV-035).
+/// text, which never reaches operator telemetry.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BoundaryLossCode {
     /// Cancellation fired after send commenced.
@@ -555,7 +555,7 @@ impl BoundaryLossCode {
 ///
 /// Every value renders as a fixed operator-facing token
 /// ([`as_str`](Self::as_str)); no provider response text, request or response
-/// body, credential material, or user content can reach it (INV-035). The
+/// body, credential material, or user content can reach it. The
 /// runtime's own exhaustive `ProviderErrorKind` classification is carried
 /// verbatim rather than restated, so the adapter taxonomy of
 /// docs/spec/runtime-substrate.md and this operator vocabulary cannot drift
@@ -2363,11 +2363,11 @@ mod tests {
         .into_request()
     }
 
-    /// S28 / INV-038 / INV-039: the outward runtime bridge consumes imported
+    /// S28: the outward runtime bridge consumes imported
     /// messages under their rendered role and exact text without consulting or
     /// manufacturing native execution provenance.
     #[test]
-    fn s28_inv038_inv039_imported_messages_map_to_provider_neutral_text_roles() {
+    fn s28_imported_messages_map_to_provider_neutral_text_roles() {
         let source = SemanticTranscriptEntryRef::from_source(
             SessionId::from_uuid(Uuid::from_u128(2)),
             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(3)),
@@ -2396,11 +2396,11 @@ mod tests {
         );
     }
 
-    /// S33 / INV-046: the provider bridge renders the durable identity boundary
+    /// S33: the provider bridge renders the durable identity boundary
     /// as the exact injected user-role session event selected by the recorded
     /// context-lifecycle decision.
     #[test]
-    fn s33_inv046_model_identity_boundary_is_an_injected_user_message() {
+    fn s33_model_identity_boundary_is_an_injected_user_message() {
         let source = source(12);
         let defaults_version = SessionConfigurationDefaultsVersion::try_from_u64(3)
             .expect("the fixture epoch is positive");
@@ -2498,11 +2498,11 @@ mod tests {
             usage: TokenUsage::unreported(),
         })
     }
-    /// S10 / INV-002 / INV-005: one provider response and its ordered result
+    /// S10: one provider response and its ordered result
     /// batch remain grouped, while malformed arguments use replay-safe JSON
     /// without replacing their exact durable request evidence.
     #[test]
-    fn s10_inv002_inv005_tool_history_is_grouped_and_replay_safe() {
+    fn s10_tool_history_is_grouped_and_replay_safe() {
         let first = request(20, "{}");
         let malformed = request(21, "{\"timezone\":");
         let scalar = request(22, "7");
@@ -2605,10 +2605,10 @@ mod tests {
         assert_eq!(rendered[1].parts.len(), 3);
     }
 
-    /// INV-026: the application-owned dispatch permit is released exactly
+    /// the application-owned dispatch permit is released exactly
     /// when the runtime first reports that provider acceptance is possible.
     #[test]
-    fn inv026_send_commenced_releases_acceptance_callback_once() {
+    fn send_commenced_releases_acceptance_callback_once() {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
@@ -2641,10 +2641,10 @@ mod tests {
         assert_eq!(sink.observations.len(), 3);
     }
 
-    /// INV-026: cross-wired acceptance evidence cannot release another
+    /// cross-wired acceptance evidence cannot release another
     /// attempt's dispatch/stop gate.
     #[test]
-    fn inv026_cross_wired_send_commenced_retains_acceptance_callback() {
+    fn cross_wired_send_commenced_retains_acceptance_callback() {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
@@ -2680,11 +2680,11 @@ mod tests {
         }
     }
 
-    /// INV-035: correctly correlated text crosses the bridge exactly as the
+    /// correctly correlated text crosses the bridge exactly as the
     /// adapter sink supplied it, while cross-wired text stays on the evidence
     /// path and never reaches presentation delivery.
     #[test]
-    fn inv035_text_delta_delivery_is_additive_and_correlation_checked() {
+    fn text_delta_delivery_is_additive_and_correlation_checked() {
         let expected_call = call();
         let expected_session = SessionId::from_uuid(Uuid::from_u128(10));
         let expected_turn = TurnId::from_uuid(Uuid::from_u128(11));
@@ -2768,10 +2768,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-014 / INV-025: runtime terminal evidence maps to the exact
+    /// S02: runtime terminal evidence maps to the exact
     /// physical disposition without retryability or error-string inference.
     #[test]
-    fn s02_inv014_inv025_terminal_evidence_classification_is_total() {
+    fn s02_terminal_evidence_classification_is_total() {
         let exchange = ExchangeFacts::default();
         assert_eq!(
             classify_terminal(
@@ -2867,10 +2867,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-014: only exact text from a matching reported target becomes
+    /// S02: only exact text from a matching reported target becomes
     /// assistant content; empty blocks create no invalid empty entry.
     #[test]
-    fn s02_inv014_matching_completion_preserves_text_parts() {
+    fn s02_matching_completion_preserves_text_parts() {
         assert_eq!(
             classify_terminal(
                 completion(
@@ -2897,10 +2897,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-002 / INV-005: runtime-native tool calls become ordered,
+    /// S10: runtime-native tool calls become ordered,
     /// normalized domain proposals without retaining provider identifiers.
     #[test]
-    fn s10_inv002_inv005_tool_completion_crosses_as_provider_neutral_proposals() {
+    fn s10_tool_completion_crosses_as_provider_neutral_proposals() {
         let classified = classify_terminal(
             tool_completion("model-exact"),
             &[],
@@ -2925,12 +2925,12 @@ mod tests {
         ));
     }
 
-    /// S02 / INV-014: a Claude 5-family tool completion carrying the
+    /// S02: a Claude 5-family tool completion carrying the
     /// omitted-display empty thinking part classifies as a tool round — the
     /// empty part is dropped like an empty text block instead of failing the
     /// whole legitimate completion closed.
     #[test]
-    fn s02_inv014_empty_thinking_part_is_dropped_from_a_tool_completion() {
+    fn s02_empty_thinking_part_is_dropped_from_a_tool_completion() {
         let classified = classify_terminal(
             completion_with_finish(
                 "model-exact",
@@ -2963,11 +2963,11 @@ mod tests {
         ));
     }
 
-    /// S02 / INV-014: thinking with actual text still fails the bridge
+    /// S02: thinking with actual text still fails the bridge
     /// closed — dropping it would silently erase response material for which
     /// no durable semantic representation exists.
     #[test]
-    fn s02_inv014_nonempty_thinking_part_still_fails_closed() {
+    fn s02_nonempty_thinking_part_still_fails_closed() {
         let outcome = classify_terminal(
             completion(
                 "model-exact",
@@ -2989,10 +2989,10 @@ mod tests {
         ));
     }
 
-    /// S10 / INV-002: tool-call content and the `ToolUse` finish reason must
+    /// S10: tool-call content and the `ToolUse` finish reason must
     /// agree before either terminal completion observation is constructed.
     #[test]
-    fn s10_inv002_mismatched_tool_finish_is_known_failed() {
+    fn s10_mismatched_tool_finish_is_known_failed() {
         assert_eq!(
             classify_terminal(
                 completion(
@@ -3075,10 +3075,10 @@ mod tests {
         );
     }
 
-    /// INV-014: malformed tool proposals are terminal known failures, so the
+    /// malformed tool proposals are terminal known failures, so the
     /// provider operation cannot remain durably in flight.
     #[test]
-    fn inv014_invalid_tool_proposals_close_as_known_failure() {
+    fn invalid_tool_proposals_close_as_known_failure() {
         let invalid_name = TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
@@ -3134,12 +3134,12 @@ mod tests {
         assert_invalid_tool_proposal_closes(mismatched_finish);
     }
 
-    /// INV-014: either early or terminal evidence of a *different lineage*
+    /// either early or terminal evidence of a *different lineage*
     /// prevents response material from becoming authoritative, and the
     /// substitution is its own recorded outcome rather than an ordinary
     /// provider failure.
     #[test]
-    fn inv014_cross_model_substitution_precedes_completion() {
+    fn cross_model_substitution_precedes_completion() {
         let early = vec![Observation {
             correlation: call(),
             fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
@@ -3178,7 +3178,7 @@ mod tests {
         );
     }
 
-    /// S20 / INV-014: an alias resolved to its own canonical dated form is
+    /// S20: an alias resolved to its own canonical dated form is
     /// the same logical target. The exchange completes, and the concrete
     /// identity that actually served it is retained as sanitized evidence.
     ///
@@ -3187,7 +3187,7 @@ mod tests {
     /// the dated identity failed the adapter stage closed, terminalized the
     /// call ambiguously, and stopped the daemon.
     #[test]
-    fn s20_inv014_alias_resolved_to_its_dated_form_is_the_same_target() {
+    fn s20_alias_resolved_to_its_dated_form_is_the_same_target() {
         let early = vec![Observation {
             correlation: call(),
             fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
@@ -3222,10 +3222,10 @@ mod tests {
         );
     }
 
-    /// S20 / INV-014: an exactly matching identity needs no normalization
+    /// S20: an exactly matching identity needs no normalization
     /// record, so nothing is manufactured for it.
     #[test]
-    fn s20_inv014_exact_identity_records_no_concretion() {
+    fn s20_exact_identity_records_no_concretion() {
         let classified = classify_terminal(
             completion(
                 "claude-haiku-4-5",
@@ -3269,10 +3269,10 @@ mod tests {
             .collect()
     }
 
-    /// S20 / INV-014: the discriminator between an alias made concrete and a
+    /// S20: the discriminator between an alias made concrete and a
     /// substituted lineage, stated as a table.
     #[test]
-    fn s20_inv014_provider_target_relation_rule_is_stated_by_example() {
+    fn s20_provider_target_relation_rule_is_stated_by_example() {
         let rows = relation_rows(&[
             ("claude-haiku-4-5", "claude-haiku-4-5"),
             ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
@@ -3334,11 +3334,11 @@ mod tests {
             .collect()
     }
 
-    /// INV-035: every classified outcome carries a stable, sanitized operator
+    /// every classified outcome carries a stable, sanitized operator
     /// cause token; no provider text, response body, or credential material
     /// can reach one.
     #[test]
-    fn inv035_every_classified_outcome_carries_a_stable_sanitized_cause_code() {
+    fn every_classified_outcome_carries_a_stable_sanitized_cause_code() {
         let rows = cause_rows(vec![
             (
                 "completed",
@@ -3409,10 +3409,10 @@ mod tests {
         .assert_eq(&table(rows));
     }
 
-    /// INV-035: a fail-closed substitution carries the same sanitized cause
+    /// a fail-closed substitution carries the same sanitized cause
     /// vocabulary as a classified outcome.
     #[test]
-    fn inv035_substitution_failure_carries_its_sanitized_cause_code() {
+    fn substitution_failure_carries_its_sanitized_cause_code() {
         let failure = classify_terminal(
             completion("claude-opus-4-8", vec![]),
             &[],
@@ -3449,12 +3449,12 @@ mod tests {
             .collect()
     }
 
-    /// INV-035: a trustworthy pre-send preparation failure — the outcome the
+    /// a trustworthy pre-send preparation failure — the outcome the
     /// application commits as `KnownFailed` before any provider traffic —
     /// carries the same stable, sanitized cause vocabulary as a terminal
     /// classification, without its adapter-rendered detail text.
     #[test]
-    fn inv035_preparation_failures_carry_stable_sanitized_cause_codes() {
+    fn preparation_failures_carry_stable_sanitized_cause_codes() {
         let rows = preparation_rows(vec![
             (
                 "unsupported_operation",
@@ -3511,10 +3511,10 @@ mod tests {
         .assert_eq(&table(rows));
     }
 
-    /// INV-035: a hostile provider-reported identity is bounded before it can
+    /// a hostile provider-reported identity is bounded before it can
     /// reach an operator log line.
     #[test]
-    fn inv035_diagnostic_model_identity_is_bounded() {
+    fn diagnostic_model_identity_is_bounded() {
         let configured = "claude-haiku-4-5";
         let reported = format!("{configured}-{}", "1".repeat(8));
         assert_eq!(

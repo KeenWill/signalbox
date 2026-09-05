@@ -1,21 +1,20 @@
 # The PostgreSQL integration suites, and how CI runs them.
 #
 # This file is the single authority for what the `postgres-integration` check
-# executes. Two consumers read it and neither restates its contents:
+# executes. The workflow and validation command read it without restating its
+# contents:
 #
 #   * `.github/workflows/rust.yml` builds one nextest archive per suite from
 #     `package`/`features`, and derives its run matrix from `shards`/`skip`,
 #     through `scripts/postgres_integration_suites.py`.
-#   * `scripts/check_docs_consistency.py` reads the same rows to decide which
-#     `#[ignore]`d tests authoritative CI actually executes, which is what
-#     `docs/invariants.md` indexes.
+#   * `python3 scripts/check_docs_consistency.py` validates agreement with
+#     the workspace, workflow, and documented local commands.
 #
 # The checker used to recover this by regex-parsing the workflow's `cargo test`
 # shell commands. That coupling broke the moment the workflow moved to nextest:
 # the parser silently recognized zero ignored-test runs, which would have
-# dropped every PostgreSQL invariant from the index while claiming CI still
-# enforced them. A manifest both sides read cannot drift that way, and
-# `check_docs_consistency.py` gates the agreement mechanically.
+# dropped every PostgreSQL integration test from its inferred inventory. A
+# manifest both sides read cannot drift that way.
 #
 # Changing a suite's shard count is a one-line edit here: the run matrix is
 # generated, so nothing in the workflow needs to move.
@@ -25,7 +24,7 @@
 # NOT derived from this file. That job is report-only, every suite in it is
 # `continue-on-error`, and it skips one further test that only its own
 # instrumented supervisor perturbs — so it is not a statement about what CI
-# enforces, and `docs/invariants.md` must not be derived from it.
+# enforces.
 #
 # Fields:
 #   name     — suite identifier; names the archive artifact and the check.

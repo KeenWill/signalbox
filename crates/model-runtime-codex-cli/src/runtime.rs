@@ -993,10 +993,10 @@ mod tests {
         assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
     }
 
-    /// INV-035: the CLI receives only a reference to its ambient login store;
+    /// the CLI receives only a reference to its ambient login store;
     /// direct credential-value variables are absent from the inherited set.
     #[test]
-    fn inv_035_cli_environment_excludes_direct_credential_values() {
+    fn cli_environment_excludes_direct_credential_values() {
         assert!(
             CODEX_ENVIRONMENT
                 .iter()

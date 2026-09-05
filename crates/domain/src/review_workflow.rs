@@ -5857,9 +5857,9 @@ mod tests {
             .collect()
     }
 
-    /// S29 / INV-040: change-request review freezes its comparison revision.
+    /// S29: change-request review freezes its comparison revision.
     #[test]
-    fn s29_inv040_change_request_target_requires_frozen_base_revision() {
+    fn s29_change_request_target_requires_frozen_base_revision() {
         let error = ReviewTarget::try_new(
             target_id(1),
             key("code-host"),
@@ -5880,10 +5880,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a stack parent remains inside the child's exact repository
+    /// a stack parent remains inside the child's exact repository
     /// topology.
     #[test]
-    fn inv040_review_target_rejects_foreign_stack_parent() {
+    fn review_target_rejects_foreign_stack_parent() {
         let parent = ReviewTarget::try_new(
             target_id(2),
             key("other-host"),
@@ -5912,10 +5912,10 @@ mod tests {
         );
     }
 
-    /// INV-040: reconstitution preserves the child row's exact parent
+    /// reconstitution preserves the child row's exact parent
     /// identity instead of adopting a compatible joined target.
     #[test]
-    fn inv040_review_target_reconstitution_rejects_substituted_parent_identity() {
+    fn review_target_reconstitution_rejects_substituted_parent_identity() {
         let canonical_parent = ReviewTarget::try_new(
             target_id(2),
             key("code-host"),
@@ -5946,9 +5946,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a parent edge requires an exact frozen child comparison.
+    /// a parent edge requires an exact frozen child comparison.
     #[test]
-    fn inv040_review_target_rejects_parent_without_base_revision() {
+    fn review_target_rejects_parent_without_base_revision() {
         let parent = ReviewTarget::try_new(
             target_id(2),
             key("code-host"),
@@ -5977,9 +5977,9 @@ mod tests {
         );
     }
 
-    /// INV-040: the child's comparison revision is the canonical parent head.
+    /// the child's comparison revision is the canonical parent head.
     #[test]
-    fn inv040_review_target_rejects_revision_disconnected_stack_parent() {
+    fn review_target_rejects_revision_disconnected_stack_parent() {
         let parent = ReviewTarget::try_new(
             target_id(2),
             key("code-host"),
@@ -6008,10 +6008,10 @@ mod tests {
         );
     }
 
-    /// INV-040: complete stack ancestry cannot repeat the target being
+    /// complete stack ancestry cannot repeat the target being
     /// constructed.
     #[test]
-    fn inv040_review_target_rejects_transitive_parent_cycle() {
+    fn review_target_rejects_transitive_parent_cycle() {
         let root = ReviewTarget::try_new(
             target_id(CYCLIC_ROOT_TARGET),
             key("code-host"),
@@ -6046,10 +6046,10 @@ mod tests {
         assert_eq!(error, ReviewTargetError::CyclicParent { target: root.id() });
     }
 
-    /// INV-040: refresh history for one change request is not an immediate
+    /// refresh history for one change request is not an immediate
     /// stack edge.
     #[test]
-    fn inv040_review_target_rejects_immediate_same_change_request_parent() {
+    fn review_target_rejects_immediate_same_change_request_parent() {
         let parent = ReviewTarget::try_new(
             target_id(2),
             key("code-host"),
@@ -6081,10 +6081,10 @@ mod tests {
         );
     }
 
-    /// INV-040: refresh history for one change request cannot reappear
+    /// refresh history for one change request cannot reappear
     /// transitively in a stack chain.
     #[test]
-    fn inv040_review_target_rejects_transitive_same_change_request_parent() {
+    fn review_target_rejects_transitive_same_change_request_parent() {
         let root = ReviewTarget::try_new(
             target_id(3),
             key("code-host"),
@@ -6128,10 +6128,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a valid parent reference retains canonical scope and head
+    /// a valid parent reference retains canonical scope and head
     /// evidence from the supplied snapshot.
     #[test]
-    fn inv040_review_target_derives_parent_evidence_from_canonical_snapshot() {
+    fn review_target_derives_parent_evidence_from_canonical_snapshot() {
         let parent = ReviewTarget::try_new(
             target_id(2),
             key("code-host"),
@@ -6161,10 +6161,10 @@ mod tests {
         assert_eq!(child.ancestry(), &[parent.id()]);
     }
 
-    /// INV-001: review identities remain distinct while composite references
+    /// review identities remain distinct while composite references
     /// preserve exact ancestry.
     #[test]
-    fn inv001_review_references_preserve_typed_identity_ancestry() {
+    fn review_references_preserve_typed_identity_ancestry() {
         let run = ReviewRunRef::new(target_id(1), run_id(2));
         let pass = ReviewPassRef::new(run, pass_id(3));
         let finding = ReviewFindingRef::new(pass, finding_id(4));
@@ -6178,9 +6178,9 @@ mod tests {
         assert_eq!(finding.finding(), finding_id(4));
     }
 
-    /// S29 / INV-040: diff-relative locations require a frozen comparison.
+    /// S29: diff-relative locations require a frozen comparison.
     #[test]
-    fn s29_inv040_diff_relative_finding_requires_target_comparison_revision() {
+    fn s29_diff_relative_finding_requires_target_comparison_revision() {
         let target = target_without_base();
         let error = ReviewFindingProposal::try_new(
             finding_ref(10),
@@ -6196,9 +6196,9 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: standalone commit review may remain file-relative.
+    /// S29: standalone commit review may remain file-relative.
     #[test]
-    fn s29_inv040_file_relative_finding_allows_standalone_commit_target() {
+    fn s29_file_relative_finding_allows_standalone_commit_target() {
         let target = target_without_base();
         let proposal = ReviewFindingProposal::try_new(
             finding_ref(10),
@@ -6215,10 +6215,10 @@ mod tests {
         assert_eq!(proposal.content().location().diff_side(), None);
     }
 
-    /// INV-040: a finding reference authenticates its exact producing pass, not
+    /// a finding reference authenticates its exact producing pass, not
     /// merely another pass in the same run.
     #[test]
-    fn inv040_finding_reference_rejects_cross_wired_producing_pass() {
+    fn finding_reference_rejects_cross_wired_producing_pass() {
         let target = target_with_base();
         let error = ReviewFindingProposal::try_new(
             finding_ref(10),
@@ -6234,10 +6234,10 @@ mod tests {
         );
     }
 
-    /// INV-040: immutable finding content requires a canonically successful
+    /// immutable finding content requires a canonically successful
     /// read-only-review producer.
     #[test]
-    fn inv040_finding_proposal_rejects_incompatible_producing_pass() {
+    fn finding_proposal_rejects_incompatible_producing_pass() {
         let target = target_with_base();
         let pass = ReviewPassEvidence::new(
             pass_ref(3),
@@ -6259,10 +6259,10 @@ mod tests {
         );
     }
 
-    /// INV-040: the finding producer's policy must come from its exact
+    /// the finding producer's policy must come from its exact
     /// independently loaded run.
     #[test]
-    fn inv040_finding_proposal_rejects_foreign_producing_run_policy() {
+    fn finding_proposal_rejects_foreign_producing_run_policy() {
         let target = target_with_base();
         let later_policy = unsupported_policy();
         let error = ReviewFindingProposal::try_new(
@@ -6287,10 +6287,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a finding cannot be produced while its canonical run remains
+    /// a finding cannot be produced while its canonical run remains
     /// active.
     #[test]
-    fn inv040_finding_proposal_rejects_contradictory_run_lifecycle() {
+    fn finding_proposal_rejects_contradictory_run_lifecycle() {
         let target = target_with_base();
         let pass = produced_findings_pass(
             finding_ref(10),
@@ -6319,10 +6319,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a producing run must name the exact pass that produced the
+    /// a producing run must name the exact pass that produced the
     /// finding inventory.
     #[test]
-    fn inv040_finding_proposal_rejects_run_naming_another_pass() {
+    fn finding_proposal_rejects_run_naming_another_pass() {
         let target = target_with_base();
         let pass = produced_findings_pass(
             finding_ref(10),
@@ -6351,9 +6351,9 @@ mod tests {
         );
     }
 
-    /// INV-040: run transitions reject a pass owned by another run.
+    /// run transitions reject a pass owned by another run.
     #[test]
-    fn inv040_run_transition_rejects_foreign_pass() {
+    fn run_transition_rejects_foreign_pass() {
         let reference = run_ref();
         let foreign = ReviewPassRef::new(ReviewRunRef::new(target_id(1), run_id(99)), pass_id(3));
         let queued = ReviewRun::new(
@@ -6382,9 +6382,9 @@ mod tests {
         assert_eq!(cross_wired.states(), (ReviewRunState::Queued, requested));
     }
 
-    /// INV-040: a run admits only the pass kind corresponding to its workflow.
+    /// a run admits only the pass kind corresponding to its workflow.
     #[test]
-    fn inv040_run_transition_rejects_incompatible_pass_kind() {
+    fn run_transition_rejects_incompatible_pass_kind() {
         let queued = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -6410,10 +6410,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a transition cannot introduce a pass that was never admitted
+    /// a transition cannot introduce a pass that was never admitted
     /// through queued-pass construction.
     #[test]
-    fn inv040_run_transition_rejects_unrecorded_pass() {
+    fn run_transition_rejects_unrecorded_pass() {
         let queued = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -6440,10 +6440,10 @@ mod tests {
         );
     }
 
-    /// INV-040: queued cancellation retains an already-recorded pass and its
+    /// queued cancellation retains an already-recorded pass and its
     /// canonical pre-start cancellation.
     #[test]
-    fn inv040_queued_run_cancellation_retains_cancelled_pass() {
+    fn queued_run_cancellation_retains_cancelled_pass() {
         let pass = pass_ref(3);
         let next = ReviewRunState::Cancelled {
             last_pass: Some(pass),
@@ -6480,10 +6480,10 @@ mod tests {
         assert_eq!(cancelled.state(), next);
     }
 
-    /// INV-040: cancellation after activation must retain the exact turn that
+    /// cancellation after activation must retain the exact turn that
     /// was cancelled.
     #[test]
-    fn inv040_running_run_rejects_turnless_pass_cancellation() {
+    fn running_run_rejects_turnless_pass_cancellation() {
         let pass = pass_ref(3);
         let mut run = ReviewRun::new(
             run_ref(),
@@ -6533,10 +6533,10 @@ mod tests {
         );
     }
 
-    /// INV-040: pass construction records its identity on the run, so later
+    /// pass construction records its identity on the run, so later
     /// cancellation cannot claim that no pass existed.
     #[test]
-    fn inv040_queued_run_rejects_passless_cancellation_after_pass_construction() {
+    fn queued_run_rejects_passless_cancellation_after_pass_construction() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -6565,10 +6565,10 @@ mod tests {
         );
     }
 
-    /// INV-040: queued pass construction authenticates its accepted-input
+    /// queued pass construction authenticates its accepted-input
     /// session.
     #[test]
-    fn inv040_pass_construction_rejects_foreign_accepted_input_session() {
+    fn pass_construction_rejects_foreign_accepted_input_session() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -6592,9 +6592,9 @@ mod tests {
         );
     }
 
-    /// INV-040: queued-pass construction authenticates its parent workflow.
+    /// queued-pass construction authenticates its parent workflow.
     #[test]
-    fn inv040_pass_construction_rejects_incompatible_run_workflow() {
+    fn pass_construction_rejects_incompatible_run_workflow() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -6618,10 +6618,10 @@ mod tests {
         );
     }
 
-    /// INV-040: queued-pass construction takes workflow evidence only from the
+    /// queued-pass construction takes workflow evidence only from the
     /// pass's exact parent run.
     #[test]
-    fn inv040_pass_construction_rejects_foreign_run_evidence() {
+    fn pass_construction_rejects_foreign_run_evidence() {
         let mut foreign_run = ReviewRun::new(
             ReviewRunRef::new(target_id(1), run_id(99)),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -6647,9 +6647,9 @@ mod tests {
         );
     }
 
-    /// INV-040: one active pass turn remains fixed through terminalization.
+    /// one active pass turn remains fixed through terminalization.
     #[test]
-    fn inv040_pass_transition_rejects_changed_turn() {
+    fn pass_transition_rejects_changed_turn() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -6700,10 +6700,10 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: a running pass admits monotonic lag after its canonical
+    /// S29: a running pass admits monotonic lag after its canonical
     /// turn terminalizes.
     #[test]
-    fn s29_inv040_running_pass_admits_terminal_turn_projection_lag() {
+    fn s29_running_pass_admits_terminal_turn_projection_lag() {
         let lagging = ReviewPassState::Running { turn: turn_id(6) };
         let input = ReviewPassReconstitutionInput::new(
             pass_ref(3),
@@ -6734,10 +6734,10 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: a queued pass starts only while its canonical turn is
+    /// S29: a queued pass starts only while its canonical turn is
     /// active; terminal outcomes cannot lead an unprojected start.
     #[test]
-    fn s29_inv040_queued_pass_start_requires_active_turn() {
+    fn s29_queued_pass_start_requires_active_turn() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -6770,10 +6770,10 @@ mod tests {
         assert_eq!(error.failure(), ReviewPassTransitionFailure::TurnNotActive);
     }
 
-    /// S29 / INV-040: run reconstitution accepts its exact canonical pass
+    /// S29: run reconstitution accepts its exact canonical pass
     /// outcome.
     #[test]
-    fn s29_inv040_run_reconstitution_accepts_exact_pass_outcome() {
+    fn s29_run_reconstitution_accepts_exact_pass_outcome() {
         let state = ReviewRunState::Succeeded {
             concluding_pass: pass_ref(3),
         };
@@ -6801,10 +6801,10 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: run reconstitution rejects a contradictory canonical
+    /// S29: run reconstitution rejects a contradictory canonical
     /// pass outcome.
     #[test]
-    fn s29_inv040_run_reconstitution_rejects_cross_wired_pass_outcome() {
+    fn s29_run_reconstitution_rejects_cross_wired_pass_outcome() {
         let state = ReviewRunState::Succeeded {
             concluding_pass: pass_ref(3),
         };
@@ -6829,10 +6829,10 @@ mod tests {
         assert_eq!(mismatch.input(), &mismatched);
     }
 
-    /// S29 / INV-040: canonical pass evidence must carry the run's frozen
+    /// S29: canonical pass evidence must carry the run's frozen
     /// policy.
     #[test]
-    fn s29_inv040_run_reconstitution_rejects_foreign_pass_policy() {
+    fn s29_run_reconstitution_rejects_foreign_pass_policy() {
         let state = ReviewRunState::Succeeded {
             concluding_pass: pass_ref(3),
         };
@@ -6862,10 +6862,10 @@ mod tests {
         assert_eq!(error.input(), &mismatched);
     }
 
-    /// INV-040: the workflow discriminator must come from the pass's own run
+    /// the workflow discriminator must come from the pass's own run
     /// row.
     #[test]
-    fn inv040_pass_reconstitution_rejects_foreign_workflow_run() {
+    fn pass_reconstitution_rejects_foreign_workflow_run() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -6896,10 +6896,10 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: a run that names a pass requires independently loaded
+    /// S29: a run that names a pass requires independently loaded
     /// canonical pass evidence.
     #[test]
-    fn s29_inv040_run_reconstitution_requires_pass_evidence() {
+    fn s29_run_reconstitution_requires_pass_evidence() {
         let state = ReviewRunState::Succeeded {
             concluding_pass: pass_ref(3),
         };
@@ -6919,10 +6919,10 @@ mod tests {
         assert_eq!(missing_error.input(), &missing);
     }
 
-    /// INV-040: exact canonical accepted-input, turn, and frontier evidence
+    /// exact canonical accepted-input, turn, and frontier evidence
     /// reconstitutes the stored pass state.
     #[test]
-    fn inv040_pass_reconstitution_accepts_exact_canonical_evidence() {
+    fn pass_reconstitution_accepts_exact_canonical_evidence() {
         let state = ReviewPassState::Succeeded {
             turn: turn_id(6),
             output_frontier: frontier_id(8),
@@ -6960,10 +6960,10 @@ mod tests {
         );
     }
 
-    /// INV-040: pass reconstitution preserves the pass row's accepted-input
+    /// pass reconstitution preserves the pass row's accepted-input
     /// identity instead of adopting the joined evidence identity.
     #[test]
-    fn inv040_pass_reconstitution_rejects_substituted_accepted_input_identity() {
+    fn pass_reconstitution_rejects_substituted_accepted_input_identity() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -6984,9 +6984,9 @@ mod tests {
         );
     }
 
-    /// INV-040: the accepted input must belong to the pass session.
+    /// the accepted input must belong to the pass session.
     #[test]
-    fn inv040_pass_reconstitution_rejects_foreign_accepted_input_session() {
+    fn pass_reconstitution_rejects_foreign_accepted_input_session() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7017,9 +7017,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a turn-naming pass state requires its canonical turn row.
+    /// a turn-naming pass state requires its canonical turn row.
     #[test]
-    fn inv040_pass_reconstitution_rejects_missing_turn_evidence() {
+    fn pass_reconstitution_rejects_missing_turn_evidence() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7044,9 +7044,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a queued pass admits no turn evidence.
+    /// a queued pass admits no turn evidence.
     #[test]
-    fn inv040_pass_reconstitution_rejects_unexpected_turn_evidence() {
+    fn pass_reconstitution_rejects_unexpected_turn_evidence() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7073,9 +7073,9 @@ mod tests {
         );
     }
 
-    /// INV-040: the canonical turn row must name the pass state's exact turn.
+    /// the canonical turn row must name the pass state's exact turn.
     #[test]
-    fn inv040_pass_reconstitution_rejects_foreign_turn() {
+    fn pass_reconstitution_rejects_foreign_turn() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7106,9 +7106,9 @@ mod tests {
         );
     }
 
-    /// INV-040: the canonical turn must belong to the pass session.
+    /// the canonical turn must belong to the pass session.
     #[test]
-    fn inv040_pass_reconstitution_rejects_foreign_turn_session() {
+    fn pass_reconstitution_rejects_foreign_turn_session() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7139,9 +7139,9 @@ mod tests {
         );
     }
 
-    /// INV-040: the canonical turn must originate from the pass input.
+    /// the canonical turn must originate from the pass input.
     #[test]
-    fn inv040_pass_reconstitution_rejects_foreign_turn_origin_input() {
+    fn pass_reconstitution_rejects_foreign_turn_origin_input() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7172,9 +7172,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a succeeded pass rejects a contradictory canonical outcome.
+    /// a succeeded pass rejects a contradictory canonical outcome.
     #[test]
-    fn inv040_pass_reconstitution_rejects_mismatched_turn_outcome() {
+    fn pass_reconstitution_rejects_mismatched_turn_outcome() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7205,9 +7205,9 @@ mod tests {
         );
     }
 
-    /// INV-040: the successful output must be the canonical terminal frontier.
+    /// the successful output must be the canonical terminal frontier.
     #[test]
-    fn inv040_pass_reconstitution_rejects_mismatched_output_frontier() {
+    fn pass_reconstitution_rejects_mismatched_output_frontier() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7238,9 +7238,9 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: a running pass accepts an active canonical turn.
+    /// S29: a running pass accepts an active canonical turn.
     #[test]
-    fn s29_inv040_running_pass_accepts_active_turn_outcome() {
+    fn s29_running_pass_accepts_active_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Running { turn: turn_id(6) },
             ReviewPassTurnOutcome::Active,
@@ -7248,10 +7248,10 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: a failed pass may project completed execution whose
+    /// S29: a failed pass may project completed execution whose
     /// workflow result was invalid.
     #[test]
-    fn s29_inv040_failed_pass_accepts_completed_turn_outcome() {
+    fn s29_failed_pass_accepts_completed_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Failed { turn: turn_id(6) },
             ReviewPassTurnOutcome::Completed,
@@ -7259,9 +7259,9 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: a failed pass accepts a failed canonical turn.
+    /// S29: a failed pass accepts a failed canonical turn.
     #[test]
-    fn s29_inv040_failed_pass_accepts_failed_turn_outcome() {
+    fn s29_failed_pass_accepts_failed_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Failed { turn: turn_id(6) },
             ReviewPassTurnOutcome::Failed,
@@ -7269,9 +7269,9 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: a failed pass accepts a refused canonical turn.
+    /// S29: a failed pass accepts a refused canonical turn.
     #[test]
-    fn s29_inv040_failed_pass_accepts_refused_turn_outcome() {
+    fn s29_failed_pass_accepts_refused_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Failed { turn: turn_id(6) },
             ReviewPassTurnOutcome::Refused,
@@ -7279,9 +7279,9 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: a blocked pass accepts a reconciliation-required turn.
+    /// S29: a blocked pass accepts a reconciliation-required turn.
     #[test]
-    fn s29_inv040_blocked_pass_accepts_reconciliation_turn_outcome() {
+    fn s29_blocked_pass_accepts_reconciliation_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Blocked {
                 turn: turn_id(6),
@@ -7292,9 +7292,9 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: a post-start cancelled pass accepts a cancelled turn.
+    /// S29: a post-start cancelled pass accepts a cancelled turn.
     #[test]
-    fn s29_inv040_cancelled_pass_accepts_cancelled_turn_outcome() {
+    fn s29_cancelled_pass_accepts_cancelled_turn_outcome() {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Cancelled {
                 turn: Some(turn_id(6)),
@@ -7304,10 +7304,10 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: authenticated successful pass evidence may project one
+    /// S29: authenticated successful pass evidence may project one
     /// exact effect result without changing its execution facts.
     #[test]
-    fn inv040_succeeded_pass_evidence_projects_one_exact_effect_result() {
+    fn succeeded_pass_evidence_projects_one_exact_effect_result() {
         let pass = succeeded_pass(70, ReviewPassKind::ImportExternalContext);
         let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
             link_id(71),
@@ -7340,10 +7340,10 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: an authenticated effect projection admits exact replay
+    /// S29: an authenticated effect projection admits exact replay
     /// but cannot be rebound to a distinct result.
     #[test]
-    fn inv040_pass_evidence_result_projection_is_immutable() {
+    fn pass_evidence_result_projection_is_immutable() {
         let pass = succeeded_pass(71, ReviewPassKind::ImportExternalContext);
         let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
             link_id(72),
@@ -7364,10 +7364,10 @@ mod tests {
         assert_eq!(projected.project_result(distinct), None);
     }
 
-    /// S29 / INV-040: authenticated blocked pass evidence may project one exact
+    /// S29: authenticated blocked pass evidence may project one exact
     /// effect result without changing its execution facts.
     #[test]
-    fn inv040_blocked_pass_evidence_projects_one_exact_effect_result() {
+    fn blocked_pass_evidence_projects_one_exact_effect_result() {
         let pass = ReviewPassEvidence::new(
             pass_ref(72),
             ReviewPassKind::Publish,
@@ -7400,9 +7400,9 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: non-effect pass states cannot project effect results.
+    /// S29: non-effect pass states cannot project effect results.
     #[test]
-    fn inv040_non_effect_pass_evidence_rejects_result_projection() {
+    fn non_effect_pass_evidence_rejects_result_projection() {
         let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
             link_id(75),
             ReviewEventOrdinal::one(),
@@ -7441,10 +7441,10 @@ mod tests {
         assert_eq!(cancelled.project_result(result), None);
     }
 
-    /// S29 / INV-040: a terminal canonical turn outcome always carries its
+    /// S29: a terminal canonical turn outcome always carries its
     /// checked terminal frontier.
     #[test]
-    fn s29_inv040_pass_evidence_rejects_terminal_outcome_without_frontier() {
+    fn s29_pass_evidence_rejects_terminal_outcome_without_frontier() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7471,10 +7471,10 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: an active canonical turn outcome never carries a
+    /// S29: an active canonical turn outcome never carries a
     /// terminal frontier.
     #[test]
-    fn s29_inv040_pass_evidence_rejects_active_outcome_with_frontier() {
+    fn s29_pass_evidence_rejects_active_outcome_with_frontier() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -7501,9 +7501,9 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a pending reservation is not posting evidence.
+    /// a pending reservation is not posting evidence.
     #[test]
-    fn inv040_posted_link_rejects_pending_reservation() {
+    fn posted_link_rejects_pending_reservation() {
         let finding = finding_ref(10);
         let pending = pending_link(
             link_id(30),
@@ -7520,10 +7520,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a publication block binds one exact pending
+    /// a publication block binds one exact pending
     /// reservation associated with the finding.
     #[test]
-    fn inv040_blocked_link_accepts_exact_pending_reservation() {
+    fn blocked_link_accepts_exact_pending_reservation() {
         let finding = finding_ref(10);
         let pending = pending_link(
             link_id(30),
@@ -7538,10 +7538,10 @@ mod tests {
         assert_eq!(blocked.link(), pending.id());
     }
 
-    /// INV-040 / INV-041: an already attached object cannot be recorded as a
+    /// an already attached object cannot be recorded as a
     /// pending publication attempt.
     #[test]
-    fn inv040_blocked_link_rejects_attached_reservation() {
+    fn blocked_link_rejects_attached_reservation() {
         let finding = finding_ref(10);
         let attached = attached_finding_link(finding, link_id(30));
 
@@ -7554,10 +7554,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: an attached link canonically associated with another
+    /// an attached link canonically associated with another
     /// finding is not posting evidence for this finding.
     #[test]
-    fn inv040_posted_link_rejects_foreign_canonical_association() {
+    fn posted_link_rejects_foreign_canonical_association() {
         let finding = finding_ref(10);
         let foreign = attached_finding_link(finding_ref(11), link_id(31));
 
@@ -7574,10 +7574,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a repository correlation that carries no review
+    /// a repository correlation that carries no review
     /// content cannot prove that a finding was posted.
     #[test]
-    fn inv040_posted_link_rejects_non_review_external_object() {
+    fn posted_link_rejects_non_review_external_object() {
         let finding = finding_ref(10);
         let link = pending_link(
             link_id(32),
@@ -7600,10 +7600,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a posted finding consumes an attached canonical link
+    /// a posted finding consumes an attached canonical link
     /// associated with that exact finding.
     #[test]
-    fn inv040_posted_link_accepts_exact_attached_association() {
+    fn posted_link_accepts_exact_attached_association() {
         let finding = finding_ref(10);
         let exact = attached_finding_link(finding, link_id(32));
 
@@ -7613,9 +7613,9 @@ mod tests {
         assert_eq!(posted.link(), link_id(32));
     }
 
-    /// INV-040: a terminal finding cannot reopen.
+    /// a terminal finding cannot reopen.
     #[test]
-    fn inv040_finding_machine_rejects_terminal_reopening() {
+    fn finding_machine_rejects_terminal_reopening() {
         let finding = ReviewFinding::new(proposal())
             .apply(finding_event(
                 finding_ref(10),
@@ -7656,9 +7656,9 @@ mod tests {
         );
     }
 
-    /// INV-040: finding history begins at ordinal one.
+    /// finding history begins at ordinal one.
     #[test]
-    fn inv040_finding_history_rejects_noncontiguous_first_ordinal() {
+    fn finding_history_rejects_noncontiguous_first_ordinal() {
         let gap = ReviewFinding::new(proposal())
             .apply(finding_event(
                 finding_ref(10),
@@ -7675,10 +7675,10 @@ mod tests {
         );
     }
 
-    /// S29 / INV-040: an event cannot be replayed into another same-run
+    /// S29: an event cannot be replayed into another same-run
     /// finding.
     #[test]
-    fn s29_inv040_finding_history_rejects_foreign_event_owner() {
+    fn s29_finding_history_rejects_foreign_event_owner() {
         let event = finding_event(
             finding_ref(11),
             ReviewEventOrdinal::one(),
@@ -7695,10 +7695,10 @@ mod tests {
         assert_eq!(error.event(), Some(&event));
     }
 
-    /// INV-040: finding-event reconstitution preserves the event row's exact
+    /// finding-event reconstitution preserves the event row's exact
     /// pass identity instead of adopting compatible joined pass evidence.
     #[test]
-    fn inv040_finding_history_rejects_substituted_event_pass_identity() {
+    fn finding_history_rejects_substituted_event_pass_identity() {
         let finding = finding_ref(10);
         let ordinal = ReviewEventOrdinal::one();
         let pass = pass_with_finding_event(
@@ -7725,10 +7725,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a referenced finding naming the aggregate's own identity is a
+    /// a referenced finding naming the aggregate's own identity is a
     /// self-reference even when its producing-pass ancestry is cross-wired.
     #[test]
-    fn inv040_finding_history_rejects_identity_self_reference() {
+    fn finding_history_rejects_identity_self_reference() {
         let event = finding_event(
             finding_ref(10),
             ReviewEventOrdinal::one(),
@@ -7751,10 +7751,10 @@ mod tests {
         assert_eq!(error.event(), Some(&event));
     }
 
-    /// INV-040: a same-target pass cannot produce an event outside its closed
+    /// a same-target pass cannot produce an event outside its closed
     /// pass-kind responsibility.
     #[test]
-    fn inv040_finding_history_rejects_incompatible_event_pass_kind() {
+    fn finding_history_rejects_incompatible_event_pass_kind() {
         let event = finding_event(
             finding_ref(10),
             ReviewEventOrdinal::one(),
@@ -7771,10 +7771,10 @@ mod tests {
         assert_eq!(error.event(), Some(&event));
     }
 
-    /// INV-040: every event pass uses the exact policy frozen by the finding's
+    /// every event pass uses the exact policy frozen by the finding's
     /// producing run.
     #[test]
-    fn inv040_finding_history_rejects_event_policy_mismatch() {
+    fn finding_history_rejects_event_policy_mismatch() {
         let later_policy = unsupported_policy();
         let event = finding_event(
             finding_ref(10),
@@ -7801,10 +7801,10 @@ mod tests {
         );
     }
 
-    /// INV-040: an event pass is authenticated against its exact canonical run
+    /// an event pass is authenticated against its exact canonical run
     /// workflow rather than a copied compatible tuple.
     #[test]
-    fn inv040_finding_history_rejects_cross_wired_event_run() {
+    fn finding_history_rejects_cross_wired_event_run() {
         let finding = finding_ref(10);
         let ordinal = ReviewEventOrdinal::one();
         let pass = pass_with_finding_event(
@@ -7837,10 +7837,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a successful finding event pass cannot be paired with a failed
+    /// a successful finding event pass cannot be paired with a failed
     /// canonical run projection.
     #[test]
-    fn inv040_finding_history_rejects_event_run_lifecycle_mismatch() {
+    fn finding_history_rejects_event_run_lifecycle_mismatch() {
         let finding = finding_ref(10);
         let ordinal = ReviewEventOrdinal::one();
         let pass = pass_with_finding_event(
@@ -7875,10 +7875,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a pass result must name the event's exact finding, ordinal, and
+    /// a pass result must name the event's exact finding, ordinal, and
     /// discriminator.
     #[test]
-    fn inv040_finding_history_rejects_mismatched_pass_result() {
+    fn finding_history_rejects_mismatched_pass_result() {
         let finding = finding_ref(10);
         let pass = pass_with_finding_event(
             finding,
@@ -7904,10 +7904,10 @@ mod tests {
         );
     }
 
-    /// INV-040: canonical and successor references admit only findings that do
+    /// canonical and successor references admit only findings that do
     /// not already carry a terminal reference edge.
     #[test]
-    fn inv040_finding_history_rejects_ineligible_reference() {
+    fn finding_history_rejects_ineligible_reference() {
         let event = finding_event(
             finding_ref(10),
             ReviewEventOrdinal::one(),
@@ -7926,10 +7926,10 @@ mod tests {
         );
     }
 
-    /// INV-040: reconstitution preserves the status frozen when a reference
+    /// reconstitution preserves the status frozen when a reference
     /// was admitted, independently of the referenced finding's current state.
     #[test]
-    fn inv040_referenced_finding_evidence_reconstitutes_only_admissible_status() {
+    fn referenced_finding_evidence_reconstitutes_only_admissible_status() {
         let reference = finding_ref(11);
         let producing_pass = produced_findings_pass(
             reference,
@@ -7959,10 +7959,10 @@ mod tests {
         );
     }
 
-    /// INV-040: one canonical pass identity cannot change outcome evidence
+    /// one canonical pass identity cannot change outcome evidence
     /// between events in the same complete finding history.
     #[test]
-    fn inv040_finding_history_rejects_conflicting_reused_pass_evidence() {
+    fn finding_history_rejects_conflicting_reused_pass_evidence() {
         let finding = ReviewFinding::new(proposal())
             .apply(finding_event(
                 finding_ref(10),
@@ -7997,10 +7997,10 @@ mod tests {
         assert_eq!(error.event(), Some(&event));
     }
 
-    /// INV-040: a user-global pass identity cannot move to another run inside
+    /// a user-global pass identity cannot move to another run inside
     /// one finding history.
     #[test]
-    fn inv040_finding_history_rejects_reparented_pass_identity() {
+    fn finding_history_rejects_reparented_pass_identity() {
         let accepted = finding_event(
             finding_ref(CANONICAL_FINDING_SEED),
             ReviewEventOrdinal::one(),
@@ -8040,10 +8040,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a user-global run identity cannot change its one pass or
+    /// a user-global run identity cannot change its one pass or
     /// workflow inside one finding history.
     #[test]
-    fn inv040_finding_history_rejects_changed_run_claim() {
+    fn finding_history_rejects_changed_run_claim() {
         let accepted = finding_event(
             finding_ref(CANONICAL_FINDING_SEED),
             ReviewEventOrdinal::one(),
@@ -8083,10 +8083,10 @@ mod tests {
         );
     }
 
-    /// INV-040: complete history replay maintains indexed pass, run, and
+    /// complete history replay maintains indexed pass, run, and
     /// publication claims instead of rescanning the growing event vector.
     #[test]
-    fn inv040_finding_history_indexes_replay_claims() {
+    fn finding_history_indexes_replay_claims() {
         let finding = ReviewFinding::new(proposal())
             .apply(finding_event(
                 finding_ref(10),
@@ -8121,10 +8121,10 @@ mod tests {
         assert_eq!(finding.publication_links, BTreeSet::from([link_id(31)]));
     }
 
-    /// INV-040: a compatible pass kind cannot author a finding event after a
+    /// a compatible pass kind cannot author a finding event after a
     /// failed outcome.
     #[test]
-    fn inv040_finding_history_rejects_incompatible_event_pass_outcome() {
+    fn finding_history_rejects_incompatible_event_pass_outcome() {
         let event = finding_event(
             finding_ref(10),
             ReviewEventOrdinal::one(),
@@ -8145,10 +8145,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: publication is attributed to the pass that produced
+    /// publication is attributed to the pass that produced
     /// the attached external object.
     #[test]
-    fn inv040_posted_event_rejects_another_publication_pass() {
+    fn posted_event_rejects_another_publication_pass() {
         let finding = finding_ref(10);
         let ordinal = ReviewEventOrdinal::try_new(2).expect("positive ordinal");
         let result_link = finding_link_ref(finding, link_id(30));
@@ -8190,10 +8190,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a no-write import pass may reconcile a
+    /// a no-write import pass may reconcile a
     /// publication-blocked finding after attaching the external object.
     #[test]
-    fn inv040_publication_blocked_finding_can_reconcile_to_posted() {
+    fn publication_blocked_finding_can_reconcile_to_posted() {
         let finding = ReviewFinding::new(proposal())
             .apply(finding_event(
                 finding_ref(10),
@@ -8225,10 +8225,10 @@ mod tests {
         assert_eq!(finding.status(), ReviewFindingStatus::Posted);
     }
 
-    /// INV-040 / INV-041: reconciliation cannot substitute another pending
+    /// reconciliation cannot substitute another pending
     /// reservation for the publication attempt that blocked.
     #[test]
-    fn inv040_publication_reconciliation_rejects_another_reservation() {
+    fn publication_reconciliation_rejects_another_reservation() {
         let finding = ReviewFinding::new(proposal())
             .apply(finding_event(
                 finding_ref(10),
@@ -8267,10 +8267,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: reconciliation cannot replay attachment evidence
+    /// reconciliation cannot replay attachment evidence
     /// consumed by an earlier posted event.
     #[test]
-    fn inv040_reposting_rejects_consumed_publication_link() {
+    fn reposting_rejects_consumed_publication_link() {
         let finding = ReviewFinding::new(proposal())
             .apply(finding_event(
                 finding_ref(10),
@@ -8314,10 +8314,10 @@ mod tests {
         );
     }
 
-    /// INV-040: the complete nine-state finding transition surface stays
+    /// the complete nine-state finding transition surface stays
     /// closed and reviewable as one table.
     #[test]
-    fn inv040_finding_transition_matrix_is_closed() {
+    fn finding_transition_matrix_is_closed() {
         expect![[r#"
             ┌───────────────────┬────────────────────────────────────────────────────────────────┐
             │ current           │ permitted_events                                               │
@@ -8336,10 +8336,10 @@ mod tests {
         .assert_eq(&table(finding_transition_rows()));
     }
 
-    /// INV-040: a repair-blocked finding cannot cross the publication-only
+    /// a repair-blocked finding cannot cross the publication-only
     /// reconciliation edge.
     #[test]
-    fn inv040_repair_blocked_finding_rejects_posting() {
+    fn repair_blocked_finding_rejects_posting() {
         let previous = finding_event(
             finding_ref(10),
             ReviewEventOrdinal::one(),
@@ -8362,9 +8362,9 @@ mod tests {
         );
     }
 
-    /// INV-041: reservation leaves the external effect explicitly pending.
+    /// reservation leaves the external effect explicitly pending.
     #[test]
-    fn inv041_external_link_reservation_is_pending() {
+    fn external_link_reservation_is_pending() {
         let association = ReviewExternalLinkAssociation::Finding(finding_ref(10));
         let pending = pending_link(
             link_id(30),
@@ -8375,9 +8375,9 @@ mod tests {
         assert!(pending.observations().is_empty());
     }
 
-    /// INV-041: an external-state observation cannot precede attachment.
+    /// an external-state observation cannot precede attachment.
     #[test]
-    fn inv041_external_link_rejects_observation_before_attachment() {
+    fn external_link_rejects_observation_before_attachment() {
         let pending = pending_link(
             link_id(30),
             ReviewExternalLinkAssociation::Finding(finding_ref(10)),
@@ -8397,9 +8397,9 @@ mod tests {
         );
     }
 
-    /// INV-041: an attached link admits its first contiguous observation.
+    /// an attached link admits its first contiguous observation.
     #[test]
-    fn inv041_attached_external_link_accepts_first_observation() {
+    fn attached_external_link_accepts_first_observation() {
         let attached = pending_link(
             link_id(30),
             ReviewExternalLinkAssociation::Finding(finding_ref(10)),
@@ -8425,10 +8425,10 @@ mod tests {
         assert_eq!(attachment.external_object(), &key("external-comment-42"));
     }
 
-    /// INV-041: failed or operation-incompatible passes cannot attach external
+    /// failed or operation-incompatible passes cannot attach external
     /// effect evidence.
     #[test]
-    fn inv041_external_link_rejects_incompatible_attachment_pass() {
+    fn external_link_rejects_incompatible_attachment_pass() {
         let pending = pending_link(
             link_id(30),
             ReviewExternalLinkAssociation::Finding(finding_ref(10)),
@@ -8449,10 +8449,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: attachment evidence rejects a nested non-posted
+    /// attachment evidence rejects a nested non-posted
     /// finding event.
     #[test]
-    fn inv040_inv041_attachment_rejects_nested_non_posted_event() {
+    fn attachment_rejects_nested_non_posted_event() {
         let finding = finding_ref(10);
         let external_object = key("external-comment-42");
         let pass = ReviewPassEvidence::new(
@@ -8495,10 +8495,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: attachment evidence rejects a nested posted event
+    /// attachment evidence rejects a nested posted event
     /// that names another reservation.
     #[test]
-    fn inv040_inv041_attachment_rejects_nested_foreign_reservation() {
+    fn attachment_rejects_nested_foreign_reservation() {
         let finding = finding_ref(10);
         let external_object = key("external-comment-42");
         let pass = ReviewPassEvidence::new(
@@ -8541,9 +8541,9 @@ mod tests {
         );
     }
 
-    /// INV-041: external-state observations require successful import evidence.
+    /// external-state observations require successful import evidence.
     #[test]
-    fn inv041_external_link_rejects_incompatible_observation_pass() {
+    fn external_link_rejects_incompatible_observation_pass() {
         let attached = attached_finding_link(finding_ref(10), link_id(30));
         let error = attached
             .observe(ReviewExternalLinkObservation::new(
@@ -8561,9 +8561,9 @@ mod tests {
         );
     }
 
-    /// INV-041: unchanged polling does not create another durable observation.
+    /// unchanged polling does not create another durable observation.
     #[test]
-    fn inv041_external_link_rejects_unchanged_observation() {
+    fn external_link_rejects_unchanged_observation() {
         let link = attached_finding_link(finding_ref(10), link_id(30))
             .observe(observation_evidence(
                 link_id(30),
@@ -8587,10 +8587,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: an unchanged external report consumes its import
+    /// an unchanged external report consumes its import
     /// pass without growing observation history.
     #[test]
-    fn inv040_inv041_external_link_accepts_exact_no_change_result() {
+    fn external_link_accepts_exact_no_change_result() {
         let reservation = link_id(30);
         let link = attached_finding_link(finding_ref(10), reservation)
             .observe(observation_evidence(
@@ -8636,10 +8636,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: reconstitution validates an unchanged claim against
+    /// reconstitution validates an unchanged claim against
     /// its recorded historical frontier after a later changed observation.
     #[test]
-    fn inv040_inv041_external_link_reconstitutes_historical_no_change_frontier() {
+    fn external_link_reconstitutes_historical_no_change_frontier() {
         let reservation = link_id(30);
         let first = attached_finding_link(finding_ref(10), reservation)
             .observe(observation_evidence(
@@ -8668,10 +8668,10 @@ mod tests {
         assert_eq!(reconstitute_link(&advanced), advanced);
     }
 
-    /// INV-040 / INV-041: a no-change claim authenticates the exact latest
+    /// a no-change claim authenticates the exact latest
     /// observation, not an equal historical state.
     #[test]
-    fn inv040_inv041_external_link_rejects_stale_no_change_frontier() {
+    fn external_link_rejects_stale_no_change_frontier() {
         let reservation = link_id(30);
         let link = attached_finding_link(finding_ref(10), reservation)
             .observe(observation_evidence(
@@ -8704,10 +8704,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: an unchanged report also retains its owning run
+    /// an unchanged report also retains its owning run
     /// claim against a later pass substitution.
     #[test]
-    fn inv040_inv041_external_link_no_change_retains_run_claim() {
+    fn external_link_no_change_retains_run_claim() {
         let reservation = link_id(30);
         let link = attached_finding_link(finding_ref(10), reservation)
             .observe(observation_evidence(
@@ -8748,10 +8748,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a no-change result cannot name a different
+    /// a no-change result cannot name a different
     /// reservation.
     #[test]
-    fn inv040_inv041_external_link_rejects_foreign_no_change_result() {
+    fn external_link_rejects_foreign_no_change_result() {
         let reservation = link_id(30);
         let link = attached_finding_link(finding_ref(10), reservation)
             .observe(observation_evidence(
@@ -8776,10 +8776,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: an observation-producing pass cannot later be
+    /// an observation-producing pass cannot later be
     /// reinterpreted as an unchanged report.
     #[test]
-    fn inv040_inv041_external_link_rejects_reused_no_change_pass() {
+    fn external_link_rejects_reused_no_change_pass() {
         let reservation = link_id(30);
         let link = attached_finding_link(finding_ref(10), reservation)
             .observe(observation_evidence(
@@ -8804,10 +8804,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a target-associated pending reservation can consume
+    /// a target-associated pending reservation can consume
     /// one blocked publication pass.
     #[test]
-    fn inv040_inv041_external_link_accepts_target_publication_block() {
+    fn external_link_accepts_target_publication_block() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let pending = pending_link(
             link_id(30),
@@ -8845,10 +8845,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a finding-associated pending reservation accepts
+    /// a finding-associated pending reservation accepts
     /// the blocked lifecycle event committed by its publication pass.
     #[test]
-    fn inv040_inv041_external_link_accepts_finding_publication_block() {
+    fn external_link_accepts_finding_publication_block() {
         let finding = finding_ref(10);
         let reservation = link_id(30);
         let pending = pending_link(
@@ -8874,10 +8874,10 @@ mod tests {
         assert_eq!(blocked.claims()[0].pass_evidence(), &pass);
     }
 
-    /// INV-040 / INV-041: a blocked publication cannot name another pending
+    /// a blocked publication cannot name another pending
     /// reservation.
     #[test]
-    fn inv040_inv041_external_link_rejects_foreign_publication_block() {
+    fn external_link_rejects_foreign_publication_block() {
         let pending = pending_link(
             link_id(30),
             ReviewExternalLinkAssociation::Run(pass_ref(20).run()),
@@ -8898,10 +8898,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: an attachment row retains its independently stored
+    /// an attachment row retains its independently stored
     /// producing-pass identity.
     #[test]
-    fn inv040_inv041_external_link_rejects_substituted_attachment_pass_identity() {
+    fn external_link_rejects_substituted_attachment_pass_identity() {
         let pass = pass_with_attachment_result(
             succeeded_pass(20, ReviewPassKind::Publish),
             link_id(30),
@@ -8928,10 +8928,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: an observation row retains its independently stored
+    /// an observation row retains its independently stored
     /// observing-pass identity.
     #[test]
-    fn inv040_inv041_external_link_rejects_substituted_observation_pass_identity() {
+    fn external_link_rejects_substituted_observation_pass_identity() {
         let observation = observation_evidence(
             link_id(30),
             ReviewEventOrdinal::one(),
@@ -8956,10 +8956,10 @@ mod tests {
         );
     }
 
-    /// INV-041: attachment evidence must be joined to the exact canonical run
+    /// attachment evidence must be joined to the exact canonical run
     /// that owns its pass.
     #[test]
-    fn inv041_external_link_rejects_cross_wired_attachment_run() {
+    fn external_link_rejects_cross_wired_attachment_run() {
         let pass = pass_with_attachment_result(
             succeeded_pass(20, ReviewPassKind::Publish),
             link_id(30),
@@ -8991,10 +8991,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a successful attachment pass cannot be paired with a
+    /// a successful attachment pass cannot be paired with a
     /// failed canonical run projection.
     #[test]
-    fn inv040_inv041_external_link_rejects_attachment_run_lifecycle_mismatch() {
+    fn external_link_rejects_attachment_run_lifecycle_mismatch() {
         let pass = pass_with_attachment_result(
             succeeded_pass(20, ReviewPassKind::Publish),
             link_id(30),
@@ -9028,10 +9028,10 @@ mod tests {
         );
     }
 
-    /// INV-041: observation evidence must be joined to the exact canonical run
+    /// observation evidence must be joined to the exact canonical run
     /// that owns its pass.
     #[test]
-    fn inv041_external_link_rejects_cross_wired_observation_run() {
+    fn external_link_rejects_cross_wired_observation_run() {
         let pass = succeeded_pass(21, ReviewPassKind::ImportExternalContext);
         let run = ReviewRunEvidence::new(
             pass.reference().run(),
@@ -9056,10 +9056,10 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a successful observation pass cannot be paired with
+    /// a successful observation pass cannot be paired with
     /// a still-running canonical run projection.
     #[test]
-    fn inv040_inv041_external_link_rejects_observation_run_lifecycle_mismatch() {
+    fn external_link_rejects_observation_run_lifecycle_mismatch() {
         let pass = observation_evidence(
             link_id(30),
             ReviewEventOrdinal::one(),
@@ -9093,10 +9093,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a pass identity reused across observations cannot change its
+    /// a pass identity reused across observations cannot change its
     /// terminal evidence.
     #[test]
-    fn inv040_external_link_rejects_conflicting_reused_observation_pass() {
+    fn external_link_rejects_conflicting_reused_observation_pass() {
         let first = succeeded_pass(21, ReviewPassKind::ImportExternalContext);
         let link = attached_finding_link(finding_ref(10), link_id(30))
             .observe(observation_evidence(
@@ -9131,10 +9131,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a user-global external-effect pass cannot move to another
+    /// a user-global external-effect pass cannot move to another
     /// run.
     #[test]
-    fn inv040_external_link_rejects_reparented_pass_identity() {
+    fn external_link_rejects_reparented_pass_identity() {
         let attachment_pass = succeeded_pass(ARBITRARY_JUDGMENT_PASS_SEED, ReviewPassKind::Publish);
         let attached = attached_finding_link_with_pass(
             finding_ref(CANONICAL_FINDING_SEED),
@@ -9169,9 +9169,9 @@ mod tests {
         );
     }
 
-    /// INV-040: an external-effect run cannot change its one pass or workflow.
+    /// an external-effect run cannot change its one pass or workflow.
     #[test]
-    fn inv040_external_link_rejects_changed_run_claim() {
+    fn external_link_rejects_changed_run_claim() {
         let attachment_pass = succeeded_pass(ARBITRARY_JUDGMENT_PASS_SEED, ReviewPassKind::Publish);
         let attached = attached_finding_link_with_pass(
             finding_ref(CANONICAL_FINDING_SEED),
@@ -9206,10 +9206,10 @@ mod tests {
         );
     }
 
-    /// INV-040: an observation from another same-target link cannot be
+    /// an observation from another same-target link cannot be
     /// attributed to the loaded aggregate.
     #[test]
-    fn inv040_external_link_rejects_foreign_observation_owner() {
+    fn external_link_rejects_foreign_observation_owner() {
         let attached = pending_link(
             link_id(30),
             ReviewExternalLinkAssociation::Finding(finding_ref(10)),
@@ -9237,10 +9237,10 @@ mod tests {
         );
     }
 
-    /// INV-041: an attachment from another same-target reservation cannot be
+    /// an attachment from another same-target reservation cannot be
     /// attributed to the loaded aggregate.
     #[test]
-    fn inv041_external_link_rejects_foreign_attachment_owner() {
+    fn external_link_rejects_foreign_attachment_owner() {
         let pending = pending_link(
             link_id(30),
             ReviewExternalLinkAssociation::Finding(finding_ref(10)),
@@ -9261,10 +9261,10 @@ mod tests {
         );
     }
 
-    /// INV-040: produced-finding inventories have one canonical identity
+    /// produced-finding inventories have one canonical identity
     /// order.
     #[test]
-    fn inv040_produced_findings_canonicalize_identity_order() {
+    fn produced_findings_canonicalize_identity_order() {
         let first = finding_ref(10);
         let second = finding_ref(11);
         let inventory = ReviewProducedFindings::try_new(vec![second, first])
@@ -9273,9 +9273,9 @@ mod tests {
         assert_eq!(inventory.findings(), &[first, second]);
     }
 
-    /// INV-040: a produced-finding inventory cannot repeat an identity.
+    /// a produced-finding inventory cannot repeat an identity.
     #[test]
-    fn inv040_produced_findings_reject_duplicate_identity() {
+    fn produced_findings_reject_duplicate_identity() {
         let finding = finding_ref(10);
         let error = ReviewProducedFindings::try_new(vec![finding, finding])
             .expect_err("one result cannot repeat a finding identity");
@@ -9283,9 +9283,9 @@ mod tests {
         assert_eq!(error, ReviewProducedFindingsError::Duplicate { finding });
     }
 
-    /// INV-040: a produced-finding inventory is bounded to 32 identities.
+    /// a produced-finding inventory is bounded to 32 identities.
     #[test]
-    fn inv040_produced_findings_reject_over_budget_inventory() {
+    fn produced_findings_reject_over_budget_inventory() {
         let inventory = over_budget_finding_inventory();
         let actual = inventory.len();
         let error = ReviewProducedFindings::try_new(inventory)
@@ -9300,9 +9300,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a finding must appear in its exact producing pass inventory.
+    /// a finding must appear in its exact producing pass inventory.
     #[test]
-    fn inv040_finding_proposal_rejects_omitted_producing_result() {
+    fn finding_proposal_rejects_omitted_producing_result() {
         let empty = ReviewPassEvidence::new(
             pass_ref(3),
             ReviewPassKind::ReadOnlyReview,
@@ -9331,10 +9331,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a proposal rejects a result inventory containing a finding
+    /// a proposal rejects a result inventory containing a finding
     /// attributed to another producing pass.
     #[test]
-    fn inv040_finding_proposal_rejects_cross_wired_producing_inventory() {
+    fn finding_proposal_rejects_cross_wired_producing_inventory() {
         let reference = finding_ref(10);
         let foreign = ReviewFindingRef::new(pass_ref(4), finding_id(11));
         let producing_pass = ReviewPassEvidence::new(
@@ -9365,10 +9365,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a durably reconstituted completed review always carries its
+    /// a durably reconstituted completed review always carries its
     /// exact produced-finding inventory, including the empty inventory.
     #[test]
-    fn inv040_read_only_pass_reconstitution_requires_produced_findings() {
+    fn read_only_pass_reconstitution_requires_produced_findings() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -9399,9 +9399,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a pass result cannot name a finding from another target.
+    /// a pass result cannot name a finding from another target.
     #[test]
-    fn inv040_pass_reconstitution_rejects_foreign_result_target() {
+    fn pass_reconstitution_rejects_foreign_result_target() {
         let foreign_finding = ReviewFindingRef::new(
             ReviewPassRef::new(ReviewRunRef::new(target_id(99), run_id(2)), pass_id(3)),
             finding_id(10),
@@ -9439,9 +9439,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a terminal pass may bind its exact result once.
+    /// a terminal pass may bind its exact result once.
     #[test]
-    fn inv040_terminal_pass_binds_absent_result() {
+    fn terminal_pass_binds_absent_result() {
         let result = accepted_finding_result();
         let bound = succeeded_judgment_pass()
             .bind_result(result.clone())
@@ -9450,9 +9450,9 @@ mod tests {
         assert_eq!(bound.state().result(), Some(&result));
     }
 
-    /// INV-040: replaying the equal bound pass result is idempotent.
+    /// replaying the equal bound pass result is idempotent.
     #[test]
-    fn inv040_terminal_pass_accepts_equal_result_replay() {
+    fn terminal_pass_accepts_equal_result_replay() {
         let result = accepted_finding_result();
         let bound = succeeded_judgment_pass()
             .bind_result(result.clone())
@@ -9467,9 +9467,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a distinct result cannot replace an already bound result.
+    /// a distinct result cannot replace an already bound result.
     #[test]
-    fn inv040_terminal_pass_rejects_distinct_result_rebind() {
+    fn terminal_pass_rejects_distinct_result_rebind() {
         let bound = succeeded_judgment_pass()
             .bind_result(accepted_finding_result())
             .expect("compatible exact result binds");
@@ -9490,9 +9490,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a rejected run transition returns its unchanged aggregate.
+    /// a rejected run transition returns its unchanged aggregate.
     #[test]
-    fn inv040_rejected_run_transition_retains_current_aggregate() {
+    fn rejected_run_transition_retains_current_aggregate() {
         let current = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -9506,9 +9506,9 @@ mod tests {
         assert_eq!(error.current(), &current);
     }
 
-    /// INV-040: a rejected pass transition returns its unchanged aggregate.
+    /// a rejected pass transition returns its unchanged aggregate.
     #[test]
-    fn inv040_rejected_pass_transition_retains_current_aggregate() {
+    fn rejected_pass_transition_retains_current_aggregate() {
         let current = succeeded_review_pass();
         let error = current
             .clone()
@@ -9518,9 +9518,9 @@ mod tests {
         assert_eq!(error.current(), &current);
     }
 
-    /// INV-040: a rejected finding event returns its unchanged aggregate.
+    /// a rejected finding event returns its unchanged aggregate.
     #[test]
-    fn inv040_rejected_finding_transition_retains_current_aggregate() {
+    fn rejected_finding_transition_retains_current_aggregate() {
         let current = ReviewFinding::new(proposal());
         let foreign = finding_event(
             finding_ref(FOREIGN_FINDING_SEED),
@@ -9536,9 +9536,9 @@ mod tests {
         assert_eq!(error.current(), Some(&current));
     }
 
-    /// INV-041: a rejected link transition returns its unchanged aggregate.
+    /// a rejected link transition returns its unchanged aggregate.
     #[test]
-    fn inv041_rejected_link_transition_retains_current_aggregate() {
+    fn rejected_link_transition_retains_current_aggregate() {
         let link = link_id(ARBITRARY_LINK_SEED);
         let current = pending_link(
             link,
@@ -9562,9 +9562,9 @@ mod tests {
         assert_eq!(error.current(), &current);
     }
 
-    /// INV-040: read-only success admission includes its exact finding inventory.
+    /// read-only success admission includes its exact finding inventory.
     #[test]
-    fn inv040_read_only_success_transition_requires_produced_findings() {
+    fn read_only_success_transition_requires_produced_findings() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -9616,10 +9616,10 @@ mod tests {
         );
     }
 
-    /// INV-041: a blocked publication transition must consume one exact
+    /// a blocked publication transition must consume one exact
     /// reservation-bearing result.
     #[test]
-    fn inv041_publish_block_transition_requires_result() {
+    fn publish_block_transition_requires_result() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::PublishReview,
@@ -9669,10 +9669,10 @@ mod tests {
         );
     }
 
-    /// INV-041: reconstitution also fails closed when a blocked publication
+    /// reconstitution also fails closed when a blocked publication
     /// row omits its reservation-bearing result.
     #[test]
-    fn inv041_publish_block_reconstitution_requires_result() {
+    fn publish_block_reconstitution_requires_result() {
         let state = ReviewPassState::Blocked {
             turn: turn_id(6),
             result: None,
@@ -9704,10 +9704,10 @@ mod tests {
         );
     }
 
-    /// INV-040: pass construction requires an accepted input with a canonical
+    /// pass construction requires an accepted input with a canonical
     /// origin turn.
     #[test]
-    fn inv040_pass_construction_rejects_input_without_origin_turn() {
+    fn pass_construction_rejects_input_without_origin_turn() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -9728,10 +9728,10 @@ mod tests {
         );
     }
 
-    /// INV-040: pass reconstitution rejects accepted input that no longer
+    /// pass reconstitution rejects accepted input that no longer
     /// authenticates an origin turn.
     #[test]
-    fn inv040_pass_reconstitution_rejects_input_without_origin_turn() {
+    fn pass_reconstitution_rejects_input_without_origin_turn() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -9748,9 +9748,9 @@ mod tests {
         );
     }
 
-    /// INV-040: rejection reason is part of the exact event result.
+    /// rejection reason is part of the exact event result.
     #[test]
-    fn inv040_finding_history_rejects_mismatched_result_reason() {
+    fn finding_history_rejects_mismatched_result_reason() {
         let finding = finding_ref(10);
         let ordinal = ReviewEventOrdinal::one();
         let committed = ReviewFindingEventKind::Rejected {
@@ -9782,10 +9782,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a duplicate's referenced identity is part of the exact event
+    /// a duplicate's referenced identity is part of the exact event
     /// result.
     #[test]
-    fn inv040_finding_history_rejects_mismatched_result_reference() {
+    fn finding_history_rejects_mismatched_result_reference() {
         let finding = finding_ref(10);
         let ordinal = ReviewEventOrdinal::one();
         let committed = ReviewFindingEventKind::Duplicate {
@@ -9817,10 +9817,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a duplicate's authenticated admission status is part of the
+    /// a duplicate's authenticated admission status is part of the
     /// exact event result.
     #[test]
-    fn inv040_finding_history_rejects_mismatched_result_reference_status() {
+    fn finding_history_rejects_mismatched_result_reference_status() {
         let finding = finding_ref(10);
         let ordinal = ReviewEventOrdinal::one();
         let committed = ReviewFindingEventKind::Duplicate {
@@ -9852,9 +9852,9 @@ mod tests {
         );
     }
 
-    /// INV-040: judgment cannot accept a finding below the frozen threshold.
+    /// judgment cannot accept a finding below the frozen threshold.
     #[test]
-    fn inv040_finding_rejects_acceptance_below_policy_threshold() {
+    fn finding_rejects_acceptance_below_policy_threshold() {
         let error = ReviewFinding::new(proposal_with_confidence_axes(FindingConfidenceAxes {
             is_real: 6_999,
             severity_label: 10_000,
@@ -9873,9 +9873,9 @@ mod tests {
         );
     }
 
-    /// INV-040: publication cannot post a finding below the frozen threshold.
+    /// publication cannot post a finding below the frozen threshold.
     #[test]
-    fn inv040_finding_rejects_posting_below_policy_threshold() {
+    fn finding_rejects_posting_below_policy_threshold() {
         let finding = ReviewFinding::new(proposal_with_confidence_axes(FindingConfidenceAxes {
             is_real: 7_999,
             severity_label: 10_000,
@@ -9902,9 +9902,9 @@ mod tests {
         );
     }
 
-    /// INV-040: severity-label uncertainty never suppresses a real finding.
+    /// severity-label uncertainty never suppresses a real finding.
     #[test]
-    fn inv040_finding_thresholds_ignore_severity_label_confidence() {
+    fn finding_thresholds_ignore_severity_label_confidence() {
         let accepted = ReviewFinding::new(proposal_with_confidence_axes(FindingConfidenceAxes {
             is_real: 9_500,
             severity_label: 0,
@@ -9929,9 +9929,9 @@ mod tests {
         assert_eq!(posted.status(), ReviewFindingStatus::Posted);
     }
 
-    /// INV-041: a reservation provider must be the canonical target provider.
+    /// a reservation provider must be the canonical target provider.
     #[test]
-    fn inv041_external_link_rejects_provider_mismatch() {
+    fn external_link_rejects_provider_mismatch() {
         let error = ReviewExternalLink::try_reserve(
             link_id(30),
             ReviewExternalLinkAssociation::Target(target_id(1)),
@@ -9944,10 +9944,10 @@ mod tests {
         assert_eq!(error, ReviewExternalLinkTransitionFailure::ProviderMismatch);
     }
 
-    /// INV-041: a posted attachment result must belong to the exact finding
+    /// a posted attachment result must belong to the exact finding
     /// association it commits.
     #[test]
-    fn inv041_external_link_rejects_posted_result_for_target_association() {
+    fn external_link_rejects_posted_result_for_target_association() {
         let finding = finding_ref(10);
         let link = link_id(30);
         let external_object = key("external-comment-42");
@@ -9978,10 +9978,10 @@ mod tests {
         );
     }
 
-    /// INV-041: the same canonical object may follow one moving change request
+    /// the same canonical object may follow one moving change request
     /// to a refreshed target snapshot.
     #[test]
-    fn inv041_external_object_claim_accepts_refreshed_change_request() {
+    fn external_object_claim_accepts_refreshed_change_request() {
         let first_target = change_request_target(ChangeRequestTargetFixture {
             target_seed: 1,
             provider: "code-host",
@@ -10028,10 +10028,10 @@ mod tests {
             .expect("same change request may retain the provider object");
     }
 
-    /// INV-041: independently loaded target evidence cannot contradict the
+    /// independently loaded target evidence cannot contradict the
     /// provider frozen by the external-link reservation.
     #[test]
-    fn inv041_external_object_claim_rejects_cross_wired_target_provider() {
+    fn external_object_claim_rejects_cross_wired_target_provider() {
         let target = target_with_base();
         let link = attached_target_link(
             &target,
@@ -10059,10 +10059,10 @@ mod tests {
         );
     }
 
-    /// INV-041: one canonical object cannot move to an unrelated change
+    /// one canonical object cannot move to an unrelated change
     /// request.
     #[test]
-    fn inv041_external_object_claim_rejects_unrelated_change_request() {
+    fn external_object_claim_rejects_unrelated_change_request() {
         let first_target = change_request_target(ChangeRequestTargetFixture {
             target_seed: 1,
             provider: "code-host",
@@ -10110,10 +10110,10 @@ mod tests {
         );
     }
 
-    /// INV-041: immutable commit snapshots never share one canonical external
+    /// immutable commit snapshots never share one canonical external
     /// object.
     #[test]
-    fn inv041_external_object_claim_rejects_commit_reassociation() {
+    fn external_object_claim_rejects_commit_reassociation() {
         let first_target = ReviewTarget::try_new(
             target_id(1),
             key("code-host"),
@@ -10246,10 +10246,10 @@ mod tests {
         );
     }
 
-    /// INV-040: duplicate admission preserves each finding's independent
+    /// duplicate admission preserves each finding's independent
     /// producing run and pass when target and frozen policy are equal.
     #[test]
-    fn inv040_finding_admits_authenticated_cross_run_reference() {
+    fn finding_admits_authenticated_cross_run_reference() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let canonical_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10284,9 +10284,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a cross-run reference cannot cross immutable target identity.
+    /// a cross-run reference cannot cross immutable target identity.
     #[test]
-    fn inv040_finding_rejects_cross_target_reference() {
+    fn finding_rejects_cross_target_reference() {
         let subject_reference =
             finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
         let foreign_reference = finding_ref_for_producer(target_id(2), REASSIGNED_PASS_SEED);
@@ -10313,9 +10313,9 @@ mod tests {
         );
     }
 
-    /// INV-040: a cross-run reference cannot cross complete frozen policy.
+    /// a cross-run reference cannot cross complete frozen policy.
     #[test]
-    fn inv040_finding_rejects_cross_policy_reference() {
+    fn finding_rejects_cross_policy_reference() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let foreign_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10342,10 +10342,10 @@ mod tests {
         );
     }
 
-    /// INV-040: complete-graph reconstitution rejects an edge whose frozen
+    /// complete-graph reconstitution rejects an edge whose frozen
     /// policy contradicts the independently supplied referenced root.
     #[test]
-    fn inv040_reconstituted_reference_graph_rejects_root_policy_mismatch() {
+    fn reconstituted_reference_graph_rejects_root_policy_mismatch() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let canonical_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10381,10 +10381,10 @@ mod tests {
         );
     }
 
-    /// INV-040: pass-result projection independently rejects cross-policy
+    /// pass-result projection independently rejects cross-policy
     /// referenced evidence before finding-event admission.
     #[test]
-    fn inv040_pass_result_projection_rejects_cross_policy_reference() {
+    fn pass_result_projection_rejects_cross_policy_reference() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let foreign_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10406,10 +10406,10 @@ mod tests {
         );
     }
 
-    /// INV-040: referenced-finding reconstitution authenticates every element
+    /// referenced-finding reconstitution authenticates every element
     /// of target/run/pass/finding ancestry against the sealed producer.
     #[test]
-    fn inv040_referenced_finding_reconstitution_rejects_cross_wired_ancestry() {
+    fn referenced_finding_reconstitution_rejects_cross_wired_ancestry() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let canonical_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let canonical =
@@ -10479,10 +10479,10 @@ mod tests {
         );
     }
 
-    /// INV-040: referenced-finding reconstitution rejects a producer inventory
+    /// referenced-finding reconstitution rejects a producer inventory
     /// containing an identity owned by another pass.
     #[test]
-    fn inv040_referenced_finding_reconstitution_rejects_unsealed_inventory() {
+    fn referenced_finding_reconstitution_rejects_unsealed_inventory() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let foreign_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10513,10 +10513,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a terminal subject cannot acquire a later duplicate edge even
+    /// a terminal subject cannot acquire a later duplicate edge even
     /// to an otherwise eligible same-target same-policy finding.
     #[test]
-    fn inv040_terminal_finding_cannot_acquire_reference() {
+    fn terminal_finding_cannot_acquire_reference() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let canonical_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10555,10 +10555,10 @@ mod tests {
         );
     }
 
-    /// INV-040: complete reconstitution rejects a direct two-finding cycle
+    /// complete reconstitution rejects a direct two-finding cycle
     /// even when each stored admission status was independently eligible.
     #[test]
-    fn inv040_reconstituted_reference_graph_rejects_direct_cycle() {
+    fn reconstituted_reference_graph_rejects_direct_cycle() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let first_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let second_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10605,10 +10605,10 @@ mod tests {
         );
     }
 
-    /// INV-040: complete reconstitution follows independent producer ancestry
+    /// complete reconstitution follows independent producer ancestry
     /// across runs and rejects a transitive three-finding cycle.
     #[test]
-    fn inv040_reconstituted_reference_graph_rejects_transitive_cycle() {
+    fn reconstituted_reference_graph_rejects_transitive_cycle() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let first_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let second_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10671,10 +10671,10 @@ mod tests {
         );
     }
 
-    /// INV-040: complete reconstitution rejects an edge whose independently
+    /// complete reconstitution rejects an edge whose independently
     /// authenticated referenced root is absent from the supplied target graph.
     #[test]
-    fn inv040_reconstituted_reference_graph_rejects_missing_root() {
+    fn reconstituted_reference_graph_rejects_missing_root() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let canonical_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10709,10 +10709,10 @@ mod tests {
         );
     }
 
-    /// INV-040: supersession admits the same authenticated cross-run boundary
+    /// supersession admits the same authenticated cross-run boundary
     /// as duplicate classification without reparenting either finding.
     #[test]
-    fn inv040_finding_admits_authenticated_cross_run_supersession() {
+    fn finding_admits_authenticated_cross_run_supersession() {
         let target = target_id(CANONICAL_TARGET_SEED);
         let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
         let successor_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
@@ -10746,10 +10746,10 @@ mod tests {
         );
     }
 
-    /// INV-040: referenced-finding reconstitution rejects a producer whose
+    /// referenced-finding reconstitution rejects a producer whose
     /// canonical operation is not successful read-only review.
     #[test]
-    fn inv040_referenced_finding_reconstitution_rejects_incompatible_producer_kind() {
+    fn referenced_finding_reconstitution_rejects_incompatible_producer_kind() {
         let reference =
             finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
         let inventory = ReviewProducedFindings::try_new(vec![reference])
@@ -10805,10 +10805,10 @@ mod tests {
         );
     }
 
-    /// INV-040: referenced-finding reconstitution rejects incomplete or
+    /// referenced-finding reconstitution rejects incomplete or
     /// contradictory producer terminal evidence.
     #[test]
-    fn inv040_referenced_finding_reconstitution_rejects_incomplete_producer_outcome() {
+    fn referenced_finding_reconstitution_rejects_incomplete_producer_outcome() {
         let reference =
             finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
         let failed_pass = ReviewPassEvidence::new(
@@ -10852,10 +10852,10 @@ mod tests {
         );
     }
 
-    /// INV-040: referenced-finding reconstitution rejects a run that
+    /// referenced-finding reconstitution rejects a run that
     /// contradicts its producer's complete frozen policy.
     #[test]
-    fn inv040_referenced_finding_reconstitution_rejects_producer_policy_mismatch() {
+    fn referenced_finding_reconstitution_rejects_producer_policy_mismatch() {
         let reference =
             finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
         let finding = open_finding_with_producer(reference, ReviewPolicy::version_one());
@@ -10881,10 +10881,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a complete graph cannot substitute the same aggregate root
+    /// a complete graph cannot substitute the same aggregate root
     /// twice while claiming complete target coverage.
     #[test]
-    fn inv040_reconstituted_reference_graph_rejects_duplicate_root() {
+    fn reconstituted_reference_graph_rejects_duplicate_root() {
         let reference =
             finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
         let finding = open_finding_with_producer(reference, ReviewPolicy::version_one());
@@ -10898,10 +10898,10 @@ mod tests {
         );
     }
 
-    /// INV-040: a complete graph for one immutable target cannot include a
+    /// a complete graph for one immutable target cannot include a
     /// disconnected root from another target.
     #[test]
-    fn inv040_reconstituted_reference_graph_rejects_foreign_target_root() {
+    fn reconstituted_reference_graph_rejects_foreign_target_root() {
         let expected_target = target_id(CANONICAL_TARGET_SEED);
         let foreign_target = target_id(2);
         let expected_reference = finding_ref_for_producer(expected_target, PRODUCING_PASS_SEED);

@@ -1056,11 +1056,11 @@ mod tests {
     };
     use uuid::Uuid;
 
-    /// S34 / INV-046: the domain retains exact prompt text independently of
+    /// S34: the domain retains exact prompt text independently of
     /// deployment policy; empty and U+0000-bearing text is rejected with the
     /// value retained unchanged.
     #[test]
-    fn s34_inv046_system_prompt_retains_large_exact_utf8_text() {
+    fn s34_system_prompt_retains_large_exact_utf8_text() {
         let exact = "y".repeat(2 * 1024 * 1024) + "\u{221a}";
         let admitted =
             SessionSystemPrompt::try_new(exact.clone()).expect("large exact text is admitted");
@@ -1080,11 +1080,11 @@ mod tests {
         assert_eq!(with_null.into_parts().0, "a\u{0}b");
     }
 
-    /// S34 / INV-046: the complete defaults value carries the optional prompt
+    /// S34: the complete defaults value carries the optional prompt
     /// in structural equality, so an epoch differing only in its prompt is a
     /// different replacement payload.
     #[test]
-    fn s34_inv046_defaults_equality_covers_the_system_prompt() {
+    fn s34_defaults_equality_covers_the_system_prompt() {
         let model = ModelSelectionRequest::Direct(direct(1));
         let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
             .expect("test prompt is admissible");
@@ -1106,10 +1106,10 @@ mod tests {
         assert_eq!(prompted.model(), model);
     }
 
-    /// INV-003 / INV-051: a direct default cannot carry settings admitted for
+    /// a direct default cannot carry settings admitted for
     /// a different direct selection.
     #[test]
-    fn inv003_inv051_defaults_reject_crosswired_direct_settings() {
+    fn defaults_reject_crosswired_direct_settings() {
         let validated_selection = direct(1);
         let configured_selection = direct(2);
         let settings = ModelCapabilities::new(
@@ -1142,10 +1142,10 @@ mod tests {
         assert_eq!(defaults, None);
     }
 
-    /// INV-003 / INV-051: a durable defaults epoch cannot retain a per-call
+    /// a durable defaults epoch cannot retain a per-call
     /// contribution that belongs only to one origin request.
     #[test]
-    fn inv003_inv051_defaults_reject_per_call_settings_provenance() {
+    fn defaults_reject_per_call_settings_provenance() {
         let selection = direct(1);
         let settings = ModelCapabilities::new(
             BTreeSet::from([ReasoningLevel::High]),
@@ -1205,10 +1205,10 @@ mod tests {
         assert_ne!(definition, other_definition);
     }
 
-    /// S37 / INV-052 / INV-053: alias retargeting resolves the caller overlay
+    /// S37: alias retargeting resolves the caller overlay
     /// against the new direct capability and retains its automatic adjustment.
     #[test]
-    fn s37_inv052_inv053_alias_retarget_freezes_adjusted_origin_settings() {
+    fn s37_alias_retarget_freezes_adjusted_origin_settings() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let prior_capabilities = ModelCapabilities::new(
@@ -1298,10 +1298,10 @@ mod tests {
         assert_eq!(reconstituted, origin);
     }
 
-    /// INV-003 / INV-053: adjustment evidence is impossible when the stored
+    /// adjustment evidence is impossible when the stored
     /// settings were already validated for the unchanged direct selection.
     #[test]
-    fn inv003_inv053_origin_rejects_adjustment_without_a_model_change() {
+    fn origin_rejects_adjustment_without_a_model_change() {
         let selection = direct(1);
         let capabilities = ModelCapabilities::new(
             BTreeSet::from([ReasoningLevel::Low, ReasoningLevel::High]),
@@ -1361,10 +1361,10 @@ mod tests {
         assert_eq!(reconstituted, None);
     }
 
-    /// INV-003 / INV-053: model-independent provider defaults remain valid
+    /// model-independent provider defaults remain valid
     /// durable evidence when an origin is reconstituted.
     #[test]
-    fn inv003_inv053_origin_reconstitutes_provider_default_settings() {
+    fn origin_reconstitutes_provider_default_settings() {
         let selection = direct(1);
         let defaults = SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection));
         let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
@@ -1388,7 +1388,7 @@ mod tests {
         assert_eq!(reconstituted, Some(expected));
     }
 
-    /// INV-008: comparison uses constructible semantic values; a direct
+    /// comparison uses constructible semantic values; a direct
     /// request and an alias request remain distinct.
     #[test]
     fn direct_and_alias_requests_remain_semantically_distinct() {
@@ -1398,7 +1398,7 @@ mod tests {
         );
     }
 
-    /// INV-008: direct and alias selections remain semantically unequal even
+    /// direct and alias selections remain semantically unequal even
     /// when they resolve to the same exact target.
     #[test]
     fn frozen_direct_and_frozen_alias_selecting_the_same_target_remain_unequal() {
@@ -1411,7 +1411,7 @@ mod tests {
         assert_ne!(FrozenModelSelection::Direct(target), frozen_alias);
     }
 
-    /// INV-008: alias provenance is part of the frozen selection's semantic
+    /// alias provenance is part of the frozen selection's semantic
     /// value.
     #[test]
     fn frozen_aliases_with_different_provenance_remain_unequal() {
@@ -1445,11 +1445,11 @@ mod tests {
         assert_eq!(configuration.model_fallback(), ModelFallback::Disabled);
     }
 
-    /// INV-003 / INV-051: a complete effective configuration rejects settings
+    /// a complete effective configuration rejects settings
     /// validated for another frozen direct model while retaining canonical,
     /// model-independent provider defaults.
     #[test]
-    fn inv003_inv051_effective_configuration_rejects_crosswired_model_settings() {
+    fn effective_configuration_rejects_crosswired_model_settings() {
         let validated_selection = direct(1);
         let frozen_selection = FrozenModelSelection::Direct(direct(2));
         let level = ReasoningLevel::High;
@@ -1491,7 +1491,7 @@ mod tests {
         );
     }
 
-    /// INV-008: configuration equality is structural semantic value equality
+    /// configuration equality is structural semantic value equality
     /// over the frozen model selection and the unit policy values.
     #[test]
     fn effective_configuration_equality_is_structural_over_the_frozen_selection() {
@@ -1545,10 +1545,10 @@ mod tests {
         );
     }
 
-    /// INV-002: reconstitution accepts the complete positive `u64` domain and
+    /// reconstitution accepts the complete positive `u64` domain and
     /// rejects the zero sentinel without admitting a storage representation.
     #[test]
-    fn inv002_defaults_version_checked_u64_boundary() {
+    fn defaults_version_checked_u64_boundary() {
         assert_eq!(SessionConfigurationDefaultsVersion::try_from_u64(0), None);
         assert_eq!(
             SessionConfigurationDefaultsVersion::try_from_u64(1),
@@ -1582,7 +1582,7 @@ mod tests {
         assert_eq!(established.defaults(), &initial);
     }
 
-    /// INV-008: session model-selection defaults are versioned; a
+    /// session model-selection defaults are versioned; a
     /// replacement installs a complete later immutable version.
     #[test]
     fn replacement_installs_the_next_complete_version() {
@@ -1632,7 +1632,7 @@ mod tests {
         assert_eq!(checked.session_defaults_version(), current.version());
     }
 
-    /// INV-012: `UseSessionDefault` and `ReplaceWith(X)` remain structurally
+    /// `UseSessionDefault` and `ReplaceWith(X)` remain structurally
     /// distinct comparison payloads even when the current default is `X`.
     #[test]
     fn override_payloads_stay_distinct_even_when_they_derive_equal_requests() {
@@ -1687,7 +1687,7 @@ mod tests {
             .expect("a direct request freezes without an alias definition")
     }
 
-    /// INV-008: an explicitly configured origin atomically records its
+    /// an explicitly configured origin atomically records its
     /// version-checked request, exact defaults version, and effective value.
     #[test]
     fn origin_configuration_freezes_the_derived_direct_request_coherently() {
@@ -1832,10 +1832,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-003 / INV-051: the catalog-free origin path cannot preserve
+    /// S37: the catalog-free origin path cannot preserve
     /// settings admitted for an alias's prior direct target after retargeting.
     #[test]
-    fn s37_inv003_inv051_legacy_freeze_rejects_alias_retarget_settings() {
+    fn s37_legacy_freeze_rejects_alias_retarget_settings() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let requested_alias = alias(1);
@@ -1886,10 +1886,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-003 / INV-051: legacy reconstitution rejects an alias whose
+    /// S37: legacy reconstitution rejects an alias whose
     /// frozen target differs from the stored settings validation identity.
     #[test]
-    fn s37_inv003_inv051_legacy_reconstitution_rejects_alias_retarget_settings() {
+    fn s37_legacy_reconstitution_rejects_alias_retarget_settings() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let requested_alias = alias(1);
@@ -1936,7 +1936,7 @@ mod tests {
         assert_eq!(reconstituted, None);
     }
 
-    /// INV-008: the defaults version belongs to provenance, not
+    /// the defaults version belongs to provenance, not
     /// effective-value equality.
     #[test]
     fn defaults_version_is_provenance_rather_than_effective_equality() {
@@ -1957,7 +1957,7 @@ mod tests {
         assert_ne!(first, later);
     }
 
-    /// INV-008: an explicit origin records request, defaults version, and
+    /// an explicit origin records request, defaults version, and
     /// effective value; reclassified steering carries only its source-turn
     /// binding.
     #[test]

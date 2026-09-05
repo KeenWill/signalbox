@@ -208,7 +208,7 @@ mod tests {
     use super::*;
 
     #[test]
-    /// INV-060: direct reads share the wire and store range bound.
+    /// direct reads share the wire and store range bound.
     fn direct_read_bound_matches_the_wire_and_store_contract() {
         assert_eq!(
             MAX_BLOB_RANGE_BYTES,

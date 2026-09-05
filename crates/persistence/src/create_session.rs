@@ -1349,10 +1349,10 @@ mod tests {
         corruption
     }
 
-    /// S01 / INV-003: the ordinary creation reader cannot silently discard a
+    /// S01: the ordinary creation reader cannot silently discard a
     /// delegated spawning identity from an interactive session row.
     #[test]
-    fn s01_inv003_interactive_creation_rejects_spawning_request() {
+    fn s01_interactive_creation_rejects_spawning_request() {
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(
                 &SessionCreationCause::Interactive,

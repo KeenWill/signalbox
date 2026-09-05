@@ -7,7 +7,7 @@ use super::{
     diagnostic::*, evidence::*, redaction::*, result::*, test_support::*, text_decoding::*,
 };
 
-/// INV-035: provider-controlled successful fields are credential-scrubbed
+/// provider-controlled successful fields are credential-scrubbed
 /// before entering completed tool evidence.
 #[test]
 fn web_search_success_evidence_redacts_reflected_credential() {
@@ -25,7 +25,7 @@ fn web_search_success_evidence_redacts_reflected_credential() {
     assert!(!content.contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: the URL-specific credential gate detects an exact credential in
+/// the URL-specific credential gate detects an exact credential in
 /// an admitted result path before completed evidence is constructed.
 #[test]
 fn web_search_rejects_plain_credential_in_result_url_path() {
@@ -44,7 +44,7 @@ fn web_search_rejects_plain_credential_in_result_url_path() {
     );
 }
 
-/// INV-035: credentials colliding with fixed provider-result diagnostics are
+/// credentials colliding with fixed provider-result diagnostics are
 /// rejected before any provider response or error can be formatted.
 #[test]
 fn web_search_rejects_credentials_colliding_with_fixed_result_diagnostics() {
@@ -59,7 +59,7 @@ fn web_search_rejects_credentials_colliding_with_fixed_result_diagnostics() {
     assert!(placeholder_collision.is_none());
 }
 
-/// INV-035: a credential spanning the populated response `Option` wrapper and
+/// a credential spanning the populated response `Option` wrapper and
 /// its result type is rejected before a constructor result can be rendered.
 #[test]
 fn web_search_rejects_credential_colliding_with_response_option() {
@@ -77,7 +77,7 @@ fn web_search_rejects_credential_colliding_with_response_option() {
     assert!(rendered.contains(POPULATED_RESPONSE_OPTION_DEBUG_COLLISION_KEY));
 }
 
-/// INV-035: credentials spanning the populated partial-response `Option`
+/// credentials spanning the populated partial-response `Option`
 /// wrapper are rejected before a constructor result can be rendered.
 #[test]
 fn web_search_rejects_credential_colliding_with_partial_response_option() {
@@ -95,7 +95,7 @@ fn web_search_rejects_credential_colliding_with_partial_response_option() {
     assert!(rendered.contains(POPULATED_PARTIAL_RESPONSE_OPTION_DEBUG_COLLISION_KEY));
 }
 
-/// INV-035: credentials spanning the populated provider-error `Option`
+/// credentials spanning the populated provider-error `Option`
 /// wrapper and its opaque diagnostic are rejected before public formatting.
 #[test]
 fn web_search_rejects_credential_colliding_with_provider_error_option() {
@@ -113,7 +113,7 @@ fn web_search_rejects_credential_colliding_with_provider_error_option() {
     assert!(rendered.contains(POPULATED_PROVIDER_ERROR_OPTION_DEBUG_COLLISION_KEY));
 }
 
-/// INV-035: credentials colliding with fixed provider, policy, or
+/// credentials colliding with fixed provider, policy, or
 /// configuration Debug labels are rejected before egress objects can render.
 #[test]
 fn web_search_rejects_credentials_colliding_with_fixed_egress_diagnostics() {
@@ -140,7 +140,7 @@ fn web_search_rejects_credentials_colliding_with_fixed_egress_diagnostics() {
     assert!(format!("{configuration:?}").contains(CONFIGURATION_DEBUG_COLLISION_KEY));
 }
 
-/// INV-035: credentials colliding with fixed executor-evidence Debug labels
+/// credentials colliding with fixed executor-evidence Debug labels
 /// are rejected before any terminal evidence can be formatted.
 #[test]
 fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
@@ -206,7 +206,7 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
     assert!(rendered_result.contains(SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY));
 }
 
-/// INV-035: a credential spanning the populated error `Result` wrapper and
+/// a credential spanning the populated error `Result` wrapper and
 /// its error variant is rejected before any error evidence can be rendered.
 #[test]
 fn web_search_rejects_credential_colliding_with_populated_error_result() {
@@ -226,7 +226,7 @@ fn web_search_rejects_credential_colliding_with_populated_error_result() {
     assert!(rendered.contains(ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY));
 }
 
-/// INV-035: a credential spanning the successful `Result` wrapper and
+/// a credential spanning the successful `Result` wrapper and
 /// `KnownFailed` evidence is rejected before any failure can be rendered.
 #[test]
 fn web_search_rejects_credential_colliding_with_known_failure_result() {
@@ -246,7 +246,7 @@ fn web_search_rejects_credential_colliding_with_known_failure_result() {
     assert!(rendered.contains(KNOWN_FAILURE_RESULT_BOUNDARY_DEBUG_COLLISION_KEY));
 }
 
-/// INV-035: a credential spanning the successful `Result` wrapper and a
+/// a credential spanning the successful `Result` wrapper and a
 /// populated `KnownFailed` detail is rejected before it can be rendered.
 #[test]
 fn web_search_rejects_credential_colliding_with_populated_known_failure_result() {
@@ -302,7 +302,7 @@ fn web_search_accepts_credentials_matching_removed_diagnostic_probe_text() {
     assert!(probe.is_some());
 }
 
-/// INV-035: JSON Unicode escapes in provider text are decoded within the
+/// JSON Unicode escapes in provider text are decoded within the
 /// bounded scrubber before completed evidence is formed.
 #[test]
 fn web_search_success_evidence_redacts_json_unicode_escaped_credential() {
@@ -329,7 +329,7 @@ fn web_search_success_evidence_redacts_json_unicode_escaped_credential() {
     ));
 }
 
-/// INV-035: reversible short JSON escapes in the credential itself apply
+/// reversible short JSON escapes in the credential itself apply
 /// before provider-controlled fields enter completed evidence.
 #[test]
 fn web_search_success_evidence_redacts_json_solidus_decoded_credential() {
@@ -353,7 +353,7 @@ fn web_search_success_evidence_redacts_json_solidus_decoded_credential() {
     assert!(!content.contains(JSON_SOLIDUS_COLLISION_VALUE));
 }
 
-/// INV-035: a brace-delimited Rust Debug Unicode escape in the credential
+/// a brace-delimited Rust Debug Unicode escape in the credential
 /// is decoded before provider text or completed-evidence Debug can reflect it.
 #[test]
 fn web_search_success_evidence_redacts_rust_debug_unicode_credential() {
@@ -379,7 +379,7 @@ fn web_search_success_evidence_redacts_rust_debug_unicode_credential() {
     assert!(!content.contains(RUST_DEBUG_UNICODE_COLLISION_VALUE));
 }
 
-/// INV-035: multi-character full Unicode folding applies to provider text
+/// multi-character full Unicode folding applies to provider text
 /// before completed evidence is formed.
 #[test]
 fn web_search_success_evidence_redacts_full_case_folded_credential() {
@@ -405,7 +405,7 @@ fn web_search_success_evidence_redacts_full_case_folded_credential() {
     ));
 }
 
-/// INV-035: reversible decoding of the credential itself applies before
+/// reversible decoding of the credential itself applies before
 /// provider-controlled fields enter completed evidence.
 #[test]
 fn web_search_success_evidence_redacts_text_matching_decoded_credential() {
@@ -429,7 +429,7 @@ fn web_search_success_evidence_redacts_text_matching_decoded_credential() {
     assert!(!content.contains(REVERSE_ENCODED_COLLISION_VALUE));
 }
 
-/// INV-035: a terminated standard named HTML reference is decoded before
+/// a terminated standard named HTML reference is decoded before
 /// reversible output can expose a credential.
 #[test]
 fn web_search_redacts_terminated_standard_named_reference_in_result_text() {
@@ -482,7 +482,7 @@ fn web_search_preserves_common_named_references_as_entity_escaped_text() {
     assert!(content.contains(FIXTURE_ESCAPED_COMMON_NAMED_REFERENCES_SNIPPET));
 }
 
-/// INV-035: signed digits are not valid JSON Unicode or HTML numeric
+/// signed digits are not valid JSON Unicode or HTML numeric
 /// references and cannot be normalized into provider evidence.
 #[test]
 fn web_search_rejects_signed_numeric_escape_digits() {
@@ -517,7 +517,7 @@ fn web_search_preserves_entity_escaped_unknown_named_references() {
     assert!(content.contains(escaped.as_ref()));
 }
 
-/// INV-035: credential removal cannot turn an entity-escaped literal into
+/// credential removal cannot turn an entity-escaped literal into
 /// markup-bearing output after typed result construction.
 #[test]
 fn web_search_rejects_credential_collision_with_entity_escape_syntax() {
@@ -588,7 +588,7 @@ fn web_search_preserves_semicolonless_named_reference_in_result_text() {
     assert!(content.contains(escaped.as_ref()));
 }
 
-/// INV-035: an unknown named-reference prefix cannot hide a later recognized
+/// an unknown named-reference prefix cannot hide a later recognized
 /// reference from credential decoding at a nested ampersand.
 #[test]
 fn web_search_redacts_recognized_reference_after_nested_ampersand() {
@@ -636,7 +636,7 @@ fn web_search_preserves_prefixed_legacy_named_reference_in_result_text() {
     assert!(content.contains(escaped.as_ref()));
 }
 
-/// INV-035: credential scrubbing cannot turn a checked result title into
+/// credential scrubbing cannot turn a checked result title into
 /// an empty title in completed evidence.
 #[test]
 fn web_search_rejects_result_with_title_invalidated_by_credential_scrubbing() {
@@ -660,7 +660,7 @@ fn web_search_rejects_result_with_title_invalidated_by_credential_scrubbing() {
     );
 }
 
-/// INV-035: credential scrubbing cannot turn a checked result URL into an
+/// credential scrubbing cannot turn a checked result URL into an
 /// invalid URL in completed evidence.
 #[test]
 fn web_search_rejects_result_with_url_invalidated_by_credential_scrubbing() {
@@ -680,7 +680,7 @@ fn web_search_rejects_result_with_url_invalidated_by_credential_scrubbing() {
     );
 }
 
-/// INV-035: a standard HTML character reference cannot conceal a
+/// a standard HTML character reference cannot conceal a
 /// credential reflected in provider-controlled text.
 #[test]
 fn web_search_redacts_html_encoded_credential_in_result_text() {
@@ -729,7 +729,7 @@ fn web_search_preserves_over_window_numeric_reference_in_result_text() {
     assert!(!content.contains(&reflection));
 }
 
-/// INV-035: an HTML C1 numeric reference is decoded through its standard
+/// an HTML C1 numeric reference is decoded through its standard
 /// replacement mapping before provider evidence is retained.
 #[test]
 fn web_search_redacts_c1_numeric_reference_credential_in_result_text() {
@@ -753,7 +753,7 @@ fn web_search_redacts_c1_numeric_reference_credential_in_result_text() {
     assert!(!content.contains(HTML_NUMERIC_C1_COLLISION_VALUE));
 }
 
-/// INV-035: canonical Unicode normalization cannot conceal a credential
+/// canonical Unicode normalization cannot conceal a credential
 /// reflected in an ordinary provider title.
 #[test]
 fn web_search_redacts_unicode_normalized_credential_in_result_text() {
@@ -779,7 +779,7 @@ fn web_search_redacts_unicode_normalized_credential_in_result_text() {
     assert!(!content.contains(URL_UNICODE_HOST_COLLISION_KEY));
 }
 
-/// INV-035: decomposition-preserving normalization detects a credential
+/// decomposition-preserving normalization detects a credential
 /// substring whose first scalar is a combining mark.
 #[test]
 fn web_search_redacts_unicode_combining_mark_boundary_credential() {
@@ -803,7 +803,7 @@ fn web_search_redacts_unicode_combining_mark_boundary_credential() {
     assert!(!content.contains(UNICODE_COMBINING_MARK_COLLISION_VALUE));
 }
 
-/// INV-035: repeated HTML character-reference decoding cannot conceal a
+/// repeated HTML character-reference decoding cannot conceal a
 /// credential reflected in provider-controlled text.
 #[test]
 fn web_search_redacts_nested_html_encoded_credential_in_result_text() {
@@ -827,7 +827,7 @@ fn web_search_redacts_nested_html_encoded_credential_in_result_text() {
     assert!(!content.contains(HTML_NESTED_ENTITY_COLLISION_VALUE));
 }
 
-/// INV-035: composed form and HTML decoding cannot conceal a credential
+/// composed form and HTML decoding cannot conceal a credential
 /// reflected in provider-controlled text.
 #[test]
 fn web_search_redacts_form_then_html_encoded_credential_in_result_text() {
@@ -851,7 +851,7 @@ fn web_search_redacts_form_then_html_encoded_credential_in_result_text() {
     assert!(!content.contains(FORM_HTML_COLLISION_VALUE));
 }
 
-/// INV-035: an early HTML reference is still decoded when a later
+/// an early HTML reference is still decoded when a later
 /// multibyte scalar crosses the character-reference scan bound.
 #[test]
 fn web_search_html_reference_scan_handles_multibyte_boundaries() {
@@ -874,7 +874,7 @@ fn web_search_html_reference_decoder_preserves_distant_terminator() {
     assert_eq!(decoded.change, ReversibleTextChange::Unchanged);
 }
 
-/// INV-035: credential removal cannot reproduce a key that overlaps the
+/// credential removal cannot reproduce a key that overlaps the
 /// ordinary redaction sentinel.
 #[test]
 fn web_search_redaction_sentinel_cannot_reproduce_credential() {

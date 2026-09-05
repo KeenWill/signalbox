@@ -239,11 +239,11 @@ async fn active_instruction_turn(
     Ok((session, turn))
 }
 
-/// INV-061: one active turn records its exact discovery evidence and empty
+/// one active turn records its exact discovery evidence and empty
 /// turn-start instruction manifest before model execution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error>> {
+async fn turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x6101));
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x6102));
@@ -552,12 +552,11 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// INV-061: a complete recorder that loses scheduler serialization observes
+/// a complete recorder that loses scheduler serialization observes
 /// the winning manifest and retains none of its fresh evidence identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_losing_complete_record_observes_the_winning_manifest() -> Result<(), Box<dyn Error>>
-{
+async fn losing_complete_record_observes_the_winning_manifest() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let arbitrary_replay_identity_base = 0x6900;
     let (session, turn) = active_instruction_turn(&pool, arbitrary_replay_identity_base).await?;
@@ -655,12 +654,11 @@ async fn inv061_losing_complete_record_observes_the_winning_manifest() -> Result
     Ok(())
 }
 
-/// INV-061: a failure after the recorder has inserted discovery, root, bundle,
+/// a failure after the recorder has inserted discovery, root, bundle,
 /// and candidate evidence rolls the entire attempted snapshot back.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_mid_record_failure_rolls_back_all_instruction_evidence()
--> Result<(), Box<dyn Error>> {
+async fn mid_record_failure_rolls_back_all_instruction_evidence() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = active_instruction_turn(&pool, 0x6a00).await?;
     let directory = tempfile::tempdir()?;
@@ -753,10 +751,10 @@ async fn inv061_mid_record_failure_rolls_back_all_instruction_evidence()
     Ok(())
 }
 
-/// INV-061: every persisted turn-instruction evidence table rejects mutation.
+/// every persisted turn-instruction evidence table rejects mutation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_turn_instruction_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
+async fn turn_instruction_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = active_instruction_turn(&pool, 0x6700).await?;
     let directory = tempfile::tempdir()?;
@@ -957,11 +955,11 @@ async fn inv061_turn_instruction_evidence_is_append_only() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-061: counted activation records a nonempty discovery while the selected
+/// counted activation records a nonempty discovery while the selected
 /// turn is still queued, and the active-turn boundary does not accept it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_counted_activation_records_a_queued_turn_manifest() -> Result<(), Box<dyn Error>> {
+async fn counted_activation_records_a_queued_turn_manifest() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_instruction_turn(&pool, 0x6300).await?;
     let directory = tempfile::tempdir()?;
@@ -1077,11 +1075,11 @@ async fn inv061_counted_activation_records_a_queued_turn_manifest() -> Result<()
     Ok(())
 }
 
-/// INV-061: a later complete scan of unchanged source evidence links its
+/// a later complete scan of unchanged source evidence links its
 /// candidate to the first registration identity instead of minting another.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_unchanged_source_reuses_its_registered_bundle() -> Result<(), Box<dyn Error>> {
+async fn unchanged_source_reuses_its_registered_bundle() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (first_session, first_turn) = active_instruction_turn(&pool, 0x6400).await?;
     let (second_session, second_turn) = active_instruction_turn(&pool, 0x6500).await?;
@@ -1168,12 +1166,11 @@ async fn inv061_unchanged_source_reuses_its_registered_bundle() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-061: changing source bytes at a registered path creates a distinct
+/// changing source bytes at a registered path creates a distinct
 /// retained registration while preserving the prior bundle identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_changed_source_creates_a_distinct_registered_bundle() -> Result<(), Box<dyn Error>>
-{
+async fn changed_source_creates_a_distinct_registered_bundle() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (first_session, first_turn) = active_instruction_turn(&pool, 0x6b00).await?;
     let (second_session, second_turn) = active_instruction_turn(&pool, 0x6c00).await?;
@@ -1290,11 +1287,11 @@ async fn inv061_changed_source_creates_a_distinct_registered_bundle() -> Result<
     Ok(())
 }
 
-/// INV-061: an incomplete discovery remains durable diagnostic evidence but
+/// an incomplete discovery remains durable diagnostic evidence but
 /// binds no manifest, so retry can record a later complete snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_incomplete_discovery_remains_unbound_for_retry() -> Result<(), Box<dyn Error>> {
+async fn incomplete_discovery_remains_unbound_for_retry() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = active_instruction_turn(&pool, 0x6200).await?;
     let directory = tempfile::tempdir()?;

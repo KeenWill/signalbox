@@ -478,13 +478,12 @@ async fn call_free_failure_recovery_cause_round_trips_as_a_closed_type()
     Ok(())
 }
 
-/// INV-048 / INV-053: a fresh durable sweep rediscovers a pursuing goal whose
+/// a fresh durable sweep rediscovers a pursuing goal whose
 /// current turn terminalized before its scheduler disposition could commit,
 /// and the goal-owned origin records its frozen model settings.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_inv053_terminal_goal_disposition_survives_scheduler_restart()
--> Result<(), Box<dyn Error>> {
+async fn terminal_goal_disposition_survives_scheduler_restart() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1088,13 +1087,12 @@ async fn owned_pending_failure_selection_requires_the_exact_need_under_the_sessi
     Ok(())
 }
 
-/// INV-048 / INV-053: a goal-owned accepted input dispatches its frozen model
+/// a goal-owned accepted input dispatches its frozen model
 /// settings and activates without a synthetic user command, then remains a
 /// canonical active origin for steer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command()
--> Result<(), Box<dyn Error>> {
+async fn s_goal_goal_owned_input_activates_without_a_user_command() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1221,11 +1219,11 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
     Ok(())
 }
 
-/// INV-048: an expected-head resume applies to exactly the blocked event it
+/// an expected-head resume applies to exactly the blocked event it
 /// names, and an unmet expectation appends nothing and spends no identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<(), Box<dyn Error>> {
+async fn s_goal_expected_resume_binds_to_one_blocked_event() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1340,11 +1338,11 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
     Ok(())
 }
 
-/// INV-048: resuming a blocked goal schedules exactly one next turn whose
+/// resuming a blocked goal schedules exactly one next turn whose
 /// accepted input is the exact optional user guidance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(), Box<dyn Error>> {
+async fn s_goal_resume_delivers_guidance_to_the_next_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1451,11 +1449,11 @@ async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(),
     Ok(())
 }
 
-/// INV-048: PostgreSQL round-trips the complete immutable goal lineage,
+/// PostgreSQL round-trips the complete immutable goal lineage,
 /// including its user receipts and atomic statement supersession.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_complete_lineage_round_trips() -> Result<(), Box<dyn Error>> {
+async fn s_goal_complete_lineage_round_trips() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1568,10 +1566,10 @@ async fn s_goal_inv048_complete_lineage_round_trips() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// INV-048: persisted goal history rejects mutation after commit.
+/// persisted goal history rejects mutation after commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_event_history_is_append_only() -> Result<(), Box<dyn Error>> {
+async fn goal_event_history_is_append_only() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1606,11 +1604,11 @@ async fn inv048_goal_event_history_is_append_only() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// INV-048: superseding before activation makes the old queued statement
+/// superseding before activation makes the old queued statement
 /// ineligible while the replacement remains the first runnable goal turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<dyn Error>> {
+async fn supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1688,12 +1686,11 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-048: a terminal current goal turn whose goal remains pursuing is a
+/// a terminal current goal turn whose goal remains pursuing is a
 /// durable reconciliation hint after process loss.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<(), Box<dyn Error>>
-{
+async fn terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1728,12 +1725,12 @@ async fn inv048_terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<
     Ok(())
 }
 
-/// INV-012 / INV-048: stopping before activation retains the exact descendant
+/// stopping before activation retains the exact descendant
 /// scope for replay, leaves no runnable goal work, and cannot block a later
 /// explicit commission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_inv048_stop_scope_replays_and_retires_queued_work() -> Result<(), Box<dyn Error>> {
+async fn stop_scope_replays_and_retires_queued_work() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1798,12 +1795,11 @@ async fn inv012_inv048_stop_scope_replays_and_retires_queued_work() -> Result<()
     Ok(())
 }
 
-/// INV-048: a stopped queued goal turn is immutable history and does not
+/// a stopped queued goal turn is immutable history and does not
 /// remain a periodic reconciliation hint.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_stopped_queued_goal_is_absent_from_reconciliation_hints()
--> Result<(), Box<dyn Error>> {
+async fn stopped_queued_goal_is_absent_from_reconciliation_hints() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1850,11 +1846,11 @@ async fn inv048_stopped_queued_goal_is_absent_from_reconciliation_hints()
     Ok(())
 }
 
-/// INV-048: retiring a queued replacement keeps its immutable tail position
+/// retiring a queued replacement keeps its immutable tail position
 /// while excluding its turn from runtime scheduling.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
+async fn stopped_replacement_does_not_corrupt_the_active_acceptance_tail()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1950,11 +1946,11 @@ async fn inv048_stopped_replacement_does_not_corrupt_the_active_acceptance_tail(
     Ok(())
 }
 
-/// INV-048: an alias absent at acceptance is a replayable command rejection,
+/// an alias absent at acceptance is a replayable command rejection,
 /// not repository corruption or a partially commissioned lineage.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_unknown_goal_model_alias_is_durably_rejected() -> Result<(), Box<dyn Error>> {
+async fn unknown_goal_model_alias_is_durably_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let alias = ModelAlias::from_uuid(Uuid::from_u128(0xa11));
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -2003,12 +1999,11 @@ async fn inv048_unknown_goal_model_alias_is_durably_rejected() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: an applied command receipt can reference only the goal event that
+/// an applied command receipt can reference only the goal event that
 /// carries that same durable command identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_applied_receipt_cannot_cross_wire_another_command_event()
--> Result<(), Box<dyn Error>> {
+async fn applied_receipt_cannot_cross_wire_another_command_event() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2076,12 +2071,11 @@ async fn inv048_applied_receipt_cannot_cross_wire_another_command_event()
     Ok(())
 }
 
-/// INV-048: an applied goal command names only the event kind corresponding
+/// an applied goal command names only the event kind corresponding
 /// to its immutable operation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Result<(), Box<dyn Error>>
-{
+async fn goal_command_operation_matches_the_applied_event_kind() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2135,11 +2129,11 @@ async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Resul
     Ok(())
 }
 
-/// INV-048: exhausting the session acceptance ordinal yields typed scheduler
+/// exhausting the session acceptance ordinal yields typed scheduler
 /// backpressure and a durable, replayable user-command rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
+async fn goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -2218,12 +2212,12 @@ async fn inv048_goal_turn_acceptance_position_exhaustion_is_typed_and_durable()
     Ok(())
 }
 
-/// INV-048: neither a delayed model declaration nor an unrecorded scheduler
+/// neither a delayed model declaration nor an unrecorded scheduler
 /// failure from an older turn can block a resumed goal whose newer turn is current.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_delayed_old_turn_transitions_do_not_block_the_resumed_turn()
--> Result<(), Box<dyn Error>> {
+async fn delayed_old_turn_transitions_do_not_block_the_resumed_turn() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2318,11 +2312,11 @@ async fn inv048_delayed_old_turn_transitions_do_not_block_the_resumed_turn()
     Ok(())
 }
 
-/// INV-048: a continuation can name only the acceptance-latest goal turn,
+/// a continuation can name only the acceptance-latest goal turn,
 /// so a resumed turn prevents a stale completed predecessor from branching.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_continuation_requires_the_latest_goal_turn() -> Result<(), Box<dyn Error>> {
+async fn continuation_requires_the_latest_goal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2443,11 +2437,11 @@ async fn inv048_continuation_requires_the_latest_goal_turn() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-048: a direct model event cannot name an older turn from the current
+/// a direct model event cannot name an older turn from the current
 /// goal generation after a successor has become current.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
+async fn model_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2490,11 +2484,11 @@ async fn inv048_model_event_requires_the_current_goal_turn() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-048: a direct scheduler event cannot name an unsuccessful older turn
+/// a direct scheduler event cannot name an unsuccessful older turn
 /// after a same-generation successor has become current.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_scheduler_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
+async fn scheduler_event_requires_the_current_goal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2527,12 +2521,11 @@ async fn inv048_scheduler_event_requires_the_current_goal_turn() -> Result<(), B
     Ok(())
 }
 
-/// INV-048: a direct scheduler failure event must name a terminal turn whose
+/// a direct scheduler failure event must name a terminal turn whose
 /// disposition is unsuccessful.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_scheduler_event_requires_an_unsuccessful_terminal_turn()
--> Result<(), Box<dyn Error>> {
+async fn scheduler_event_requires_an_unsuccessful_terminal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2575,13 +2568,12 @@ async fn inv048_scheduler_event_requires_an_unsuccessful_terminal_turn()
     Ok(())
 }
 
-/// INV-048: model goal events bind to the exact `goal_declare` name and
+/// model goal events bind to the exact `goal_declare` name and
 /// canonical arguments and adjacent declaration text carried by their trusted
 /// request identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
--> Result<(), Box<dyn Error>> {
+async fn model_goal_declaration_request_matches_name_and_arguments() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2672,11 +2664,11 @@ async fn inv048_model_goal_declaration_request_matches_name_and_arguments()
     Ok(())
 }
 
-/// INV-048: goal_declare is rejected when another response part follows it,
+/// goal_declare is rejected when another response part follows it,
 /// preventing later tool effects after a terminal goal transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_goal_declaration_is_the_final_response_part() -> Result<(), Box<dyn Error>> {
+async fn model_goal_declaration_is_the_final_response_part() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2810,11 +2802,11 @@ async fn a_committed_closure_refuses_late_model_achievement() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-048: the adjacent transcript representation carries the domain's full
+/// the adjacent transcript representation carries the domain's full
 /// 1 MiB goal-report bound without widening normalized tool arguments.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_goal_declaration_carries_full_report_bound() -> Result<(), Box<dyn Error>> {
+async fn model_goal_declaration_carries_full_report_bound() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -2872,11 +2864,11 @@ async fn inv048_model_goal_declaration_carries_full_report_bound() -> Result<(),
     Ok(())
 }
 
-/// INV-048: the schema admits one goal declaration event per trusted model
+/// the schema admits one goal declaration event per trusted model
 /// tool-request identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_model_goal_declaration_request_is_single_use() -> Result<(), Box<dyn Error>> {
+async fn model_goal_declaration_request_is_single_use() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let unique_request: bool = sqlx::query_scalar(
         "SELECT EXISTS (
@@ -2897,12 +2889,11 @@ async fn inv048_model_goal_declaration_request_is_single_use() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: a changed current alias that is unavailable at reconciliation is
+/// a changed current alias that is unavailable at reconciliation is
 /// a typed continuation outcome, not durable-state corruption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Result<(), Box<dyn Error>>
-{
+async fn changed_unknown_alias_is_a_typed_continuation_outcome() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let first_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa21));
     let changed_alias = ModelAlias::from_uuid(Uuid::from_u128(0xa22));
@@ -2967,11 +2958,11 @@ async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Resul
     Ok(())
 }
 
-/// INV-048: every user-provenance event names an applied receipt at that exact
+/// every user-provenance event names an applied receipt at that exact
 /// event ordinal; rejected commands cannot source events.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_rejected_goal_command_cannot_source_an_event() -> Result<(), Box<dyn Error>> {
+async fn rejected_goal_command_cannot_source_an_event() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -3027,11 +3018,11 @@ async fn inv048_rejected_goal_command_cannot_source_an_event() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: applied command receipts and their exact events carry the same
+/// applied command receipts and their exact events carry the same
 /// immutable statement or optional guidance payload.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_command_payload_matches_the_applied_event() -> Result<(), Box<dyn Error>> {
+async fn goal_command_payload_matches_the_applied_event() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -3086,11 +3077,11 @@ async fn inv048_goal_command_payload_matches_the_applied_event() -> Result<(), B
     Ok(())
 }
 
-/// INV-048: every pursuit-starting user event atomically creates exactly one
+/// every pursuit-starting user event atomically creates exactly one
 /// goal-owned accepted input and turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_pursuing_goal_event_requires_its_goal_turn() -> Result<(), Box<dyn Error>> {
+async fn pursuing_goal_event_requires_its_goal_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -3142,11 +3133,11 @@ async fn inv048_pursuing_goal_event_requires_its_goal_turn() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-048: a queued goal turn's requested and frozen configuration derive
+/// a queued goal turn's requested and frozen configuration derive
 /// from the exact defaults epoch named by its accepted input.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_turn_configuration_matches_its_defaults_epoch() -> Result<(), Box<dyn Error>> {
+async fn goal_turn_configuration_matches_its_defaults_epoch() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -3269,11 +3260,11 @@ async fn inv048_goal_turn_configuration_matches_its_defaults_epoch() -> Result<(
     Ok(())
 }
 
-/// INV-048: rejection reasons are closed over the operation paths that can
+/// rejection reasons are closed over the operation paths that can
 /// produce them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_command_rejection_matches_its_operation() -> Result<(), Box<dyn Error>> {
+async fn goal_command_rejection_matches_its_operation() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -3316,11 +3307,11 @@ async fn inv048_goal_command_rejection_matches_its_operation() -> Result<(), Box
     Ok(())
 }
 
-/// INV-048: goal-owned turn admission takes the scheduler row lock before it
+/// goal-owned turn admission takes the scheduler row lock before it
 /// inserts any accepted-input or turn-lifecycle fact.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
+async fn goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -3476,14 +3467,13 @@ async fn acquire_peer_message_suffix(
     Ok(())
 }
 
-/// S19 / INV-010 / INV-012: descendant-scoped goal stop takes its canonical
+/// S19: descendant-scoped goal stop takes its canonical
 /// cascade prefix before the ordinary root lock, so an overlapping peer-message
 /// prefix cannot form the child/root inversion that PostgreSQL reports as
 /// `40P01`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_goal_stop_orders_cascade_before_peer_message()
--> Result<(), Box<dyn Error>> {
+async fn s19_goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfb00;
     let fixture = descendant_lock_order_fixture(&pool, seed).await?;
@@ -3527,13 +3517,12 @@ async fn s19_inv010_inv012_goal_stop_orders_cascade_before_peer_message()
     Ok(())
 }
 
-/// S19 / INV-010 / INV-012: descendant-scoped input interrupt takes the same
+/// S19: descendant-scoped input interrupt takes the same
 /// canonical cascade prefix before its root and scheduler locks, preventing the
 /// peer-message child/root inversion.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_input_interrupt_orders_cascade_before_peer_message()
--> Result<(), Box<dyn Error>> {
+async fn s19_input_interrupt_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfc00;
     let fixture = descendant_lock_order_fixture(&pool, seed).await?;
@@ -3595,13 +3584,12 @@ async fn s19_inv010_inv012_input_interrupt_orders_cascade_before_peer_message()
     Ok(())
 }
 
-/// S19 / INV-010 / INV-012: when the descendant-scope root is itself a
+/// S19: when the descendant-scope root is itself a
 /// delegated child, the canonical session frontier includes its parent
 /// endpoint in the same ascending lock set.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_descendant_frontier_includes_root_parent_endpoint()
--> Result<(), Box<dyn Error>> {
+async fn s19_descendant_frontier_includes_root_parent_endpoint() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfca0;
     let grandparent = seed + 1;
@@ -3709,14 +3697,13 @@ async fn s19_inv010_inv012_descendant_frontier_includes_root_parent_endpoint()
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012 / INV-032: an applied descendant-scoped goal stop
+/// S18: an applied descendant-scoped goal stop
 /// atomically records every edge, logically terminalizes active and queued
 /// bound children with exact provenance, and leaves the background child
 /// runnable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cascade()
--> Result<(), Box<dyn Error>> {
+async fn s18_goal_stop_materializes_complete_delegation_cascade() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf100;
     let bound_child = 0xf101;
@@ -4154,13 +4141,12 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: a descendant-scoped lifecycle stop whose live
+/// S18: a descendant-scoped lifecycle stop whose live
 /// turn is closed by its core interrupt carries `stopped` into the cascade, so
 /// a bound child follows `on_parent_stopped` rather than `on_parent_cancelled`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_lifecycle_stop_interrupt_uses_stopped_child_policy()
--> Result<(), Box<dyn Error>> {
+async fn s18_lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf500;
     let child = 0xf501;
@@ -4332,7 +4318,7 @@ struct PrunedEdgeRecordCounts {
     logical_terminals: i64,
 }
 
-/// S19 / INV-010 / INV-012: a descendant-scoped stop descends into a nested
+/// S19: a descendant-scoped stop descends into a nested
 /// relationship under its immediate parent's disposition, not under the root
 /// command's kind.
 ///
@@ -4345,7 +4331,7 @@ struct PrunedEdgeRecordCounts {
 /// `parent_stopped_parent_and_descendants`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_nested_cascade_descends_under_immediate_parent_disposition()
+async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf600;
@@ -4500,7 +4486,7 @@ async fn s19_inv010_inv012_nested_cascade_descends_under_immediate_parent_dispos
     Ok(())
 }
 
-/// S19 / INV-010 / INV-012: a descendant-scoped stop stops descending below a
+/// S19: a descendant-scoped stop stops descending below a
 /// relationship that survives it, leaving that whole subtree runnable.
 ///
 /// `background_child` keeps running under any parent termination, so the
@@ -4511,8 +4497,7 @@ async fn s19_inv010_inv012_nested_cascade_descends_under_immediate_parent_dispos
 /// queued delegated turn stays eligible.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_inv010_inv012_nested_cascade_prunes_below_a_surviving_edge()
--> Result<(), Box<dyn Error>> {
+async fn s19_nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf700;
     let background_child = 0xf701;
@@ -4667,7 +4652,7 @@ async fn s19_inv010_inv012_nested_cascade_prunes_below_a_surviving_edge()
     Ok(())
 }
 
-/// S18 / INV-005 / INV-032: a delegated turn that completes while holding
+/// S18: a delegated turn that completes while holding
 /// next-safe-point steering reclassifies that steering into a successor turn.
 ///
 /// A delegated turn has no accepted-input queue origin, so reclassification
@@ -4675,8 +4660,7 @@ async fn s19_inv010_inv012_nested_cascade_prunes_below_a_surviving_edge()
 /// queue chain that an accepted-input turn walks.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
--> Result<(), Box<dyn Error>> {
+async fn s18_delegated_turn_reclassifies_its_pending_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xfb00;
     let child = 0xfb01;
@@ -4831,14 +4815,13 @@ async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
     Ok(())
 }
 
-/// S18 / INV-015 / INV-032: a cascade-terminalized child releases its
+/// S18: a cascade-terminalized child releases its
 /// compaction boundary. The retained delegated turn stays physically active, so
 /// preparation must read runtime relevance rather than the physical state and
 /// must source the logical terminal's frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv015_inv032_logically_terminal_child_admits_compaction() -> Result<(), Box<dyn Error>>
-{
+async fn s18_logically_terminal_child_admits_compaction() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xfa00;
     let bound_child = 0xfa01;
@@ -4955,11 +4938,11 @@ async fn s18_inv015_inv032_logically_terminal_child_admits_compaction() -> Resul
     Ok(())
 }
 
-/// INV-048: an applied stop waits on the scheduler row before recording its
+/// an applied stop waits on the scheduler row before recording its
 /// terminal event, so queued activation cannot cross the user receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_stop_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
+async fn stop_waits_for_scheduler_lock() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())

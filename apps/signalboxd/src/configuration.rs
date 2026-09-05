@@ -9458,10 +9458,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: every explicit lower layer is validated even when a
+    /// S37: every explicit lower layer is validated even when a
     /// higher-precedence layer masks it in the effective configuration.
     #[test]
-    fn s37_inv051_configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
+    fn s37_configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
         let profile_configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9484,10 +9484,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: an explicit unsupported selected-profile value is
+    /// S37: an explicit unsupported selected-profile value is
     /// rejected even when the global layer is valid.
     #[test]
-    fn s37_inv051_configuration_rejects_an_unsupported_selected_profile_value() {
+    fn s37_configuration_rejects_an_unsupported_selected_profile_value() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9504,10 +9504,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: a selected profile cannot combine individually
+    /// S37: a selected profile cannot combine individually
     /// supported controls that its adapter cannot enforce together.
     #[test]
-    fn s37_inv051_configuration_rejects_an_adapter_incompatible_selected_profile() {
+    fn s37_configuration_rejects_an_adapter_incompatible_selected_profile() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9524,10 +9524,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: an adapter-incompatible global combination remains
+    /// S37: an adapter-incompatible global combination remains
     /// invalid when a selected profile masks it with a supported combination.
     #[test]
-    fn s37_inv051_configuration_rejects_a_masked_adapter_incompatible_global_layer() {
+    fn s37_configuration_rejects_a_masked_adapter_incompatible_global_layer() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9617,7 +9617,7 @@ context_window_tokens = 200000
         assert_eq!(serving_credential.credential_reference(), fast_profile);
     }
 
-    /// INV-035: credential references stay scoped while paths and values stay
+    /// credential references stay scoped while paths and values stay
     /// out of errors and debug output.
     #[tokio::test]
     async fn file_credentials_are_reference_scoped_and_paths_are_redacted() {
@@ -9648,11 +9648,11 @@ context_window_tokens = 200000
         assert!(!format!("{source:?}").contains("definitely"));
     }
 
-    /// INV-035: each operation preparation observes the file as it exists at
+    /// each operation preparation observes the file as it exists at
     /// that request, so atomic deployment replacement rotates the key without
     /// caching secret bytes in hub composition.
     #[tokio::test]
-    async fn inv035_file_credentials_are_reread_for_rotation() {
+    async fn file_credentials_are_reread_for_rotation() {
         let path = std::env::temp_dir().join(format!("signalbox-credential-{}", Uuid::now_v7()));
         std::fs::write(&path, b"first-test-value").expect("fixture file is writable");
         let source = FileCredentialAccess::new(
@@ -9682,10 +9682,10 @@ context_window_tokens = 200000
         std::fs::remove_file(path).expect("fixture file is removable");
     }
 
-    /// INV-035: a historical session pin can resolve any declared file
+    /// a historical session pin can resolve any declared file
     /// profile, not only the member currently preferred by a pool.
     #[tokio::test]
-    async fn inv035_file_credential_catalog_resolves_each_declared_profile() {
+    async fn file_credential_catalog_resolves_each_declared_profile() {
         let directory = tempfile::tempdir().expect("fixture directory is available");
         let primary_path = directory.path().join("primary");
         let historical_path = directory.path().join("historical");

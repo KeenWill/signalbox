@@ -798,10 +798,10 @@ mod tests {
         }
     }
 
-    /// S01 / INV-001 / INV-012: reserved command identities fail before
+    /// S01: reserved command identities fail before
     /// canonical command construction or any application effect.
     #[test]
-    fn s01_inv001_inv012_request_rejects_reserved_command_identifiers() {
+    fn s01_request_rejects_reserved_command_identifiers() {
         assert_eq!(
             SubmitInputRequest::try_new(
                 DurableCommandId::from_uuid(Uuid::nil()),
@@ -838,11 +838,11 @@ mod tests {
         assert!(nudge.observed.into_inner().is_empty());
     }
 
-    /// INV-011 / INV-037: immediate interrupt handling waits on the same
+    /// immediate interrupt handling waits on the same
     /// turn-keyed gate held across tool authorization, execution, and result
     /// commit.
     #[tokio::test]
-    async fn inv011_inv037_interrupt_waits_for_tool_dispatch_gate() {
+    async fn interrupt_waits_for_tool_dispatch_gate() {
         let expected_turn = turn_id(9);
         let request = SubmitInputRequest::try_new(
             command_id(10),
@@ -950,10 +950,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-001 / INV-002: production candidates are fresh UUIDv7
+    /// S01: production candidates are fresh UUIDv7
     /// values of their distinct domain kinds without using UUID order.
     #[test]
-    fn s01_inv001_inv002_production_generator_supplies_fresh_uuid_v7_candidates() {
+    fn s01_production_generator_supplies_fresh_uuid_v7_candidates() {
         let mut generator = UuidV7SubmitInputIdGenerator;
         let first_input = generator.next_accepted_input_id();
         let first_turn = generator.next_turn_id();
@@ -978,11 +978,11 @@ mod tests {
         assert!(!candidate.is_max());
     }
 
-    /// S01 / INV-002 / INV-007 / INV-008 / INV-012 / INV-028: orchestration
+    /// S01: orchestration
     /// fixes user attribution and forwards one exact command and candidate
     /// pair to the atomic port.
     #[test]
-    fn s01_inv002_inv007_inv008_inv012_inv028_orchestrates_one_user_command_and_candidate_pair() {
+    fn s01_orchestrates_one_user_command_and_candidate_pair() {
         let request = request(1);
         let accepted_input = accepted_input_id(4);
         let turn = turn_id(5);
@@ -1015,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn inv007_coalesced_turn_origin_nudge_is_a_successful_handoff() {
+    fn coalesced_turn_origin_nudge_is_a_successful_handoff() {
         let request = request(1);
         let accepted_input = accepted_input_id(4);
         let turn = turn_id(5);
@@ -1038,10 +1038,10 @@ mod tests {
         assert_eq!(nudge.observed.into_inner(), vec![request.session()]);
     }
 
-    /// S08 / INV-002 / INV-028: safe-point steering supplies no turn
+    /// S08: safe-point steering supplies no turn
     /// candidate because successful acceptance initially creates no turn.
     #[test]
-    fn s08_inv002_inv028_next_safe_point_mints_no_turn() {
+    fn s08_next_safe_point_mints_no_turn() {
         let requested_session = session_id(2);
         let request = SubmitInputRequest::try_new(
             command_id(1),
@@ -1109,10 +1109,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-012: a recorded applied result passes through unchanged
+    /// S01: a recorded applied result passes through unchanged
     /// without application preparation or translation.
     #[test]
-    fn s01_inv012_recorded_applied_result_passes_through() {
+    fn s01_recorded_applied_result_passes_through() {
         assert_recorded_result_passes_through(applied_result(
             &request(1),
             accepted_input_id(4),
@@ -1120,10 +1120,10 @@ mod tests {
         ));
     }
 
-    /// S01 / INV-012: every closed rejected result shape passes through
+    /// S01: every closed rejected result shape passes through
     /// unchanged without application preparation or translation.
     #[test]
-    fn s01_inv012_recorded_rejected_results_pass_through() {
+    fn s01_recorded_rejected_results_pass_through() {
         assert_recorded_result_passes_through(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::SessionNotFound {
                 session: session_id(2),
@@ -1156,10 +1156,10 @@ mod tests {
         ));
     }
 
-    /// S01 / INV-012: equal replay returns original durable identities rather
+    /// S01: equal replay returns original durable identities rather
     /// than either retransmission's fresh candidates.
     #[test]
-    fn s01_inv012_equal_replay_returns_the_recorded_result() {
+    fn s01_equal_replay_returns_the_recorded_result() {
         let request = request(1);
         let session = request.session();
         let winner_input = accepted_input_id(4);
@@ -1196,9 +1196,9 @@ mod tests {
         assert_eq!(applied.turn(), winner_turn);
     }
 
-    /// S01 / INV-012: user-global conflicting reuse is returned unchanged.
+    /// S01: user-global conflicting reuse is returned unchanged.
     #[test]
-    fn s01_inv012_conflicting_reuse_is_returned_unchanged() {
+    fn s01_conflicting_reuse_is_returned_unchanged() {
         let request = request(1);
         let expected = SubmitInputOutcome::ConflictingReuse {
             command_id: request.command_id(),
@@ -1218,11 +1218,11 @@ mod tests {
         assert!(nudge.observed.into_inner().is_empty());
     }
 
-    /// S01 / INV-012: a transaction failure remains nonterminal after exactly
+    /// S01: a transaction failure remains nonterminal after exactly
     /// one call; application orchestration does not retry or fabricate a
     /// recorded result.
     #[test]
-    fn s01_inv012_transaction_failure_is_returned_without_retry() {
+    fn s01_transaction_failure_is_returned_without_retry() {
         let mut service = SubmitInputService::new(
             FakeIds::new([accepted_input_id(4)], [turn_id(5)]),
             FakeTransaction::returning([Err(FakeTransactionError::Unavailable)]),

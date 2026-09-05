@@ -4120,7 +4120,7 @@ pub enum ClientRequest {
     /// its stop is durably requested and terminalization flows through the
     /// existing lifecycle, while `content` becomes the immediate-successor
     /// origin the session continues with. No standalone cancellation command
-    /// exists; this verb is the interrupt treatment on the wire (INV-029).
+    /// exists; this verb is the interrupt treatment on the wire.
     StopTurn {
         /// Durable mutation identity.
         command_id: CommandId,
@@ -11793,7 +11793,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_goal_requests_and_history_round_trip_in_the_single_vocabulary()
+    fn goal_requests_and_history_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
@@ -11963,7 +11963,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_split_goal_projection_fits_maximally_escaped_text_frames()
+    fn split_goal_projection_fits_maximally_escaped_text_frames()
     -> Result<(), Box<dyn std::error::Error>> {
         let text = "\u{1}".repeat(MAX_CONTENT_FRAGMENT_BYTES);
         let start = ServerFrame::try_new(
@@ -11994,7 +11994,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_goal_history_rejects_model_provenance_for_execution_failure() {
+    fn goal_history_rejects_model_provenance_for_execution_failure() {
         let mismatched = ServerMessage::GoalHistoryItem {
             event_ordinal: CanonicalU64::new(2),
             generation: CanonicalU64::new(1),
@@ -12019,8 +12019,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_client_round_trip_preserves_closed_request_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn client_round_trip_preserves_closed_request_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let frame = ClientFrame::try_new(
             request(u64::MAX)?,
             ClientRequest::SubmitInput {
@@ -12051,11 +12051,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-012 / INV-060: multipart request encoding preserves part order and
+    /// multipart request encoding preserves part order and
     /// every attachment metadata field in the one canonical array shape.
     #[test]
-    fn inv012_inv060_multipart_input_wire_is_ordered_and_exact()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn multipart_input_wire_is_ordered_and_exact() -> Result<(), Box<dyn std::error::Error>> {
         let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
             .parse::<CanonicalBlobDigest>()?;
         let content = UserInputContent::from_parts(vec![
@@ -12109,9 +12108,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-012: multipart decoding stops at the public retained-parts bound.
+    /// multipart decoding stops at the public retained-parts bound.
     #[test]
-    fn inv012_multipart_deserialization_stops_after_the_parts_bound()
+    fn multipart_deserialization_stops_after_the_parts_bound()
     -> Result<(), Box<dyn std::error::Error>> {
         let oversized = vec![
             UserInputPart::Text {
@@ -12152,10 +12151,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-012 / INV-060: attachment display filenames are required-nullable
+    /// attachment display filenames are required-nullable
     /// in both directions of the version-one wire.
     #[test]
-    fn inv012_inv060_attachment_requires_display_filename_member() {
+    fn attachment_requires_display_filename_member() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}],"expected_defaults_version":"1","model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}}}"#,
         );
@@ -12165,7 +12164,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_transcript_user_entry_round_trips_ordered_multipart_content()
+    fn transcript_user_entry_round_trips_ordered_multipart_content()
     -> Result<(), Box<dyn std::error::Error>> {
         let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
             .parse::<CanonicalBlobDigest>()?;
@@ -12198,7 +12197,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_transcript_user_entry_rejects_malformed_multipart_content() {
+    fn transcript_user_entry_rejects_malformed_multipart_content() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_user_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","accepted_input_id":"00000000-0000-0000-0000-000000000003","turn_id":"00000000-0000-0000-0000-000000000004","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}]}}"#,
         );
@@ -12212,7 +12211,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_read_transcript_round_trips_in_the_single_vocabulary()
+    fn read_transcript_round_trips_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -12230,7 +12229,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_text_entries_round_trip_in_the_single_vocabulary()
+    fn imported_text_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let imported_text = ServerMessage::TranscriptTextEntry {
             entry_index: CanonicalU64::new(0),
@@ -12255,7 +12254,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_conservative_entries_round_trip_in_the_single_vocabulary()
+    fn imported_conservative_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let imported_conservative = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(1),
@@ -12284,7 +12283,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegated_task_entries_round_trip_in_the_single_vocabulary()
+    fn delegated_task_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(0),
@@ -12307,7 +12306,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_message_entries_round_trip_in_the_single_vocabulary()
+    fn delegation_message_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(1),
@@ -12333,7 +12332,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_foreground_delegation_result_entries_round_trip_in_the_single_vocabulary()
+    fn foreground_delegation_result_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(2),
@@ -12364,7 +12363,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_background_delegation_result_entries_round_trip_in_the_single_vocabulary()
+    fn background_delegation_result_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(3),
@@ -12475,7 +12474,7 @@ mod tests {
         // stopped/cancelled outcome. Crossed pairs such as
         // stopped/parent_cancelled are valid under a bound relationship's own
         // termination policy and are covered by
-        // `inv033_delegation_terminal_turn_state_round_trips_crossed_parent_policy`;
+        // `delegation_terminal_turn_state_round_trips_crossed_parent_policy`;
         // these two remain inadmissible on either half.
         assert_delegation_terminal_state_rejected("stopped", "child_completed");
         assert_delegation_terminal_state_rejected("already_terminal", "parent_cancelled");
@@ -12552,19 +12551,19 @@ mod tests {
         assert!(rejected.to_string().contains("tool_attempt_id"));
     }
 
-    /// INV-044: runner-recovery wire state preserves the positive placement
+    /// runner-recovery wire state preserves the positive placement
     /// revision required by its relational source.
     #[test]
-    fn inv044_runner_recovery_turn_state_rejects_zero_placement_revision() {
+    fn runner_recovery_turn_state_rejects_zero_placement_revision() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000002","acceptance_position":"1","model_settings":null,"state":{"type":"active_awaiting_runner_recovery","runner_id":"00000000-0000-0000-0000-000000000003","placement_revision":"0","tool_attempt_id":null}}}"#,
         );
     }
 
-    /// INV-044: the public state type cannot be inhabited with the zero
+    /// the public state type cannot be inhabited with the zero
     /// placement revision rejected by its enclosing frame.
     #[test]
-    fn inv044_runner_recovery_turn_state_direct_decode_rejects_zero_revision() {
+    fn runner_recovery_turn_state_direct_decode_rejects_zero_revision() {
         let rejected = serde_json::from_value::<TurnState>(serde_json::json!({
             "type": "active_awaiting_runner_recovery",
             "runner_id": "00000000-0000-0000-0000-000000000003",
@@ -12577,7 +12576,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_terminal_turn_state_round_trips_parent_authority()
+    fn delegation_terminal_turn_state_round_trips_parent_authority()
     -> Result<(), Box<dyn std::error::Error>> {
         let state = TurnState::DelegationTerminated {
             spawning_request_id: uuid(4),
@@ -12614,7 +12613,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_terminal_turn_state_round_trips_crossed_parent_policy()
+    fn delegation_terminal_turn_state_round_trips_crossed_parent_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         // A bound relationship maps the parent verb through its own policy, so
         // a parent cancellation may terminalize a child with `stop` and a
@@ -12641,42 +12640,42 @@ mod tests {
     }
 
     #[test]
-    fn inv033_unknown_request_fields_fail_explicitly() {
+    fn unknown_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions","extra":true}}"#,
         );
     }
 
     #[test]
-    fn inv033_missing_required_request_fields_fail_explicitly() {
+    fn missing_required_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"read_transcript"}}"#,
         );
     }
 
     #[test]
-    fn inv033_wrong_typed_request_fields_fail_explicitly() {
+    fn wrong_typed_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":1,"request":{"type":"list_sessions"}}"#,
         );
     }
 
     #[test]
-    fn inv033_unknown_tagged_request_variants_fail_explicitly() {
+    fn unknown_tagged_request_variants_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"future_request"}}"#,
         );
     }
 
     #[test]
-    fn inv033_unknown_top_level_fields_fail_explicitly() {
+    fn unknown_top_level_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions"},"extra":true}"#,
         );
     }
 
     #[test]
-    fn inv033_unsupported_version_precedes_payload_decoding() {
+    fn unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
         assert_unsupported_version("2");
         assert_unsupported_version("18446744073709551616");
@@ -12686,7 +12685,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_unsupported_version_is_classified_at_the_container_depth_limit() {
+    fn unsupported_version_is_classified_at_the_container_depth_limit() {
         let future = unsupported_version_with_nested_object_payload(MAX_JSON_CONTAINER_DEPTH - 1);
         let error = decode_client_line(&line(&future))
             .expect_err("the maximum admitted depth reaches version classification");
@@ -12695,7 +12694,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_container_depth_beyond_the_limit_is_malformed() {
+    fn container_depth_beyond_the_limit_is_malformed() {
         let future = unsupported_version_with_nested_object_payload(MAX_JSON_CONTAINER_DEPTH);
         let error =
             decode_client_line(&line(&future)).expect_err("excessive nesting must be rejected");
@@ -12704,7 +12703,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_nested_duplicates_are_malformed_before_unsupported_version() {
+    fn nested_duplicates_are_malformed_before_unsupported_version() {
         let error = decode_client_line(&line(
             r#"{"version":1,"request_id":"9","request":{"future":1,"future":2}}"#,
         ))
@@ -12714,7 +12713,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_duplicate_top_level_members_are_malformed_before_classification() {
+    fn duplicate_top_level_members_are_malformed_before_classification() {
         let duplicate_version = decode_client_line(&line(
             r#"{"version":1,"version":1,"request_id":"9","request":{"type":"list_sessions"}}"#,
         ))
@@ -12805,7 +12804,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_nested_unit_shapes_reject_unknown_members() {
+    fn nested_unit_shapes_reject_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"sessions_start","extra":true}}"#,
         );
@@ -12818,42 +12817,42 @@ mod tests {
     }
 
     #[test]
-    fn inv033_active_running_requires_current_model_call_member() {
+    fn active_running_requires_current_model_call_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000002"}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_shape_requires_nullable_attempt_member() {
+    fn failed_terminal_shape_requires_nullable_attempt_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_model_call":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_shape_requires_nullable_call_member() {
+    fn failed_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_call_requires_an_attempt() {
+    fn failed_terminal_call_requires_an_attempt() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null,"terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000003","disposition":"known_failed"}}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_call_accepts_only_failure_dispositions() {
+    fn failed_terminal_call_accepts_only_failure_dispositions() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"completed"}}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_call_rejects_unknown_members() {
+    fn failed_terminal_call_rejects_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","extra":true}}}}"#,
         );
@@ -12969,36 +12968,36 @@ mod tests {
     }
 
     #[test]
-    fn inv033_cancelled_terminal_shape_requires_nullable_call_member() {
+    fn cancelled_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003"}}}"#,
         );
     }
 
     #[test]
-    fn inv033_turn_cancelled_event_rejects_unknown_members() {
+    fn turn_cancelled_event_rejects_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"turn_cancelled","turn_id":"00000000-0000-0000-0000-000000000002","cancellation_entry_id":"00000000-0000-0000-0000-000000000003","terminal_frontier_id":"00000000-0000-0000-0000-000000000004","extra":true}}}"#,
         );
     }
 
     #[test]
-    fn inv033_cancellation_requested_state_rejects_unknown_members() {
+    fn cancellation_requested_state_rejects_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","state":{"type":"cancellation_requested","extra":true}}}}"#,
         );
     }
 
     #[test]
-    fn inv033_nested_terminal_duplicate_members_are_rejected() {
+    fn nested_terminal_duplicate_members_are_rejected() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":null,"terminal_model_call":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_in_memory_failed_terminal_call_requires_an_attempt()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn in_memory_failed_terminal_call_requires_an_attempt() -> Result<(), Box<dyn std::error::Error>>
+    {
         let invalid = ServerFrame::try_new(
             request(1)?,
             ServerMessage::TranscriptTurn {
@@ -13021,7 +13020,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_canonical_decimal_spellings_are_required() {
+    fn canonical_decimal_spellings_are_required() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"01","request":{"type":"list_sessions"}}"#,
         );
@@ -13044,20 +13043,20 @@ mod tests {
     }
 
     #[test]
-    fn inv033_canonical_uuid_spellings_are_required() {
+    fn canonical_uuid_spellings_are_required() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"read_transcript","session_id":"00000000-0000-0000-0000-00000000000A"}}"#,
         );
     }
 
     #[test]
-    fn inv012_command_sentinels_are_rejected() {
+    fn command_sentinels_are_rejected() {
         assert_command_sentinel_rejected("00000000-0000-0000-0000-000000000000");
         assert_command_sentinel_rejected("ffffffff-ffff-ffff-ffff-ffffffffffff");
     }
 
     #[test]
-    fn inv033_zero_client_request_id_is_rejected() {
+    fn zero_client_request_id_is_rejected() {
         assert!(
             decode_client_line(&line(
                 r#"{"version":1,"request_id":"0","request":{"type":"list_sessions"}}"#
@@ -13067,8 +13066,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_rejection_detail_shape_is_closed_and_code_bound()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn rejection_detail_shape_is_closed_and_code_bound() -> Result<(), Box<dyn std::error::Error>> {
         assert!(
             ServerFrame::try_new(
                 request(1)?,
@@ -13112,8 +13110,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_commit_ambiguity_has_one_stable_error_code() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn commit_ambiguity_has_one_stable_error_code() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new(
             request(1)?,
             ServerMessage::Error {
@@ -13133,8 +13130,7 @@ mod tests {
     }
 
     #[test]
-    fn inv060_publication_ambiguity_has_one_stable_error_code()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn publication_ambiguity_has_one_stable_error_code() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new(
             request(1)?,
             ServerMessage::Error {
@@ -13154,7 +13150,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_uncorrelated_identity_is_reserved_for_server_errors()
+    fn uncorrelated_identity_is_reserved_for_server_errors()
     -> Result<(), Box<dyn std::error::Error>> {
         let error = ServerFrame::try_new(
             RequestId::uncorrelated(),
@@ -13227,7 +13223,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_fragment_bound_keeps_worst_case_json_below_frame_cap()
+    fn fragment_bound_keeps_worst_case_json_below_frame_cap()
     -> Result<(), Box<dyn std::error::Error>> {
         let fragment = ContentFragment::try_new("\u{1}".repeat(MAX_CONTENT_FRAGMENT_BYTES))?;
         let frame = ServerFrame::try_new(
@@ -13272,8 +13268,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_oversized_outgoing_frame_fails_explicitly() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn oversized_outgoing_frame_fails_explicitly() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new(
             request(1)?,
             ServerMessage::Error {
@@ -13290,7 +13285,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_exact_newline_framing_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    fn exact_newline_framing_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new(request(1)?, ClientRequest::ListSessions {})?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(encoded.last(), Some(&b'\n'));
@@ -13313,7 +13308,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_oversized_complete_frame_preserves_recoverable_request_id() {
+    fn oversized_complete_frame_preserves_recoverable_request_id() {
         let oversized =
             padded_oversized_client_frame(r#""request_id":"9""#, super::MAX_FRAME_BYTES);
         let error = decode_client_line(&oversized)
@@ -13324,7 +13319,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_oversized_duplicate_request_identity_is_uncorrelated() {
+    fn oversized_duplicate_request_identity_is_uncorrelated() {
         let oversized = padded_oversized_client_frame(
             r#""request_id":"9","request_id":"10""#,
             super::MAX_FRAME_BYTES,
@@ -13337,7 +13332,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_oversized_noncanonical_request_identity_is_uncorrelated() {
+    fn oversized_noncanonical_request_identity_is_uncorrelated() {
         let oversized =
             padded_oversized_client_frame(r#""request_id":"09""#, super::MAX_FRAME_BYTES);
         let error =
@@ -13348,7 +13343,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_request_identity_recovery_stops_at_the_frame_cap() {
+    fn request_identity_recovery_stops_at_the_frame_cap() {
         let far_oversized =
             padded_oversized_client_frame(r#""request_id":"9""#, super::MAX_FRAME_BYTES * 2);
         let error = decode_client_line(&far_oversized)
@@ -13359,7 +13354,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_bounded_client_request_identity_recovery_matches_oversized_decode() {
+    fn bounded_client_request_identity_recovery_matches_oversized_decode() {
         let oversized =
             padded_oversized_client_frame(r#""request_id":"9""#, super::MAX_FRAME_BYTES);
         let content = &oversized[..oversized.len() - 1];
@@ -13372,7 +13367,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_all_client_request_variants_encode_with_current_version()
+    fn all_client_request_variants_encode_with_current_version()
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelSelection::Direct {
             selection_id: uuid(3),
@@ -13425,8 +13420,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_list_request_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_list_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
             ClientRequest::ListSessionMetadata {
@@ -13441,8 +13435,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_read_request_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_read_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(2)?,
             ClientRequest::ReadSessionMetadata {
@@ -13453,7 +13446,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_replacement_request_has_an_exact_closed_shape()
+    fn metadata_replacement_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(3)?,
@@ -13466,9 +13459,9 @@ mod tests {
         )
     }
 
-    /// INV-033: the unified listing request has one exact closed shape.
+    /// the unified listing request has one exact closed shape.
     #[test]
-    fn inv033_list_conversations_request_has_an_exact_closed_shape()
+    fn list_conversations_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ListConversations {
@@ -13499,10 +13492,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the nullable filter and cursor members are required, the
+    /// the nullable filter and cursor members are required, the
     /// origin filter is a closed set, and the cursor rejects unknown members.
     #[test]
-    fn inv033_list_conversations_members_are_required_and_closed() {
+    fn list_conversations_members_are_required_and_closed() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
@@ -13517,10 +13510,10 @@ mod tests {
         );
     }
 
-    /// INV-033: structurally invalid title filters reject a listing request
+    /// structurally invalid title filters reject a listing request
     /// before application construction.
     #[test]
-    fn inv033_list_conversations_validates_title_filter_shape() {
+    fn list_conversations_validates_title_filter_shape() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":"","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
@@ -13540,10 +13533,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the three unified page messages keep their exact closed
+    /// the three unified page messages keep their exact closed
     /// shapes across round trips.
     #[test]
-    fn inv033_conversation_page_messages_have_exact_closed_shapes()
+    fn conversation_page_messages_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -13608,9 +13601,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a page end never names a cursor for an empty page.
+    /// a page end never names a cursor for an empty page.
     #[test]
-    fn inv033_conversation_page_end_rejects_cursor_for_empty_page() {
+    fn conversation_page_end_rejects_cursor_for_empty_page() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"0","next_after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000001"}}}"#,
         );
@@ -13624,10 +13617,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a native summary title follows the metadata title rules and
+    /// a native summary title follows the metadata title rules and
     /// an imported summary restates the derived display-title shape.
     #[test]
-    fn inv033_conversation_summary_shapes_are_validated() {
+    fn conversation_summary_shapes_are_validated() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":"","archived":false,"defaults_version":"1"}}}"#,
         );
@@ -13645,9 +13638,9 @@ mod tests {
         );
     }
 
-    /// INV-033: imported title length is deployment policy, not wire grammar.
+    /// imported title length is deployment policy, not wire grammar.
     #[test]
-    fn inv033_conversation_summary_admits_structurally_valid_long_imported_title()
+    fn conversation_summary_admits_structurally_valid_long_imported_title()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::ConversationSummary {
             conversation: ConversationSummary::ImportedConversation {
@@ -13662,8 +13655,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_import_request_preserves_exact_bytes_and_format()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn import_request_preserves_exact_bytes_and_format() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ImportConversation {
             format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
@@ -13682,11 +13674,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: chunked import has one exact closed begin/append/commit/abort
+    /// chunked import has one exact closed begin/append/commit/abort
     /// request vocabulary.
     #[test]
-    fn inv033_chunked_import_requests_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn chunked_import_requests_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let begin = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -13740,11 +13732,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: every maximum-sized append still fits the unchanged complete
+    /// every maximum-sized append still fits the unchanged complete
     /// frame bound, while a larger raw chunk is invalid before encoding.
     #[test]
-    fn inv033_import_append_respects_the_existing_frame_bound()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn import_append_respects_the_existing_frame_bound() -> Result<(), Box<dyn std::error::Error>> {
         let maximum = ClientRequest::AppendConversationImport {
             chunk: ConversationImportSource::new(vec![
                 b'x';
@@ -13772,10 +13763,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: chunked-import transport acknowledgements have exact closed
+    /// chunked-import transport acknowledgements have exact closed
     /// shapes; commit deliberately keeps the existing terminal receipts.
     #[test]
-    fn inv033_chunked_import_acknowledgements_have_exact_closed_shapes()
+    fn chunked_import_acknowledgements_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -13809,11 +13800,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: blob upload requests carry one exact tagged digest, positive
+    /// blob upload requests carry one exact tagged digest, positive
     /// length, and canonical bounded chunk without an implicit blob class.
     #[test]
-    fn inv060_blob_upload_requests_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_upload_requests_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let begin = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -13881,10 +13871,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: one maximum decoded blob chunk fits the frame cap, while an
+    /// one maximum decoded blob chunk fits the frame cap, while an
     /// empty or one-byte-larger append is rejected before encoding.
     #[test]
-    fn inv060_blob_upload_chunk_bound_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_upload_chunk_bound_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
         let maximum = ClientRequest::AppendBlobUpload {
             chunk: BlobChunk::new(vec![b'x'; super::MAX_BLOB_CHUNK_BYTES]),
         };
@@ -13912,10 +13902,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: upload lifecycle receipts echo the exact verified identity and
+    /// upload lifecycle receipts echo the exact verified identity and
     /// positive cumulative sizes.
     #[test]
-    fn inv060_blob_upload_acknowledgements_have_exact_closed_shapes()
+    fn blob_upload_acknowledgements_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         assert_server_message_round_trip(
@@ -13963,11 +13953,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: bulk-ingest ownership and every upload lifecycle failure use
+    /// bulk-ingest ownership and every upload lifecycle failure use
     /// one exhaustive content-silent invalid-request vocabulary.
     #[test]
-    fn inv060_blob_upload_refusals_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_upload_refusals_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let expected_digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let actual_digest = CanonicalBlobDigest::from_bytes([0xcd; 32]);
         assert_server_message_round_trip(
@@ -14057,10 +14046,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a direct metadata read has exact closed request and response
+    /// a direct metadata read has exact closed request and response
     /// shapes with canonical decimal facts.
     #[test]
-    fn inv060_blob_metadata_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_metadata_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let metadata = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14090,10 +14079,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a direct range read has exact closed request and response
+    /// a direct range read has exact closed request and response
     /// shapes with canonical decimal bounds.
     #[test]
-    fn inv060_blob_range_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_range_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let offset = 7_u64;
         let length = 2_u64;
@@ -14131,11 +14120,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a successful range response must represent its exact
+    /// a successful range response must represent its exact
     /// half-open byte range.
     #[test]
-    fn inv060_blob_range_response_rejects_overflowing_end() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn blob_range_response_rejects_overflowing_end() -> Result<(), Box<dyn std::error::Error>> {
         let result = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14150,11 +14138,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: invalid direct range lengths remain decodable so the daemon
+    /// invalid direct range lengths remain decodable so the daemon
     /// can return the contracted typed invalid-request response.
     #[test]
-    fn inv060_blob_read_length_bound_reaches_request_handling()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_read_length_bound_reaches_request_handling() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let zero = ClientRequest::ReadBlobChunk {
             digest,
@@ -14186,11 +14173,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: an exact maximum direct range response remains inside the
+    /// an exact maximum direct range response remains inside the
     /// unchanged frame ceiling.
     #[test]
-    fn inv060_maximum_blob_read_response_fits_one_frame() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn maximum_blob_read_response_fits_one_frame() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let maximum = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14206,9 +14192,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: an out-of-bounds read is one typed invalid request.
+    /// an out-of-bounds read is one typed invalid request.
     #[test]
-    fn inv060_blob_read_out_of_bounds_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_read_out_of_bounds_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -14225,9 +14211,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: exhausting absent replicas has a content-silent missing code.
+    /// exhausting absent replicas has a content-silent missing code.
     #[test]
-    fn inv060_blob_missing_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_missing_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -14240,10 +14226,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: exhausting corrupt replicas has a content-silent corruption
+    /// exhausting corrupt replicas has a content-silent corruption
     /// code.
     #[test]
-    fn inv060_blob_corrupt_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_corrupt_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -14256,10 +14242,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a size-exceeded refusal cannot claim the impossible zero
+    /// a size-exceeded refusal cannot claim the impossible zero
     /// expected length that begin-upload admission rejects.
     #[test]
-    fn inv060_blob_upload_size_exceeded_rejects_zero_expected_length()
+    fn blob_upload_size_exceeded_rejects_zero_expected_length()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::Error {
             code: ErrorCode::InvalidRequest,
@@ -14277,10 +14263,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a length-mismatch refusal cannot claim the impossible zero
+    /// a length-mismatch refusal cannot claim the impossible zero
     /// expected length that begin-upload admission rejects.
     #[test]
-    fn inv060_blob_upload_length_mismatch_rejects_zero_expected_length()
+    fn blob_upload_length_mismatch_rejects_zero_expected_length()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::Error {
             code: ErrorCode::InvalidRequest,
@@ -14298,10 +14284,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: import-invalid-request evidence names exact sizes and only the
+    /// import-invalid-request evidence names exact sizes and only the
     /// content-silent converter class plus record ordinal.
     #[test]
-    fn inv033_conversation_import_rejection_evidence_has_exact_closed_shapes()
+    fn conversation_import_rejection_evidence_has_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -14418,9 +14404,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: imported-frontier creation has one exact closed request shape.
+    /// imported-frontier creation has one exact closed request shape.
     #[test]
-    fn inv033_imported_frontier_creation_has_an_exact_closed_shape()
+    fn imported_frontier_creation_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::CreateSessionFromImportedFrontier {
@@ -14446,7 +14432,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_frontier_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn imported_frontier_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14468,10 +14454,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: model-call usage has one exact closed shape.
+    /// model-call usage has one exact closed shape.
     #[test]
-    fn inv033_model_call_usage_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn model_call_usage_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let message = ServerMessage::TranscriptModelCallUsage {
             model_call_index: CanonicalU64::new(0),
@@ -14540,7 +14525,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_frontier_rejects_zero_position() -> Result<(), Box<dyn std::error::Error>> {
+    fn imported_frontier_rejects_zero_position() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(2)?,
@@ -14561,7 +14546,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_conversation_read_has_an_exact_closed_shape()
+    fn imported_conversation_read_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ReadImportedConversation {
@@ -14579,10 +14564,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: an imported-conversation entry carries its position, exact
+    /// an imported-conversation entry carries its position, exact
     /// attestation, content kind, and bounded preview in one closed shape.
     #[test]
-    fn inv033_imported_conversation_entry_has_an_exact_closed_shape()
+    fn imported_conversation_entry_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::ImportedConversationEntry {
             position: CanonicalU64::new(2),
@@ -14607,7 +14592,7 @@ mod tests {
     /// An entry whose content carries no exact attested text states that
     /// absence as an explicit null rather than an empty preview.
     #[test]
-    fn inv033_imported_conversation_entry_states_an_absent_preview_as_null()
+    fn imported_conversation_entry_states_an_absent_preview_as_null()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14630,8 +14615,8 @@ mod tests {
     /// An imported-conversation entry position is one-based, so zero is not a
     /// selectable ordinal on the wire.
     #[test]
-    fn inv033_imported_conversation_entry_rejects_zero_position()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn imported_conversation_entry_rejects_zero_position() -> Result<(), Box<dyn std::error::Error>>
+    {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14711,8 +14696,8 @@ mod tests {
     /// A truncation marker over an empty preview contradicts the scalar cut,
     /// which always keeps at least one scalar of nonempty text.
     #[test]
-    fn inv033_imported_text_preview_rejects_truncated_empty_text()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn imported_text_preview_rejects_truncated_empty_text() -> Result<(), Box<dyn std::error::Error>>
+    {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14736,7 +14721,7 @@ mod tests {
     /// kind that has no such text is a contradictory frame rather than extra
     /// information the client may present.
     #[test]
-    fn inv033_imported_conversation_entry_rejects_a_preview_on_nontext_content()
+    fn imported_conversation_entry_rejects_a_preview_on_nontext_content()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14760,7 +14745,7 @@ mod tests {
     /// A requested ordinal inside the stated range contradicts the rejection
     /// carrying it, so the frame is refused rather than rendered.
     #[test]
-    fn inv033_imported_range_rejection_refuses_a_selectable_requested_position()
+    fn imported_range_rejection_refuses_a_selectable_requested_position()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14785,7 +14770,7 @@ mod tests {
     /// An imported conversation is nonempty, so a zero selectable bound cannot
     /// describe one.
     #[test]
-    fn inv033_imported_range_rejection_refuses_an_empty_selectable_range()
+    fn imported_range_rejection_refuses_an_empty_selectable_range()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14807,10 +14792,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: an out-of-range imported position is a rejection naming the
+    /// an out-of-range imported position is a rejection naming the
     /// conversation's selectable range, never the absent-session `not_found`.
     #[test]
-    fn inv033_names_the_imported_position_range() -> Result<(), Box<dyn std::error::Error>> {
+    fn names_the_imported_position_range() -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::Error {
             code: ErrorCode::Rejected,
             message: String::from("the command was rejected by current durable state"),
@@ -14831,10 +14816,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: an absent imported conversation names an imported conversation
+    /// an absent imported conversation names an imported conversation
     /// as the missing target.
     #[test]
-    fn inv033_names_the_absent_imported_conversation() -> Result<(), Box<dyn std::error::Error>> {
+    fn names_the_absent_imported_conversation() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14857,7 +14842,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_submit_request_round_trips_in_the_single_vocabulary()
+    fn submit_request_round_trips_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14879,7 +14864,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_turn_control_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn turn_control_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14900,10 +14885,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: reconciliation has one exact closed request shape.
+    /// reconciliation has one exact closed request shape.
     #[test]
-    fn inv033_reconcile_turn_request_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn reconcile_turn_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let request_id = request(1)?;
         let request_value = ClientRequest::ReconcileTurn {
             command_id: command(4)?,
@@ -14933,10 +14918,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the reconciliation refusal and the stale-target rejection carry
+    /// the reconciliation refusal and the stale-target rejection carry
     /// their exact closed wire shapes.
     #[test]
-    fn inv033_reconciliation_rejection_details_have_exact_closed_shapes()
+    fn reconciliation_rejection_details_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -14978,7 +14963,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_import_source_requires_canonical_padded_base64() {
+    fn import_source_requires_canonical_padded_base64() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA"}}"#,
         );
@@ -14991,7 +14976,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_submit_exchange_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn submit_exchange_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -15023,9 +15008,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the cursorless provider-text message round trips exactly.
+    /// the cursorless provider-text message round trips exactly.
     #[test]
-    fn inv033_provider_text_message_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn provider_text_message_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -15048,10 +15033,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: review target registration has one exact closed shape.
+    /// review target registration has one exact closed shape.
     #[test]
-    fn inv033_review_target_exchange_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn review_target_exchange_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let request_id = request(1)?;
         let request_value = ClientRequest::CreateReviewTarget {
             command_id: command(2)?,
@@ -15585,8 +15570,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inv046_adds_forward_only_defaults_replacement()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn adds_forward_only_defaults_replacement() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(6)?;
         let request_value = ClientRequest::ReplaceSessionDefaults {
             command_id: command(1)?,
@@ -15664,8 +15648,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inv046_adds_the_bounded_session_system_prompt()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn adds_the_bounded_session_system_prompt() -> Result<(), Box<dyn std::error::Error>> {
         // The system-prompt member is required.
         // Every admitted frame must carry the member explicitly.
         assert_client_malformed(
@@ -15872,9 +15855,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: prompt text enforces structural content rules only.
+    /// prompt text enforces structural content rules only.
     #[test]
-    fn inv033_system_prompt_text_rejects_empty_and_nul_content() {
+    fn system_prompt_text_rejects_empty_and_nul_content() {
         let admitted = SystemPromptText::try_new(String::from("exact √ prompt"))
             .expect("structurally valid text is admitted");
         assert_eq!(admitted.as_str(), "exact √ prompt");
@@ -15882,10 +15865,9 @@ mod tests {
         assert!(SystemPromptText::try_new("a\u{0}b".to_owned()).is_err());
     }
 
-    /// INV-033: deployment limits use one closed required nullable wire shape.
+    /// deployment limits use one closed required nullable wire shape.
     #[test]
-    fn inv033_deployment_limits_have_exact_closed_wire_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn deployment_limits_have_exact_closed_wire_shapes() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
             ClientRequest::ReadDeploymentLimits {},
@@ -15906,10 +15888,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033 / INV-047: template frames have exact closed shapes.
+    /// template frames have exact closed shapes.
     #[test]
-    fn inv033_inv047_template_frames_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn template_frames_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let create = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -16007,7 +15988,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_placement_constructor_rejects_paths_over_the_structural_byte_bound() {
+    fn session_placement_constructor_rejects_paths_over_the_structural_byte_bound() {
         let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
         let frame_sized_empty_segments = ".".repeat(super::MAX_FRAME_BYTES - 1);
 
@@ -16019,7 +16000,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_placement_frames_admit_the_complete_structural_range() {
+    fn session_placement_frames_admit_the_complete_structural_range() {
         let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
         let frame = format!(
             r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"model_settings":{{"reasoning_level":{{"kind":"inherit"}},"fast_mode":{{"kind":"inherit"}},"service_tier":{{"kind":"inherit"}}}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{maximum_structural_path}"}}}}}}
@@ -16049,7 +16030,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_placement_rejection_versions_are_coherent() {
+    fn session_placement_rejection_versions_are_coherent() {
         assert_placement_version_mismatch_rejected(0, 2);
         assert_placement_version_mismatch_rejected(1, 0);
         assert_placement_version_mismatch_rejected(2, 2);
@@ -16077,9 +16058,9 @@ mod tests {
         assert!(valid.is_ok());
     }
 
-    /// INV-033: invalid template names or versions cannot enter admitted frames.
+    /// invalid template names or versions cannot enter admitted frames.
     #[test]
-    fn inv033_template_frames_require_valid_values() -> Result<(), Box<dyn std::error::Error>> {
+    fn template_frames_require_valid_values() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"Reviewer"}}"#,
         );
@@ -16098,9 +16079,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a frame at the single version is admitted unchanged.
+    /// a frame at the single version is admitted unchanged.
     #[test]
-    fn inv033_single_protocol_version_is_admitted() -> Result<(), Box<dyn std::error::Error>> {
+    fn single_protocol_version_is_admitted() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new(request(1)?, ClientRequest::ListSessions {})?;
         let encoded = encode_client_line(&frame)?;
 
@@ -16109,25 +16090,24 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the integer immediately below the single version is refused.
+    /// the integer immediately below the single version is refused.
     #[test]
-    fn inv033_version_below_single_version_is_refused() {
+    fn version_below_single_version_is_refused() {
         assert_unsupported_version("0");
     }
 
-    /// INV-033: closed-enum decoding refuses an unknown version member.
+    /// closed-enum decoding refuses an unknown version member.
     #[test]
-    fn inv033_unknown_protocol_version_member_is_refused() {
+    fn unknown_protocol_version_member_is_refused() {
         let error = serde_json::from_str::<ProtocolVersion>("2")
             .expect_err("an unknown protocol version must be refused");
 
         assert!(error.to_string().contains("frame version is unsupported"));
     }
 
-    /// INV-033: the model-alias catalog has exact closed shapes.
+    /// the model-alias catalog has exact closed shapes.
     #[test]
-    fn inv033_model_alias_catalog_has_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn model_alias_catalog_has_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -16167,8 +16147,7 @@ mod tests {
     /// fence, statement, and first input — in one closed shape, and its
     /// receipt names the created session and the fence record.
     #[test]
-    fn inv033_commission_session_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn commission_session_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
             ClientRequest::CommissionSession {
@@ -16293,8 +16272,7 @@ mod tests {
 
     /// request shape, and a requested semantic position must be nonzero.
     #[test]
-    fn inv033_compaction_request_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn compaction_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let compact = ClientRequest::CompactSession {
             command_id: command(1)?,
             session_id: uuid(2),
@@ -16328,8 +16306,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_import_outcomes_have_distinct_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn import_outcomes_have_distinct_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::ConversationImportInserted {
@@ -16349,8 +16326,7 @@ mod tests {
 
     /// its exact closed shape across one encode/decode round trip.
     #[test]
-    fn inv033_stop_turn_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn stop_turn_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::StopTurn {
             command_id: command(4)?,
@@ -16382,9 +16358,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: tool decisions keep exact wire forms across one round trip.
+    /// tool decisions keep exact wire forms across one round trip.
     #[test]
-    fn inv033_decide_tool_request_has_exact_closed_decision_shapes()
+    fn decide_tool_request_has_exact_closed_decision_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let approval = ClientRequest::DecideToolRequest {
             command_id: command(4)?,
@@ -16438,8 +16414,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_user_approve_event_round_trips()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn tool_approval_user_approve_event_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(3)?,
             ServerMessage::SessionEvent {
@@ -16460,7 +16435,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_user_deny_event_round_trips_with_reason()
+    fn tool_approval_user_deny_event_round_trips_with_reason()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(15)?,
@@ -16484,7 +16459,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_deny_event_round_trips_null_reason_for_empty_derivation()
+    fn tool_approval_delegate_deny_event_round_trips_null_reason_for_empty_derivation()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
@@ -16507,7 +16482,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_transcript_tool_approval_round_trips_historical_delegate_provenance()
+    fn transcript_tool_approval_round_trips_historical_delegate_provenance()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(16)?,
@@ -16536,22 +16511,22 @@ mod tests {
     }
 
     #[test]
-    fn inv033_transcript_tool_approval_rejects_explicit_null() {
+    fn transcript_tool_approval_rejects_explicit_null() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"16","message":{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_tool_approval_user_decider_rejects_delegate_rationale() {
+    fn tool_approval_user_decider_rejects_delegate_rationale() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
         );
     }
 
-    /// INV-033: the override request carries its exact closed wire shape.
+    /// the override request carries its exact closed wire shape.
     #[test]
-    fn inv033_override_denied_tool_request_has_exact_closed_shape()
+    fn override_denied_tool_request_has_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let override_request = ClientRequest::OverrideDeniedToolRequest {
             command_id: command(4)?,
@@ -16576,11 +16551,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the override receipt and every override rejection carry their
+    /// the override receipt and every override rejection carry their
     /// exact closed wire shapes.
     #[test]
-    fn inv033_override_denial_responses_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn override_denial_responses_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::ToolDenialOverridden {
@@ -16624,8 +16599,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_user_override_event_round_trips()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn tool_approval_user_override_event_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(5)?,
             ServerMessage::SessionEvent {
@@ -16649,7 +16623,7 @@ mod tests {
     /// A user-override decider is approve-only and carries no rationale: a
     /// denial or a rationale under that decider is a malformed frame.
     #[test]
-    fn inv033_tool_approval_user_override_decider_is_approve_only() {
+    fn tool_approval_user_override_decider_is_approve_only() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":null}}}"#,
         );
@@ -16659,14 +16633,14 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_decider_requires_rationale() {
+    fn tool_approval_delegate_decider_requires_rationale() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_deny_event_round_trips_with_derived_reason()
+    fn tool_approval_delegate_deny_event_round_trips_with_derived_reason()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
@@ -16691,14 +16665,14 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_denial_rejects_underived_reason() {
+    fn tool_approval_delegate_denial_rejects_underived_reason() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"forged user reason"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"bounded rationale"}}}"#,
         );
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_rationale_rejects_oversize() {
+    fn tool_approval_delegate_rationale_rejects_oversize() {
         const RATIONALE_FILLER: &str = "x";
         let oversized_rationale =
             RATIONALE_FILLER.repeat(ToolDecisionRationale::MAX_UTF8_BYTES + 1);
@@ -16712,10 +16686,9 @@ mod tests {
         assert_server_malformed(&oversized_frame);
     }
 
-    /// INV-033: every stop rejection carries its exact closed wire shape.
+    /// every stop rejection carries its exact closed wire shape.
     #[test]
-    fn inv033_stop_rejection_details_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn stop_rejection_details_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -16770,10 +16743,10 @@ mod tests {
         )
     }
 
-    /// INV-033: the decision receipt and every decision rejection carry their
+    /// the decision receipt and every decision rejection carry their
     #[test]
-    fn inv033_tool_decision_responses_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn tool_decision_responses_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let approval_receipt = ServerMessage::ToolRequestDecided {
             tool_request_id: uuid(7),
             decision: ToolDecision::Approve {},
@@ -16842,28 +16815,28 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_list_requires_title_query_member() {
+    fn metadata_list_requires_title_query_member() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"include_archived":false,"page_size":"50","after_session_id":null}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_list_requires_cursor_member() {
+    fn metadata_list_requires_cursor_member() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"50"}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_list_rejects_duplicate_required_tags() {
+    fn metadata_list_rejects_duplicate_required_tags() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":["same","same"],"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_list_rejects_empty_title_query() {
+    fn metadata_list_rejects_empty_title_query() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":"","include_archived":false,"page_size":"50","after_session_id":null}}"#,
         );
@@ -16881,35 +16854,35 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_replacement_rejects_empty_title() {
+    fn metadata_replacement_rejects_empty_title() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":"","tags":[],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_replacement_requires_title_member() {
+    fn metadata_replacement_requires_title_member() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"tags":[],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_replacement_rejects_duplicate_tags() {
+    fn metadata_replacement_rejects_duplicate_tags() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":["same","same"],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_duplicate_metadata_attribute_member_is_malformed() {
+    fn duplicate_metadata_attribute_member_is_malformed() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":[],"attributes":{"same":"first","\u0073ame":"second"},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_required_tag_deserializer_has_no_deployment_policy()
+    fn metadata_required_tag_deserializer_has_no_deployment_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         let required_tags = serde_json::to_string(&numbered_metadata_strings(3))?;
         let json = format!(
@@ -16920,7 +16893,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_tag_deserializer_has_no_deployment_policy()
+    fn metadata_summary_tag_deserializer_has_no_deployment_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut tags = numbered_metadata_strings(3);
         tags.sort();
@@ -16965,12 +16938,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the last-writer actor projects every agency durable metadata can
+    /// the last-writer actor projects every agency durable metadata can
     /// record. The domain projection this pins is total by type, so a later
     /// agency reaches the wire only through a variant added here.
     #[test]
-    fn inv033_metadata_writer_actor_round_trips_every_agency()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_writer_actor_round_trips_every_agency() -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_actor_round_trips(MetadataActor::User {}, r#"{"type":"user"}"#)?;
         assert_metadata_actor_round_trips(MetadataActor::Core {}, r#"{"type":"core"}"#)?;
         assert_metadata_actor_round_trips(
@@ -16987,10 +16959,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the actor vocabulary stays closed — an unadmitted spelling and a
+    /// the actor vocabulary stays closed — an unadmitted spelling and a
     /// variant carrying the wrong reference are both malformed frames.
     #[test]
-    fn inv033_metadata_writer_actor_rejects_unadmitted_shapes() {
+    fn metadata_writer_actor_rejects_unadmitted_shapes() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"operator"}}}}"#,
         );
@@ -17003,7 +16975,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_capacity_matches_domain_and_frame_headroom()
+    fn metadata_capacity_matches_domain_and_frame_headroom()
     -> Result<(), Box<dyn std::error::Error>> {
         let exact = SessionMetadata::try_new(
             Some("\u{1}".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES)),
@@ -17078,7 +17050,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_filter_capacity_is_enforced_before_mapping()
+    fn metadata_filter_capacity_is_enforced_before_mapping()
     -> Result<(), Box<dyn std::error::Error>> {
         let exact = ClientRequest::ListSessionMetadata {
             required_tags: Vec::new(),
@@ -17117,8 +17089,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_enforces_aggregate_utf8_capacity()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_summary_enforces_aggregate_utf8_capacity() -> Result<(), Box<dyn std::error::Error>>
+    {
         let individually_valid_but_oversized = ServerMessage::SessionMetadataSummary {
             session_id: uuid(1),
             defaults_version: CanonicalU64::new(1),
@@ -17147,35 +17119,35 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_requires_nullable_title_member() {
+    fn metadata_summary_requires_nullable_title_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"tags":[],"archived":false,"last_writer":null}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_summary_requires_nullable_last_writer_member() {
+    fn metadata_summary_requires_nullable_last_writer_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"title":null,"tags":[],"archived":false}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_page_end_requires_nullable_cursor_member() {
+    fn metadata_page_end_requires_nullable_cursor_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_page_end","session_count":"0"}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_point_read_requires_nullable_last_writer_member() {
+    fn metadata_point_read_requires_nullable_last_writer_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_point_read_requires_nullable_title_member() {
+    fn metadata_point_read_requires_nullable_title_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"tags":[],"attributes":{},"archived":false},"last_writer":null}}"#,
         );
@@ -17193,7 +17165,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_rejects_unsorted_tags() -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_summary_rejects_unsorted_tags() -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_message_rejected(ServerMessage::SessionMetadataSummary {
             session_id: uuid(1),
             defaults_version: CanonicalU64::new(1),
@@ -17212,7 +17184,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_rejects_unwritten_nondefault_content()
+    fn metadata_summary_rejects_unwritten_nondefault_content()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_message_rejected(ServerMessage::SessionMetadataSummary {
             session_id: uuid(1),
@@ -17229,7 +17201,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_read_rejects_written_content_without_a_writer()
+    fn metadata_read_rejects_written_content_without_a_writer()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_message_rejected(ServerMessage::SessionMetadata {
             session_id: uuid(1),
@@ -17239,8 +17211,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_page_rejects_a_cursor_after_an_empty_page()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_page_rejects_a_cursor_after_an_empty_page() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_metadata_message_rejected(ServerMessage::SessionMetadataPageEnd {
             session_count: CanonicalU64::new(0),
             next_after_session_id: Some(uuid(1)),
@@ -17261,8 +17233,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_single_vocabulary_admits_reconciliation_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn single_vocabulary_admits_reconciliation_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let model_reconciliation = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
             acceptance_position: CanonicalU64::new(1),
@@ -17324,11 +17295,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033 / INV-048: queued goal retirement has one exact closed wire
+    /// queued goal retirement has one exact closed wire
     /// shape and round-trips its immutable turn identity.
     #[test]
-    fn inv033_inv048_goal_turn_retired_event_round_trips() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn goal_turn_retired_event_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::SessionEvent {
             cursor: CanonicalU64::new(1),
             session_id: uuid(1),
@@ -17350,7 +17320,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_client_requests_round_trip_their_closed_shapes()
+    fn delegation_client_requests_round_trip_their_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         const SPAWN_FRAME_REQUEST: u64 = 34;
         const AWAIT_FRAME_REQUEST: u64 = 35;
@@ -17397,7 +17367,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_receipts_round_trip_result_and_delivery_correlation()
+    fn delegation_receipts_round_trip_result_and_delivery_correlation()
     -> Result<(), Box<dyn std::error::Error>> {
         const SPAWN_RECEIPT_REQUEST: u64 = 37;
         const AWAIT_RECEIPT_REQUEST: u64 = 38;
@@ -17454,7 +17424,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_request_rejections_round_trip_closed_evidence()
+    fn delegation_request_rejections_round_trip_closed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         const NOT_EXECUTABLE_FRAME_REQUEST: u64 = 41;
         const ORDINAL_EXHAUSTED_FRAME_REQUEST: u64 = 42;
@@ -17523,7 +17493,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delivery_sequence_exhaustion_round_trips_closed_evidence()
+    fn delivery_sequence_exhaustion_round_trips_closed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         const FRAME_REQUEST: u64 = 51;
         let ids = delegation_wire_identities();
@@ -17550,7 +17520,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_message_identity_collision_round_trips_closed_evidence()
+    fn message_identity_collision_round_trips_closed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         const FRAME_REQUEST: u64 = 54;
         let ids = delegation_wire_identities();
@@ -17575,7 +17545,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delivery_sequence_exhaustion_rejects_a_nonterminal_counter()
+    fn delivery_sequence_exhaustion_rejects_a_nonterminal_counter()
     -> Result<(), Box<dyn std::error::Error>> {
         const FRAME_REQUEST: u64 = 52;
         let ids = delegation_wire_identities();
@@ -17598,7 +17568,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_request_content_validation_is_left_to_application_input()
+    fn delegation_request_content_validation_is_left_to_application_input()
     -> Result<(), Box<dyn std::error::Error>> {
         const EMPTY_TASK_FRAME_REQUEST: u64 = 43;
         const NUL_MESSAGE_FRAME_REQUEST: u64 = 44;
@@ -17651,7 +17621,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_parent_caused_child_results_keep_policy_action_separate_from_parent_reason()
+    fn parent_caused_child_results_keep_policy_action_separate_from_parent_reason()
     -> Result<(), Box<dyn std::error::Error>> {
         const STOPPED_BY_CANCEL_FRAME_REQUEST: u64 = 46;
         const CANCELLED_BY_STOP_FRAME_REQUEST: u64 = 47;
@@ -17703,7 +17673,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_child_result_rejects_repeated_spawn_and_await_request_identity()
+    fn child_result_rejects_repeated_spawn_and_await_request_identity()
     -> Result<(), Box<dyn std::error::Error>> {
         const REPEATED_REQUEST_FRAME_REQUEST: u64 = 48;
         let ids = delegation_wire_identities();
@@ -17728,8 +17698,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_message_receipt_rejects_zero_delivery_sequence()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn message_receipt_rejects_zero_delivery_sequence() -> Result<(), Box<dyn std::error::Error>> {
         const ZERO_DELIVERY_FRAME_REQUEST: u64 = 49;
         let ids = delegation_wire_identities();
         let zero_delivery = ServerFrame::try_new(
@@ -17748,8 +17717,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_await_registration_rejects_foreground_mode() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn await_registration_rejects_foreground_mode() -> Result<(), Box<dyn std::error::Error>> {
         const FOREGROUND_REGISTRATION_FRAME_REQUEST: u64 = 50;
         let ids = delegation_wire_identities();
         let foreground_registration = ServerFrame::try_new(
@@ -17769,8 +17737,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_message_receipt_rejects_the_reserved_spawn_ordinal()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn message_receipt_rejects_the_reserved_spawn_ordinal() -> Result<(), Box<dyn std::error::Error>>
+    {
         const FRAME_REQUEST: u64 = 53;
         let ids = delegation_wire_identities();
         let receipt = ServerFrame::try_new(
@@ -18086,8 +18054,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inherits_imported_transcript_and_tool_event_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inherits_imported_transcript_and_tool_event_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let imported = ServerMessage::TranscriptTextEntry {
             entry_index: CanonicalU64::new(0),
             source_session_id: uuid(1),
@@ -18125,17 +18093,17 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: an explicit null is not a member of the closed delivery vocabulary.
+    /// an explicit null is not a member of the closed delivery vocabulary.
     #[test]
-    fn inv033_submit_delivery_rejects_explicit_null() {
+    fn submit_delivery_rejects_explicit_null() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":"content","expected_defaults_version":"1","delivery":null}}"#,
         );
     }
 
-    /// INV-033: steering has one exact closed shape.
+    /// steering has one exact closed shape.
     #[test]
-    fn inv033_steering_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
+    fn steering_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let steering_request = ClientRequest::SubmitInput {
             command_id: command(1)?,
             session_id: uuid(2),
@@ -18170,9 +18138,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: queueing carries its exact active-turn and defaults guards.
+    /// queueing carries its exact active-turn and defaults guards.
     #[test]
-    fn inv033_queueing_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
+    fn queueing_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let queue_frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(2)?,
@@ -18209,10 +18177,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: explicit start-when-idle has one closed shape.
+    /// explicit start-when-idle has one closed shape.
     #[test]
-    fn inv033_explicit_start_when_idle_has_a_closed_shape() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn explicit_start_when_idle_has_a_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(3)?,
@@ -18245,11 +18212,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: configured start and queue treatments reject a missing
+    /// configured start and queue treatments reject a missing
     /// defaults guard before encoding.
     #[test]
-    fn inv033_configured_delivery_rejects_missing_defaults()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn configured_delivery_rejects_missing_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let start = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(4)?,
@@ -18282,10 +18248,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: configuration-free steering rejects an independently supplied
+    /// configuration-free steering rejects an independently supplied
     /// defaults version before encoding.
     #[test]
-    fn inv033_steering_rejects_independent_defaults_configuration()
+    fn steering_rejects_independent_defaults_configuration()
     -> Result<(), Box<dyn std::error::Error>> {
         let invalid = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -18321,10 +18287,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: steering against an already-stopping turn carries the exact
+    /// steering against an already-stopping turn carries the exact
     #[test]
-    fn inv033_stopping_steering_rejection_has_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn stopping_steering_rejection_has_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_server_message_round_trip(
             request(4)?,
             ServerMessage::Error {
@@ -18342,8 +18308,7 @@ mod tests {
 
     /// its accepted input, position, and exact source turn.
     #[test]
-    fn inv033_steering_receipt_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn steering_receipt_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let steering_response = ServerMessage::SteeringSubmitted {
             session_id: uuid(2),
             accepted_input_id: uuid(6),
@@ -18389,8 +18354,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_server_message_family_has_exact_closed_wire_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn server_message_family_has_exact_closed_wire_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::SessionCreated {
@@ -19034,11 +18999,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-032 / INV-053: a late follower's authoritative turn projection
+    /// a late follower's authoritative turn projection
     /// carries the same complete frozen settings evidence as the durable event.
     #[test]
-    fn inv032_inv053_transcript_turn_round_trips_frozen_settings()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn transcript_turn_round_trips_frozen_settings() -> Result<(), Box<dyn std::error::Error>> {
         let settings = settings_snapshot_fixture();
         let message = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
@@ -19068,10 +19032,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-012: queued user content is validated before a server frame can be
+    /// queued user content is validated before a server frame can be
     /// encoded, including when no model-settings snapshot is present.
     #[test]
-    fn inv012_transcript_turn_rejects_invalid_queued_content_before_encoding() {
+    fn transcript_turn_rejects_invalid_queued_content_before_encoding() {
         let result = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
             ServerMessage::TranscriptTurn {
@@ -19088,10 +19052,10 @@ mod tests {
         assert_eq!(result, Err(FrameValidationError::UserContentShape));
     }
 
-    /// INV-033: queued turn settings evidence belongs to the accepted input
+    /// queued turn settings evidence belongs to the accepted input
     /// named by the authoritative queued state.
     #[test]
-    fn inv033_transcript_turn_rejects_settings_for_another_queued_input() {
+    fn transcript_turn_rejects_settings_for_another_queued_input() {
         let settings = settings_snapshot_fixture();
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
@@ -19122,10 +19086,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: terminal turn settings evidence belongs to the turn named by
+    /// terminal turn settings evidence belongs to the turn named by
     /// the authoritative transcript projection.
     #[test]
-    fn inv033_transcript_turn_rejects_settings_for_another_terminal_turn() {
+    fn transcript_turn_rejects_settings_for_another_terminal_turn() {
         let settings = settings_snapshot_fixture();
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
@@ -19157,18 +19121,18 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: required-nullable turn settings cannot be omitted.
+    /// required-nullable turn settings cannot be omitted.
     #[test]
-    fn inv033_transcript_turn_requires_model_settings_member() {
+    fn transcript_turn_requires_model_settings_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"text","text":"queued request"}]}}}"#,
         );
     }
 
-    /// INV-033: complete settings snapshots cannot contradict their retained
+    /// complete settings snapshots cannot contradict their retained
     /// precedence provenance.
     #[test]
-    fn inv033_model_settings_snapshot_rejects_inconsistent_effective_values() {
+    fn model_settings_snapshot_rejects_inconsistent_effective_values() {
         let mut model_settings = session_settings_snapshot_fixture();
         model_settings.effective.reasoning_level = Some(ReasoningLevel::Low);
         let error = ServerFrame::try_new(
@@ -19183,10 +19147,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: only the exact all-inherit provider-default snapshot is
+    /// only the exact all-inherit provider-default snapshot is
     /// model-independent.
     #[test]
-    fn inv033_nondefault_settings_snapshot_requires_validation_identity() {
+    fn nondefault_settings_snapshot_requires_validation_identity() {
         let mut model_settings = session_settings_snapshot_fixture();
         model_settings.validated_for_selection_id = None;
 
@@ -19202,9 +19166,9 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: durable defaults snapshots cannot retain a per-call layer.
+    /// durable defaults snapshots cannot retain a per-call layer.
     #[test]
-    fn inv033_defaults_snapshot_rejects_per_call_settings() {
+    fn defaults_snapshot_rejects_per_call_settings() {
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
             ServerMessage::SessionCreated {
@@ -19217,10 +19181,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: the separately reported per-call contribution must equal the
+    /// the separately reported per-call contribution must equal the
     /// retained precedence layer.
     #[test]
-    fn inv033_turn_settings_event_rejects_crosswired_per_call_override() {
+    fn turn_settings_event_rejects_crosswired_per_call_override() {
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
             ServerMessage::SessionEvent {
@@ -19246,9 +19210,9 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: adjustments require a distinct prior direct validation identity.
+    /// adjustments require a distinct prior direct validation identity.
     #[test]
-    fn inv033_turn_settings_event_rejects_unchanged_adjustment_source() {
+    fn turn_settings_event_rejects_unchanged_adjustment_source() {
         let mut settings = settings_snapshot_fixture();
         settings.precedence.session = settings.precedence.per_call;
         settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
@@ -19282,10 +19246,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: a distinct prior direct selection authenticates automatic
+    /// a distinct prior direct selection authenticates automatic
     /// model-change adjustment evidence for the frozen turn.
     #[test]
-    fn inv033_turn_settings_event_accepts_distinct_adjustment_source() {
+    fn turn_settings_event_accepts_distinct_adjustment_source() {
         let mut settings = settings_snapshot_fixture();
         settings.precedence.session = settings.precedence.per_call;
         settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
@@ -19318,10 +19282,10 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// INV-033: caller and adjustment evidence must derive the exact installed
+    /// caller and adjustment evidence must derive the exact installed
     /// defaults snapshot.
     #[test]
-    fn inv033_settings_change_event_rejects_unrelated_installed_snapshot() {
+    fn settings_change_event_rejects_unrelated_installed_snapshot() {
         let prior_settings = provider_default_settings_snapshot_fixture();
         let installed_settings = session_settings_snapshot_fixture();
         let model = ModelSelection::Direct {
@@ -19351,10 +19315,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: an automatic model-change adjustment cannot rewrite a value
+    /// an automatic model-change adjustment cannot rewrite a value
     /// explicitly supplied by the caller of that same defaults replacement.
     #[test]
-    fn inv033_settings_change_rejects_adjustment_to_caller_explicit_value() {
+    fn settings_change_rejects_adjustment_to_caller_explicit_value() {
         let prior_settings = provider_default_settings_snapshot_fixture();
         let mut installed_settings = provider_default_settings_snapshot_fixture();
         installed_settings.precedence.session.reasoning_level =
@@ -19398,10 +19362,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: defaults reads bind a direct model to the snapshot validation
+    /// defaults reads bind a direct model to the snapshot validation
     /// identity.
     #[test]
-    fn inv033_defaults_read_rejects_crosswired_direct_settings() {
+    fn defaults_read_rejects_crosswired_direct_settings() {
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
             ServerMessage::SessionDefaults {
@@ -19420,10 +19384,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-012 / INV-033: settings-change events reject both reserved command
+    /// settings-change events reject both reserved command
     /// identities during wire decoding.
     #[test]
-    fn inv012_inv033_settings_change_event_rejects_command_sentinels() {
+    fn settings_change_event_rejects_command_sentinels() {
         let nil = format!(
             "{{\"version\":1,\"request_id\":\"1\",\"message\":{{\"type\":\"session_event\",\"cursor\":\"1\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"event\":{{\"type\":\"session_model_settings_changed\",\"command_id\":\"00000000-0000-0000-0000-000000000000\",\"prior_defaults_version\":\"1\",\"installed_defaults_version\":\"2\",\"prior_model\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"installed_model\":{{\"kind\":\"alias\",\"alias_id\":\"00000000-0000-0000-0000-000000000005\"}},\"prior_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"installed_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"caller_override\":{{\"reasoning_level\":{{\"kind\":\"inherit\"}},\"fast_mode\":{{\"kind\":\"inherit\"}},\"service_tier\":{{\"kind\":\"inherit\"}}}},\"adjustments\":[]}}}}}}"
         );
@@ -19443,10 +19407,10 @@ mod tests {
         );
     }
 
-    /// INV-033: steering inherits its source turn and cannot carry an
+    /// steering inherits its source turn and cannot carry an
     /// independent settings contribution.
     #[test]
-    fn inv033_steering_rejects_a_model_settings_override() {
+    fn steering_rejects_a_model_settings_override() {
         let mut model_settings = ModelSettingsOverlay::inherit_all();
         model_settings.reasoning_level = SettingOverlay::Value(ReasoningLevel::High);
         let error = ClientFrame::try_new(
@@ -19706,7 +19670,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inv044_runner_placed_session_summary_round_trips_complete_projection()
+    fn runner_placed_session_summary_round_trips_complete_projection()
     -> Result<(), Box<dyn std::error::Error>> {
         let runner = RunnerProjection::try_new(
             RunnerProjectionSelector::CapabilityClass {
@@ -19743,7 +19707,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_summary_rejects_an_omitted_required_nullable_runner() {
+    fn session_summary_rejects_an_omitted_required_nullable_runner() {
         let encoded = br#"{"version":1,"request_id":"1","message":{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000003"},"placement_version":"1","placement":{"kind":"pathless"}}}
 "#;
 

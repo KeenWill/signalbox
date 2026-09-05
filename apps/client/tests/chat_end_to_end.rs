@@ -553,7 +553,7 @@ fn last_line_position(lines: &[String], needle: &str) -> Result<usize, Box<dyn E
         .ok_or_else(|| io::Error::other(format!("output omitted {needle}")).into())
 }
 
-/// S10 / INV-032: the interactive client keeps its follow connection live
+/// S10: the interactive client keeps its follow connection live
 /// while a second connection approves a streamed tool proposal, then presents
 /// the result and continuation delta before the durable terminal reply.
 #[tokio::test(flavor = "multi_thread")]
@@ -637,7 +637,7 @@ async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dy
     fixture.stop().await
 }
 
-/// S07 / INV-029: the interactive loop keeps accepted work queued until the
+/// S07: the interactive loop keeps accepted work queued until the
 /// durable activation event. Its independent request path then steers that
 /// exact active turn before `:stop` atomically cancels it and admits exact
 /// successor content without closing the follow connection.

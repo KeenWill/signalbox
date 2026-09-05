@@ -7,7 +7,7 @@ use super::{
     test_support::*, tool::*,
 };
 
-/// INV-035: sanitizing a dispatch-unknown diagnostic preserves its
+/// sanitizing a dispatch-unknown diagnostic preserves its
 /// commit-ambiguous classification through a credential-safe executor error.
 #[tokio::test]
 async fn web_search_sanitized_dispatch_unknown_stays_commit_ambiguous() {
@@ -43,7 +43,7 @@ async fn web_search_sanitized_dispatch_unknown_stays_commit_ambiguous() {
     );
 }
 
-/// INV-035: credential collisions preserve definitive invalid-credential
+/// credential collisions preserve definitive invalid-credential
 /// evidence without retaining the colliding diagnostic detail.
 #[test]
 fn credential_collision_retains_invalid_credential_evidence() {
@@ -55,7 +55,7 @@ fn credential_collision_retains_invalid_credential_evidence() {
     assert_eq!(detail, CREDENTIAL_UNAVAILABLE_DETAIL);
 }
 
-/// INV-035: credential collisions preserve definitive request-failure
+/// credential collisions preserve definitive request-failure
 /// evidence without retaining the colliding diagnostic detail.
 #[test]
 fn credential_collision_retains_request_failure_evidence() {
@@ -67,7 +67,7 @@ fn credential_collision_retains_request_failure_evidence() {
     assert_eq!(detail, REQUEST_FAILED_DETAIL);
 }
 
-/// INV-035: credential collisions preserve definitive provider-rejection
+/// credential collisions preserve definitive provider-rejection
 /// evidence without retaining the colliding diagnostic detail.
 #[test]
 fn credential_collision_retains_provider_rejection_evidence() {
@@ -79,7 +79,7 @@ fn credential_collision_retains_provider_rejection_evidence() {
     assert_eq!(detail, PROVIDER_REJECTED_DETAIL);
 }
 
-/// INV-035: credential collisions preserve definitive invalid-response
+/// credential collisions preserve definitive invalid-response
 /// evidence without retaining the colliding diagnostic detail.
 #[test]
 fn credential_collision_retains_invalid_response_evidence() {
@@ -91,7 +91,7 @@ fn credential_collision_retains_invalid_response_evidence() {
     assert_eq!(detail, INVALID_RESPONSE_DETAIL);
 }
 
-/// INV-035: credential collisions preserve definitive response-overflow
+/// credential collisions preserve definitive response-overflow
 /// evidence without retaining the colliding diagnostic detail.
 #[test]
 fn credential_collision_retains_response_overflow_evidence() {
@@ -103,7 +103,7 @@ fn credential_collision_retains_response_overflow_evidence() {
     assert_eq!(detail, INVALID_RESPONSE_DETAIL);
 }
 
-/// INV-035: a definitive failure detail that collides with the credential
+/// a definitive failure detail that collides with the credential
 /// is omitted without converting the failure into an executor error.
 #[test]
 fn credential_collision_omits_known_failure_detail() {
@@ -118,7 +118,7 @@ fn credential_collision_omits_known_failure_detail() {
     assert_eq!(known_failure_detail(evidence), None);
 }
 
-/// INV-035: a colliding definitive request-failure detail commits through
+/// a colliding definitive request-failure detail commits through
 /// the public service path before dispatch rather than invoking crash
 /// classification.
 #[tokio::test]
@@ -130,7 +130,7 @@ async fn credential_collision_commits_request_failure_without_crash() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: a case-normalized definitive detail collision is omitted while
+/// a case-normalized definitive detail collision is omitted while
 /// the public service commits a pre-dispatch known failure.
 #[tokio::test]
 async fn case_normalized_detail_collision_commits_request_failure() {
@@ -141,7 +141,7 @@ async fn case_normalized_detail_collision_commits_request_failure() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: a dynamic provider-rejection detail that collides with the
+/// a dynamic provider-rejection detail that collides with the
 /// credential is omitted while the public service commits known failure.
 #[tokio::test]
 async fn credential_collision_commits_provider_rejection_without_crash() {
@@ -152,7 +152,7 @@ async fn credential_collision_commits_provider_rejection_without_crash() {
     assert_eq!(searches, 1);
 }
 
-/// INV-035: a credential spanning the populated-detail wrapper and a
+/// a credential spanning the populated-detail wrapper and a
 /// dynamic provider rejection falls back to definitive detail-free evidence.
 #[tokio::test]
 async fn wrapper_spanning_provider_detail_collision_commits_known_failure() {
@@ -166,7 +166,7 @@ async fn wrapper_spanning_provider_detail_collision_commits_known_failure() {
     assert_eq!(searches, 1);
 }
 
-/// INV-035: a post-response sanitization failure is definitive invalid
+/// a post-response sanitization failure is definitive invalid
 /// response evidence rather than a dispatch-ambiguous executor error.
 #[tokio::test]
 async fn web_search_post_response_sanitization_failure_is_known_failed() {
@@ -211,7 +211,7 @@ async fn non_utf8_credential_value_commits_known_failure_without_dispatch() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: an interior HTTP-header-invalid byte is a definitive
+/// an interior HTTP-header-invalid byte is a definitive
 /// pre-dispatch failure and never reaches the injected transport.
 #[tokio::test]
 async fn interior_newline_credential_commits_without_dispatch() {
@@ -222,10 +222,10 @@ async fn interior_newline_credential_commits_without_dispatch() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: a credential at the byte bound crosses all boundary preflights
+/// a credential at the byte bound crosses all boundary preflights
 /// without repeated normalization and remains usable.
 #[tokio::test]
-async fn inv035_credential_at_byte_bound_reaches_transport_with_linear_scan() {
+async fn credential_at_byte_bound_reaches_transport_with_linear_scan() {
     let credential = vec![b'x'; MAX_CREDENTIAL_BYTES];
 
     let (outcome, searches) = execute_raw_credential_through_service(&credential).await;
@@ -234,7 +234,7 @@ async fn inv035_credential_at_byte_bound_reaches_transport_with_linear_scan() {
     assert_eq!(searches, 1);
 }
 
-/// INV-035: a credential with trailing HTTP field whitespace commits
+/// a credential with trailing HTTP field whitespace commits
 /// definitive pre-dispatch evidence without reaching injected transport.
 #[tokio::test]
 async fn trailing_header_whitespace_credential_commits_without_dispatch() {

@@ -646,10 +646,10 @@ mod tests {
         )
     }
 
-    /// INV-015: projection changes model visibility without removing any
+    /// projection changes model visibility without removing any
     /// durable entry from the complete frontier.
     #[test]
-    fn inv015_projection_is_summary_plus_suffix_while_source_stays_complete() {
+    fn projection_is_summary_plus_suffix_while_source_stays_complete() {
         let first = entry(1);
         let through = entry(2);
         let suffix = entry(3);
@@ -676,10 +676,10 @@ mod tests {
         );
     }
 
-    /// INV-015: stored compaction facts must agree with the summary payload
+    /// stored compaction facts must agree with the summary payload
     /// and exact source-frontier range.
     #[test]
-    fn inv015_projection_rejects_a_range_that_hides_unsummarized_prefix() {
+    fn projection_rejects_a_range_that_hides_unsummarized_prefix() {
         let first = entry(1);
         let hidden = entry(2);
         let through = entry(3);
@@ -692,10 +692,10 @@ mod tests {
         );
     }
 
-    /// INV-015: a boundary cannot separate a tool proposal from its correlated
+    /// a boundary cannot separate a tool proposal from its correlated
     /// result because the suffix would be invalid provider conversation history.
     #[test]
-    fn inv015_projection_rejects_open_tool_exchange_boundary() {
+    fn projection_rejects_open_tool_exchange_boundary() {
         let proposal = tool_use(1, 9);
         let result = tool_denied(2, 9);
         let range = ContextCompactionRange::inclusive(proposal.reference(), proposal.reference());
@@ -707,10 +707,10 @@ mod tests {
         );
     }
 
-    /// INV-015: stored compaction facts must agree with the summary payload
+    /// stored compaction facts must agree with the summary payload
     /// and exact source-frontier range.
     #[test]
-    fn inv015_compaction_reconstitution_preserves_exact_provenance() {
+    fn compaction_reconstitution_preserves_exact_provenance() {
         let first = entry(1);
         let through = entry(2);
         let range = ContextCompactionRange::inclusive(first.reference(), through.reference());
@@ -770,10 +770,10 @@ mod tests {
         assert_eq!(compaction.summary_entry(), summary.identity());
     }
 
-    /// INV-015: successor ranges are interpreted in the current model-visible
+    /// successor ranges are interpreted in the current model-visible
     /// order even when a retained suffix physically precedes the prior summary.
     #[test]
-    fn inv015_successor_projection_uses_visible_order_across_prior_summary() {
+    fn successor_projection_uses_visible_order_across_prior_summary() {
         let first = entry(1);
         let through = entry(2);
         let retained_suffix = entry(3);

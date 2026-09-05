@@ -199,10 +199,10 @@ Signalbox's evidence-shaped contract (exit-0-without-a-terminal-marker is
 BoundaryLoss, not success). Open design tensions the track's spec-diff must
 resolve, not decide here: (1) a subprocess is one physical request the adapter
 cannot prove is retry-free internally, so the spec-diff has to reconcile that
-boundary with the one-physical-request invariants (INV-025/026); (2) for the
-wrapped-CLI tracks below, auth rides the CLI's ambient subscription login, so
-the spec-diff has to reconcile that with the credential-reference boundary and
-per-request value durability the `ModelRuntime` contract pins (recovered calls,
+boundary with the one-physical-request invariants; (2) for the wrapped-CLI
+tracks below, auth rides the CLI's ambient subscription login, so the spec-diff
+has to reconcile that with the credential-reference boundary and per-request
+value durability the `ModelRuntime` contract pins (recovered calls,
 logged-in-account changes).
 
 The FIRST of these to wire also introduces the provider-dispatch mechanism
@@ -235,7 +235,7 @@ an intended external-control surface, and the runtime trait seam keeps a future
 direct adapter a drop-in replacement behind the same two-method contract.
 
 On open tension (1) above, the owner set the dispatch-boundary direction — it
-governs any subprocess adapter, both wrap tracks included: INV-025/026 are
+governs any subprocess adapter, both wrap tracks included: the invariants are
 reconciled by re-anchoring the invariant's subject to the adapter's unit of
 irrevocable dispatch — one HTTPS request for the direct adapters, one process
 spawn for a subprocess adapter. At that boundary the invariants hold at full
@@ -695,9 +695,9 @@ excluded, or fails closed to confirmation. A runner never widens its own
 approval surface, and the no-permission-downgrade-on-re-registration point above
 stands. Credential doctrine for the first slice: a tool declaring credential
 access is Daemon-only, and signalboxd hands no credentials over the runner
-protocol — INV-035 read as placement law. Runners may hold their own ambient
-machine or environment credentials, which sit outside this model;
-credential-scoped runner classes are a recorded deferred extension.
+protocol — read as placement law. Runners may hold their own ambient machine or
+environment credentials, which sit outside this model; credential-scoped runner
+classes are a recorded deferred extension.
 
 Runner identity and session placement, kernel only (the design pass owns the
 rest): runner identity is logical — enrollment-based, not hardware-fingerprinted

@@ -2472,7 +2472,7 @@ async fn stale_stopped_dispatch_requeues_and_redispatches_after_release()
     Ok(())
 }
 
-/// INV-069: a completed judge escalation in a repository-watch-created session
+/// a completed judge escalation in a repository-watch-created session
 /// cannot retain the singleton as unattended active work. Its normal
 /// failed-turn/blocked-goal closeout releases the dispatch, leaves an auditable
 /// escalation record, and makes the same event eligible for a fresh dispatch.
@@ -2582,7 +2582,7 @@ async fn headless_approval_escalation_releases_rearms_and_redispatches()
     Ok(())
 }
 
-/// INV-069: the dispatch fence describes the generation the dispatch
+/// the dispatch fence describes the generation the dispatch
 /// commissioned and nothing else. A session that goes on to accept an unrelated
 /// successor goal judges that goal's requests without the fence, so its
 /// escalation parks for the user whose goal it is instead of taking the
@@ -6032,8 +6032,7 @@ async fn terminal_cutoff_preserves_an_obligation_for_its_own_event() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv069_dispatch_admission_records_bounded_durable_start_leases()
--> Result<(), Box<dyn Error>> {
+async fn dispatch_admission_records_bounded_durable_start_leases() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for_with_lease(
         rule_with_dispatch_action_count(32)?,
         Some(Duration::from_secs(10 * 60)),
@@ -6065,8 +6064,7 @@ async fn inv069_dispatch_admission_records_bounded_durable_start_leases()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv069_retired_generation_one_turn_cannot_prepare_after_expiry()
--> Result<(), Box<dyn Error>> {
+async fn retired_generation_one_turn_cannot_prepare_after_expiry() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for_with_lease(
         one_action_rule(Duration::ZERO)?,
         Some(Duration::from_secs(1)),
@@ -6120,7 +6118,7 @@ async fn inv069_retired_generation_one_turn_cannot_prepare_after_expiry()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv069_expiry_retires_releases_and_rearms_the_dispatch() -> Result<(), Box<dyn Error>> {
+async fn expiry_retires_releases_and_rearms_the_dispatch() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for_with_lease(
         one_action_rule(Duration::ZERO)?,
         Some(Duration::from_millis(1)),
@@ -6181,8 +6179,8 @@ async fn inv069_expiry_retires_releases_and_rearms_the_dispatch() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv069_quarantined_expired_lease_does_not_block_the_next_candidate()
--> Result<(), Box<dyn Error>> {
+async fn quarantined_expired_lease_does_not_block_the_next_candidate() -> Result<(), Box<dyn Error>>
+{
     let fixture = dispatch_fixture_for_with_lease(
         rule_with_dispatch_action_count(2)?,
         Some(Duration::from_millis(1)),
@@ -6258,8 +6256,8 @@ async fn startup_drain_skips_a_quarantined_expired_lease() -> Result<(), Box<dyn
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv069_expiry_retires_a_lease_without_stopping_its_successor_goal()
--> Result<(), Box<dyn Error>> {
+async fn expiry_retires_a_lease_without_stopping_its_successor_goal() -> Result<(), Box<dyn Error>>
+{
     let fixture = dispatch_fixture_for_with_lease(
         one_action_rule(Duration::ZERO)?,
         Some(Duration::from_secs(1)),

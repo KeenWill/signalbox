@@ -93,7 +93,7 @@ fn web_search_result_preprocesses_scheme_relative_unicode_url() {
     assert_eq!(result.url(), FIXTURE_CANONICAL_UNICODE_RESULT_URL);
 }
 
-/// INV-035: result URL user information is discarded by the typed parser and
+/// result URL user information is discarded by the typed parser and
 /// cannot reach tool evidence.
 #[test]
 fn web_search_result_drops_parsed_user_information() {
@@ -107,7 +107,7 @@ fn web_search_result_drops_parsed_user_information() {
     assert_eq!(result.url(), FIXTURE_RESULT_URL);
 }
 
-/// INV-035: result URL query parameters not named by the explicit allowlist
+/// result URL query parameters not named by the explicit allowlist
 /// are discarded before output construction.
 #[test]
 fn web_search_result_drops_unapproved_query_parameters() {
@@ -121,7 +121,7 @@ fn web_search_result_drops_unapproved_query_parameters() {
     assert_eq!(result.url(), FIXTURE_RESULT_URL);
 }
 
-/// INV-035: result URL fragments are discarded before output construction.
+/// result URL fragments are discarded before output construction.
 #[test]
 fn web_search_result_drops_fragments() {
     let result = WebSearchResult::try_new(WebSearchResultFields {
@@ -134,7 +134,7 @@ fn web_search_result_drops_fragments() {
     assert_eq!(result.url(), FIXTURE_RESULT_URL);
 }
 
-/// INV-035: provider text is entity-escaped while the response is parsed,
+/// provider text is entity-escaped while the response is parsed,
 /// before any evidence renderer can observe it.
 #[test]
 fn web_search_result_entity_escapes_provider_text() {
@@ -149,7 +149,7 @@ fn web_search_result_entity_escapes_provider_text() {
     assert_eq!(result.snippet(), FIXTURE_ESCAPED_MARKUP_SNIPPET);
 }
 
-/// INV-035: provider response and error diagnostics never render
+/// provider response and error diagnostics never render
 /// provider-controlled fields that could reflect the API key.
 #[test]
 fn web_search_debug_output_omits_reflected_credential() {
@@ -171,7 +171,7 @@ fn web_search_debug_output_omits_reflected_credential() {
     assert!(!format!("{error:?}").contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: response diagnostics do not render a result count that can equal
+/// response diagnostics do not render a result count that can equal
 /// a valid request credential.
 #[test]
 fn web_search_response_debug_omits_credential_shaped_result_count() {

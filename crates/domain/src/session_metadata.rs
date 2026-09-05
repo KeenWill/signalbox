@@ -1007,9 +1007,9 @@ mod tests {
         assert_eq!(snapshot.last_writer(), None);
     }
 
-    /// S25 / INV-013: archive is metadata on the same durable session identity.
+    /// S25: archive is metadata on the same durable session identity.
     #[test]
-    fn inv013_recorded_snapshot_preserves_identity_and_archive_state() {
+    fn recorded_snapshot_preserves_identity_and_archive_state() {
         let session = session_id(1);
         let content = metadata(true);
         let writer = SessionMetadataLastWriter::new(
@@ -1025,10 +1025,10 @@ mod tests {
         assert_eq!(snapshot.last_writer(), Some(writer));
     }
 
-    /// INV-012: comparison equality excludes only durable command identity and
+    /// comparison equality excludes only durable command identity and
     /// treats set/map input order canonically.
     #[test]
-    fn inv012_command_equality_covers_canonical_payload_not_identity() {
+    fn command_equality_covers_canonical_payload_not_identity() {
         let first = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let another_identity =
             ReplaceSessionMetadata::new(command_id(3), session_id(2), metadata(false));
@@ -1095,10 +1095,10 @@ mod tests {
         assert_eq!(command.actor(), Actor::User);
     }
 
-    /// INV-012: tool agency is semantic replay payload rather than an
+    /// tool agency is semantic replay payload rather than an
     /// interchangeable attribution side channel.
     #[test]
-    fn inv012_command_equality_includes_tool_actor() {
+    fn command_equality_includes_tool_actor() {
         let user = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let tool = ReplaceSessionMetadata::new_for_tool(
             command_id(1),
@@ -1198,10 +1198,10 @@ mod tests {
         assert_eq!(rejected.session(), command.session());
     }
 
-    /// INV-012: complete matching stored facts reconstruct the exact command
+    /// complete matching stored facts reconstruct the exact command
     /// and its recorded applied receipt without consulting current metadata.
     #[test]
-    fn inv012_matching_applied_facts_reconstitute() {
+    fn matching_applied_facts_reconstitute() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(true));
         let updated_at = SessionMetadataUpdatedAt::from_unix_micros(17);
         let reconstructed = ReplaceSessionMetadataReconstitutionInput::applied(
@@ -1225,10 +1225,10 @@ mod tests {
         );
     }
 
-    /// INV-012: matching tool-attributed facts reconstruct the exact command
+    /// matching tool-attributed facts reconstruct the exact command
     /// and last-writer agency.
     #[test]
-    fn inv012_matching_tool_applied_facts_reconstitute() {
+    fn matching_tool_applied_facts_reconstitute() {
         let request = tool_request_id(3);
         let command = ReplaceSessionMetadata::new_for_tool(
             command_id(1),
@@ -1260,9 +1260,9 @@ mod tests {
         );
     }
 
-    /// INV-012: a recorded user command cannot substitute recovery agency.
+    /// a recorded user command cannot substitute recovery agency.
     #[test]
-    fn inv012_applied_reconstitution_rejects_recovery_for_user_command() {
+    fn applied_reconstitution_rejects_recovery_for_user_command() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let input = ReplaceSessionMetadataReconstitutionInput::applied(
             command.clone(),
@@ -1284,9 +1284,9 @@ mod tests {
         assert_eq!(error.into_parts().0.command(), &command);
     }
 
-    /// INV-012: a rejected user command cannot substitute recovery agency.
+    /// a rejected user command cannot substitute recovery agency.
     #[test]
-    fn inv012_rejected_reconstitution_rejects_recovery_for_user_command() {
+    fn rejected_reconstitution_rejects_recovery_for_user_command() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let error = ReplaceSessionMetadataReconstitutionInput::rejected_session_not_found(
             command.clone(),
@@ -1303,10 +1303,10 @@ mod tests {
         assert_eq!(error.input().command(), &command);
     }
 
-    /// INV-012: an applied result cannot attribute a different writer from the
+    /// an applied result cannot attribute a different writer from the
     /// canonical command.
     #[test]
-    fn inv012_reconstitution_rejects_cross_wired_actor() {
+    fn reconstitution_rejects_cross_wired_actor() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let input = ReplaceSessionMetadataReconstitutionInput::applied(
             command.clone(),
@@ -1328,9 +1328,9 @@ mod tests {
         assert_eq!(error.into_parts().0.command(), &command);
     }
 
-    /// INV-012: an applied result cannot name another session.
+    /// an applied result cannot name another session.
     #[test]
-    fn inv012_applied_reconstitution_rejects_cross_wired_session() {
+    fn applied_reconstitution_rejects_cross_wired_session() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let error = ReplaceSessionMetadataReconstitutionInput::applied(
             command.clone(),
@@ -1349,9 +1349,9 @@ mod tests {
         assert_eq!(error.input().command(), &command);
     }
 
-    /// INV-012: a terminal result cannot name another session.
+    /// a terminal result cannot name another session.
     #[test]
-    fn inv012_rejected_reconstitution_rejects_cross_wired_session() {
+    fn rejected_reconstitution_rejects_cross_wired_session() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let error = ReplaceSessionMetadataReconstitutionInput::rejected_session_not_found(
             command.clone(),

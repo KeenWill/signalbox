@@ -40,7 +40,6 @@ boundaries.
 - [Architecture](docs/architecture.md)
 - [Glossary](docs/glossary.md)
 - [Scenarios](docs/scenarios.md)
-- [Invariant test index](docs/invariants.md)
 - [Domain spine](docs/domain-spine.md)
 - [Testing style](docs/agents/testing-style.md)
 - [Open questions](docs/open-questions.md)

@@ -1769,11 +1769,11 @@ mod tests {
         assert_eq!(pending, "ke");
     }
 
-    /// INV-035: a credential the provider echoes back with ordinary JSON
+    /// a credential the provider echoes back with ordinary JSON
     /// escapes is caught even when the arrival boundary falls inside the
     /// escape itself, which is where `input_json_delta` is free to split.
     #[test]
-    fn inv_035_simple_escaped_credential_split_mid_escape_is_redacted() {
+    fn simple_escaped_credential_split_mid_escape_is_redacted() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -1857,7 +1857,7 @@ mod tests {
     ///
     /// Deliberately mirrors [`redact_observation_fact`]: production decides
     /// which fields a credential can reach by redacting them, so a field it
-    /// scrubs and this classifier reports as `Absent` is a field no INV-035
+    /// scrubs and this classifier reports as `Absent` is a field no
     /// case would ever inspect — deleting that production redaction would
     /// leave the suite green while the credential is emitted. The two matches
     /// are meant to name the same surface, and only `SendCommenced` and
@@ -2150,7 +2150,7 @@ mod tests {
     }
 
     /// The reassembly is the only reason the check is stronger than a
-    /// per-observation scan, and a helper carrying logic the INV-035 cases
+    /// per-observation scan, and a helper carrying logic the  cases
     /// depend on is verified rather than assumed: a credential split across
     /// two deltas leaks recoverably even though neither fragment contains it,
     /// and the projection those cases use never reconstructs that stream.
@@ -2324,7 +2324,7 @@ mod tests {
     /// The reconstructed arguments for one tool index, as a reader of the
     /// stream would see them.
     ///
-    /// INV-035 constrains the *content* a consumer reassembles — safe bytes
+    /// constrains the *content* a consumer reassembles — safe bytes
     /// preserved, credential absent — not how the scrubber chops it into
     /// deltas. Asserting exact fragment boundaries would fail a
     /// behaviour-preserving change that buffered the safe prefix or coalesced
@@ -2344,7 +2344,7 @@ mod tests {
             .collect()
     }
 
-    /// INV-035: the credential is scrubbed from the facts that carry a single
+    /// the credential is scrubbed from the facts that carry a single
     /// provider-controlled value, not only from the delta streams.
     ///
     /// Each of these is redacted by `redact_observation_fact`, so each is a
@@ -2352,7 +2352,7 @@ mod tests {
     /// carrying the credential, deleting that production redaction would leave
     /// this suite green.
     #[test]
-    fn inv_035_single_value_facts_are_credential_scrubbed() {
+    fn single_value_facts_are_credential_scrubbed() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -2382,7 +2382,7 @@ mod tests {
         // Pinned exactly rather than by credential absence and a count. Those
         // two hold just as well when redaction replaces the *whole* value, so
         // a regression that scrubbed `model-` and `-v1` away with the
-        // credential would satisfy them while losing the safe bytes INV-035
+        // credential would satisfy them while losing the safe bytes
         // preserves. Comparing the forwarded facts states both halves at once:
         // the credential is gone, the surrounding bytes and the non-credential
         // `http_status` are untouched, and each variant is still itself.
@@ -2632,7 +2632,7 @@ mod tests {
         assert_eq!(decoded_escapes(r"\ud83d"), "\\ud83d");
     }
 
-    /// INV-035: a disguised credential emitted on a stream the intended-stream
+    /// a disguised credential emitted on a stream the intended-stream
     /// assertion never reconstructs is still caught.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
@@ -2649,7 +2649,7 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: a proposal's provider-controlled id and name are scrubbed
+    /// a proposal's provider-controlled id and name are scrubbed
     /// alongside its arguments, pinned to their exact redacted values.
     ///
     /// `redact_tool_proposal` scrubs all three fields, but the sibling case
@@ -2659,7 +2659,7 @@ mod tests {
     /// than mere absence: replacing a whole field would satisfy an absence
     /// check while discarding the safe bytes around the credential.
     #[test]
-    fn inv_035_proposed_identifiers_and_names_are_credential_scrubbed() {
+    fn proposed_identifiers_and_names_are_credential_scrubbed() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -2687,7 +2687,7 @@ mod tests {
         );
     }
 
-    /// INV-035: a disguised credential in proposed arguments is scrubbed by
+    /// a disguised credential in proposed arguments is scrubbed by
     /// the sink itself, pinned to the exact forwarded proposal.
     ///
     /// Driven through `CredentialRedactingSink` rather than starting from an
@@ -2695,7 +2695,7 @@ mod tests {
     /// the helper works and nothing about the production path, so a regression
     /// in `redact_tool_proposal` would not reach it.
     #[test]
-    fn inv_035_disguised_credential_in_proposed_arguments_is_scrubbed() {
+    fn disguised_credential_in_proposed_arguments_is_scrubbed() {
         let key = credential("fixture/secret");
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
         let mut observed = Vec::new();
@@ -2725,7 +2725,7 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: the sink scrubs a disguised credential from a stream that
+    /// the sink scrubs a disguised credential from a stream that
     /// stops before closing its document, pinned to the exact forwarded value.
     ///
     /// Driven through production rather than from an already-leaked fact: a
@@ -2733,7 +2733,7 @@ mod tests {
     /// nothing about `redact_json_stream_fragment`, so a regression requiring
     /// a complete document before redacting would not reach it.
     #[test]
-    fn inv_035_sink_scrubs_a_disguise_in_an_unfinished_document() {
+    fn sink_scrubs_a_disguise_in_an_unfinished_document() {
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
 
         assert_eq!(
@@ -2742,9 +2742,9 @@ mod tests {
         );
     }
 
-    /// INV-035: the same holds for a token the stream never closed.
+    /// the same holds for a token the stream never closed.
     #[test]
-    fn inv_035_sink_scrubs_a_disguise_in_an_unclosed_token() {
+    fn sink_scrubs_a_disguise_in_an_unclosed_token() {
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
 
         assert_eq!(
@@ -2753,10 +2753,10 @@ mod tests {
         );
     }
 
-    /// INV-035: and for a disguise behind an invalid escape, which production
+    /// and for a disguise behind an invalid escape, which production
     /// redacts through its malformed-fragment path.
     #[test]
-    fn inv_035_sink_scrubs_a_disguise_behind_a_malformed_escape() {
+    fn sink_scrubs_a_disguise_behind_a_malformed_escape() {
         let [_, _, partial, ..] = &REPRESENTATIVE_DISGUISES;
 
         assert_eq!(
@@ -2798,7 +2798,7 @@ mod tests {
         fragment.clone()
     }
 
-    /// INV-035: a disguised credential in a token the stream never closed is
+    /// a disguised credential in a token the stream never closed is
     /// caught, the shape a truncated argument delta actually takes.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
@@ -2815,7 +2815,7 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: an invalid escape ahead of a disguised credential does not
+    /// an invalid escape ahead of a disguised credential does not
     /// hide it.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
@@ -2848,10 +2848,10 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: a credential spelled as a surrogate pair survives a boundary
+    /// a credential spelled as a surrogate pair survives a boundary
     /// that falls between the pair's two halves.
     #[test]
-    fn inv_035_surrogate_pair_credential_split_mid_escape_is_redacted() {
+    fn surrogate_pair_credential_split_mid_escape_is_redacted() {
         let key = credential("key\u{1f600}loop");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -2878,11 +2878,11 @@ mod tests {
         assert_eq!(arguments, r#"{"emoji":"[redacted]"}"#);
     }
 
-    /// INV-035: a held credential prefix ending inside an escape is replaced
+    /// a held credential prefix ending inside an escape is replaced
     /// rather than forwarded when another tool call's arguments arrive, so no
     /// later observation can reassemble it across the fact boundary.
     #[test]
-    fn inv_035_held_partial_escape_is_flushed_closed_before_another_tool_index() {
+    fn held_partial_escape_is_flushed_closed_before_another_tool_index() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);

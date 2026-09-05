@@ -196,7 +196,7 @@ mod tests {
     use super::matches_defaults;
 
     #[test]
-    fn inv053_adjusted_turn_settings_authenticate_against_their_unadjusted_defaults() {
+    fn adjusted_turn_settings_authenticate_against_their_unadjusted_defaults() {
         let prior_selection = DirectModelSelection::from_uuid(Uuid::from_u128(1));
         let selected = DirectModelSelection::from_uuid(Uuid::from_u128(2));
         let per_call = ModelSettingsOverlay::inherit_all();

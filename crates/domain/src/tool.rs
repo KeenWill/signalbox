@@ -2215,10 +2215,10 @@ mod tests {
             .collect()
     }
 
-    /// S10 / INV-019: request names are exact and restricted to the recorded
+    /// S10: request names are exact and restricted to the recorded
     /// ASCII spelling.
     #[test]
-    fn s10_inv019_tool_name_rejects_empty_long_and_unsafe_spelling() {
+    fn s10_tool_name_rejects_empty_long_and_unsafe_spelling() {
         assert_eq!(
             ToolName::try_new(String::new())
                 .expect_err("empty names are invalid")
@@ -2242,10 +2242,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-005 / INV-019: valid JSON is canonicalized recursively,
+    /// S10: valid JSON is canonicalized recursively,
     /// while malformed provider text remains exact bounded evidence.
     #[test]
-    fn s10_inv005_inv019_arguments_are_canonical_or_exactly_undecodable() {
+    fn s10_arguments_are_canonical_or_exactly_undecodable() {
         let json = NormalizedToolArguments::try_from_provider_text(String::from(
             r#"{ "z": [{"b": 2, "a": 1}], "a": true }"#,
         ))
@@ -2260,10 +2260,10 @@ mod tests {
         assert_eq!(malformed.as_str(), malformed_text);
     }
 
-    /// S10 / INV-005: a complete JSON prefix followed by any non-whitespace
+    /// S10: a complete JSON prefix followed by any non-whitespace
     /// provider text remains exact undecodable evidence.
     #[test]
-    fn s10_inv005_arguments_reject_trailing_non_whitespace() {
+    fn s10_arguments_reject_trailing_non_whitespace() {
         let provider_text = String::from(r#"{"timezone":"UTC"} trailing"#);
         let normalized = NormalizedToolArguments::try_from_provider_text(provider_text.clone())
             .expect("bounded non-JSON text remains admissible evidence");
@@ -2272,10 +2272,10 @@ mod tests {
         assert_eq!(normalized.as_str(), provider_text);
     }
 
-    /// S10 / INV-005 / INV-019: literal U+0000 cannot enter the durable text
+    /// S10: literal U+0000 cannot enter the durable text
     /// vocabulary even when the remaining provider text is undecodable JSON.
     #[test]
-    fn s10_inv005_inv019_arguments_reject_literal_null() {
+    fn s10_arguments_reject_literal_null() {
         let value = String::from("{\"timezone\":\0");
         let error = NormalizedToolArguments::try_from_provider_text(value.clone())
             .expect_err("PostgreSQL text cannot preserve a literal null");
@@ -2284,10 +2284,10 @@ mod tests {
         assert_eq!(error.failure(), ToolArgumentsFailure::ContainsNull);
     }
 
-    /// S10 / INV-005: reconstitution rejects a competing noncanonical JSON
+    /// S10: reconstitution rejects a competing noncanonical JSON
     /// representation.
     #[test]
-    fn s10_inv005_stored_json_must_be_canonical() {
+    fn s10_stored_json_must_be_canonical() {
         let error = NormalizedToolArguments::try_from_stored(
             ToolArgumentsKind::Json,
             String::from(r#"{ "b": 2, "a": 1 }"#),
@@ -2300,10 +2300,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-005: canonicalization preserves JSON numeric values outside
+    /// S10: canonicalization preserves JSON numeric values outside
     /// the native integer and floating-point ranges without rounding.
     #[test]
-    fn s10_inv005_arguments_preserve_arbitrary_precision_numbers() {
+    fn s10_arguments_preserve_arbitrary_precision_numbers() {
         let normalized = NormalizedToolArguments::try_from_provider_text(String::from(
             r#"{"wide":18446744073709551617,"exponent":1e400}"#,
         ))
@@ -2316,10 +2316,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-005: the byte bound, rather than serde's default recursion
+    /// S10: the byte bound, rather than serde's default recursion
     /// cutoff, governs syntactically valid nested JSON.
     #[test]
-    fn s10_inv005_deeply_nested_arguments_remain_json() {
+    fn s10_deeply_nested_arguments_remain_json() {
         let depth = 512;
         let value = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
         let normalized = NormalizedToolArguments::try_from_provider_text(value.clone())
@@ -2329,10 +2329,10 @@ mod tests {
         assert_eq!(normalized.as_str(), value);
     }
 
-    /// S10 / INV-005: malformed input is classified before any recursively
+    /// S10: malformed input is classified before any recursively
     /// owned JSON tree exists, even after a deeply nested complete child.
     #[test]
-    fn s10_inv005_deep_partial_json_is_dropped_stack_safely() {
+    fn s10_deep_partial_json_is_dropped_stack_safely() {
         let depth = 100_000;
         let value = format!("[{}null{},!]", "[".repeat(depth), "]".repeat(depth));
         let normalized = NormalizedToolArguments::try_from_provider_text(value.clone())
@@ -2342,10 +2342,10 @@ mod tests {
         assert_eq!(normalized.as_str(), value);
     }
 
-    /// INV-049: delegated approval narrows authority and can never approve or deny a
+    /// delegated approval narrows authority and can never approve or deny a
     /// request frozen as human-only.
     #[test]
-    fn inv049_delegate_narrows_and_never_widens_human_authority() {
+    fn delegate_narrows_and_never_widens_human_authority() {
         const HUMAN_ONLY_REQUEST_SEED: u128 = 40;
         const JUDGE_MODEL_SEED: u128 = 41;
         const APPROVAL_CALL_SEED: u128 = 42;
@@ -2583,10 +2583,10 @@ mod tests {
         assert!(ToolDenialReason::try_new(derived.into_string()).is_ok());
     }
 
-    /// S10 / INV-020: a restored session-blanket approval requires the
+    /// S10: a restored session-blanket approval requires the
     /// approve-all posture frozen for that turn.
     #[test]
-    fn s10_inv020_session_blanket_reconstitution_requires_frozen_authority() {
+    fn s10_session_blanket_reconstitution_requires_frozen_authority() {
         let request = tool_request_id(4);
         let restored = ToolApprovalResolutionReconstitutionInput::session_blanket(
             request,
@@ -2612,10 +2612,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-020 / INV-035: credential-boundary suppression constructs an
+    /// S10: credential-boundary suppression constructs an
     /// inert proposal and restores only the fixed automatic denial provenance.
     #[test]
-    fn s10_inv020_inv035_runtime_safety_denial_is_non_executable() {
+    fn s10_runtime_safety_denial_is_non_executable() {
         let request = tool_request_id(4);
         let proposal = ToolCallProposal::suppressed(
             ToolName::try_new(String::from("sandboxed_exec")).expect("fixture tool name is valid"),
@@ -2640,10 +2640,10 @@ mod tests {
         assert!(!restored.is_approved());
     }
 
-    /// S10 / INV-020: only the user-command preparation path can construct
+    /// S10: only the user-command preparation path can construct
     /// user-sourced approval.
     #[test]
-    fn s10_inv020_user_command_preparation_preserves_agency() {
+    fn s10_user_command_preparation_preserves_agency() {
         let request = request(4);
         let command =
             DecideToolRequest::new(command_id(5), request.id(), ToolApprovalDecision::Approve);
@@ -2669,10 +2669,10 @@ mod tests {
         assert!(applied.resolution().is_approved());
     }
 
-    /// S10 / INV-019: one provider response admits at most the recorded 32
+    /// S10: one provider response admits at most the recorded 32
     /// logical tool requests without accepting a partial prefix.
     #[test]
-    fn s10_inv019_tool_response_request_count_is_bounded() {
+    fn s10_tool_response_request_count_is_bounded() {
         let admitted = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(32))
             .expect("the exact per-response limit is admitted");
         let rejected = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(33))
@@ -2682,10 +2682,10 @@ mod tests {
         assert_eq!(rejected.into_parts().len(), 33);
     }
 
-    /// INV-012: user-global command sentinels never enter the canonical
+    /// user-global command sentinels never enter the canonical
     /// tool-decision command space.
     #[test]
-    fn inv012_tool_decision_rejects_reserved_command_identities() {
+    fn tool_decision_rejects_reserved_command_identities() {
         let nil_command_id = DurableCommandId::from_uuid(uuid::Uuid::nil());
         let nil_error = DecideToolRequest::try_new(
             nil_command_id,
@@ -2705,10 +2705,10 @@ mod tests {
         assert_eq!(max_error.command_id(), max_command_id);
     }
 
-    /// S10 / INV-020: only an applied user command can restore
+    /// S10: only an applied user command can restore
     /// user-command approval authority.
     #[test]
-    fn s10_inv020_rejected_user_command_cannot_restore_approval() {
+    fn s10_rejected_user_command_cannot_restore_approval() {
         let command = DecideToolRequest::new(
             command_id(5),
             tool_request_id(4),
@@ -2787,10 +2787,10 @@ mod tests {
         assert_eq!(error.value(), value);
     }
 
-    /// INV-012: durable-command comparison equality excludes only command
+    /// durable-command comparison equality excludes only command
     /// identity and retains the exact decision payload.
     #[test]
-    fn inv012_decision_command_equality_excludes_only_command_identity() {
+    fn decision_command_equality_excludes_only_command_identity() {
         let request = tool_request_id(1);
         let approve = DecideToolRequest::new(command_id(2), request, ToolApprovalDecision::Approve);
         let replay = DecideToolRequest::new(command_id(3), request, ToolApprovalDecision::Approve);
@@ -2804,10 +2804,10 @@ mod tests {
         assert_ne!(approve, deny);
     }
 
-    /// S11 / INV-027: denials remain request-bound logical resolutions and
+    /// S11: denials remain request-bound logical resolutions and
     /// cannot name a physical attempt.
     #[test]
-    fn s11_inv027_denial_resolution_names_only_the_request() {
+    fn s11_denial_resolution_names_only_the_request() {
         let request = tool_request_id(9);
 
         assert_eq!(
@@ -3207,10 +3207,10 @@ mod tests {
         );
     }
 
-    /// INV-012: the reserved user-global nil and max command sentinels cannot
+    /// the reserved user-global nil and max command sentinels cannot
     /// claim override commands.
     #[test]
-    fn inv012_override_command_identity_rejects_reserved_sentinels() {
+    fn override_command_identity_rejects_reserved_sentinels() {
         let nil = OverrideDeniedToolRequest::try_new(
             DurableCommandId::from_uuid(uuid::Uuid::nil()),
             session_id(1),
@@ -3234,10 +3234,10 @@ mod tests {
         );
     }
 
-    /// INV-012: override-command comparison equality excludes only command
+    /// override-command comparison equality excludes only command
     /// identity and retains the session and the denied request.
     #[test]
-    fn inv012_override_command_equality_excludes_only_command_identity() {
+    fn override_command_equality_excludes_only_command_identity() {
         const REPLAY_COMMAND_SEED: u128 = 72;
         const OTHER_SESSION_SEED: u128 = 9;
 
@@ -3290,11 +3290,11 @@ mod tests {
         assert!(!approval.requires_decision());
     }
 
-    /// S10 / INV-020: a restored user-override approval requires the
+    /// S10: a restored user-override approval requires the
     /// delegated posture frozen on its request — the posture the judge would
     /// otherwise decide.
     #[test]
-    fn s10_inv020_user_override_reconstitution_requires_delegated_posture() {
+    fn s10_user_override_reconstitution_requires_delegated_posture() {
         const CONSUMING_REQUEST_SEED: u128 = 73;
 
         let restored = ToolApprovalResolutionReconstitutionInput::user_override(

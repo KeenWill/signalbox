@@ -2127,7 +2127,7 @@ fn report_tool_turn_terminalization(failed: &FailedModelCallTurn, terminal_outco
 /// Sanitized by construction: the daemon-authored catalog name, two
 /// daemon-minted aggregate identifiers, and the closed error kind are the only
 /// fields, so no credential material, response body, tool argument, or
-/// conversation content can reach telemetry (INV-035). The bounded error
+/// conversation content can reach telemetry. The bounded error
 /// detail is deliberately omitted — executors alone decide what it says.
 fn report_tool_attempt(name: &ToolName, observation: &CorrelatedToolAttemptObservation) {
     let ToolAttemptSignal::Failed(error_kind) = tool_attempt_signal(observation.observation())
@@ -2947,10 +2947,10 @@ mod tests {
         );
     }
 
-    /// INV-020: registry automation records policy provenance, while blanket
+    /// registry automation records policy provenance, while blanket
     /// automation remains explicitly distinct from user agency.
     #[test]
-    fn inv020_initial_policy_preserves_automation_provenance() {
+    fn initial_policy_preserves_automation_provenance() {
         let automatic = definition(
             "automatic",
             ToolPermissionDefault::Auto,
@@ -3095,10 +3095,10 @@ mod tests {
         );
     }
 
-    /// INV-024 / INV-027: an approved unknown request closes with typed
+    /// an approved unknown request closes with typed
     /// preflight evidence before authorization or executor entry.
     #[tokio::test]
-    async fn inv024_inv027_unknown_tool_never_crosses_executor_boundary() {
+    async fn unknown_tool_never_crosses_executor_boundary() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let transaction = FakeTransaction {
@@ -3261,10 +3261,10 @@ mod tests {
         assert_eq!(error.operator_failure_cause_code(), "tool_catalog_drift");
     }
 
-    /// INV-011 / INV-021 / INV-024: durable authorization precedes the
+    /// durable authorization precedes the
     /// executor, and only its exact correlation can commit returned evidence.
     #[tokio::test]
-    async fn inv011_inv021_inv024_executor_evidence_is_fenced_and_committed_in_order() {
+    async fn executor_evidence_is_fenced_and_committed_in_order() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -3323,10 +3323,10 @@ mod tests {
         );
     }
 
-    /// S17 / INV-005 / INV-011: a scheduling-aware executor's durable
+    /// S17: a scheduling-aware executor's durable
     /// foreground wait is reread before the service accepts the parked turn.
     #[tokio::test]
-    async fn s17_inv005_inv011_durable_child_wait_is_authenticated_without_second_observation() {
+    async fn s17_durable_child_wait_is_authenticated_without_second_observation() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3377,10 +3377,10 @@ mod tests {
         );
     }
 
-    /// S17 / INV-011 / INV-024: terminal evidence committed atomically with a
+    /// S17: terminal evidence committed atomically with a
     /// tool effect is authenticated and never sent through a second commit.
     #[tokio::test]
-    async fn s17_inv011_inv024_durable_completion_is_authenticated_without_second_commit() {
+    async fn s17_durable_completion_is_authenticated_without_second_commit() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3429,10 +3429,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024: a durable-completion claim cannot authorize an
+    /// a durable-completion claim cannot authorize an
     /// attempt that storage still reports as pending.
     #[tokio::test]
-    async fn inv011_inv024_durable_completion_fails_closed_when_not_committed() {
+    async fn durable_completion_fails_closed_when_not_committed() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3478,10 +3478,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024 / INV-037: a failed durable-completion reread retains
+    /// a failed durable-completion reread retains
     /// the exact evidence and dispatch permit, then retries only authentication.
     #[tokio::test]
-    async fn inv011_inv024_inv037_durable_completion_retries_only_authentication() {
+    async fn durable_completion_retries_only_authentication() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3543,10 +3543,10 @@ mod tests {
         );
     }
 
-    /// S17 / INV-011 / INV-024: a transient durable-wait reread failure keeps
+    /// S17: a transient durable-wait reread failure keeps
     /// the exact evidence and dispatch permit for same-incarnation retry.
     #[tokio::test]
-    async fn s17_inv011_inv024_durable_child_wait_retries_only_its_authentication() {
+    async fn s17_durable_child_wait_retries_only_its_authentication() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3602,12 +3602,12 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024 / INV-037: an infrastructure executor failure cannot
+    /// an infrastructure executor failure cannot
     /// release the interrupt gate while its durable attempt remains in flight,
     /// and its committed crash classification contains the failure for this
     /// turn.
     #[tokio::test]
-    async fn inv011_inv024_inv037_infrastructure_executor_failure_classifies_before_gate_release() {
+    async fn infrastructure_executor_failure_classifies_before_gate_release() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3681,10 +3681,10 @@ mod tests {
         ));
     }
 
-    /// INV-011 / INV-024 / INV-037: crash classification closes an authorized
+    /// crash classification closes an authorized
     /// attempt before a fail-closed executor error remains fatal to the daemon.
     #[tokio::test]
-    async fn inv011_inv024_inv037_corrupt_executor_failure_remains_fatal_after_classification() {
+    async fn corrupt_executor_failure_remains_fatal_after_classification() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3730,10 +3730,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024 / INV-037: failed executor crash classification
+    /// failed executor crash classification
     /// retains the exact gate permit until a later pass commits closure.
     #[tokio::test]
-    async fn inv011_inv024_inv037_failed_executor_classification_retains_gate() {
+    async fn failed_executor_classification_retains_gate() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3815,10 +3815,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024 / INV-037: a failed classification retry retains the
+    /// a failed classification retry retains the
     /// original fatal executor class after durable closure succeeds.
     #[tokio::test]
-    async fn inv011_inv024_inv037_recovered_classification_preserves_fatal_executor_failure() {
+    async fn recovered_classification_preserves_fatal_executor_failure() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3895,10 +3895,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-037: a correlation mismatch retained across failed crash
+    /// a correlation mismatch retained across failed crash
     /// classification resurfaces only after durable closure releases the gate.
     #[tokio::test]
-    async fn inv011_inv037_recovered_classification_preserves_correlation_mismatch() {
+    async fn recovered_classification_preserves_correlation_mismatch() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3985,10 +3985,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-037: a prepared execution hint is revalidated after the
+    /// a prepared execution hint is revalidated after the
     /// dispatch gate, so a winning interrupt becomes ordinary no-work.
     #[tokio::test]
-    async fn inv011_inv037_stale_prepared_hint_after_gate_is_no_work() {
+    async fn stale_prepared_hint_after_gate_is_no_work() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -4031,10 +4031,10 @@ mod tests {
         assert!(events.lock().expect("event lock").is_empty());
     }
 
-    /// INV-011 / INV-037: an all-resolved continuation hint is revalidated
+    /// an all-resolved continuation hint is revalidated
     /// under the dispatch gate, so a winning interrupt is ordinary no-work.
     #[tokio::test]
-    async fn inv011_inv037_vanished_continuation_batch_is_no_work() {
+    async fn vanished_continuation_batch_is_no_work() {
         let (batch, _) = batch_with_attempt_state(
             "{}",
             ToolEffectClass::EffectFree,
@@ -4082,11 +4082,11 @@ mod tests {
         assert!(events.lock().expect("event lock").is_empty());
     }
 
-    /// INV-011 / INV-024: an in-flight attempt is not classified as
+    /// an in-flight attempt is not classified as
     /// prior-process loss until the same-turn dispatch permit is available and
     /// authoritative state has been reloaded.
     #[tokio::test]
-    async fn inv011_inv024_crash_classification_waits_for_dispatch_gate() {
+    async fn crash_classification_waits_for_dispatch_gate() {
         let (batch, _) = batch_with_attempt_state(
             "{}",
             ToolEffectClass::EffectFree,
@@ -4163,9 +4163,9 @@ mod tests {
         assert_eq!(observation.correlation(), &expected_correlation);
     }
 
-    /// INV-024: effect-free ambiguity becomes a known failure.
+    /// effect-free ambiguity becomes a known failure.
     #[test]
-    fn inv024_effect_free_ambiguity_becomes_known_failure() {
+    fn effect_free_ambiguity_becomes_known_failure() {
         assert_ambiguity_admission(
             ToolEffectClass::EffectFree,
             ToolAttemptObservation::KnownFailed {
@@ -4174,9 +4174,9 @@ mod tests {
         );
     }
 
-    /// INV-024: external-effect ambiguity retains its recovery distinction.
+    /// external-effect ambiguity retains its recovery distinction.
     #[test]
-    fn inv024_external_effect_ambiguity_is_preserved() {
+    fn external_effect_ambiguity_is_preserved() {
         assert_ambiguity_admission(
             ToolEffectClass::ExternalEffect,
             ToolAttemptObservation::Ambiguous,
@@ -4214,12 +4214,12 @@ mod tests {
         )
     }
 
-    /// S15 / INV-024: a result past the admission bound is replaced by the
+    /// S15: a result past the admission bound is replaced by the
     /// typed `ResultTooLarge` error. The observation compared here is the whole
     /// value handed to the commit boundary, so equality with a detail-less
     /// typed failure is also the proof that no oversized byte survives into it.
     #[test]
-    fn s15_inv024_oversized_result_is_replaced_by_result_too_large() {
+    fn s15_oversized_result_is_replaced_by_result_too_large() {
         let observation = completed_text_admission("r".repeat(OVERSIZED_RESULT_BYTES));
 
         assert_eq!(
@@ -4230,12 +4230,12 @@ mod tests {
         );
     }
 
-    /// S15 / INV-024: a result carrying U+0000 is admitted as a detail-less
+    /// S15: a result carrying U+0000 is admitted as a detail-less
     /// `ExecutionFailed`. The tool-loop specification names a replacement kind
     /// for the size bound only, so this test pins the implemented mapping for
     /// the null-bearing arm rather than a specified one.
     #[test]
-    fn s15_inv024_result_containing_null_is_replaced_by_execution_failed() {
+    fn s15_result_containing_null_is_replaced_by_execution_failed() {
         let observation = completed_text_admission(String::from("head\0tail"));
 
         assert_eq!(
@@ -4286,11 +4286,11 @@ mod tests {
         );
     }
 
-    /// S15 / INV-024: the substitution is what the hub durably commits — the
+    /// S15: the substitution is what the hub durably commits — the
     /// ended attempt carries the typed `ResultTooLarge` failure, so oversized
     /// executor bytes never become durable result evidence.
     #[tokio::test]
-    async fn s15_inv024_committed_oversized_result_ends_the_attempt_known_failed() {
+    async fn s15_committed_oversized_result_ends_the_attempt_known_failed() {
         let effect_class = ToolEffectClass::EffectFree;
         let (batch, _) = prepared_batch("{}", effect_class);
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -4348,10 +4348,10 @@ mod tests {
         assert_eq!(*events.lock().expect("event lock"), ["authorize", "commit"]);
     }
 
-    /// INV-011 / INV-024: the definition selected by successful preflight is
+    /// the definition selected by successful preflight is
     /// the exact same-incarnation declaration carried across authorization.
     #[tokio::test]
-    async fn inv011_inv024_authorization_uses_preflight_definition_snapshot() {
+    async fn authorization_uses_preflight_definition_snapshot() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -4401,11 +4401,11 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024: a lost authorization acknowledgement is reread
+    /// a lost authorization acknowledgement is reread
     /// while the dispatch gate remains held, and committed authority enters
     /// the executor exactly once.
     #[tokio::test]
-    async fn inv011_inv024_ambiguous_authorization_resumes_committed_fence() {
+    async fn ambiguous_authorization_resumes_committed_fence() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -4458,10 +4458,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024: a failed result commit retains exact executor
+    /// a failed result commit retains exact executor
     /// evidence and retries only that commit after an authoritative reread.
     #[tokio::test]
-    async fn inv011_inv024_failed_commit_does_not_repeat_executor_work() {
+    async fn failed_commit_does_not_repeat_executor_work() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {

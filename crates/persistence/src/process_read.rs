@@ -1698,7 +1698,7 @@ impl ProcessReadRepository {
         // An existing session must carry a current pointer that resolves to
         // an installed epoch even when a named historical epoch is selected:
         // a missing pointer or a dangling pointer is corruption, not a
-        // servable read (INV-008).
+        // servable read.
         let current_version: Option<Decimal> = row.try_get("current_version")?;
         if current_version.is_none() {
             return Err(ProcessReadCorruption::Missing("current defaults pointer").into());
@@ -2233,7 +2233,7 @@ async fn open_transcript_in_transaction(
     )?;
     let runner = load_process_runner_projection(&mut transaction, requested_session).await?;
     let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
-    // INV-039 remains fail-closed on every transcript open: native lineage
+    //  remains fail-closed on every transcript open: native lineage
     // supersedes the seed as the rendered frontier, not as an integrity fact.
     let imported_seed =
         load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
@@ -5670,10 +5670,10 @@ mod tests {
         TurnId::from_uuid(Uuid::from_u128(value))
     }
 
-    /// S24 / INV-032: acceptance order A, B, C may execute as A, C, B; the
+    /// S24: acceptance order A, B, C may execute as A, C, B; the
     /// database lineage diagnostic selects B as the one complete-chain tip.
     #[test]
-    fn s24_inv032_latest_tip_follows_execution_lineage() {
+    fn s24_latest_tip_follows_execution_lineage() {
         let second = turn(2);
 
         assert_eq!(
@@ -5683,10 +5683,10 @@ mod tests {
         );
     }
 
-    /// INV-032: a branched persisted execution lineage cannot choose one
+    /// a branched persisted execution lineage cannot choose one
     /// authoritative snapshot frontier and therefore fails closed.
     #[test]
-    fn inv032_latest_frontier_rejects_branched_execution_lineage() {
+    fn latest_frontier_rejects_branched_execution_lineage() {
         assert!(decode_execution_lineage_tip(3, 1, 3, 2, true, false, Some(turn(2))).is_err());
     }
 

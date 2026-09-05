@@ -3687,7 +3687,7 @@ mod tests {
     }
 
     #[test]
-    fn inv061_workspace_instruction_root_and_bundle_mappings_are_closed() {
+    fn workspace_instruction_root_and_bundle_mappings_are_closed() {
         assert_eq!(
             instruction_root_kind_to_str(InstructionDiscoveryRootKind::Workspace),
             "workspace"
@@ -3734,7 +3734,7 @@ mod tests {
     }
 
     #[test]
-    fn inv061_workspace_instruction_finding_mapping_is_closed() {
+    fn workspace_instruction_finding_mapping_is_closed() {
         assert_instruction_finding_mapping(
             InstructionDiscoveryFindingKind::RootUnavailable,
             "root_unavailable",
@@ -3781,7 +3781,7 @@ mod tests {
     }
 
     #[test]
-    fn inv061_workspace_instruction_placement_authority_mapping_is_closed() {
+    fn workspace_instruction_placement_authority_mapping_is_closed() {
         assert_eq!(
             workspace_instruction_authority_from_placement_state("unpinned"),
             Some(WorkspaceInstructionAuthorityStorageKind::Runner)
@@ -4654,10 +4654,10 @@ mod tests {
         );
     }
 
-    /// INV-003 / INV-053: the JSONB mapping preserves complete model-settings
+    /// the JSONB mapping preserves complete model-settings
     /// precedence, effective value, source evidence, and validation identity.
     #[test]
-    fn inv003_inv053_model_settings_json_round_trips_complete_evidence() {
+    fn model_settings_json_round_trips_complete_evidence() {
         let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x51));
         let capabilities = ModelCapabilities::new(
             BTreeSet::from([ReasoningLevel::High]),
@@ -4684,10 +4684,10 @@ mod tests {
         assert_eq!(decoded, settings);
     }
 
-    /// INV-003: unknown stored settings members fail closed instead of being
+    /// unknown stored settings members fail closed instead of being
     /// silently ignored during reconstitution.
     #[test]
-    fn inv003_model_settings_json_rejects_unknown_members() {
+    fn model_settings_json_rejects_unknown_members() {
         let mut encoded =
             model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
         encoded
@@ -4714,10 +4714,10 @@ mod tests {
         assert!(matches!(nested_error, StoredModelSettingsError::Json(_)));
     }
 
-    /// INV-003: every nullable member remains required durable evidence, so
+    /// every nullable member remains required durable evidence, so
     /// omission cannot normalize a truncated document into provider defaults.
     #[test]
-    fn inv003_model_settings_json_rejects_missing_nullable_members() {
+    fn model_settings_json_rejects_missing_nullable_members() {
         let mut missing_source =
             model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
         missing_source
@@ -4745,10 +4745,10 @@ mod tests {
         assert!(matches!(effective_error, StoredModelSettingsError::Json(_)));
     }
 
-    /// INV-003: fast mode has no provider-default state in the domain, so a
+    /// fast mode has no provider-default state in the domain, so a
     /// durable spelling that invents one fails closed.
     #[test]
-    fn inv003_model_settings_overlay_rejects_provider_default_fast_mode() {
+    fn model_settings_overlay_rejects_provider_default_fast_mode() {
         let encoded = serde_json::json!({
             "reasoning_level": {"kind": "inherit"},
             "fast_mode": {"kind": "provider_default"},
@@ -5221,10 +5221,10 @@ mod tests {
         assert_eq!(tool_approval_posture_from_str(UNKNOWN_POSTURE), None);
     }
 
-    /// INV-002: PostgreSQL numeric values are decoded and checked before a
+    /// PostgreSQL numeric values are decoded and checked before a
     /// domain defaults version exists.
     #[test]
-    fn inv002_defaults_version_numeric_boundary() {
+    fn defaults_version_numeric_boundary() {
         assert_eq!(
             defaults_version_from_numeric(Decimal::ZERO),
             Err(PositiveOrdinalMappingError::NonPositive)
@@ -5254,10 +5254,10 @@ mod tests {
         );
     }
 
-    /// INV-002: PostgreSQL numeric values are decoded and checked before a
+    /// PostgreSQL numeric values are decoded and checked before a
     /// domain input position exists.
     #[test]
-    fn inv002_input_position_numeric_boundary() {
+    fn input_position_numeric_boundary() {
         assert_eq!(
             input_position_from_numeric(Decimal::ZERO),
             Err(PositiveOrdinalMappingError::NonPositive)
@@ -5287,10 +5287,10 @@ mod tests {
         );
     }
 
-    /// INV-002: each CreateSession identity kind crosses the persistence
+    /// each CreateSession identity kind crosses the persistence
     /// boundary through its own typed conversion.
     #[test]
-    fn inv002_create_session_identity_mappings_remain_kind_specific() {
+    fn create_session_identity_mappings_remain_kind_specific() {
         let session_uuid = Uuid::from_u128(1);
         let command_uuid = Uuid::from_u128(2);
 
@@ -5303,10 +5303,10 @@ mod tests {
         assert_eq!(durable_command_id_to_uuid(command), command_uuid);
     }
 
-    /// INV-002: accepted-input and future-turn identities cross the SQL
+    /// accepted-input and future-turn identities cross the SQL
     /// boundary through distinct mappings even though both use native UUIDs.
     #[test]
-    fn inv002_submit_input_identity_mappings_remain_kind_specific() {
+    fn submit_input_identity_mappings_remain_kind_specific() {
         let accepted_uuid = Uuid::from_u128(3);
         let turn_uuid = Uuid::from_u128(4);
 
@@ -5319,10 +5319,10 @@ mod tests {
         assert_eq!(turn_id_to_uuid(turn), turn_uuid);
     }
 
-    /// INV-002: the durable-command boundary rejects the nil and max sentinel
+    /// the durable-command boundary rejects the nil and max sentinel
     /// UUIDs rather than admitting them as command identities.
     #[test]
-    fn inv002_durable_command_mapping_rejects_sentinel_uuids() {
+    fn durable_command_mapping_rejects_sentinel_uuids() {
         assert_eq!(
             durable_command_id_from_uuid(Uuid::nil()),
             Err(DurableCommandIdMappingError::SentinelUuid)

@@ -6475,9 +6475,9 @@ mod tests {
         }
     }
 
-    /// INV-033: spawn rejection evidence names the exact logical tool request.
+    /// spawn rejection evidence names the exact logical tool request.
     #[test]
-    fn inv033_spawn_rejection_requires_exact_tool_request() {
+    fn spawn_rejection_requires_exact_tool_request() {
         let expected = delegation_rejection_expectation(DelegationRejectionOperation::Spawn);
         let exact = RejectionDetail::DelegationSpawnConflict {
             tool_request_id: expected.tool_request,
@@ -6490,9 +6490,9 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
     }
 
-    /// INV-033: a spawn mutation cannot accept an await-family rejection.
+    /// a spawn mutation cannot accept an await-family rejection.
     #[test]
-    fn inv033_spawn_rejection_rejects_await_family() {
+    fn spawn_rejection_rejects_await_family() {
         let expected = delegation_rejection_expectation(DelegationRejectionOperation::Spawn);
         let await_rejection = RejectionDetail::DelegationAwaitConflict {
             tool_request_id: expected.tool_request,
@@ -6504,10 +6504,10 @@ mod tests {
         ));
     }
 
-    /// INV-033: a child identity collision names only daemon-minted state and
+    /// a child identity collision names only daemon-minted state and
     /// cannot authenticate which spawn mutation produced the rejection.
     #[test]
-    fn inv033_spawn_rejects_uncorrelated_child_identity_collision() {
+    fn spawn_rejects_uncorrelated_child_identity_collision() {
         let expected = delegation_rejection_expectation(DelegationRejectionOperation::Spawn);
         let uncorrelated = RejectionDetail::DelegatedChildIdentityCollision {
             child_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
@@ -6516,10 +6516,10 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
     }
 
-    /// INV-033: common delegation rejection evidence repeats the exact
+    /// common delegation rejection evidence repeats the exact
     /// request-supplied session, turn, and logical request identities.
     #[test]
-    fn inv033_await_rejection_requires_exact_request_tuple() {
+    fn await_rejection_requires_exact_request_tuple() {
         let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
             child,
@@ -6540,10 +6540,10 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
     }
 
-    /// INV-033: delegation-wide missing-identity rejections repeat the exact
+    /// delegation-wide missing-identity rejections repeat the exact
     /// request-supplied session and logical tool request identities.
     #[test]
-    fn inv033_delegation_missing_identity_rejections_require_exact_request() {
+    fn delegation_missing_identity_rejections_require_exact_request() {
         let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected =
             delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
@@ -6587,10 +6587,10 @@ mod tests {
         ));
     }
 
-    /// INV-033: await missing-relationship evidence repeats both requested
+    /// await missing-relationship evidence repeats both requested
     /// endpoints.
     #[test]
-    fn inv033_await_rejection_requires_exact_relationship_endpoints() {
+    fn await_rejection_requires_exact_relationship_endpoints() {
         let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
             child,
@@ -6609,10 +6609,10 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
     }
 
-    /// INV-033: relationship event exhaustion does not carry enough evidence
+    /// relationship event exhaustion does not carry enough evidence
     /// to correlate an await mutation, so the response remains ambiguous.
     #[test]
-    fn inv033_await_rejects_uncorrelated_event_ordinal_exhaustion() {
+    fn await_rejects_uncorrelated_event_ordinal_exhaustion() {
         let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
             child,
@@ -6626,10 +6626,10 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
     }
 
-    /// INV-033: background-await delivery exhaustion names the requesting
+    /// background-await delivery exhaustion names the requesting
     /// parent as the result recipient.
     #[test]
-    fn inv033_background_await_delivery_exhaustion_requires_parent_recipient() {
+    fn background_await_delivery_exhaustion_requires_parent_recipient() {
         let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
             child,
@@ -6648,10 +6648,10 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
     }
 
-    /// INV-033: a foreground await cannot report background-only delivery
+    /// a foreground await cannot report background-only delivery
     /// sequence exhaustion.
     #[test]
-    fn inv033_foreground_await_rejects_delivery_sequence_exhaustion() {
+    fn foreground_await_rejects_delivery_sequence_exhaustion() {
         let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
             child,
@@ -6668,10 +6668,10 @@ mod tests {
         ));
     }
 
-    /// INV-033: message missing-relationship evidence repeats both requested
+    /// message missing-relationship evidence repeats both requested
     /// endpoints.
     #[test]
-    fn inv033_message_rejection_requires_exact_relationship_endpoints() {
+    fn message_rejection_requires_exact_relationship_endpoints() {
         let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected =
             delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
@@ -6688,10 +6688,10 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
     }
 
-    /// INV-033: relationship event exhaustion cannot authenticate which peer
+    /// relationship event exhaustion cannot authenticate which peer
     /// message mutation exhausted the shared relationship ordinal.
     #[test]
-    fn inv033_message_rejects_uncorrelated_event_ordinal_exhaustion() {
+    fn message_rejects_uncorrelated_event_ordinal_exhaustion() {
         let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected =
             delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
@@ -6703,10 +6703,10 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
     }
 
-    /// INV-033: a message identity collision names only daemon-minted state
+    /// a message identity collision names only daemon-minted state
     /// and cannot authenticate which message mutation produced the rejection.
     #[test]
-    fn inv033_message_rejects_uncorrelated_identity_collision() {
+    fn message_rejects_uncorrelated_identity_collision() {
         let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected =
             delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
@@ -6717,10 +6717,10 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
     }
 
-    /// INV-033: message delivery exhaustion names the requested peer as its
+    /// message delivery exhaustion names the requested peer as its
     /// recipient.
     #[test]
-    fn inv033_message_delivery_exhaustion_requires_peer_recipient() {
+    fn message_delivery_exhaustion_requires_peer_recipient() {
         let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected =
             delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
@@ -6737,9 +6737,9 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
     }
 
-    /// INV-033: a message mutation cannot accept an await-family rejection.
+    /// a message mutation cannot accept an await-family rejection.
     #[test]
-    fn inv033_message_rejection_rejects_await_family() {
+    fn message_rejection_rejects_await_family() {
         let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let expected =
             delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
@@ -6873,7 +6873,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_goal_history_replay_accepts_supersession_lineage() -> Result<(), ClientError> {
+    fn goal_history_replay_accepts_supersession_lineage() -> Result<(), ClientError> {
         let first_command = CommandId::try_from_uuid(Uuid::from_u128(11))
             .expect("fixture command identity is admitted");
         let supersede_command = CommandId::try_from_uuid(Uuid::from_u128(12))
@@ -6907,7 +6907,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_goal_history_replay_rejects_an_invalid_first_transition() {
+    fn goal_history_replay_rejects_an_invalid_first_transition() {
         let command_id = CommandId::try_from_uuid(Uuid::from_u128(14))
             .expect("fixture command identity is admitted");
         let mut replay = GoalHistoryReplay::default();
@@ -6918,7 +6918,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_goal_history_replay_rejects_a_mismatched_current_projection() {
+    fn goal_history_replay_rejects_a_mismatched_current_projection() {
         let command_id = CommandId::try_from_uuid(Uuid::from_u128(15))
             .expect("fixture command identity is admitted");
         let mut replay = GoalHistoryReplay::default();
@@ -8392,7 +8392,7 @@ mod tests {
         assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
     }
 
-    /// INV-044: orderly terminal runner shutdown blocks queued activation
+    /// orderly terminal runner shutdown blocks queued activation
     /// before placement reconciliation catches up.
     #[test]
     fn queued_send_stops_on_current_runner_shutdown() {
@@ -8406,7 +8406,7 @@ mod tests {
         assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
     }
 
-    /// INV-044: terminal runner connection loss blocks queued activation
+    /// terminal runner connection loss blocks queued activation
     /// before placement reconciliation catches up.
     #[test]
     fn queued_send_stops_on_current_runner_connection_loss() {
@@ -8819,10 +8819,10 @@ mod tests {
         Ok(())
     }
 
-    /// S28 / INV-038: a directory replaced after enumeration cannot redirect
+    /// S28: a directory replaced after enumeration cannot redirect
     /// a queued candidate read through a symbolic link.
     #[tokio::test]
-    async fn s28_inv038_scan_refuses_directory_symlink_replacement() -> Result<(), Box<dyn Error>> {
+    async fn s28_scan_refuses_directory_symlink_replacement() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let outside = tempfile::tempdir()?;
         let queued_directory = root.path().join("queued");
@@ -8866,12 +8866,11 @@ mod tests {
         Ok(())
     }
 
-    /// S28 / INV-038: a regular candidate replaced after enumeration by a
+    /// S28: a regular candidate replaced after enumeration by a
     /// FIFO is rejected without waiting for a writer.
     #[cfg(not(target_vendor = "apple"))]
     #[tokio::test]
-    async fn s28_inv038_scan_refuses_fifo_replacement_without_blocking()
-    -> Result<(), Box<dyn Error>> {
+    async fn s28_scan_refuses_fifo_replacement_without_blocking() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let candidate_path = root.path().join("conversation.jsonl");
         fs::write(&candidate_path, b"inside")?;
@@ -8924,11 +8923,11 @@ mod tests {
         .assert_eq(&failure.to_string());
     }
 
-    /// INV-060: opening a FIFO as an upload source is nonblocking and rejects
+    /// opening a FIFO as an upload source is nonblocking and rejects
     /// the descriptor before hashing.
     #[cfg(not(target_vendor = "apple"))]
     #[test]
-    fn inv060_blob_upload_rejects_fifo_source_without_blocking() -> Result<(), Box<dyn Error>> {
+    fn blob_upload_rejects_fifo_source_without_blocking() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let source = root.path().join("blob.fifo");
         rustix::fs::mkfifoat(
@@ -8946,11 +8945,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a regular seekable source is nonempty when its hash pass reads
+    /// a regular seekable source is nonempty when its hash pass reads
     /// bytes even if its advisory metadata length is zero.
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn inv060_blob_upload_counts_bytes_from_the_hash_pass() -> Result<(), Box<dyn Error>> {
+    async fn blob_upload_counts_bytes_from_the_hash_pass() -> Result<(), Box<dyn Error>> {
         let path = Path::new("/proc/version");
         let mut source = open_blob_source(path)?;
         let metadata_length = source.file.metadata().await?.len();
@@ -9100,27 +9099,24 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: an ambiguous catalog commit restarts the complete high-level
+    /// an ambiguous catalog commit restarts the complete high-level
     /// upload instead of retrying commit alone.
     #[tokio::test]
-    async fn inv060_blob_upload_restarts_after_ambiguous_catalog_commit()
-    -> Result<(), Box<dyn Error>> {
+    async fn blob_upload_restarts_after_ambiguous_catalog_commit() -> Result<(), Box<dyn Error>> {
         assert_ambiguous_blob_upload_restarts(ErrorCode::CommitAmbiguous).await
     }
 
-    /// INV-060: an ambiguous remote publication restarts the complete
+    /// an ambiguous remote publication restarts the complete
     /// high-level upload instead of retrying commit alone.
     #[tokio::test]
-    async fn inv060_blob_upload_restarts_after_ambiguous_publication() -> Result<(), Box<dyn Error>>
-    {
+    async fn blob_upload_restarts_after_ambiguous_publication() -> Result<(), Box<dyn Error>> {
         assert_ambiguous_blob_upload_restarts(ErrorCode::PublicationAmbiguous).await
     }
 
-    /// INV-060: an already-present receipt succeeds only after re-reading the
+    /// an already-present receipt succeeds only after re-reading the
     /// same descriptor and proving its identity is unchanged.
     #[tokio::test]
-    async fn inv060_blob_upload_revalidates_source_before_deduplication()
-    -> Result<(), Box<dyn Error>> {
+    async fn blob_upload_revalidates_source_before_deduplication() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let source_path = directory.path().join("blob.bin");
@@ -9181,10 +9177,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: the terminal client prehashes one descriptor, streams bounded
+    /// the terminal client prehashes one descriptor, streams bounded
     /// chunks in order, validates every echo, and reports the committed identity.
     #[tokio::test]
-    async fn inv060_blob_upload_streams_the_exact_lifecycle() -> Result<(), Box<dyn Error>> {
+    async fn blob_upload_streams_the_exact_lifecycle() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let source_path = directory.path().join("blob.bin");
@@ -9309,10 +9305,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: terminal metadata validates echoed identity and prints the
+    /// terminal metadata validates echoed identity and prints the
     /// bounded catalog facts returned by the daemon.
     #[tokio::test]
-    async fn inv060_blob_metadata_preserves_exact_wire_facts() -> Result<(), Box<dyn Error>> {
+    async fn blob_metadata_preserves_exact_wire_facts() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
@@ -9365,10 +9361,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a terminal range read validates echoed identity and offset and
+    /// a terminal range read validates echoed identity and offset and
     /// returns only the exact requested bytes for file delivery.
     #[tokio::test]
-    async fn inv060_blob_read_returns_only_the_exact_range() -> Result<(), Box<dyn Error>> {
+    async fn blob_read_returns_only_the_exact_range() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
@@ -9416,10 +9412,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: terminal range delivery creates one file containing exactly the
+    /// terminal range delivery creates one file containing exactly the
     /// bounded bytes returned by the daemon.
     #[tokio::test]
-    async fn inv060_blob_output_file_contains_exact_bytes() -> Result<(), Box<dyn Error>> {
+    async fn blob_output_file_contains_exact_bytes() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let output = directory.path().join("range.bin");
         let bytes = b"exact range bytes";
@@ -10610,10 +10606,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the current client sends the configuration-free request and returns its typed accepted-input/source-turn receipt.
+    /// the current client sends the configuration-free request and returns its typed accepted-input/source-turn receipt.
     #[tokio::test]
-    async fn inv033_current_client_uses_the_exact_steering_exchange() -> Result<(), Box<dyn Error>>
-    {
+    async fn current_client_uses_the_exact_steering_exchange() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
@@ -10682,7 +10677,7 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the reconciliation verb names the exact parked turn on the
+    /// the reconciliation verb names the exact parked turn on the
     /// wire and returns the accepted successor turn.
     #[tokio::test]
     async fn reconcile_turn_names_the_parked_turn_and_returns_its_successor()
@@ -10747,10 +10742,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the stop verb names the exact expected active turn on the
+    /// the stop verb names the exact expected active turn on the
     /// wire and returns the accepted successor turn.
     #[tokio::test]
-    async fn inv033_stop_turn_names_the_active_turn_and_returns_its_successor()
+    async fn stop_turn_names_the_active_turn_and_returns_its_successor()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
@@ -10812,10 +10807,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a decision verb sends the exact closed decision and validates
+    /// a decision verb sends the exact closed decision and validates
     /// that the receipt echoes the same request and decision.
     #[tokio::test]
-    async fn inv033_decide_validates_the_exact_recorded_receipt() -> Result<(), Box<dyn Error>> {
+    async fn decide_validates_the_exact_recorded_receipt() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
@@ -10879,11 +10874,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a receipt naming a different request or decision is a
+    /// a receipt naming a different request or decision is a
     /// protocol violation, never silently accepted.
     #[tokio::test]
-    async fn inv033_decide_rejects_a_receipt_for_a_different_decision() -> Result<(), Box<dyn Error>>
-    {
+    async fn decide_rejects_a_receipt_for_a_different_decision() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
@@ -10930,12 +10924,12 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: `decide` accepts only its own receipt. A `tool_denial_overridden`
+    /// `decide` accepts only its own receipt. A `tool_denial_overridden`
     /// receipt names a distinct command — it proves a one-shot override was
     /// recorded for a future re-proposal, never that this pending request was
     /// decided — so naming the same request cannot make it stand in for one.
     #[tokio::test]
-    async fn inv033_decide_rejects_a_denial_override_receipt() -> Result<(), Box<dyn Error>> {
+    async fn decide_rejects_a_denial_override_receipt() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;

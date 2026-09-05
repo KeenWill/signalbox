@@ -2147,7 +2147,7 @@ mod tests {
         );
     }
 
-    /// INV-035: credential text and its JSON-escaped spelling are scrubbed
+    /// credential text and its JSON-escaped spelling are scrubbed
     /// recursively before a successful result can enter durable tool evidence.
     #[test]
     fn credential_scrubber_redacts_exact_and_json_escaped_values() {

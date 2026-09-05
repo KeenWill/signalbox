@@ -1669,10 +1669,10 @@ mod tests {
         }
     }
 
-    /// INV-015: successor compaction selection follows model-visible order even
+    /// successor compaction selection follows model-visible order even
     /// when the retained suffix physically precedes the predecessor summary.
     #[test]
-    fn inv015_successor_boundary_uses_projected_order() {
+    fn successor_boundary_uses_projected_order() {
         let first = entry(0x7001);
         let root_through = entry(0x7002);
         let retained_suffix = entry(0x7003);
@@ -1692,10 +1692,10 @@ mod tests {
         assert_eq!(latest_safe_boundary(&visible), Some(1));
     }
 
-    /// INV-015: a successor summary can replace a boundary whose physical
+    /// a successor summary can replace a boundary whose physical
     /// position precedes the summary that begins its visible range.
     #[test]
-    fn inv015_successor_summary_projects_over_physical_reversal() {
+    fn successor_summary_projects_over_physical_reversal() {
         let first = entry(0x7011);
         let root_through = entry(0x7012);
         let retained_suffix = entry(0x7013);

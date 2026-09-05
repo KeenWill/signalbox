@@ -61,8 +61,8 @@ async fn queue_turn(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-/// INV-010: expiry waits for the session scheduler lock before retiring turns.
-async fn inv010_admission_expiry_retires_the_held_session_and_queued_turn_together()
+/// expiry waits for the session scheduler lock before retiring turns.
+async fn admission_expiry_retires_the_held_session_and_queued_turn_together()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let creation = owned_creation(1, StartGate::Held);

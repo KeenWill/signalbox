@@ -278,10 +278,10 @@ mod tests {
         .expect("prepared completed-call invalidation derives sealed facts")
     }
 
-    /// S21 / INV-006 / INV-014: Prepared ends directly as exact known failure
+    /// S21: Prepared ends directly as exact known failure
     /// while every open logical dependency remains an atomic closure requirement.
     #[test]
-    fn s21_inv006_inv014_prepared_invalidation_binds_atomic_failure_only() {
+    fn s21_prepared_invalidation_binds_atomic_failure_only() {
         let facts = prepared_facts([
             (
                 IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
@@ -330,10 +330,10 @@ mod tests {
         ));
     }
 
-    /// S21 / INV-006 / INV-014: unclassified work or blocking ambiguity rejects
+    /// S21: unclassified work or blocking ambiguity rejects
     /// the atomic-only path with exact facts and source phase unchanged.
     #[test]
-    fn s21_inv006_inv014_incomplete_prepared_physical_closure_rejects_unchanged() {
+    fn s21_incomplete_prepared_physical_closure_rejects_unchanged() {
         assert_incomplete_physical_closure_rejects_unchanged(IssuedOperationClosure::Unclassified);
         assert_incomplete_physical_closure_rejects_unchanged(
             IssuedOperationClosure::PhysicallyAmbiguous {
@@ -366,10 +366,10 @@ mod tests {
         );
     }
 
-    /// INV-006: phase shape, exact attempt correlation, and Prepared state all
+    /// phase shape, exact attempt correlation, and Prepared state all
     /// reject without consuming either supplied input.
     #[test]
-    fn inv006_prepared_binding_source_rejections_preserve_inputs() {
+    fn prepared_binding_source_rejections_preserve_inputs() {
         let running = CurrentTurnAttempt::prepared(turn_attempt_id(1))
             .begin_running()
             .expect("test attempt can run");

@@ -13,7 +13,7 @@ use super::{
     test_telemetry_support::*, text_decoding::*, tool::*,
 };
 
-/// INV-035: the actual `ToolExecutor::execute` result rejects a fixed evidence
+/// the actual `ToolExecutor::execute` result rejects a fixed evidence
 /// label before dispatch and never reproduces the request credential.
 #[tokio::test]
 async fn web_search_bound_executor_result_omits_credential_collision() {
@@ -53,7 +53,7 @@ async fn web_search_bound_executor_result_omits_credential_collision() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: case normalization of fixed bound-evidence Debug tokens rejects a
+/// case normalization of fixed bound-evidence Debug tokens rejects a
 /// request credential before dispatch without reproducing it.
 #[tokio::test]
 async fn web_search_bound_executor_result_omits_case_normalized_credential_collision() {
@@ -96,7 +96,7 @@ async fn web_search_bound_executor_result_omits_case_normalized_credential_colli
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: fixed bound-wrapper vocabulary is checked before physical
+/// fixed bound-wrapper vocabulary is checked before physical
 /// dispatch, not only after evidence is correlated.
 #[tokio::test]
 async fn web_search_bound_wrapper_collision_fails_before_dispatch() {
@@ -113,7 +113,7 @@ async fn web_search_bound_wrapper_collision_fails_before_dispatch() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: exact field framing introduced by the correlated bound wrapper
+/// exact field framing introduced by the correlated bound wrapper
 /// is checked before physical dispatch.
 #[tokio::test]
 async fn web_search_exact_bound_wrapper_framing_fails_before_dispatch() {
@@ -127,7 +127,7 @@ async fn web_search_exact_bound_wrapper_framing_fails_before_dispatch() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: populated completed evidence is combined with the correlated
+/// populated completed evidence is combined with the correlated
 /// bound wrapper before physical dispatch.
 #[tokio::test]
 async fn web_search_populated_success_wrapper_fails_before_dispatch() {
@@ -141,7 +141,7 @@ async fn web_search_populated_success_wrapper_fails_before_dispatch() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: boundary whitespace cannot hide a credential that normalizes
+/// boundary whitespace cannot hide a credential that normalizes
 /// to fixed bound-evidence vocabulary.
 #[tokio::test]
 async fn web_search_bound_result_checks_trimmed_unusable_credential() {
@@ -158,7 +158,7 @@ async fn web_search_bound_result_checks_trimmed_unusable_credential() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: the definitive `KnownFailed` vocabulary never exempts a matching
+/// the definitive `KnownFailed` vocabulary never exempts a matching
 /// request credential from the final correlated evidence check.
 #[tokio::test]
 async fn web_search_bound_failure_word_collision_fails_before_dispatch() {
@@ -175,7 +175,7 @@ async fn web_search_bound_failure_word_collision_fails_before_dispatch() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: a credential matching the fixed `KnownFailed` Debug token is
+/// a credential matching the fixed `KnownFailed` Debug token is
 /// rejected before dispatch and omitted from the public executor result.
 #[tokio::test]
 async fn web_search_bound_known_failure_token_omits_case_folded_credential_collision() {
@@ -218,7 +218,7 @@ async fn web_search_bound_known_failure_token_omits_case_folded_credential_colli
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: a credential matching a substring of the fixed `KnownFailed`
+/// a credential matching a substring of the fixed `KnownFailed`
 /// Debug token is rejected before dispatch and omitted from the public
 /// executor result.
 #[tokio::test]
@@ -262,7 +262,7 @@ async fn web_search_bound_known_failure_token_omits_credential_substring_collisi
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: fixed populated-detail framing is rejected during credential
+/// fixed populated-detail framing is rejected during credential
 /// admission and preserves definitive credential-unavailable evidence.
 #[tokio::test]
 async fn web_search_populated_failure_detail_collision_commits_before_dispatch() {
@@ -291,7 +291,7 @@ async fn web_search_populated_failure_detail_collision_commits_before_dispatch()
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: every populated fixed failure detail is checked inside the
+/// every populated fixed failure detail is checked inside the
 /// complete bound wrapper before dispatch and falls back to detail-free evidence.
 #[tokio::test]
 async fn web_search_invalid_response_detail_collision_commits_before_dispatch() {
@@ -317,7 +317,7 @@ async fn web_search_invalid_response_detail_collision_commits_before_dispatch() 
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: the outer `Ok` wrapper is included in case-normalized checks
+/// the outer `Ok` wrapper is included in case-normalized checks
 /// of the complete public known-failure executor result.
 #[tokio::test]
 async fn web_search_bound_known_failure_omits_outer_ok_wrapper_collision() {
@@ -360,7 +360,7 @@ async fn web_search_bound_known_failure_omits_outer_ok_wrapper_collision() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: punctuation does not conceal a case-normalized fixed Debug
+/// punctuation does not conceal a case-normalized fixed Debug
 /// spelling during pre-dispatch credential validation.
 #[tokio::test]
 async fn web_search_bound_executor_result_omits_punctuated_case_collision() {
@@ -403,7 +403,7 @@ async fn web_search_bound_executor_result_omits_punctuated_case_collision() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: a credential that can collide with the fixed outer `Err`
+/// a credential that can collide with the fixed outer `Err`
 /// marker is rejected before physical dispatch, and the resulting complete
 /// executor diagnostic does not reproduce it.
 #[tokio::test]
@@ -444,7 +444,7 @@ async fn web_search_bound_executor_error_result_omits_credential_collision() {
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: an oversized resolved credential is a definitive pre-dispatch
+/// an oversized resolved credential is a definitive pre-dispatch
 /// failure and is never expanded by the scrubber or sent to transport.
 #[tokio::test]
 async fn oversized_credential_commits_without_dispatch() {
@@ -456,7 +456,7 @@ async fn oversized_credential_commits_without_dispatch() {
     assert_eq!(searches, 0);
 }
 
-/// INV-035: a credential beyond the bounded inspection budget fails
+/// a credential beyond the bounded inspection budget fails
 /// closed before whole-value normalization, decoding, or dispatch.
 #[tokio::test]
 async fn oversized_credential_above_inspection_bound_fails_closed() {
@@ -470,7 +470,7 @@ async fn oversized_credential_above_inspection_bound_fails_closed() {
     assert!(!rendered.contains(std::str::from_utf8(&credential).expect("fixture is UTF-8")));
 }
 
-/// INV-035: oversized credential values cannot reach telemetry through a
+/// oversized credential values cannot reach telemetry through a
 /// bounded reversible decoding chain.
 #[test]
 fn oversized_encoded_credential_value_diagnostic_is_suppressed() {
@@ -490,7 +490,7 @@ fn oversized_encoded_credential_value_diagnostic_is_suppressed() {
     assert!(!format!("{report_error:?}").contains(OVERSIZED_CREDENTIAL_TELEMETRY_COLLISION_VALUE));
 }
 
-/// INV-035: bounded reversible variants of an oversized credential remain
+/// bounded reversible variants of an oversized credential remain
 /// checked against the public executor result.
 #[tokio::test]
 async fn oversized_encoded_bound_wrapper_collision_is_suppressed() {
