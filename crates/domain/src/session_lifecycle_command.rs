@@ -1,7 +1,7 @@
-//! The §7 session-lifecycle command surface: the lifecycle operations one
-//! durable command family carries, the finish condition an owned session
-//! owes, the verdict a finish check returns, and the authenticated principal
-//! every command envelope records.
+//! The session-lifecycle command surface (docs/spec/session-lifecycle.md):
+//! the lifecycle operations one durable command family carries, the finish
+//! condition an owned session owes, the verdict a finish check returns, and
+//! the authenticated principal every command envelope records.
 
 use crate::{
     Actor, DescendantTerminationScope, DispatchingModule, DurableCommandId,
@@ -90,7 +90,7 @@ pub enum FinishCheckVerdict {
     Unverified,
 }
 
-/// One of the §7 lifecycle operations.
+/// One of the lifecycle operations.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum SessionLifecycleOperation {
     /// Open a held start gate so queued admission work may dispatch.
@@ -187,7 +187,7 @@ impl std::hash::Hash for SessionLifecycleCommand {
 pub enum SessionLifecycleCommandRejection {
     /// The target session does not exist.
     SessionNotFound,
-    /// §1's algebra does not admit the transition from the held state.
+    /// The lifecycle algebra does not admit the transition from the held state.
     TransitionNotAdmitted,
     /// The operation closes or resumes a park, and the session is not parked.
     RequiresParked,
