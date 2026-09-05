@@ -11,7 +11,7 @@ and routing, the ingest and read lifecycle, the blob wire vocabulary, multipart
 user content with attachment parts, and what a model sees when accepted content
 carries an attachment. A blob is an immutable, nonempty byte sequence identified
 by the SHA-256 of exactly those bytes. `BlobDigest` is the domain value, and its
-external spelling is the hexadecimal digest behind a `sha256:` prefix.
+external spelling is the hexadecimal digest after a `sha256:` prefix.
 
 PostgreSQL holds the catalog: one `blob` row per digest, one `blob_replica` row
 for every store that holds a verified copy, and one `blob_store_binding` row
@@ -22,21 +22,21 @@ a new write goes; the catalog is the record of where bytes are.
 The daemon configuration carries an optional `[blob_storage]` table. It names a
 staging directory, a maximum blob size, the stores, and one route for every
 storage class; each store has a name, a namespace UUID, and a kind, either
-`filesystem` or `s3`. Every store carries a namespace marker inside the store: a
-filesystem root holds a private `.signalbox-blob-namespace-v1` file and an S3
-bucket holds an object of the same name, and in both the complete content is the
-configured namespace UUID followed by one line feed. At startup
-`BlobStoreRegistry` checks the configuration against the recorded bindings and
-the markers, then hands out the adapters, which implement the `BlobStore` trait.
+`filesystem` or `s3`. Every store holds a namespace marker: a filesystem root
+holds a private `.signalbox-blob-namespace-v1` file, an S3 bucket holds an
+object of the same name, and in both the complete content is the configured
+namespace UUID followed by one line feed. At startup `BlobStoreRegistry` checks
+the configuration against the recorded bindings and the markers, then hands out
+the adapters, which implement the `BlobStore` trait.
 
 Ingest arrives over the process protocol as a chunked upload. The daemon spools
 the bytes to the staging directory while hashing them, publishes the object to
-the store the route selects, verifies the published object, and only then
-records the catalog rows. Reads reach the daemon over the process protocol, over
-the same-origin HTTP surface the browser client uses, and through the blob-read
-tool family a model calls. All three read through one runtime that walks the
-recorded replicas in order and serves a verified byte range. The request and
-response shapes live in `crates/process-protocol` and on
+the store the route selects, verifies the published object, then records the
+catalog rows. Reads reach the daemon over the process protocol, over the
+same-origin HTTP surface the browser client uses, and through the blob-read tool
+family a model calls. All three read through one runtime that walks the recorded
+replicas in order and serves a verified byte range. The request and response
+shapes live in `crates/process-protocol` and on
 [process-protocol](process-protocol.md).
 
 The browser client asks for a descriptor of one use of a blob. The descriptor
@@ -45,11 +45,11 @@ common image formats, and thumbnail and preview views that an isolated worker
 produces on demand. Each production is recorded as a `BlobDerivation`, an
 immutable relation from input digests to output digests that names its producer.
 
-Accepted user content is `UserContent`, an ordered sequence of parts, each exact
-text or an attachment naming a blob digest with a kind, a media type, and an
-optional filename. Transcript presence is distinct from model-context inclusion:
-an attachment appears in the transcript and the terminal as metadata, the model
-sees it as a textual stub, and the model reaches the bytes only through the
+Accepted user content is `UserContent`, an ordered sequence of parts; each part
+is exact text or an attachment naming a blob digest with a kind, a media type,
+and an optional filename. Transcript presence is distinct from model-context
+inclusion: the transcript and the terminal show an attachment as metadata, the
+model sees a textual stub, and the model reaches the bytes only through the
 blob-read tools. Before a model call is authorized to send, attachment
 preparation verifies a replica of every attachment the rendered request names.
 
@@ -61,15 +61,14 @@ deduplication safe, and a multi-principal boundary must revisit this before
 sharing the namespace.
 
 A store's durable identity is its name plus its namespace UUID, never its
-current locator. Why: deriving identity from location configuration would
-silently change the meaning of every old durable record on each configuration
-edit.
+current locator. Why: identity derived from the locator would silently change
+the meaning of every old durable record on each configuration edit.
 
 The namespace marker lives inside the store rather than in the daemon's
-configuration or database. Why: an absent mount must not be admitted as the
-recorded namespace because its path and device identity are locally unique, and
-two locator strings that alias one bucket must disagree on their configured
-namespace UUIDs instead of being admitted as two replicas.
+configuration or database. Why: path and device identity are only locally
+unique, so without the marker an absent mount would be admitted as the recorded
+namespace, and two locator strings that alias one bucket would be admitted as
+two replicas instead of disagreeing on their namespace UUIDs.
 
 There is no replica-retirement state, so a configured binding cannot be removed
 while any `blob_replica` row names it, even after another replica exists
@@ -81,9 +80,9 @@ mounts fail startup. Why: a remote filesystem operation cannot be interrupted or
 bounded from inside the daemon.
 
 Several stores are enabled at once and routed by storage class; routing by media
-type or filename is inexpressible. Why: the class is a classification the daemon
-made, and a caller-supplied string must not select which infrastructure gains
-authority over bytes.
+type or filename is inexpressible. Why: the daemon assigns the class, and a
+caller-supplied string must not select which infrastructure gains authority over
+bytes.
 
 S3 credentials come only from the configured credentials file; no environment
 variable, provider profile, metadata service, or other ambient source supplies
@@ -99,8 +98,8 @@ action.
 
 Content responses send an exact content length, advertise byte ranges, forbid
 media-type sniffing, and use the quoted digest as the ETag with immutable
-year-long caching. Why: the digest as ETag makes an immutable cache lifetime
-safe.
+year-long caching. Why: the bytes behind a digest never change, so an immutable
+cache lifetime is safe.
 
 The terminal client escapes DEL and every C1 control code point inside the part
 JSON it prints, so the ordered part values stay parseable while text and
@@ -148,9 +147,8 @@ Moving one namespace to another locator preserves its UUID; assigning a locator
 to another namespace requires a fresh store name and UUID.
 
 Startup succeeds without the `[blob_storage]` table only while the blob catalog
-is empty; once the catalog is nonempty, omission is a startup error. With the
-table absent, blob and conversation-import operations are unavailable rather
-than inventing a storage location.
+is empty. With the table absent, blob and conversation-import operations are
+unavailable rather than inventing a storage location.
 
 Configured stores name distinct physical namespaces. Startup compares each
 filesystem root's canonical path, device and inode identity, and mount ancestry
