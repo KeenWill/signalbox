@@ -185,7 +185,7 @@ The turn-start manifest stays the first manifest of every turn. Successor
 manifests are appended, never substituted, and every manifest is immutable.
 
 An empty admitted set produces no region, so the present projection needs no
-workspace-capable target and no present target check is required.
+workspace-capable target and no target check is required.
 
 Model-runtime adapters keep native loaders disabled and receive instruction
 input only as prepared model input.

@@ -8,19 +8,18 @@ of them a model call could use.
 
 A workspace instruction is a file a repository or an operator supplies to guide
 a model. It is either an agent document, a file named `AGENTS.md`, or an agent
-skill, a directory holding a `SKILL.md`. Signalbox reads both portable formats
-itself. The daemon, not a model-runtime adapter, finds them, records them,
-decides which a session may use, places their text in model input, and proves
-per turn what a model could see. Model-runtime adapters run with their native
-document, rules, and skill loaders disabled
+skill, a directory holding a `SKILL.md`. The daemon, not a model-runtime
+adapter, finds them, records them, decides which a session may use, places their
+text in model input, and proves per turn what a model could see. Model-runtime
+adapters run with their native document, rules, and skill loaders disabled
 ([runtime-substrate.md](runtime-substrate.md)).
 
-The design has four stages. Discovery finds candidates. Registration validates a
+There are four stages. Discovery finds candidates. Registration validates a
 candidate and gives it a typed identity and a source hash. Eligibility decides
 which registered bundles one session may use. Admission places a bundle's
 rendered text in one turn's model input. Discovery and registration are built.
 Eligibility and admission exist only as the empty per-turn record described
-below; everything else about them is listed under Not built.
+below.
 
 A bundle is one independently addressable instruction source. Discovery
 (`discover_workspace_instructions` in
@@ -36,32 +35,30 @@ could not read or classify, and whether the scan was complete.
 Registration turns each candidate into an `InstructionBundleRegistration`
 (`crates/domain/src/workspace_instruction.rs`). Its identity is a distinct
 `InstructionBundleId`, not a display name, path, ordinal, or content hash. Its
-source content is the file's exact bytes for an agent document and the exact
-`SKILL.md` bytes for a skill, and a versioned SHA-256 over those bytes records
-what was available to the session. A skill's frontmatter is parsed for its name
-and description.
+source content is the exact bytes of the agent document or the skill's
+`SKILL.md`, and a versioned SHA-256 over those bytes records what was available
+to the session. A skill's frontmatter is parsed for its name and description.
 
 The per-turn record is the `TurnInstructionManifest`. Every turn owns one
 turn-start manifest, which names the turn's discovery and carries the hashes of
 the turn's eligibility set and admitted set. The activation transaction
 ([turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md)) inserts
-and authenticates that manifest with an empty eligibility set and an empty
-admitted set. It is the only manifest the present implementation stores, and no
-admission exists. Discovery snapshots, registered bundles, and manifests live in
-the tables that `crates/persistence/migrations/202609010007_workspaces.sql`
-creates; `apps/signalboxd/src/workspace_instruction_runtime.rs` runs discovery
-and records the manifest during activation.
+and authenticates that manifest with empty eligibility and admitted sets. It is
+the only manifest the daemon stores, and no admission exists. Discovery
+snapshots, registered bundles, and manifests live in the tables that
+`crates/persistence/migrations/202609010007_workspaces.sql` creates;
+`apps/signalboxd/src/workspace_instruction_runtime.rs` runs discovery and
+records the manifest during activation.
 
 ## Decisions
 
-Signalbox reads the `AGENTS.md` and Agent Skills formats itself and treats no
-client's ambient loader as authority. Why: one reproducible path from file to
-model input, which host-local files cannot bypass.
+Signalbox reads the `AGENTS.md` and Agent Skills formats itself. Why: one
+reproducible path from file to model input, which host-local files cannot
+bypass.
 
-A runner-placed session records no workspace discovery root, and the daemon does
-not claim to scan a workspace it does not hold; configured roots are still
-discovered. Why: the runner owns a different filesystem, and the durable root
-inventory proves the omission instead of hiding it.
+A runner-placed session records no workspace discovery root; configured roots
+are still discovered. Why: the runner owns a different filesystem, and the
+durable root inventory proves the omission instead of hiding it.
 
 Registration verifies repository content by digest because a checkout is input,
 not daemon authority.
@@ -69,12 +66,12 @@ not daemon authority.
 Skill frontmatter is what a YAML parser deserializes into a closed struct:
 unknown keys are rejected, a metadata mapping is accepted and discarded, mixed
 line endings are accepted, bounds are counted in characters, and every failure
-is one InvalidSkill finding.
+is one invalid-skill finding.
 
 Discovery does not follow symbolic links.
 
 The discovery safety limits are fixed by the daemon and are not
-user-configurable discovery policy.
+user-configurable.
 
 ## Contracts
 
