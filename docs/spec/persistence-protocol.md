@@ -31,9 +31,9 @@ its checksum in `_sqlx_migrations`.
 
 The schema is normalized and purpose-specific: mutable current-state rows
 guarded by constraints and triggers, and append-only facts that triggers protect
-from update, delete, and truncate. The core file holds three singletons: the
-hub-fence generation that fences the connection pool, the outbox sequence
-allocator, and the outbox delivery cursor.
+from update and delete, and in the guarded table families from truncate as well.
+The core file holds three singletons: the hub-fence generation that fences the
+connection pool, the outbox sequence allocator, and the outbox delivery cursor.
 
 One append-only, user-global `durable_command` registry claims every command
 identifier across all kinds and sessions, and each command kind has one typed
@@ -158,9 +158,12 @@ registry, not an application race, and the loser rereads the winner.
 Compaction and review orchestration are the two built commands whose claim and
 settlement are separate transactions. Compaction commits its registry row,
 pending typed command, and prepared call before provider work, and a later
-session-locked transaction settles it exactly once. Review orchestration commits
-its registry row and immutable intent before returning its guard, and the
-guard's later transaction replaces that intent with the receipt.
+session-locked transaction settles it exactly once. Preparation locks the
+session's scheduler row and then the current-defaults pointer FOR UPDATE through
+commit, and returns a defaults-changed rejection when the request's epoch is no
+longer current. Review orchestration commits its registry row and immutable
+intent before returning its guard, and the guard's later transaction replaces
+that intent with the receipt.
 
 The row locks the lock inventory names are issued from that one reviewed file,
 so their order is auditable instead of scattered through query strings.
@@ -381,12 +384,18 @@ floored under the caller's configured deadline.
 
 A delegated terminal observation locks both endpoint session rows, then both
 endpoint scheduler rows, in ascending session-identity order, and only then the
-delegation row. A descendant-scoped stop or interrupt locks the complete
-reachable session frontier in ascending session-identity order before the
-ordinary root or scheduler locks, then the relationships in spawning-request
+delegation row. A peer message locks both endpoint session rows FOR NO KEY
+UPDATE in ascending session-identity order, then both scheduler rows, and only
+then the relationship row. A descendant-scoped stop or interrupt locks the
+complete reachable session frontier in ascending session-identity order before
+the ordinary root or scheduler locks, then the relationships in spawning-request
 order.
 
 A durable user-command claim precedes the runner lock subsequence.
+
+Updating a session's placement locks the current-placement head FOR UPDATE
+before checking the expected version, and holds it through the successor event's
+insertion and the head's advance.
 
 Replacing session defaults locks the current-defaults pointer row FOR UPDATE
 before loading, and the compare-and-set update on that locked row is the
@@ -467,7 +476,9 @@ resolved by the next locked cursor read.
 
 Dispatch validates each record against durable state: an activation against the
 turn's attempt, a call transition against monotonic call state, and a terminal
-record against its turn and frontier.
+record against its turn and frontier. A context-compaction event whose
+compaction, producing call, summary, and result frontier do not correlate fails
+the dispatch.
 
 An applied submit-input that creates a turn origin appends an input-accepted
 event; pending steering appends nothing until terminal reclassification mints
