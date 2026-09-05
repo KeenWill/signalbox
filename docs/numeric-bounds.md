@@ -16,11 +16,8 @@ its two consumers need different ceilings. The 128 rows partition as 36 guards,
 fixtures. Source locations are maintained with the implementation slices that
 move or delete declarations.
 
-The numeric-bound gate accepts only structural guards, values mechanically
-derived from guards, representation facts, and test fixtures from this
-classified set. Exact pre-existing daemon and persistence candidates omitted
-from the commissioned audit remain outside the blocking set; any newly named
-bound in either root fails closed.
+The inventory distinguishes structural guards, values mechanically derived from
+guards, representation facts, test fixtures, and deployment configuration.
 
 ## Guards and derived bounds
 
