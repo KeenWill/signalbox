@@ -402,9 +402,8 @@ from that bound:
   whose values are JSON strings under the message's byte bound, unsigned
   integers, booleans, null, or nested objects and arrays holding at most 64
   members or elements each, with at most eight containers on any root-to-value
-  path counted exactly as
-  [conversation import](conversation-import.md#claude-code-session-jsonl-versions-1-and-2)
-  counts container depth.
+  path counted exactly as [conversation import](conversation-import.md) counts
+  container depth.
 
 Those three limits together leave more than a kibibyte of the retained bound for
 the detail object's own framing and worst-case JSON escaping. A detail outside
