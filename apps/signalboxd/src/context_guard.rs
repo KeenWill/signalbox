@@ -1003,7 +1003,7 @@ fn compaction_recovery_cause(
 
 /// Classifies the turn-terminal cause a failed automatic compaction records.
 ///
-/// An input the compactor cannot fit is the §11 wall and keeps its own
+/// An input the compactor cannot fit is the compaction wall and keeps its own
 /// spelling; every other compaction failure is recorded as such rather than
 /// borrowed from the wall.
 const fn compaction_terminal_cause(
