@@ -824,6 +824,16 @@ where
                     let selected_model = runtime_models
                         .resolve(target)
                         .ok_or(ContextGuardedTurnPassError::ContextWindowUnavailable(turn))?;
+                    if dispatch_start
+                        && model_configuration
+                            .adapter_for_provider_model(selected_model.provider_model())
+                            == Some(ModelAdapter::Anthropic)
+                    {
+                        // Counting and attachment reads are provider/storage
+                        // I/O. Preserve the queued preview so an ordinary pass
+                        // performs them outside the reserved start lane.
+                        return Ok(());
+                    }
                     let model = runtime_models
                         .effective_definition(
                             selected_model,
@@ -844,6 +854,47 @@ where
                             // queued so recovery must verify and recount the
                             // attachment before any later activation.
                             return Ok(());
+                        }
+                        ModelCallInputTokenCount::AttachmentFailure => {
+                            // Activate without compaction so ordinary
+                            // capability preparation records the exact
+                            // definitive attachment failure before any send.
+                            let committed = activation
+                                .commit_preview(preview)
+                                .await
+                                .map_err(|source| ContextGuardedTurnPassError::Activation {
+                                    turn: Some(turn),
+                                    source,
+                                })?;
+                            match committed {
+                                CommitActivationPreviewOutcome::Stale => continue,
+                                CommitActivationPreviewOutcome::Activated(activated) => {
+                                    if activated.session() != session {
+                                        execution.report_post_activation_failure();
+                                        return Err(
+                                            ContextGuardedTurnPassError::ActivationSessionMismatch(
+                                                turn,
+                                            ),
+                                        );
+                                    }
+                                    observe_turn(activated.turn());
+                                    report_guarded_turn_activation(
+                                        activated.session(),
+                                        activated.turn(),
+                                    );
+                                    return execution
+                                        .execute(activated)
+                                        .instrument(guarded_turn_span(session, turn))
+                                        .await
+                                        .map_err(|source| {
+                                            ContextGuardedTurnPassError::Execution {
+                                                stage: TurnPassExecutionStage::Execution,
+                                                turn: Some(turn),
+                                                source,
+                                            }
+                                        });
+                                }
+                            }
                         }
                         ModelCallInputTokenCount::Unavailable => {
                             if let Some(compaction) = &reported_usage_compaction
