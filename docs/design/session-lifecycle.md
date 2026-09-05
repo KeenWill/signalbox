@@ -51,8 +51,9 @@ daemon reads the active-stall bound from configuration, and the pass parks an
 active or recovering session whose stall exceeds it, with the cause selected
 from the state: active-stall deadline expired from active, recovering deadline
 expired from recovering. Modules and the program substrate subscribe to those
-events and run no timer over a session of their own. A module that needs a
-deadline core does not arm asks for a new deadline kind in core.
+events and run no timer over a session of their own, the repo-watch start lease
+excepted. A module that needs a deadline core does not arm asks for a new
+deadline kind in core.
 
 The lifecycle actor vocabulary gains a run-scoped program-run actor for commands
 issued by a registered program's run, as
