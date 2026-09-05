@@ -350,8 +350,9 @@ frontier are durable evidence of the transition, so a replayed completion
 offering any other one is reported as a mismatched replay. An
 operator-commissioned dispatch has an attending operator and no independent
 redispatch path, so its completed escalation leaves the turn and request
-awaiting tool approval; the completed judge call, recommendation, rationale, and
-usage are the durable record, and no approval decision is invented.
+awaiting tool approval, as does a sweep-commissioned dispatch whose authority
+still stands; the completed judge call, recommendation, rationale, and usage are
+the durable record, and no approval decision is invented.
 
 A pull-request close or merge records one lifecycle cutoff, a later open event
 makes an earlier unprocessed cutoff a recorded reopen, and dispatch admission
