@@ -19,13 +19,14 @@ The environment supplies a fixed set of deployment values: the database URL, the
 catalog paths, the socket paths, the paths of the two integration credential
 files, the optional browser bind address and static-asset root, the log filter,
 and the telemetry settings. `DATABASE_URL` is the whole database channel, and a
-deployment carries every connection parameter in the URL. Model-provider
-credential paths come from `file` profiles in the catalog;
-`ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An absent
-`SIGNALBOX_WEB_BIND` binds a loopback default, and an explicit socket must be a
-loopback address or configuration fails. The daemon's browser listener serves
-the `/api` routes on that bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names a
-production web build, the static files under that root; an empty root fails
+deployment carries every connection parameter in the URL. Whatever TLS mode the
+URL states, the production connection verifies the server certificate and
+hostname in full. Model-provider credential paths come from `file` profiles in
+the catalog; `ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An
+absent `SIGNALBOX_WEB_BIND` binds a loopback default, and an explicit socket
+must be a loopback address or configuration fails. The daemon's browser listener
+serves the `/api` routes on that bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names
+a production web build, the static files under that root; an empty root fails
 configuration and an absent one answers every other path 404. The DTOs and
 schemas under `crates/web-contract` are the authority for that surface, and the
 checked-in JavaScript decoders and TypeScript declarations are generated from
@@ -61,13 +62,14 @@ reservation, not the raw advertised window, and is not smaller than
 `max_output_tokens`. The daemon provides exactly the `anthropic`, `openai`,
 `claude_cli`, and `codex_cli` adapters; no adapter pins a profile name, and a
 pool may hold several profiles for one adapter. The required `[numeric_bounds]`
-table holds every deployment-owned numeric policy and the loader supplies no
-default for any member. `codex_cli_version_probe_bound` bounds a credential-free
-startup probe of the configured Codex executable, and a missing, malformed,
-zero, unsuccessful, or mismatched probe fails configuration before the socket
-opens. One valid document yields correlated immutable in-memory catalogs: the
-domain `ModelTargetCatalog` for execution-time target resolution and the
-`RuntimeModelCatalog` for the provider bridge.
+table holds the central numeric-bound inventory and the loader supplies no
+default for any member, while other tables carry their own configured limits.
+`codex_cli_version_probe_bound` bounds a credential-free startup probe of the
+configured Codex executable, and a missing, malformed, zero, unsuccessful, or
+mismatched probe fails configuration before the socket opens. One valid document
+yields correlated immutable in-memory catalogs: the domain `ModelTargetCatalog`
+for execution-time target resolution and the `RuntimeModelCatalog` for the
+provider bridge.
 
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
 binds one configured workspace root. Each session's workspace root is derived
@@ -358,10 +360,10 @@ credential value from provider text before it truncates that text. A credential
 for one repository never authorizes a request to another.
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
-identifiers. They never contain source bytes, host or credential paths, provider
-payloads, SQL, or user content; a tool failure may name a bounded
-workspace-relative path. Retained source content, such as an imported transcript
-entry, is not diagnostic evidence.
+identifiers. They never contain source bytes, host or credential paths, raw or
+unsanitized provider payloads, SQL, or user content; a tool failure may name a
+bounded workspace-relative path. Retained source content, such as an imported
+transcript entry, is not diagnostic evidence.
 
 `HOME` locates the default PostgreSQL password file and must be a nonempty
 absolute path when a template uses a `$HOME/` prompt reference. The
