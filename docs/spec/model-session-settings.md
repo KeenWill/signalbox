@@ -72,7 +72,8 @@ Signalbox does not infer capability support from model-name prefixes and does
 not run a provider CLI during request preparation.
 
 Codex CLI context-window overrides are keyed by exact provider-model name. The
-daemon's configured context-window limit remains the usable input ceiling used
+daemon accepts an override only for a configured Codex CLI model, and its
+configured context-window limit remains the usable total context ceiling used
 for accounting.
 
 ## Boundary contracts

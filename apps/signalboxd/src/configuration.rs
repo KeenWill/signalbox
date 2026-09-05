@@ -1623,6 +1623,17 @@ impl HubModelConfiguration {
             }
         }
 
+        if codex_cli.as_ref().is_some_and(|configuration| {
+            configuration
+                .model_context_window_overrides
+                .keys()
+                .any(|provider_model| {
+                    provider_model_adapters.get(provider_model) != Some(&ModelAdapter::CodexCli)
+                })
+        }) {
+            return Err(HubModelConfigurationError::InvalidCodexCliConfiguration);
+        }
+
         if approval_judge_selection.is_some_and(|selection| !direct_selections.contains(&selection))
         {
             return Err(HubModelConfigurationError::DanglingApprovalJudgeSelection);
@@ -8716,7 +8727,14 @@ context_window_tokens = 200000
         let temporary = tempfile::tempdir().expect("fixture directory is available");
         let executable = std::env::current_exe().expect("the test executable has a path");
         let configuration = format!(
-            "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 1000000 }}\n",
+            "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 1000000 }}\n\n\
+             [[models]]\n\
+             selection_id = \"10000000-0000-4000-8000-00000000000f\"\n\
+             target_id = \"20000000-0000-4000-8000-00000000000f\"\n\
+             model_family = \"codex\"\n\
+             provider_model = \"gpt-5.6-sol\"\n\
+             max_output_tokens = 8192\n\
+             context_window_tokens = 828400\n",
             configuration_with_codex_paths(&executable, temporary.path())
         );
 
@@ -8737,6 +8755,36 @@ context_window_tokens = 200000
         let executable = std::env::current_exe().expect("the test executable has a path");
         let configuration = format!(
             "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 0 }}\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unknown_codex_model_context_window_override() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 1000000 }}\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_codex_override_for_another_adapter() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"claude-example\" = 1000000 }}\n",
             configuration_with_codex_paths(&executable, temporary.path())
         );
 
