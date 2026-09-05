@@ -1,8 +1,7 @@
 # Web egress threat model
 
-The web egress boundary keeps provider bytes from becoming anything but bounded
-evidence and keeps every outbound web request under operator policy and
-approval.
+The web egress boundary reduces provider bytes to bounded evidence and keeps
+every outbound web request under operator policy and approval.
 
 ## Map
 
@@ -28,10 +27,10 @@ back.
 ## Decisions
 
 Structural construction is the primary control on web-tool output, and the
-credential scrubber is defense in depth after it. Why: parsing makes provider
-bytes data for a bounded parser rather than a second rendering channel, and
-exact-value redaction may miss a credential that provider content transforms,
-encodes, or splits; those forms are accepted residual risk.
+credential scrubber is defense in depth after it. Why: parsing treats provider
+bytes as input to a bounded parser rather than as a second rendering channel,
+and exact-value redaction may miss a credential that provider content
+transforms, encodes, or splits; those forms are accepted residual risk.
 
 The trustworthiness, relevance, and safety of provider content are outside this
 model, which constrains how content is represented, not what it means.
@@ -39,17 +38,16 @@ model, which constrains how content is represented, not what it means.
 Origin admission constrains the recipient only; it establishes no user intent to
 send data and lets no external system direct another, so approval stays
 necessary even when a transport has an exact destination policy. Why: a model
-can combine workspace content into a fetch URL, or take a code-host read as
+can put workspace content into a fetch URL, or take a code-host read as
 authority for a later search, and neither source authorizes that disclosure or
 delegation.
 
 Both tools' declarations are conservative, so deliberate operator policy and the
 ordinary approval flow are the only ways to widen egress authority.
 
-A finding that demonstrates a violation of the structural output boundary or a
-named bound is an implementation defect. A finding only about a residual named
-above, or about provider-content semantics, is accepted and needs no code
-change.
+A demonstrated violation of the structural output boundary or a named bound is
+an implementation defect. A finding only about a residual named above, or about
+provider-content semantics, is accepted and needs no code change.
 
 ## Contracts
 
