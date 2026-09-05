@@ -43,7 +43,8 @@ compression variable in the environment fails startup. `SIGNALBOX_OTLP_PROTOCOL`
 selects `grpc` or `http/protobuf`, `SIGNALBOX_OTLP_HEADERS_FILE` names a
 collector-header file read once at startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets
 the parent-based trace-id sampling ratio from 0 through 1, and
-`SIGNALBOX_OTLP_SERVICE_NAME` sets the service name.
+`SIGNALBOX_OTLP_SERVICE_NAME` sets the service name. The endpoint is a base URL,
+and `http/protobuf` export appends `/v1/traces` to its path.
 `SIGNALBOX_PROMETHEUS_BIND`, an exact IP socket address, enables a separate
 Prometheus listener.
 
@@ -374,7 +375,9 @@ appears in a log, an error, or a durable record. For a profile whose credential
 value the daemon resolves, the daemon redacts that exact value from provider
 text before it truncates the text; a delivery that gives the daemon no value
 receives credential-shape redaction instead. A credential for one repository
-never authorizes a request to another.
+never authorizes a request to another. That isolation comes from how a
+credential is provisioned or from the repository entry a runner selects; the
+daemon's code-host tools use one fixed credential reference.
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
 identifiers. They never contain source bytes, host or credential paths, raw or
@@ -468,9 +471,10 @@ source record's.
 
 An absent `[web_fetch]` table or empty array admits no outbound `web_fetch`
 request, and every request must match one canonical configured origin before
-dispatch. The GitHub egress policy admits exactly `https://api.github.com:443`
-for authenticated requests, and model arguments cannot widen either admission
-rule.
+dispatch. Each configured entry is a bare HTTP(S) origin canonicalized to its
+scheme, host, and effective port before duplicates are rejected. The GitHub
+egress policy admits exactly `https://api.github.com:443` for authenticated
+requests, and model arguments cannot widen either admission rule.
 
 Admission is not delivery: the daemon supplies a surface only for `anthropic`
 and `openai` `file`, `claude_cli` `ambient` and `file`, and `codex_cli`
