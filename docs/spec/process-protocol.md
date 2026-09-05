@@ -761,13 +761,13 @@ UTF-8 bytes, and applies the same exact case-sensitive substring filter to a
 present native metadata title or imported display title; an absent title matches
 no title query, and a transitional pending imported title survives every title
 filter so the read fails closed on it
-([conversation-import](conversation-import.md#derived-display-titles)) rather
-than silently omitting an unresolved row. `origin` selects native rows, imported
-rows, or both; `include_archived = false` selects the default view excluding
-archived native sessions, and imported conversations carry no archive state, so
-the switch never affects them. Every bound in this paragraph is client-frame
-field or size validation returning `malformed_frame` before application
-construction, exactly as for the metadata list.
+([conversation-import](conversation-import.md)) rather than silently omitting an
+unresolved row. `origin` selects native rows, imported rows, or both;
+`include_archived = false` selects the default view excluding archived native
+sessions, and imported conversations carry no archive state, so the switch never
+affects them. Every bound in this paragraph is client-frame field or size
+validation returning `malformed_frame` before application construction, exactly
+as for the metadata list.
 
 The daemon maps the client-selected delivery object without reinterpretation:
 `start_when_idle` to `StartWhenNoActiveTurn`, `steer` to `NextSafePoint`, and
@@ -1357,11 +1357,11 @@ Each summary carries one closed `conversation` object tagged by `origin`. A
 `title`, `archived`, and the current `defaults_version`; the runner proposal
 also requires the exact `runner_projection`. An `imported_conversation` summary
 carries `imported_conversation_id`, the optional exact source-derived display
-`title` ([conversation-import](conversation-import.md#derived-display-titles)
-owns the derivation), the total normalized `entry_count` — the greatest
-`through_position` an imported continuation may select — and the exact stored
-`source_format` (`claude_code_session_jsonl_v1`, `claude_code_session_jsonl_v2`,
-or `codex_rollout_jsonl_v1`). Neither summary materializes transcript, entry, or
+`title` ([conversation-import](conversation-import.md) owns the derivation), the
+total normalized `entry_count` — the greatest `through_position` an imported
+continuation may select — and the exact stored `source_format`
+(`claude_code_session_jsonl_v1`, `claude_code_session_jsonl_v2`, or
+`codex_rollout_jsonl_v1`). Neither summary materializes transcript, entry, or
 raw-record content; the per-entry read surfaces retain that authority. The end
 cursor is null when no later match existed in the page snapshot; otherwise it
 names the last emitted summary's origin and identity. The page sequence is
@@ -1399,13 +1399,13 @@ uses that closed order regardless of configuration order, as owned by the
 [static model capability catalog](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
 The exact settings vocabulary and the prohibition on exposing an alternate fast
 serving identity are owned by
-[model/session settings](model-session-settings.md#local-process-representation).
-Reasoning-level and service-tier overlay members admit `inherit`,
-`provider_default`, or `value`; fast-mode overlay members admit only `inherit`
-or a `value` of `disabled` or `enabled`. The same vocabulary carries the closed
-`unsupported_reasoning_level`, `unsupported_fast_mode`, and
-`unsupported_service_tier` rejection details; each names the direct selection,
-and the value-bearing forms retain the unsupported value.
+[model/session settings](model-session-settings.md). Reasoning-level and
+service-tier overlay members admit `inherit`, `provider_default`, or `value`;
+fast-mode overlay members admit only `inherit` or a `value` of `disabled` or
+`enabled`. The same vocabulary carries the closed `unsupported_reasoning_level`,
+`unsupported_fast_mode`, and `unsupported_service_tier` rejection details; each
+names the direct selection, and the value-bearing forms retain the unsupported
+value.
 
 `session_metadata` is the successful single-session read and
 `session_metadata_replaced` is the successful write receipt. Both carry
@@ -2480,7 +2480,7 @@ below. The client accepts a global `--socket <path>` override or reads
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`;
 - conversation import operations described by the
-  [conversation-import operational surface](conversation-import.md#operational-surface);
+  [conversation-import operational surface](conversation-import.md);
 - `blob upload <file>`;
 - `blob metadata <sha256-digest>`;
 - `blob read <sha256-digest> --offset <decimal> --length <decimal> --output <file>`;

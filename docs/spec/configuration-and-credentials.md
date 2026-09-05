@@ -118,11 +118,11 @@ exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
 100-item page, and 512-byte snippet search ceilings. It also advertises the
 256-group usage summary and 100-call usage-detail ceilings. Version two adds the
 bounded import DTOs and routes owned by
-[conversation import](conversation-import.md#bounded-browser-discovery-and-continuation).
-The generated browser decoder rejects an unknown field, wrong shape, different
-family, or different version rather than interpreting it as the local process
-protocol. No process-protocol frame is a browser DTO. The descriptor,
-historical-window, and lexical-search route shapes and semantics are owned by
+[conversation import](conversation-import.md). The generated browser decoder
+rejects an unknown field, wrong shape, different family, or different version
+rather than interpreting it as the local process protocol. No process-protocol
+frame is a browser DTO. The descriptor, historical-window, and lexical-search
+route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline)
 and its
 [lexical-search section](sessions-and-transcript.md#bounded-browser-lexical-search).
