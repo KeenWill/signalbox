@@ -4439,6 +4439,7 @@ dependencies = [
 name = "signalbox-ownership-seam"
 version = "0.0.0"
 dependencies = [
+ "signalbox-application",
  "signalbox-domain",
  "signalbox-persistence",
  "sqlx",
