@@ -590,7 +590,7 @@ INV-tagged test names and attached doc comments.
   delivery without retaining that slot; result commit creates a durable parent
   wake. The returned value or typed failure becomes delivered parent content,
   never child transcript content, under the
-  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#boundary-contracts).
 - **Transient updates:** Best-effort nudges reduce result/message wake latency;
   the durable eligibility sweep is the restart and lost-wake backstop.
 - **Owning component:** Daemon owns relationships and scheduling; each session
@@ -622,7 +622,7 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Every evaluated child has an explicit reason and exact
   spawn, parent-event, and command provenance. Already-issued effects are not
   undone and ambiguous effects remain reconcilable under the
-  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#boundary-contracts).
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-034.
 - **Remaining questions:** Ordinary archive remains independently non-cascading;
   destructive retention remains separate later scope.

@@ -2768,7 +2768,7 @@ pub struct FreshInitialInput {
 /// apply an interrupt. The reclassification and tool-cancellation callbacks
 /// are therefore unreachable and use the reserved identities as placeholders.
 /// The four identities are drawn from the submit slice's application-owned
-/// generator under the lock (session-lifecycle §7).
+/// generator under the lock (docs/spec/session-lifecycle.md).
 pub(crate) async fn insert_fresh_initial_input(
     connection: &mut PgConnection,
     command: SubmitInput,
@@ -3210,7 +3210,7 @@ where
 }
 
 /// Whether this is the core-issued interrupt a committed closure owes its own
-/// live turn (§2). The closure recorded that turn, and the interrupt
+/// live turn. The closure recorded that turn, and the interrupt
 /// terminalizing it is how the handoff settles, so a pending handoff admits
 /// exactly it.
 async fn settles_committed_closure(
@@ -7170,7 +7170,7 @@ async fn insert_prepared_effects(
     settle_injection_receipt(connection, &prepared).await
 }
 
-/// Settles the command's injection receipt (§8). Pending steering settles at
+/// Settles the command's injection receipt. Pending steering settles at
 /// its boundary; a session that does not exist has no receipt to carry.
 async fn settle_injection_receipt(
     connection: &mut PgConnection,
