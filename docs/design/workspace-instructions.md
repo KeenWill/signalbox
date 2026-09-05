@@ -7,11 +7,12 @@ discovery, registration, and turn-start manifest that exist.
 ## Goal
 
 A model can deliberately admit an eligible workspace instruction bundle into its
-input. Every admission is decided by the approval judge, recorded as an
-immutable row, bounded by fixed byte budgets, and reproduced exactly on every
-later call of the session. Repository-supplied text reaches the model only
-inside labeled regions that hold it below the session system prompt and the
-user's request.
+input. Every admissible read is routed through the approval judge, and the
+defined human fallback decides when the judge does not. Each admission is
+recorded as an immutable row, bounded by fixed byte budgets, and reproduced
+exactly on every later call of the session. Repository-supplied text reaches the
+model only inside labeled regions that hold it below the session system prompt
+and the user's request.
 
 ## Design
 
@@ -24,7 +25,9 @@ A session-specific replacement is its own durable command. An absent allow-list
 makes no bundle eligible. Each entry pairs a bundle identity with the
 authorizing root the session reaches it through, because one bundle may be
 registered under several roots and the root fixes the paths and scope the model
-sees.
+sees. A selector or replacement that resolves one bundle identity through more
+than one root is rejected before the allow-list is installed, so every resolved
+bundle identity is distinct.
 
 The activation transaction copies the exact ordered eligibility list under the
 session scheduler lock and records its versioned SHA-256 hash in the turn-start
@@ -39,7 +42,9 @@ snapshot cannot be enumerated, previewed, or admitted.
 Three tools expose the snapshot to the model. `instructions_list` enumerates the
 snapshot by cursor. `instructions_preview` returns bounded structure for one
 eligible bundle: headings for a document, validated metadata and headings for a
-skill, with the source byte length. `instructions_read` names one eligible
+skill, with the source byte length. A preview is capped by a fixed maximum
+heading count and a fixed maximum encoded result size, and truncates
+deterministically at either bound. `instructions_read` names one eligible
 bundle, requests admission, and returns a typed receipt naming the admission,
 the source hash, the rendered hash, the rendered byte length, and any truncation
 boundary, never the body. Preview and a fresh read reread the source under the
@@ -96,10 +101,11 @@ the prior admitted-set head, the bundle, the rendered hash and byte length, the
 exact rendered wrapper bytes, and the request identity, and the session's
 admitted-set head advances to it. The row is the plaintext authority for every
 later projection even if the workspace source changes or disappears or its root
-leaves the configuration. A second request for an admitted bundle returns its
-durable already-admitted receipt without rereading the source and appends
-nothing; a replay returns its recorded receipt. Process memory and the live
-workspace are never authority for the admitted set.
+leaves the configuration. A second request for an admitted bundle still in the
+effective eligibility view returns its durable already-admitted receipt without
+rereading the source and appends nothing, while a request for a revoked identity
+resolves as ineligible; a replay returns its recorded receipt. Process memory
+and the live workspace are never authority for the admitted set.
 
 Admitted instructions are a model-input projection rebuilt each turn from the
 rendered bytes the admission rows retain, not transcript entries. Signalbox
@@ -209,8 +215,9 @@ separators and the empty vectors of the eligibility, admitted-set, and manifest
 hashes. The nonempty forms append records after those prefixes and change
 nothing the trigger checks for a turn-start manifest.
 
-The turn-start manifest stays the first manifest of every turn. Successor
-manifests are appended, never substituted, and every manifest is immutable.
+The turn-start manifest stays the first manifest of every turn that reaches
+instruction preparation. Successor manifests are appended, never substituted,
+and every manifest is immutable.
 
 An empty admitted set produces no region, so the present projection needs no
 workspace-capable target and no target check is required.
@@ -246,6 +253,8 @@ alone after the workspace source is changed or deleted.
 A source above 32,768 bytes renders truncated with its boundary recorded; a read
 that would exceed 65,536 aggregate bytes fails and changes no admitted set; a
 region no target can carry fails preparation before provider spawn.
+
+A test pins the preview's maximum heading count and maximum encoded result size.
 
 Repository-controlled strings in list and preview results appear only inside the
 untrusted region, and no such string can close it.
