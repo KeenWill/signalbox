@@ -31,6 +31,7 @@ image = { version = "0.25.8", default-features = false, features = [
     "png",
     "webp",
 ] }
+percent-encoding = "2.3.2"
 mime = "0.3.17"
 # Classifies the error `axum::body::to_bytes` returns: only its
 # `LengthLimitError` is an oversized body; anything else is transport failure.

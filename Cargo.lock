@@ -4773,6 +4773,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "percent-encoding",
  "prometheus",
  "reqwest",
  "rust_decimal",
