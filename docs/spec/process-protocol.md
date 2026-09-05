@@ -3,7 +3,7 @@
 The process protocol is the wire boundary between a local client process and
 `signalboxd`.
 
-## Map
+## Overview
 
 `crates/process-protocol` defines protocol version 1 and a closed set of
 request, message, event, and field shapes; that set is the whole wire surface
@@ -68,7 +68,7 @@ and a generation fence in `crates/persistence/src/hub_fence.rs` enforce one
 active daemon process per database, and therefore one dispatcher and its
 fan-outs.
 
-## Decisions
+## Design decisions
 
 Version 1 is edited in place until the first durable deployment, a client that
 cannot be rebuilt at will, such as an owner-operated remote daemon or installed
@@ -112,7 +112,7 @@ fence session, so a copied generation value cannot construct work after the
 guard is released. Importing or upgrading a database created before the
 generation fence is unsupported.
 
-## Contracts
+## Boundary contracts
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
 identifiers. They never contain source bytes, file paths, provider payloads,
@@ -323,7 +323,7 @@ line feed, DEL, and every C1 code point in process-derived text as a visible
 escape; a single explicit raw-output option is the only opt-in to unescaped
 text.
 
-## Not built
+## Planned
 
 - Credential-exclusion administration, a listing read and a clear mutation over
   active exclusions: [design](../design/process-protocol.md).

@@ -769,7 +769,7 @@ provider evidence while returning a distinct pool-exhausted application outcome.
 Both forms are durable and cannot be reconstructed as a single account failure.
 
 **Committed unimplemented functionality — process-level exclusion evidence.**
-The richer process event at [process protocol](process-protocol.md#not-built)
+The richer process event at [process protocol](process-protocol.md#planned)
 remains absent. When implemented, it carries the complete nonempty evidence list
 in policy-member order, including exclusion generation or predecessor
 correlation and optional reset, without changing the typed domain cause above.

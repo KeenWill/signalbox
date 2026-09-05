@@ -13,7 +13,7 @@ facts, `spawn_session`, cascade metadata on stop receipts, and the typed
 projection of credential-pool exhaustion and of the credential-availability
 wait.
 
-## Shape
+## Design
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
@@ -140,7 +140,7 @@ recorded in [open-questions.md](../open-questions.md). The endings these shapes
 project belong to
 [credential-availability.md](../spec/credential-availability.md).
 
-## Constraints on present code
+## Compatibility constraints
 
 `spawn_session` and `session_spawned` are admitted version-1 variants: the
 daemon decodes `spawn_session` and rejects it without mutation, and no daemon
@@ -162,7 +162,7 @@ whatever first makes either wait reachable includes this projection.
 Exclusion records retain the generation and predecessor correlations the clear
 mutation names, and a cleared record is retained inactive rather than deleted.
 
-## Acceptance
+## Acceptance criteria
 
 Every request and message above decodes under version 1 with unknown fields
 rejected, and each surface ships with its daemon handler and its terminal-client

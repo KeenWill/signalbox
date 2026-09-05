@@ -291,7 +291,7 @@ driver, not the client protocol.
 
 **Committed unimplemented functionality.** No present surface re-reads a
 configuration file after startup. Reload is one admin verb,
-[`reload_configuration`](process-protocol.md#not-built): it re-reads the
+[`reload_configuration`](process-protocol.md#planned): it re-reads the
 configured paths, validates the complete replacement exactly as startup does,
 and swaps the in-memory catalogs atomically on success. Any failure, and any
 replacement whose startup-only sections differ, leaves the running configuration
@@ -2251,7 +2251,7 @@ recovery path for acknowledged work, so INV-034 is unaffected.
 
 The exact future operator-clear request, target correlations, replay behavior,
 and receipt are owned by
-[credential-exclusion administration](process-protocol.md#not-built). No present
+[credential-exclusion administration](process-protocol.md#planned). No present
 process or application surface implements that request, so every explicit-clear
 path above remains committed unimplemented functionality and no indefinite wait
 can presently be released.
@@ -2350,7 +2350,7 @@ carry; none of them describes behavior available from this build.
   exactly as it clears a quarantine, and only an operator clear, an availability
   probe that costs nothing and calls no model, or another durable availability
   update ends an indefinite generation. The clear request itself is owned by
-  [credential-exclusion administration](process-protocol.md#not-built) and
+  [credential-exclusion administration](process-protocol.md#planned) and
   described under [pool-based preparation](#pool-based-preparation); no present
   process or application surface implements it and no composed adapter exposes
   such a probe, so no exclusion this build writes is ever cleared.
@@ -2373,7 +2373,7 @@ carry; none of them describes behavior available from this build.
   clear protocol decides administrability from it — a policy-origin quarantine
   is clearable by operator command while an OAuth delivery-origin one requires
   re-provisioning
-  ([credential-exclusion administration](process-protocol.md#not-built)).
+  ([credential-exclusion administration](process-protocol.md#planned)).
   Coalescing across origins would produce one generation with two contradictory
   answers, so a delivery-origin failure against a profile already carrying an
   active policy-origin generation mints its own, and the two are cleared, and
