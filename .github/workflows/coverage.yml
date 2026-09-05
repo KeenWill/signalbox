@@ -5,9 +5,10 @@ name: Coverage
 # and every job carries `continue-on-error` so a coverage failure can never
 # block a merge — the same report-only shape rust.yml's instruction counts and
 # tool-smokes.yml's live smokes already use. What this produces is a job
-# summary, a downloadable HTML and LCOV report, one pull-request comment, and
-# an upload of that LCOV to Codecov under the `rust` flag. The upload changes
-# nothing about the posture: codecov.yml marks every status there
+# summary, a downloadable HTML and LCOV report, and an upload of that LCOV
+# to Codecov under the `rust` flag. Codecov updates a pull-request comment only
+# when coverage changes. The upload changes nothing about the posture:
+# codecov.yml marks every status there
 # `informational: true`, so what Codecov reports is another readout and not a
 # second opinion with a veto.
 #
