@@ -52,18 +52,22 @@ Prometheus listener.
 `SIGNALBOX_RUNNER_CONFIG_FILE` or `--config PATH`, and rejects both or neither
 before opening a socket. It reads that file once at startup as strict versioned
 TOML, whose checked-in example is `config/signalbox-runner.example.toml`. Its
+`runner_root` must be a real directory owned by the effective user with
+owner-only permissions, held under an exclusive lock for the process lifetime,
+and its `bubblewrap_path` must resolve to an executable regular file. Its
 `allowed_network_hosts` narrows a fixed host list and cannot add a hostname.
 Runner credential profiles are non-secret checked names the daemon grants and
 only the runner resolves.
 
 The model catalog declares what the four adapters can serve. Each `[[models]]`
 entry binds an immutable direct-selection key to one exact provider target, a
-model family, a provider-native spelling, token ceilings, and optional flat USD
-rates; aliases name a selection. A model whose `fast_mode` is `alternate_target`
-names a `fast_target_id` that resolves to a non-client-selectable
-`[[serving_targets]]` entry carrying its own target, model family, provider
-spelling, and token ceilings. `provider_model` is nonempty and unpadded, and one
-spelling routes to exactly one adapter across the document.
+model family, a provider-native spelling, token ceilings, and flat USD rates
+that are either wholly absent or a complete bundle carrying its own stable rate
+version; aliases name a selection. A model whose `fast_mode` is
+`alternate_target` names a `fast_target_id` that resolves to a
+non-client-selectable `[[serving_targets]]` entry carrying its own target, model
+family, provider spelling, and token ceilings. `provider_model` is nonempty and
+unpadded, and one spelling routes to exactly one adapter across the document.
 `context_window_tokens` is the usable ceiling after any provider or adapter
 reservation, not the raw advertised window, and is not smaller than
 `max_output_tokens`. `[model_settings]` is the deployment global default and
