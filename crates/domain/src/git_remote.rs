@@ -160,10 +160,13 @@ impl GitRemoteUrl {
             .next()
             .unwrap_or_default();
         if parsed.scheme() != "https"
-            || !matches!(parsed.host(), Some(url::Host::Domain(_)))
+            || parsed.host().is_none()
             || authority.is_empty()
             || authority.contains('@')
             || authority.ends_with(':')
+            || !authority.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'~' | b':')
+            })
             || !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.query().is_some()
@@ -429,6 +432,13 @@ mod tests {
     fn a_destination_naming_a_host_is_admitted() {
         assert_destination_is_admitted("https://example.test:8443/namespace/project.git");
         assert_destination_is_admitted("https://example.test");
+        assert_destination_is_admitted("https://1");
+    }
+
+    #[test]
+    fn a_destination_requiring_url_normalization_is_refused() {
+        assert_destination_is_refused("https://example%2etest/repository.git");
+        assert_destination_is_refused(r"https://example.test\repository.git");
     }
 
     /// A query string is the other common credential channel a URL offers, and

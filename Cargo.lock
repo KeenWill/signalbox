@@ -4168,6 +4168,7 @@ dependencies = [
  "expect-test",
  "gix-validate",
  "gungraun",
+ "hex",
  "regex",
  "rpds",
  "serde",
@@ -4334,6 +4335,8 @@ version = "0.0.0"
 dependencies = [
  "futures-timer",
  "futures-util",
+ "hex",
+ "mime",
  "serde",
  "serde_json",
  "tokio",
@@ -4358,6 +4361,7 @@ dependencies = [
 name = "signalbox-model-reference-catalog"
 version = "0.0.0"
 dependencies = [
+ "jiff",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -4508,6 +4512,7 @@ dependencies = [
 name = "signalbox-runner-wire"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "sha2 0.11.0",

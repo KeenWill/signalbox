@@ -193,9 +193,11 @@ use ordinary HTTP bodies rather than JSON wrapping.
 
 ### Bounded browser usage and cost reads
 
-The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes,
-their filters, pagination, compatibility grouping, and read-time configured-cost
-semantics are owned by [Usage evidence](usage-evidence.md).
+The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes read
+the usage projection [model-call-execution](model-call-execution.md) owns; their
+response shapes, bounds, and cost labels are the web contract under
+`crates/web-contract`, and the daemon's web HTTP layer parses their filters and
+cursors.
 
 `deterministic_test_router` supplies a database-free page plus bounded read,
 mutation, and two-item stream routes. It composes the same bootstrap, mutation
@@ -1761,7 +1763,7 @@ what a pool needs, and a profile in no pool has no co-member to contradict. Two
 provisionings of one account must not both commit, so this consultation is
 serialized against any concurrent provisioning commit of a consulted profile;
 the lock protocol that achieves it is owned by
-[persistence protocol](persistence-protocol.md#lock-protocol).
+[persistence protocol](persistence-protocol.md).
 
 Provisioning is not the only moment co-membership arises, and checking only at
 provisioning would leave the property unenforced by the other one. Two profiles
@@ -2035,7 +2037,7 @@ The five admitted actions are:
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `stay`               | The member keeps the session. A failure terminalizes as it would with no pool.                                                                                                                                                                                                                                        |
 | `switch_next_turn`   | A failure terminalizes as it would with no pool; low headroom does not fail or replace the current turn. The next turn's preparation excludes this member.                                                                                                                                                            |
-| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)).                                                                                                                                                                 |
+| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md)).                                                                                                                                                                                              |
 | `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                                                                                                                                                                                      |
 | `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an explicit operator command clears it — or, where an adapter offers one, until a zero-cost probe that calls no model reports availability. Never by a timer and never by a restart; the clearing rule is stated in full below. |
 
@@ -2110,17 +2112,17 @@ still leave one excluded member at selection.
 Preparation is the other side of that race and joins the same protocol. Before
 it reads any member's exclusion state, it locks the action head of every member
 of the policy it may select, at the ordering position and in the modes
-[persistence protocol](persistence-protocol.md#lock-protocol) fixes, and holds
-those locks through the `Prepared` insert. The modes are not restated here,
-because they are not uniform across members: a preparation writes the exclusion
-state of any member whose pending displacement it consumes, and reads the rest.
-The share and exclusive modes conflict, so one of the two transactions waits: a
-call is either prepared before the exclusion commits or prepared against a
-member it has already observed as excluded. Without this rule selection takes no
-lock the exclusion writer takes — an unbounded `first_listed` member acquires
-neither a capacity row nor a cursor row — and a preparation that read a member
-as admissible could then dispatch a provider request on a credential quarantined
-in the interval.
+[persistence protocol](persistence-protocol.md) fixes, and holds those locks
+through the `Prepared` insert. The modes are not restated here, because they are
+not uniform across members: a preparation writes the exclusion state of any
+member whose pending displacement it consumes, and reads the rest. The share and
+exclusive modes conflict, so one of the two transactions waits: a call is either
+prepared before the exclusion commits or prepared against a member it has
+already observed as excluded. Without this rule selection takes no lock the
+exclusion writer takes — an unbounded `first_listed` member acquires neither a
+capacity row nor a cursor row — and a preparation that read a member as
+admissible could then dispatch a provider request on a credential quarantined in
+the interval.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
@@ -2753,11 +2755,10 @@ deployment-side rules that code cannot enforce are stated in
   (INV-002 boundary type). An ambient CLI operation validates its pinned
   external-login reference and prepares the process capability without reading a
   credential value. The shared cancellation contract for preparation and
-  execution is owned by
-  [model-call-execution](model-call-execution.md#staged-execution). A code-host
-  tool resolves its fixed `github-primary` reference only after the durable tool
-  attempt is authorized `InFlight` and immediately before its typed transport
-  call; no model argument, client, or runner can select or receive the
+  execution is owned by [model-call-execution](model-call-execution.md). A
+  code-host tool resolves its fixed `github-primary` reference only after the
+  durable tool attempt is authorized `InFlight` and immediately before its typed
+  transport call; no model argument, client, or runner can select or receive the
   credential. The pull-request suite follows the same timing with its fixed
   GitHub API egress policy.
 
