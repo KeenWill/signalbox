@@ -62,14 +62,15 @@ result commit, crash classification, and the continuation checkpoint.
 
 A result entry in the transcript references a durable row rather than carrying
 content: an execution result names the terminal attempt, a denial names the
-request, a delegation result names the foreground `await_session` request and
-the child whose durable result completed its wait, and `ToolClosed` names a
-request whose turn ended before it completed ordinary execution, whether it was
-still undecided, approved but not yet attempted, or ambiguous when an interrupt
-or automatic reconciliation terminalized the turn. Once every request in a
-running batch is resolved, one continuation transaction projects the results and
-prepares the next model call. An approval wait is a stored active-turn phase
-that names the earliest undecided request and survives restart.
+request, a delegation result names the `await_session` request whose child
+produced it, foreground or background, and the child whose durable result
+completed it, and `ToolClosed` names a request whose turn ended before it
+completed ordinary execution, whether it was still undecided, approved but not
+yet attempted, or ambiguous when an interrupt or automatic reconciliation
+terminalized the turn. Once every request in a running batch is resolved, one
+continuation transaction projects the results and prepares the next model call.
+An approval wait is a stored active-turn phase that names the earliest undecided
+request and survives restart.
 
 ## Design decisions
 
