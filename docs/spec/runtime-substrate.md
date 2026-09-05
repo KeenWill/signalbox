@@ -25,16 +25,15 @@ Caller identity crosses the boundary as an opaque correlation parameter carried
 by `ModelOperation`, every `Observation` and the final `TerminalReport`; the
 runtime imports no domain identifier. An operation names its target as two
 caller-supplied facts, the requested selection and the resolved target. The
-provider-reported model is a third fact that the adapter produces and surfaces
-through an observation and the terminal evidence.
+provider-reported model is a third fact, which the adapter surfaces through an
+observation and the terminal evidence.
 
-`ModelRuntime` has two stages. `prepare` does every check, translation,
-serialization and credential read without provider traffic and returns an opaque
-one-shot capability or a typed failure. `execute` consumes that capability,
-performs at most one provider interaction and always returns a terminal report.
-The unit of irrevocable dispatch is one HTTPS request for a direct adapter and
-one process spawn for a subprocess adapter. The caller side of that boundary is
-[model-call-execution](model-call-execution.md) scope.
+`ModelRuntime` has two stages. `prepare` does all work that needs no provider
+traffic and returns an opaque one-shot capability or a typed failure. `execute`
+consumes that capability, performs at most one provider interaction and returns
+a terminal report. The unit of irrevocable dispatch is one HTTPS request for a
+direct adapter and one process spawn for a subprocess adapter. The caller side
+of that boundary is [model-call-execution](model-call-execution.md) scope.
 
 Observations are transient progress facts emitted during execute: the request
 about to reach the transport, the correlated exchange opening, the
@@ -53,17 +52,16 @@ observed before the loss, and whether a tool call had opened in the material the
 adapter decoded. A provider error may also carry an adapter-owned proof that the
 provider never accepted the request.
 [credential-availability](credential-availability.md) decides what that proof
-leads to; this page owns the evidence algebra that carries it. Refusal evidence
-reaches callers only from the Codex CLI adapter.
+leads to; this page owns the evidence that carries it. Refusal evidence reaches
+callers only from the Codex CLI adapter.
 
 `SseFraming` is the provider-agnostic incremental parser both HTTP adapters
 build on, from transport byte chunks to event-stream records.
-`StructuredOutputContract` carries a name, description and JSON Schema,
-generated from a Rust type or supplied explicitly, that every adapter realizes
-as one tool proposal under a reserved name: OpenAI forces it through tool
-choice, Anthropic asks for it by instruction, and Codex renders it into the
-prompt with an outer response schema. One provider-independent decoder enforces
-exactly one proposal.
+`StructuredOutputContract` carries a name, description and JSON Schema that
+every adapter realizes as one tool proposal under a reserved name: OpenAI forces
+it through tool choice, Anthropic asks for it by instruction, and Codex renders
+it into the prompt with an outer response schema. One provider-independent
+decoder enforces exactly one proposal.
 
 The Anthropic and OpenAI adapters share one shape: at most one POST per
 operation, hand-written wire types with no provider SDK dependency, and typed
@@ -243,9 +241,7 @@ Terminal evidence is typed so the caller classifies without string matching;
 strings appear only as retained detail inside already-classified variants. Each
 adapter owns an exhaustive native mapping into the shared provider-error kind,
 which lives in the core crate, and unknown material classifies as unrecognized
-with its native facts retained rather than guessed at. Retained native text is
-redacted with the exact prepared credential, including its JSON-escaped forms,
-and only then truncated.
+with its native facts retained rather than guessed at.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
 never inferred from the error kind, status retryability or provider prose. An
@@ -271,10 +267,10 @@ observed fact in both, not an envelope defect.
 
 The tool-calls-at-loss fact reports the decoded prefix and nothing beyond it:
 none-opened says no tool call opened in what the adapter decoded, never that the
-provider sent none. The dividing line between a stated negative and a withheld
-answer is whether the adapter examined the material that could open a tool call,
-not whether it accepted that material. A tool call an earlier record already
-established outranks the withholding in every adapter.
+provider sent none. A negative is stated rather than withheld when the adapter
+examined the material that could open a tool call, whether or not it accepted
+that material. A tool call an earlier record already established outranks the
+withholding in every adapter.
 
 Streamed records must agree on identity: a missing or conflicting completion id,
 or a conflicting reported model, is a terminal protocol violation even on a
@@ -294,14 +290,14 @@ the failure.
 The structured-output contract is a request constraint, not a response
 guarantee: a nonconforming response can carry zero or several proposals, and the
 provider-independent decoder enforces exactly one. A proposal's raw argument
-JSON is kept verbatim as produced and never re-serialized. When a CLI adapter's
-redaction suppresses a whole argument object, the proposal crosses the adapter
-as typed non-executable material that keeps its admitted tool name and withholds
-only its arguments, so it can neither hide a second conflicting value nor
-satisfy a named tool choice under a foreign name. The decoders impose no
-argument-size ceiling; the normalized-argument ceiling [tool-loop](tool-loop.md)
-states belongs to the bridge, which fails the model call as unrepresentable tool
-material before any tool round rather than reaching one as invalid arguments.
+JSON is kept verbatim and never re-serialized. When a CLI adapter's redaction
+suppresses a whole argument object, the proposal crosses the adapter as typed
+non-executable material that keeps its admitted tool name and withholds only its
+arguments, so it can neither hide a second conflicting value nor satisfy a named
+tool choice under a foreign name. The decoders impose no argument-size ceiling;
+the normalized-argument ceiling [tool-loop](tool-loop.md) states belongs to the
+bridge, which fails the model call as unrepresentable tool material before any
+tool round rather than reaching one as invalid arguments.
 
 Both HTTP clients force the rustls backend, verify certificate and hostname
 against platform trust roots, require TLS 1.2 or newer, and carry no custom-root
@@ -380,13 +376,13 @@ suppression is absorbing for a sink's lifetime: usage reports, other fact
 boundaries and terminal flushes never re-enable provider-controlled bytes.
 
 Each CLI adapter's build derives its supported-version constant from the exact
-version in its pin manifest, so the manifest is the single source of truth. The
-daemon composition refuses startup before socket admission when its bounded
-probe cannot prove the installed executable reports that version. Before
-spending anything, the Codex smoke asserts that the reported version equals the
-supported version and compares the CLI's complete feature list, including stage
-and default, with an exact classified inventory. In every smoke workflow, forks
-are excluded by GitHub secret withholding and by three explicit repository-name
+version in its pin manifest, so the manifest is the sole source. The daemon
+composition refuses startup before socket admission when its bounded probe
+cannot prove the installed executable reports that version. Before spending
+anything, the Codex smoke asserts that the reported version equals the supported
+version and compares the CLI's complete feature list, including stage and
+default, with an exact classified inventory. In every smoke workflow, forks are
+excluded by GitHub secret withholding and by three explicit repository-name
 comparisons; each credential is referenced only in the step that spends the
 exchange, never echoed or passed in argv; and the test binary comes from a
 credential-free build, so no build script or procedural macro runs while the key
