@@ -221,13 +221,17 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &repository,
+                0,
                 &frontier,
                 std::slice::from_ref(&occurrence),
                 observed_at,
                 retain_until,
             )
             .await?,
-        FrontierEventAdmission::Committed(Box::new([EventAdmission::Inserted]))
+        FrontierEventAdmission::Committed {
+            generation: 1,
+            events: Box::new([EventAdmission::Inserted]),
+        }
     );
     let replayed_event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(16)),
@@ -241,13 +245,37 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &repository,
+                0,
                 &frontier,
                 std::slice::from_ref(&replayed_occurrence),
                 observed_at + Duration::from_secs(1),
                 retain_until + Duration::from_secs(1),
             )
             .await?,
-        FrontierEventAdmission::Committed(Box::new([EventAdmission::Replayed]))
+        FrontierEventAdmission::Committed {
+            generation: 1,
+            events: Box::new([EventAdmission::Replayed]),
+        }
+    );
+    let incompatible_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+        RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+            [19; 32],
+            NonZeroU64::MIN,
+            PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+        ),
+    ])?;
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &repository,
+                0,
+                &incompatible_frontier,
+                &[],
+                observed_at,
+                retain_until,
+            )
+            .await?,
+        FrontierEventAdmission::Stale
     );
     let payload: Vec<u8> = sqlx::query_scalar(
         "SELECT normalized_payload FROM mod_repo_watch.gh_event WHERE event_id = $1",
@@ -285,6 +313,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &repository,
+                1,
                 &next_frontier,
                 &[preceding_occurrence, conflicting_occurrence],
                 observed_at,
@@ -319,6 +348,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &repository,
+                1,
                 &stale_frontier,
                 &[],
                 observed_at,

@@ -38,7 +38,9 @@ signal-reviewer set, and the last positive occurrence sequence of every
 recurring event stream. A merged pull request leaves the ordinary observation
 and keeps only a compact baseline of the members the differ needs to recognize
 post-merge changes. A per-repository atomic commit takes an expected generation,
-one complete cursor candidate, and its ordered batch of event occurrences.
+one complete cursor candidate, and its ordered batch of event occurrences. A
+generation mismatch is stale unless the complete candidate and ordered batch
+exactly replay the immediately succeeding commit.
 
 A pure differ (`derive_repo_watch_events`) compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities,
