@@ -550,12 +550,9 @@ Representation rules, all enforced in the schema:
   that arm to its typed authorization, release, or offered-lease record and to
   the same runner; a unique constraint permits only one retained failure for an
   exact operation correlation. Each arm admits exactly the category/correlation
-  pairs owned by
-  [runner protocol](runner-protocol.md#local-transport-and-connection-protocol);
-  every other pair is rejected. Code, message, payload, aggregate detail size,
-  JSON member-name grammar, container cardinality, and depth carry the exact
-  checks owned by
-  [runner protocol](runner-protocol.md#local-transport-and-connection-protocol);
+  pairs the `runner-wire` crate checks; every other pair is rejected. Code,
+  message, payload, aggregate detail size, JSON member-name grammar, container
+  cardinality, and depth carry the exact checks the `runner-wire` crate owns;
   none is stored in a generic payload column or normalized on admission. The
   record and its JSON text reject update, delete, and truncate. Admission
   inserts that evidence in the same transaction that resolves the correlated
@@ -1209,11 +1206,11 @@ Locks per transaction, in acquisition order:
   one the release exchange exists only for the checked same-runner
   re-enrollment, where registration reconciliation retired the placement while
   the connection and enrollment stayed healthy
-  ([runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery)).
-  Why: both frames that can retire a release require the holding runner to
-  acknowledge deletion or report cleanup failure, so a release addressed to an
-  unreachable identity is a durable record redelivered after every restart with
-  no transition able to clear it. Release acknowledgement uses the same
+  ([runner protocol and placement](runner-protocol.md#planned)). Why: both
+  frames that can retire a release require the holding runner to acknowledge
+  deletion or report cleanup failure, so a release addressed to an unreachable
+  identity is a durable record redelivered after every restart with no
+  transition able to clear it. Release acknowledgement uses the same
   scheduler-then-placement order and never mutates turn lifecycle. Three
   transitions retire the durable release record and no other does: the release
   acknowledgement itself; durable admission of the runner's

@@ -599,21 +599,20 @@ The proposed runner-placement object has exactly:
 
 The object is complete immutable placement intent. Every member is required and
 carries either its value or JSON null, and every member is an independent axis
-under [session composition](runner-protocol.md#session-composition): no member
-is inferred from another and none is filled in by the daemon. A null
-`credential_profile` is the explicit choice of no credential rather than a
-request that the daemon select one; a `{"type":"none"}` workspace is admissible
-with either sandbox profile and with any credential choice, and paired with a
-present `working_directory` it selects a plain-directory workspace. The
-identical object is carried by all three creation requests, including
-`create_session_from_template`, so a template choice and a placement choice
-compose and neither discards the other. Unknown or duplicate override names, an
-override for a tool outside the compiled runner registry, unadvertised
-availability, malformed working directory, or unconfigured repository fails
-before command identity is claimed. The terminal defaults omitted sandbox input
-to `workspace-restricted`, but the wire never omits it. `ambient` therefore
-always reflects an explicit command-line choice. A null `runner_placement`
-creates a daemon-only session.
+under [session composition](runner-protocol.md): no member is inferred from
+another and none is filled in by the daemon. A null `credential_profile` is the
+explicit choice of no credential rather than a request that the daemon select
+one; a `{"type":"none"}` workspace is admissible with either sandbox profile and
+with any credential choice, and paired with a present `working_directory` it
+selects a plain-directory workspace. The identical object is carried by all
+three creation requests, including `create_session_from_template`, so a template
+choice and a placement choice compose and neither discards the other. Unknown or
+duplicate override names, an override for a tool outside the compiled runner
+registry, unadvertised availability, malformed working directory, or
+unconfigured repository fails before command identity is claimed. The terminal
+defaults omitted sandbox input to `workspace-restricted`, but the wire never
+omits it. `ambient` therefore always reflects an explicit command-line choice. A
+null `runner_placement` creates a daemon-only session.
 
 The proposed runner replacement target is exactly one of:
 
@@ -1141,15 +1140,14 @@ without interpretation; the runner applies the same exact-value redaction it
 applies to tool output before sending it, so the detail carries no credential
 value, and it carries no absolute host path or configured repository URL. That
 `category` set is exactly the closed daemon-actionable set the runner wire
-carries
-([runner protocol and placement](runner-protocol.md#local-transport-and-connection-protocol)),
-member for member, so every retained failure is serializable here and the
-projection never has to choose between omitting one that `failure_count` counts
-and rejecting the response. Runner status inspection is therefore the surface on
-which the complete runner-specific failure is readable even though daemon logic
-keys only off the category. `pending_runner_status` also carries the literal
-authority state `provisioning_only`; it is never presented as dispatch-capable.
-Each leak names its exact runner id and carries the exact closed `kind`, bounded
+carries ([runner protocol and placement](runner-protocol.md)), member for
+member, so every retained failure is serializable here and the projection never
+has to choose between omitting one that `failure_count` counts and rejecting the
+response. Runner status inspection is therefore the surface on which the
+complete runner-specific failure is readable even though daemon logic keys only
+off the category. `pending_runner_status` also carries the literal authority
+state `provisioning_only`; it is never presented as dispatch-capable. Each leak
+names its exact runner id and carries the exact closed `kind`, bounded
 runner-root-relative `locator`, lowercase manifest-or-entry SHA-256 digest, and
 nullable `session_id` and positive `placement_revision` admitted by that runner
 final acknowledged wire report. It never carries an absolute host path,
@@ -1213,17 +1211,17 @@ working directory, and state (`unpinned`, `pinned`, `runner_lost_before_pin`,
 `runner_lost`, or `runner_abandoned`). The credential-profile name, repository
 key, and working directory are each present or JSON null independently, because
 the composition axes they project are independent
-([runner protocol and placement](runner-protocol.md#session-composition)). This
-exact object is the `runner_projection` below; no listing defines a reduced
-runner shape. The selected profile is therefore visible even before execution,
-and `ambient` is always printed as ambient. A successful `list_sessions`
-response is `sessions_start`, one `session_summary` per result in
-session-identity order, then `sessions_end { session_count }`. The summaries are
-read in one read-only repeatable-read transaction and spooled from one decoded
-row at a time before client output. A slow client therefore retains temporary
-disk rather than the complete session catalog in request heap or an open
-database transaction. The sequence becomes authoritative only after the end
-message and count validate. This avoids an aggregate frame-size limit.
+([runner protocol and placement](runner-protocol.md)). This exact object is the
+`runner_projection` below; no listing defines a reduced runner shape. The
+selected profile is therefore visible even before execution, and `ambient` is
+always printed as ambient. A successful `list_sessions` response is
+`sessions_start`, one `session_summary` per result in session-identity order,
+then `sessions_end { session_count }`. The summaries are read in one read-only
+repeatable-read transaction and spooled from one decoded row at a time before
+client output. A slow client therefore retains temporary disk rather than the
+complete session catalog in request heap or an open database transaction. The
+sequence becomes authoritative only after the end message and count validate.
+This avoids an aggregate frame-size limit.
 
 A successful `read_operator_status` response consists of `operator_status`
 messages: `kind=start`, zero or more rows from each section in this fixed order,
@@ -2729,23 +2727,23 @@ omitted in any combination, a selector requires none of them, and an omitted
 flag encodes that explicit absence instead of letting the client or daemon
 choose a value. A credential profile with no repository, a repository with no
 credential profile, and a runner with neither are all ordinary invocations
-([runner protocol and placement](runner-protocol.md#session-composition)).
-Omitting `--sandbox-profile` selects `workspace-restricted` before the request
-is encoded, so `ambient` requires that exact flag, and either profile is
-admissible with or without a repository. Tool overrides require a runner
-selector, duplicate or cross-listed names fail locally, and every selected fact
-is printed with the created session. `runner status` starts with page size 100
-and a null cursor, validates and prints each status, failure, and leak page
-without buffering prior pages, copies a nonnull terminal cursor into the next
-request, and stops only at a null cursor. It prints profile availability,
-runner-reported failure detail, and leaks without host paths. Replace, abandon,
-and promote print command identity before socket I/O; replace and abandon also
-print the expected placement revision, and each requires the complete recovery
-set on retry. Replace accepts a different live runner, the exact pending
-enrollment request reported by `runner status`, or — for a
-registration-triggered loss — the same runner; the three targets are mutually
-exclusive. Promote names only the pending enrollment request and no session.
-Abandon creates no successor input.
+([runner protocol and placement](runner-protocol.md)). Omitting
+`--sandbox-profile` selects `workspace-restricted` before the request is
+encoded, so `ambient` requires that exact flag, and either profile is admissible
+with or without a repository. Tool overrides require a runner selector,
+duplicate or cross-listed names fail locally, and every selected fact is printed
+with the created session. `runner status` starts with page size 100 and a null
+cursor, validates and prints each status, failure, and leak page without
+buffering prior pages, copies a nonnull terminal cursor into the next request,
+and stops only at a null cursor. It prints profile availability, runner-reported
+failure detail, and leaks without host paths. Replace, abandon, and promote
+print command identity before socket I/O; replace and abandon also print the
+expected placement revision, and each requires the complete recovery set on
+retry. Replace accepts a different live runner, the exact pending enrollment
+request reported by `runner status`, or — for a registration-triggered loss —
+the same runner; the three targets are mutually exclusive. Promote names only
+the pending enrollment request and no session. Abandon creates no successor
+input.
 
 `send` without `--parts-file` reads the exact input text from standard input
 through EOF; with `--parts-file` it reads only that file's ordered part array
