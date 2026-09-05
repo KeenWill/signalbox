@@ -101,7 +101,7 @@ resolved target as the provider model parameter, never the requested selection,
 and surface a provider-reported identity as soon as observed without fabricating
 a match or mismatch; comparison is the caller's classification work (INV-014),
 under the provider-target identity rule of
-[model-call-execution](model-call-execution.md#provider-target-identity).
+[model-call-execution](model-call-execution.md).
 
 Neither HTTP adapter ever requests server-side model fallback, so a provider
 marker announcing that another model continued the turn is evidence that the
@@ -116,8 +116,7 @@ different model substituted, and a signal the provider states explicitly should
 not reach that rule as a generic unknown-block failure. The marker itself
 crosses the boundary only through that reported identity — this layer has no
 substitution variant of its own — so what the caller can conclude from it is
-bounded by
-[model-call-execution](model-call-execution.md#provider-target-identity).
+bounded by [model-call-execution](model-call-execution.md).
 
 ## Two-stage execution
 
@@ -1400,9 +1399,8 @@ stating *what happened* is owned by whichever page owns the behavior that raises
 it: for provider and model-call failures — carried by the model-call bridge,
 reusing this page's `ProviderErrorKind` vocabulary verbatim for definitive
 provider errors — the owning page is
-[model-call-execution](model-call-execution.md#operator-diagnostics), and the
-turn-liveness causes are owned by
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+[model-call-execution](model-call-execution.md), and the turn-liveness causes
+are owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Concurrent staleness is not a class: a guarded write that matches zero rows is
 consumed inside adapters by reload-and-rederive

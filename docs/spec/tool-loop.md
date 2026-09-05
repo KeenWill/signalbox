@@ -469,14 +469,13 @@ implementation status and committed compatibility constraints; the
 owns the remaining undecided registry work.
 
 Each provider operation carries the exact session-executable definition and
-locus snapshot prepared under
-[model-call execution](model-call-execution.md#frontier-rendering). Runner-only
-definitions absent from current selected execution authority are not advertised;
-`RunnerAbandoned` exposes daemon-executable declarations only, and lost
-placement blocks preparation until user recovery. Initial approval and dispatch
-for a proposal are derived from that same frozen snapshot, never from a later
-catalog or registration lookup. A dynamic catalog or runner change while the
-provider call is in flight therefore cannot upgrade permission, introduce an
+locus snapshot prepared under [model-call execution](model-call-execution.md).
+Runner-only definitions absent from current selected execution authority are not
+advertised; `RunnerAbandoned` exposes daemon-executable declarations only, and
+lost placement blocks preparation until user recovery. Initial approval and
+dispatch for a proposal are derived from that same frozen snapshot, never from a
+later catalog or registration lookup. A dynamic catalog or runner change while
+the provider call is in flight therefore cannot upgrade permission, introduce an
 unavailable runner tool, widen its frozen selector, or silently move the
 selected locus.
 

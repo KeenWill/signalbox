@@ -289,8 +289,8 @@ per-turn provenance. The following extensions remain undecided:
   end as, and every projection of each ending, by
   [the credential-availability machine](spec/credential-availability.md); the
   qualifying causes and the successor-call shape by
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls);
-  the pool grammar, per-membership ranking, and closed action vocabulary by
+  [availability successor calls](spec/model-call-execution.md); the pool
+  grammar, per-membership ranking, and closed action vocabulary by
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
   What remains open is the client projection: snapshots expose each call's usage
   and the final turn state, while the predecessor, cause, and successor relation
@@ -339,14 +339,14 @@ per-turn provenance. The following extensions remain undecided:
   family revocation is account loss. (S22)
 - **Detailed provider provenance representation.** Model identifier
   normalization is decided: the
-  [provider-target identity rule](spec/model-call-execution.md#provider-target-identity)
-  accepts an alias resolved to its own dated snapshot as the same target and
-  keeps a different lineage as a distinct substitution outcome. The mismatch
-  disposition itself is likewise accepted
-  ([model-call-execution](spec/model-call-execution.md)). What remains open is
-  the durable per-call provenance schema that would record the concrete served
-  identity and a substitution as evidence rather than as operator diagnostics
-  and a fail-closed error. Blocks the provider provenance schema. (S20–S23)
+  [provider-target identity rule](spec/model-call-execution.md) accepts an alias
+  resolved to its own dated snapshot as the same target and keeps a different
+  lineage as a distinct substitution outcome. The mismatch disposition itself is
+  likewise accepted ([model-call-execution](spec/model-call-execution.md)). What
+  remains open is the durable per-call provenance schema that would record the
+  concrete served identity and a substitution as evidence rather than as
+  operator diagnostics and a fail-closed error. Blocks the provider provenance
+  schema. (S20–S23)
 - **Future same-profile retry.** Repeating a known provider failure or ambiguous
   outcome against the target and credential profile that produced it remains
   outside every accepted policy; the successor-call decision above authorizes
@@ -379,12 +379,11 @@ execution object, creation-request placement, and template creation carrying
 placement in [process-protocol](spec/process-protocol.md); the relocation
 transcript boundary in
 [sessions-and-transcript](spec/sessions-and-transcript.md); capability-derived
-tool advertisement in
-[model-call-execution](spec/model-call-execution.md#frontier-rendering). Why: a
-decided question is a contract, and a contract binds only where the implementer
-of that contract reads it; a decision restated on this page would be a second
-authority over prose that already owns it, free to drift from the page it
-paraphrases. Multiple simultaneously enrolled runners and user-directed
+tool advertisement in [model-call-execution](spec/model-call-execution.md). Why:
+a decided question is a contract, and a contract binds only where the
+implementer of that contract reads it; a decision restated on this page would be
+a second authority over prose that already owns it, free to drift from the page
+it paraphrases. Multiple simultaneously enrolled runners and user-directed
 relocation of a healthy session are committed functionality that version one
 defers rather than open questions
 ([runner protocol and placement](spec/runner-protocol.md#planned)). The

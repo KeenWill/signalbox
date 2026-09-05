@@ -193,9 +193,11 @@ use ordinary HTTP bodies rather than JSON wrapping.
 
 ### Bounded browser usage and cost reads
 
-The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes,
-their filters, pagination, compatibility grouping, and read-time configured-cost
-semantics are owned by [Usage evidence](usage-evidence.md).
+The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes read
+the usage projection [model-call-execution](model-call-execution.md) owns; their
+response shapes, bounds, and cost labels are the web contract under
+`crates/web-contract`, and the daemon's web HTTP layer parses their filters and
+cursors.
 
 `deterministic_test_router` supplies a database-free page plus bounded read,
 mutation, and two-item stream routes. It composes the same bootstrap, mutation
@@ -2035,7 +2037,7 @@ The five admitted actions are:
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `stay`               | The member keeps the session. A failure terminalizes as it would with no pool.                                                                                                                                                                                                                                        |
 | `switch_next_turn`   | A failure terminalizes as it would with no pool; low headroom does not fail or replace the current turn. The next turn's preparation excludes this member.                                                                                                                                                            |
-| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)).                                                                                                                                                                 |
+| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md)).                                                                                                                                                                                              |
 | `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                                                                                                                                                                                      |
 | `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an explicit operator command clears it — or, where an adapter offers one, until a zero-cost probe that calls no model reports availability. Never by a timer and never by a restart; the clearing rule is stated in full below. |
 
@@ -2753,11 +2755,10 @@ deployment-side rules that code cannot enforce are stated in
   (INV-002 boundary type). An ambient CLI operation validates its pinned
   external-login reference and prepares the process capability without reading a
   credential value. The shared cancellation contract for preparation and
-  execution is owned by
-  [model-call-execution](model-call-execution.md#staged-execution). A code-host
-  tool resolves its fixed `github-primary` reference only after the durable tool
-  attempt is authorized `InFlight` and immediately before its typed transport
-  call; no model argument, client, or runner can select or receive the
+  execution is owned by [model-call-execution](model-call-execution.md). A
+  code-host tool resolves its fixed `github-primary` reference only after the
+  durable tool attempt is authorized `InFlight` and immediately before its typed
+  transport call; no model argument, client, or runner can select or receive the
   credential. The pull-request suite follows the same timing with its fixed
   GitHub API egress policy.
 
