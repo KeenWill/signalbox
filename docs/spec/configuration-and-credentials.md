@@ -615,9 +615,11 @@ durable tool attempt is authorized `InFlight` and immediately before its
 transport call, and no model argument, client, or runner can select or receive
 that credential. Tool attempts store neither integration references nor values;
 the immutable compiled code-host declaration selects `github-primary` again when
-execution resumes. The plan tools require no credential profile, egress policy,
-or workspace root, and model arguments cannot select another session or storage
-adapter.
+execution resumes. The web-search and pull-request tools resolve their fixed
+integration credential on each request and convert a missing or unusable value
+into known-failure evidence. The plan tools require no credential profile,
+egress policy, or workspace root, and model arguments cannot select another
+session or storage adapter.
 
 Exact-value redaction is seeded with the credential resolved at preparation and
 retained in the request's one-shot capability, so it exists only for a profile
