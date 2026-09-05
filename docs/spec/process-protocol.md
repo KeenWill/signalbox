@@ -76,7 +76,8 @@ admits deltas; a sessionless receipt or an event kind with no projection
 advances the cursor and reaches no follower. A database-scoped advisory guard
 and a generation fence in `crates/persistence/src/hub_fence.rs` enforce one
 active daemon process per database, and therefore one dispatcher and its
-fan-outs.
+fan-outs. The guard is taken on a dedicated connection before migrations run and
+held until shutdown.
 
 ## Design decisions
 
@@ -353,9 +354,10 @@ recovery value is printed before the commit it belongs to can become ambiguous,
 each recovery set is printed all or none, and the client never substitutes a new
 command identity for an ambiguous attempt. Its ambiguity diagnostic never echoes
 standard-input content and never synthesizes a shell command. It renders every
-C0 control code point other than line feed, DEL, and every C1 code point in
-process-derived text as a visible escape; a single explicit raw-output option is
-the only opt-in to unescaped text.
+C0 control code point, DEL, and every C1 code point in process-derived text as a
+visible escape, preserving a line feed only in flowing text and escaping it in a
+single-line field such as a provider delta or a metadata title or tag. A single
+explicit raw-output option is the only opt-in to unescaped text.
 
 ## Planned
 
