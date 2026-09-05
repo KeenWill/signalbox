@@ -43,10 +43,10 @@ live in `crates/process-protocol` and on
 [process-protocol](process-protocol.md).
 
 The browser client asks for a descriptor of one use of a blob. The descriptor
-lists the views the server admits: metadata, download, a browser-native view for
-common image formats, and thumbnail and preview views that an isolated worker
-produces on demand. Each production is recorded as a `BlobDerivation`, an
-immutable relation from input digests to output digests that names its producer.
+lists the views the server admits: download, a browser-native view for common
+image formats, and thumbnail and preview views that an isolated worker produces
+on demand. Each production is recorded as a `BlobDerivation`, an immutable
+relation from input digests to output digests that names its producer.
 
 Accepted user content is `UserContent`, an ordered sequence of parts; each part
 is exact text or an attachment naming a blob digest with a kind, a media type,

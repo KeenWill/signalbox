@@ -38,9 +38,9 @@ token names; a failed condition discards the entry and reverifies the replica in
 full. The `BlobStore` trait returns a generation token from a full verification
 only when the adapter can pin an immutable object generation and make later
 ranges conditional on it; the filesystem adapter never can, and the present S3
-adapter returns none. Attachment preparation records the generation token of
-each replica it verifies into the turn's inventory, so a blob-read tool call in
-that turn reuses the verification.
+adapter returns none. Attachment preparation records into the turn's inventory
+any generation token a replica verification returns, so a blob-read tool call in
+that turn reuses that verification.
 
 Transcript data transfer objects in `crates/web-contract` carry, for each
 attachment part, the blob descriptor the same-origin HTTP surface would return:
@@ -88,8 +88,9 @@ scope reads the verified replica and performs no full reverification, a changed
 object generation fails the conditional read and forces a full reverification,
 the inventory never holds more than eight entries, and it is empty after scope
 end and after any candidate failure. With the filesystem adapter every range
-still reverifies in full. After attachment preparation verifies a replica, a
-blob-read tool call in the same turn reuses that verification.
+still reverifies in full. After attachment preparation verifies a replica and
+receives a generation token, a blob-read tool call in the same turn reuses that
+verification.
 
 A transcript projection of an accepted input with attachments carries a
 descriptor and view URLs for each attachment part and contains no blob bytes.
