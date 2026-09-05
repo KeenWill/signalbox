@@ -3,7 +3,7 @@
 Model-call execution carries one turn attempt's request to a model provider as
 one durable, at-most-once physical call and records what came back.
 
-## Map
+## Overview
 
 The subsystem is the model-call chain: rendering a context frontier into
 provider messages; the staged prepare, authorize-send, and commit-observation
@@ -106,7 +106,7 @@ and its token axes; the projection is append-only. Two read forms exist: an
 aggregate report grouped by compatibility key, and a newest-first detail page
 with a keyset cursor.
 
-## Decisions
+## Design decisions
 
 A terminal call record never reopens, because it records what was externally
 done, and rewriting it would let later facts silently change that record. The
@@ -249,7 +249,7 @@ behind an already emitted cursor. Dollar cost is not stored in the projection;
 [configuration-and-credentials](configuration-and-credentials.md) owns its
 read-time derivation.
 
-## Contracts
+## Boundary contracts
 
 A model call is one recorded attempt. The daemon sends each attempt to the
 provider at most once. A retry is a new recorded attempt; no code retries a call
@@ -384,7 +384,7 @@ The model-runtime layer imports and redefines no domain identifier type, and a
 runtime-generated identity is never authoritative correlation; the correlation
 the sealed issued call carries is.
 
-## Not built
+## Planned
 
 - Multipart attachment rendering ([design](../design/model-call-execution.md)).
 - Runner-placement rendering and the executable session-tool snapshot

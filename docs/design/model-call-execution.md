@@ -17,7 +17,7 @@ records durable provider-target evidence. It lets a user resolve an unstopped
 ambiguity. It carries the workspace-instruction region into the model operation
 as its own typed part.
 
-## Shape
+## Design
 
 An accepted-input attachment part renders as a typed provider-neutral content
 part, and the bridge maps it to the provider's native part. Media with no
@@ -113,7 +113,7 @@ is never concatenated into the system prompt, converted to a user or tool
 message, or sourced from an adapter loader. The region's bytes and authority are
 owned by [workspace-instructions](../spec/workspace-instructions.md).
 
-## Constraints on present code
+## Compatibility constraints
 
 The accepted-input part order and the textual stub projection stay as
 blob-storage defines them, and nothing assumes a rendered user message is
@@ -149,7 +149,7 @@ and its correlated successor, not by rewriting the ended attempt.
 The model operation's system prompt carries only the frozen defaults prompt, and
 no present code concatenates any other source into it.
 
-## Acceptance
+## Acceptance criteria
 
 A turn with an image attachment reaches the provider as a native content part,
 and the transcript entries are unchanged.
