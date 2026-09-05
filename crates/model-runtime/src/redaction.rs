@@ -655,7 +655,7 @@ fn redact_json(raw: String, credential: &CredentialValue) -> String {
     if key.is_empty() {
         return raw;
     }
-    if serde_json::value::RawValue::from_string(raw.clone()).is_err() {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
         // A partial or malformed JSON value can encode a credential or its
         // trailing prefix with escapes that literal replacement cannot see.
         // Reuse the streaming decoder, then fail closed on any held prefix;
@@ -665,69 +665,33 @@ fn redact_json(raw: String, credential: &CredentialValue) -> String {
             redacted.push_str("[redacted]");
         }
         return redacted;
-    }
+    };
+    redact_json_value(&mut value, key);
+    value.to_string()
+}
 
-    let mut redacted = String::with_capacity(raw.len());
-    let mut cursor = 0;
-    while cursor < raw.len() {
-        if raw.as_bytes()[cursor] == b'"' {
-            let mut end = cursor + 1;
-            let mut escaped = false;
-            while end < raw.len() {
-                let byte = raw.as_bytes()[end];
-                end += 1;
-                if escaped {
-                    escaped = false;
-                } else if byte == b'\\' {
-                    escaped = true;
-                } else if byte == b'"' {
-                    break;
-                }
+fn redact_json_value(value: &mut serde_json::Value, credential: &str) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = text.replace(credential, "[redacted]");
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_json_value(value, credential);
             }
-            let token = &raw[cursor..end];
-            let Ok(decoded) = serde_json::from_str::<String>(token) else {
-                return redact_text(raw, credential);
-            };
-            if decoded.contains(key) {
-                let Ok(sanitized) = serde_json::to_string(&decoded.replace(key, "[redacted]"))
-                else {
-                    return "\"[redacted]\"".to_string();
-                };
-                redacted.push_str(&sanitized);
-            } else {
-                redacted.push_str(token);
+        }
+        serde_json::Value::Object(object) => {
+            let entries = std::mem::take(object);
+            for (key, mut value) in entries {
+                redact_json_value(&mut value, credential);
+                object.insert(key.replace(credential, "[redacted]"), value);
             }
-            cursor = end;
-            continue;
         }
-
-        if matches!(
-            raw.as_bytes()[cursor],
-            b'{' | b'}' | b'[' | b']' | b',' | b':'
-        ) || raw.as_bytes()[cursor].is_ascii_whitespace()
-        {
-            redacted.push(raw.as_bytes()[cursor] as char);
-            cursor += 1;
-            continue;
+        primitive if primitive.to_string().contains(credential) => {
+            *primitive = serde_json::Value::String("[redacted]".to_string());
         }
-
-        let start = cursor;
-        while cursor < raw.len()
-            && !matches!(
-                raw.as_bytes()[cursor],
-                b'{' | b'}' | b'[' | b']' | b',' | b':' | b' ' | b'\t' | b'\r' | b'\n'
-            )
-        {
-            cursor += 1;
-        }
-        let token = &raw[start..cursor];
-        if token.contains(key) {
-            redacted.push_str("\"[redacted]\"");
-        } else {
-            redacted.push_str(token);
-        }
+        _ => {}
     }
-    redacted
 }
 
 fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
@@ -1005,13 +969,13 @@ mod tests {
     }
 
     #[test]
-    fn json_redaction_preserves_untouched_raw_lexemes_and_duplicate_keys() {
+    fn json_redaction_traverses_the_deserialized_value() {
         let key = credential("key_loop");
         let raw = r#"{"token":"key_loop","id":184467440737095516160,"dup":1,"dup":2}"#;
 
         assert_eq!(
             redact_json(raw.to_string(), &key),
-            r#"{"token":"[redacted]","id":184467440737095516160,"dup":1,"dup":2}"#
+            r#"{"dup":2,"id":184467440737095516160,"token":"[redacted]"}"#
         );
     }
 
