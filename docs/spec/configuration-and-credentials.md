@@ -582,8 +582,8 @@ fail-closed:
 
 - The `[numeric_bounds]` table is required and contains every deployment-owned
   numeric policy listed in `config/signalboxd.example.toml`. Integer policies
-  use nonnegative TOML integers and duration policies use an unsigned integer
-  followed by `ms` or `s`. Every field also accepts the single exact string
+  use nonnegative TOML integers and duration policies use Jiff's friendly
+  unsigned-duration syntax. Every field also accepts the single exact string
   `"none"` for an unbounded deployment policy. Missing fields are one typed
   startup failure whose sanitized message lists every absent field in schema
   order; mistyped values, alternate spellings of `"none"`, and unknown fields

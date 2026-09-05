@@ -4766,6 +4766,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
+ "jiff",
  "mime",
  "opentelemetry",
  "opentelemetry-otlp",
