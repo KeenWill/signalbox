@@ -211,7 +211,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            73b5d325befafefa06734c1567712bf5486a4e3a4efdb25298ee113120b9f4d9
+            0bbd9ebe800a35967e0345df725e53f183a474c5f0dbf512d777886508db8425
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
