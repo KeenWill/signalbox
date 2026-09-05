@@ -1199,16 +1199,13 @@ struct CalculationValue {
 }
 
 struct CalculationParser<'a> {
-    input: &'a [u8],
+    input: &'a str,
     position: usize,
 }
 
 impl<'a> CalculationParser<'a> {
     const fn new(input: &'a str) -> Self {
-        Self {
-            input: input.as_bytes(),
-            position: 0,
-        }
+        Self { input, position: 0 }
     }
 
     fn at_end(&mut self) -> bool {
@@ -1283,7 +1280,7 @@ impl<'a> CalculationParser<'a> {
             if self.position == whitespace_start {
                 return None;
             }
-            let operator = self.input[self.position];
+            let operator = self.input.as_bytes()[self.position];
             self.position += 1;
             let whitespace_start = self.position;
             self.skip_whitespace();
@@ -1310,7 +1307,7 @@ impl<'a> CalculationParser<'a> {
         loop {
             let whitespace_start = self.position;
             self.skip_whitespace();
-            let Some(operator) = self.input.get(self.position).copied() else {
+            let Some(operator) = self.input.as_bytes().get(self.position).copied() else {
                 return Some(left);
             };
             if operator != b'*' && operator != b'/' {
@@ -1346,6 +1343,7 @@ impl<'a> CalculationParser<'a> {
         let checkpoint = self.position;
         if self
             .input
+            .as_bytes()
             .get(self.position)
             .is_some_and(|byte| byte.is_ascii_alphabetic())
         {
@@ -1360,7 +1358,7 @@ impl<'a> CalculationParser<'a> {
 
     fn parse_dimension_value(&mut self) -> Option<CalculationValue> {
         self.skip_whitespace();
-        let remaining = core::str::from_utf8(self.input.get(self.position..)?).ok()?;
+        let remaining = self.input.get(self.position..)?;
         let mut input = cssparser::ParserInput::new(remaining);
         let mut parser = cssparser::Parser::new(&mut input);
         parser.next_including_whitespace_and_comments().ok()?;
@@ -1395,12 +1393,13 @@ impl<'a> CalculationParser<'a> {
         let start = self.position;
         while self
             .input
+            .as_bytes()
             .get(self.position)
             .is_some_and(u8::is_ascii_alphabetic)
         {
             self.position += 1;
         }
-        (self.position > start).then_some(&self.input[start..self.position])
+        (self.position > start).then_some(&self.input.as_bytes()[start..self.position])
     }
 
     fn consume(&mut self, expected: u8) -> bool {
@@ -1414,23 +1413,24 @@ impl<'a> CalculationParser<'a> {
     }
 
     fn peek_is(&self, expected: u8) -> bool {
-        self.input.get(self.position) == Some(&expected)
+        self.input.as_bytes().get(self.position) == Some(&expected)
     }
 
     fn skip_whitespace(&mut self) {
         loop {
             while self
                 .input
+                .as_bytes()
                 .get(self.position)
                 .is_some_and(u8::is_ascii_whitespace)
             {
                 self.position += 1;
             }
-            if self.input.get(self.position..self.position + 2) != Some(b"/*") {
+            if self.input.as_bytes().get(self.position..self.position + 2) != Some(b"/*") {
                 return;
             }
             self.position += 2;
-            let comment_end = self.input[self.position..]
+            let comment_end = self.input.as_bytes()[self.position..]
                 .windows(2)
                 .position(|window| window == b"*/");
             let Some(comment_end) = comment_end else {
