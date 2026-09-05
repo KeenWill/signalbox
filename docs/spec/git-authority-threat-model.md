@@ -23,8 +23,9 @@ configuration, references, lock state, and object data into private snapshots;
 the typed Git library, `git2`, works only on those snapshots.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
-destination is a remote a person minted, scoped to a durable workspace record.
-The grant is keyed by the record's identity, not its path.
+destination is a remote the deployment configured, never one the caller chose. A
+minted destination is scoped to a durable workspace record, and its grant is
+keyed by the record's identity, not its path.
 
 ## Decisions
 
@@ -46,12 +47,15 @@ No operation accepts a command line, shell fragment, executable, repository
 path, or remote destination, and the implementation never spawns a Git binary.
 
 Minting a destination is a human act; pushing to a minted destination is an
-approval-gated agent act. A session cannot mint a workspace or a destination;
-session-facing minting, if ever admitted, is a posture-gated tool decided
-separately.
+approval-gated agent act. A session cannot mint a workspace or a destination.
+
+A push destination is `https` only; the durable mint and the configured remote
+judge a URL by one type, so both refuse the same set.
 
 Workspace roots are globally unique by canonical spelling, and the key carries
-no runner or location dimension.
+no runner or location dimension. Why: the single-runner rule means no two
+machines present the same root; scoping roots per runner belongs to
+[runner-protocol.md](runner-protocol.md).
 
 Three Git behaviors bind any Git transport Signalbox runs. A repository-local
 `credential.helper` value beginning with `!` is a shell snippet Git executes, so
@@ -84,14 +88,10 @@ repository behavior are not properties of the local authority;
 [configuration-and-credentials.md](configuration-and-credentials.md) own egress
 and credential scope.
 
-The contracts below are the security acceptance boundary. A finding that
-demonstrates a violation is must-fix however many review waves have passed, and
-a newly found gap in a mechanism enforcing one of them is in-scope hardening
-fixed in the current pull request's disposition commit. A finding that violates
-no stated contract, names no in-scope enforcement gap, and contradicts no
-implemented contract is an accepted residual resolved without code change. That
-classification never covers a reproducing violation or a defect this subsystem
-introduced.
+The contracts below are the security acceptance boundary. A demonstrated
+violation of one, or a gap in a mechanism enforcing one, is a defect. A finding
+that violates no contract and contradicts no implemented contract is an accepted
+residual.
 
 ## Contracts
 
@@ -122,23 +122,24 @@ concurrent transition.
 At its validation points the suite fails closed on observed concurrent
 replacement or in-place change and preserves entries it no longer owns.
 
-An external write names a branch and a minted remote, never a destination; the
-endpoint is durable authority recorded ahead of the call. The push requires
-explicit approval that no policy overrides; [tool-loop.md](tool-loop.md) owns
-the approval mechanism.
+An external write names a branch and nothing else. Its destination is the one
+validated remote the deployment configured when it constructed the push
+executor, never a caller argument. The push requires explicit approval that no
+policy overrides; [tool-loop.md](tool-loop.md) owns the approval mechanism.
 
 Operator-registered minting is the only tier that widens what Signalbox may push
 from, so an operator-registered workspace record carries the durable command
 that registered it. A daemon-derived workspace row records what the per-session
 derivation produced; nothing reads it to decide which roots the daemon may open.
 
-Grants are scoped by workspace identity, so a grant does not survive a move of
-the directory and must be minted again under the new workspace.
+Grants are scoped by workspace identity, so a grant does not survive an
+unrecorded move of the directory and must be minted again under the new
+workspace.
 
 ## Not built
 
-- Push by remote name, resolved against the durable record
-  ([design](../design/git-authority-threat-model.md)).
+- Push by remote name, with the endpoint resolved against the durable minted
+  record ahead of the call ([design](../design/git-authority-threat-model.md)).
 - Workspace minting, with the root canonicalized once at minting so later scope
   comparisons are between identities
   ([design](../design/git-authority-threat-model.md)).
