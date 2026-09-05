@@ -4762,6 +4762,7 @@ dependencies = [
  "futures-util",
  "git2",
  "hmac",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
