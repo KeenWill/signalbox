@@ -21,13 +21,14 @@ supplies instruction selectors that the session carries until its first
 activation, where one session-scheduler transaction resolves them against the
 turn's discovery and installs the allow-list
 ([configuration-and-credentials.md](../spec/configuration-and-credentials.md)).
-A session-specific replacement is its own durable command. An absent allow-list
-makes no bundle eligible. Each entry pairs a bundle identity with the
-authorizing root the session reaches it through, because one bundle may be
-registered under several roots and the root fixes the paths and scope the model
-sees. A selector or replacement that resolves one bundle identity through more
-than one root is rejected before the allow-list is installed, so every resolved
-bundle identity is distinct.
+A session-specific replacement is its own durable command and carries at most as
+many selectors as a template's selector array. An absent allow-list makes no
+bundle eligible. Each entry pairs a bundle identity with the authorizing root
+the session reaches it through, because one bundle may be registered under
+several roots and the root fixes the paths and scope the model sees. A selector
+or replacement that resolves one bundle identity through more than one root is
+rejected before the allow-list is installed, so every resolved bundle identity
+is distinct.
 
 The activation transaction copies the exact ordered eligibility list under the
 session scheduler lock and records its versioned SHA-256 hash in the turn-start
@@ -40,22 +41,25 @@ already recorded keeps its stored wrapper. A registered bundle absent from the
 snapshot cannot be enumerated, previewed, or admitted.
 
 Three tools expose the snapshot to the model. `instructions_list` enumerates the
-snapshot by cursor. `instructions_preview` returns bounded structure for one
-eligible bundle: headings for a document, validated metadata and headings for a
-skill, with the source byte length. A preview is capped by a fixed maximum
-heading count and a fixed maximum encoded result size, and truncates
-deterministically at either bound. `instructions_read` names one eligible
-bundle, requests admission, and returns a typed receipt naming the admission,
-the source hash, the rendered hash, the rendered byte length, and any truncation
-boundary, never the body. Preview and a fresh read reread the source under the
-entry's authorizing root, compare its length and hash with the registered
-evidence, and reject a mismatch, so no unregistered byte is previewed or
-admitted. List and preview declare the Auto permission default and admit
-nothing. All three tools declare the `EffectFree` effect class: list and preview
-read only daemon-local state, and a read's only durable effect commits with its
-result, so a daemon lost before result commit closes the attempt `KnownFailed`
-([tool-loop.md](../spec/tool-loop.md)). Each tool takes a closed JSON-object
-argument schema, and no schema accepts a session identity.
+snapshot by cursor; a page carries a fixed maximum entry count within a fixed
+maximum encoded size below the tool-result ceiling, cuts deterministically at
+whichever bound it reaches first, and returns a next cursor.
+`instructions_preview` returns bounded structure for one eligible bundle:
+headings for a document, validated metadata and headings for a skill, with the
+source byte length. A preview is capped by a fixed maximum heading count and a
+fixed maximum encoded result size, and truncates deterministically at either
+bound. `instructions_read` names one eligible bundle, requests admission, and
+returns a typed receipt naming the admission, the source hash, the rendered
+hash, the rendered byte length, and any truncation boundary, never the body.
+Preview and a fresh read reread the source under the entry's authorizing root,
+reading at most the registered byte length plus one byte, compare its length and
+hash with the registered evidence, and reject a mismatch, so no unregistered
+byte is previewed or admitted. List and preview declare the Auto permission
+default and admit nothing. All three tools declare the `EffectFree` effect
+class: list and preview read only daemon-local state, and a read's only durable
+effect commits with its result, so a daemon lost before result commit closes the
+attempt `KnownFailed` ([tool-loop.md](../spec/tool-loop.md)). Each tool takes a
+closed JSON-object argument schema, and no schema accepts a session identity.
 
 Nothing is admitted because it is eligible, relevant, near a touched file, or
 named in a template. The only admission route is a model request through
@@ -67,7 +71,9 @@ and when the judge call itself ends in a terminal failure
 accepted steering or operator resumption attends, an escalation instead closes
 the batch, fails the turn, and blocks the goal. A request naming an ineligible
 bundle or carrying arguments that do not decode resolves before approval and
-creates no attempt.
+creates no attempt. The execution-stage failures are exactly four closed reason
+tokens: `stale_source`, `aggregate_exhaustion`, `target_capability`, and
+`stale_cursor`.
 
 Every repository-controlled string a list or preview result carries, such as a
 display name, a source or scope path, a description, heading text, or skill
@@ -78,9 +84,13 @@ kind, byte length, hash, and root reference, stay outside it, so a reader can
 address and order a page without parsing untrusted text. The daemon-resolved
 bundle evidence a delegated `instructions_read` decision sends to the approval
 judge is framed the same way, its repository-controlled strings inside this
-region and its prose-free members outside it. The region is four LF-separated
-lines with no leading or trailing byte; the first, second, and fourth are
-literal and identical wherever a region appears:
+region and its prose-free members outside it. Every path a list result, a
+preview result, or that judge evidence carries is root-relative and names its
+root by the provider-safe reference
+([configuration-and-credentials.md](../spec/configuration-and-credentials.md)),
+never a canonical absolute path. The region is four LF-separated lines with no
+leading or trailing byte; the first, second, and fourth are literal and
+identical wherever a region appears:
 
 ```text
 <signalbox_untrusted_repository_data>
@@ -147,16 +157,18 @@ carries no session, turn, or bundle values, so replaying a manifest's rendered
 rows reproduces it without storing it.
 
 Each wrapper opens with a `<signalbox_workspace_instruction>` line, then one
-JSON line of metadata holding the bundle identity, kind, root kind, the
-provider-safe root reference for a configured root, the root-relative source
-path, and the source hash, then the budgeted source bytes between `<content>`
-and `</content>` lines, then the closing tag. The metadata line comes from one
-encoder: the compact `serde_json` encoding whose string escaping matches RFC
-8785, extended so `<`, `>`, and `&` become the six-character escapes above.
-Content replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;`. No
-repository byte can therefore terminate or fabricate an envelope. Canonical
-absolute paths never enter the region. The rendered hash is SHA-256 over the
-complete escaped wrapper.
+JSON line of metadata whose members appear in this fixed order: the bundle
+identity, kind, root kind, the provider-safe root reference for a configured
+root, the root-relative source path, and the source hash, then the budgeted
+source bytes between `<content>` and `</content>` lines, then the closing tag.
+The metadata line comes from one encoder: the compact `serde_json` encoding
+whose string escaping matches RFC 8785, extended so `<`, `>`, and `&` become the
+six-character escapes above. That fixed order and that fixed escaping make two
+implementations render identical wrapper bytes for the same admission. Content
+replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;`. No repository byte
+can therefore terminate or fabricate an envelope. Canonical absolute paths never
+enter the region. The rendered hash is SHA-256 over the complete escaped
+wrapper.
 
 Every admission's per-bundle source budget is 32,768 bytes, and
 `instructions_read` has no caller-supplied budget field. Rendering emits the
@@ -250,11 +262,13 @@ recorded receipt.
 The region bytes a manifest records are reproducible from the admission rows
 alone after the workspace source is changed or deleted.
 
-A source above 32,768 bytes renders truncated with its boundary recorded; a read
+A source above 32,768 bytes renders truncated with its boundary recorded when
+its escaped wrapper passes the aggregate and target-capability checks; a read
 that would exceed 65,536 aggregate bytes fails and changes no admitted set; a
 region no target can carry fails preparation before provider spawn.
 
-A test pins the preview's maximum heading count and maximum encoded result size.
+A test pins the catalog page's maximum entry count and maximum encoded size, and
+the preview's maximum heading count and maximum encoded result size.
 
 Repository-controlled strings in list and preview results appear only inside the
 untrusted region, and no such string can close it.

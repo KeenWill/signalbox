@@ -113,8 +113,10 @@ permission.
 
 Digest preimages frame values uniformly: literal UTF-8 separators with no
 terminator, 16-byte UUIDs, eight-byte big-endian counts and lengths,
-length-prefixed UTF-8 text, and length-framed variant names. A trigger in the
-migration checks the turn-start manifest's hashes against these preimages.
+length-prefixed UTF-8 text, and length-framed variant names. The turn-start
+manifest's boundary name is the exception: it is appended as the literal UTF-8
+bytes `turn_start` with no length frame. A trigger in the migration checks the
+turn-start manifest's hashes against these preimages.
 
 The turn-start manifest is fixed before the first provider call and
 authenticated whenever that call is prepared or reconstituted. Both recording
