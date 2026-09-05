@@ -27,9 +27,9 @@ configures. It is stored on turn and model-call rows and is neither minted nor a
 command key.
 
 The identity types are built by the `define_identity!` macro in `crates/domain`.
-Generation is an application-layer effect: `crates/domain` depends on `uuid`
-without a generation feature and cannot mint an identity, and
-`crates/application` holds one generator per orchestration slice.
+That crate depends on `uuid` without a generation feature and cannot mint an
+identity, so each orchestration slice in `crates/application` defines its own
+generator trait and the daemon runtimes outside those slices mint directly.
 
 The registry is the `durable_command` table. A registry row carries the command
 identifier, a closed command kind, a kind-scoped storage version, the claim
