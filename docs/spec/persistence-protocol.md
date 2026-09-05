@@ -34,8 +34,9 @@ its checksum in `_sqlx_migrations`.
 The schema is normalized and purpose-specific: mutable current-state rows
 guarded by constraints and triggers, and append-only facts that triggers protect
 from update and delete, and in the guarded table families from truncate as well.
-The core file holds three singletons: the hub-fence generation that fences the
-connection pool, the outbox sequence allocator, and the outbox delivery cursor.
+The core file holds two singletons: the hub-fence generation that fences the
+connection pool and the outbox sequence allocator. Each outbox consumer has its
+own delivery cursor row.
 
 One append-only, user-global `durable_command` registry claims every command
 identifier across all kinds and sessions, and each command kind has one typed
@@ -68,8 +69,8 @@ owned by [sessions-and-transcript](sessions-and-transcript.md).
 The transactional outbox is the only path from a committed transition to a
 client-visible event. Two header tables, one for core kinds and one for
 delegation kinds, feed one delivery sequence, and each event kind has a typed
-record table. `OutboxDispatcher` is the single consumer; it hands one event at a
-time to a synchronous consumer.
+record table. Each consumer reads one event at a time through its own delivery
+cursor.
 
 ## Design decisions
 
@@ -230,8 +231,9 @@ submitted input, and dispatch authenticates its goal-turn provenance instead of
 requiring a synthetic submit command.
 
 Dispatch validates a runner transition against the placement revision it names
-because delivery is one ordered cursor, and a check demanding current state
-would let a later transition block that event and every event after it.
+because delivery is ordered through each consumer's cursor, and a check
+demanding current state would let a later transition block that event and every
+event after it.
 
 Database-role separation is a deployment choice; migration invocation is wired
 in `apps/signalboxd`, not in the crate.
@@ -276,6 +278,10 @@ append on the same connection, inside the same transaction. No separate step
 publishes after the commit. Delivery is ordered and at-least-once, and consumers
 deduplicate by cursor. A runner transition event is validated against the
 placement revision it names, never against the session's current placement.
+
+Module-owned schemas contain only derived or module-local state, which may be
+pruned. Outbox records with a sequence below every per-consumer delivery cursor
+may be pruned.
 
 Domain types carry no SQLx or serialization traits. Each adapter module decodes
 its own rows through explicit fallible functions and assembles a checked input;
@@ -479,22 +485,23 @@ delegation wake in the same transaction, even when the recipient is already
 active. The wake is best effort after restart and never stands in for the
 client-visible update.
 
-Both outbox header tables share one allocator and one delivery prefix, so their
-committed events form one gap-free global sequence. Extension is version-gated:
-an addition every existing decoder can ignore leaves the kind's storage version
-alone, while a new closed state or required column advances it, and a decoder
-that predates the advance rejects the record as unsupported.
+Both outbox header tables share one allocator, so their committed events form
+one gap-free global sequence. Each consumer holds an independent delivery
+prefix. Extension is version-gated: an addition every existing decoder can
+ignore leaves the kind's storage version alone, while a new closed state or
+required column advances it, and a decoder that predates the advance rejects the
+record as unsupported.
 
-Dispatch locks the delivery singleton FOR UPDATE, reads exactly the next
-sequence and its typed record, and advances the singleton only when the
-synchronous consumer accepts, in the same transaction. A transaction that
-appends an event never advances the delivery cursor and one that advances the
-cursor never appends; the schema rejects both orders. An absent header for a
-sequence the allocator has already allocated fails the dispatch instead of
-reporting an idle queue, and a delivery cursor or any committed header beyond
-the allocator fails it too. A consumer retry or exit before the commit request
-leaves the prefix unchanged for redelivery, and a lost commit response is
-resolved by the next locked cursor read.
+Dispatch locks the consumer's delivery cursor FOR UPDATE, reads exactly the next
+sequence and its typed record, and advances that cursor only when the consumer
+accepts, in the same transaction. A transaction that appends an event never
+advances a delivery cursor and one that advances a cursor never appends; the
+schema rejects both orders. An absent header for a sequence the allocator has
+already allocated fails the dispatch instead of reporting an idle queue, and a
+delivery cursor or any committed header beyond the allocator fails it too. A
+consumer retry or exit before the commit request leaves the prefix unchanged for
+redelivery, and a lost commit response is resolved by the next locked cursor
+read.
 
 Dispatch validates each record against durable state: an activation against the
 turn's attempt, a call transition against monotonic call state, and a terminal
