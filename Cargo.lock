@@ -4067,17 +4067,12 @@ dependencies = [
 name = "signalbox-approval-judge-eval"
 version = "0.0.0"
 dependencies = [
- "expect-test",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
- "signalbox-persistence",
  "signalboxd",
- "sqlx",
- "testcontainers-modules",
  "tokio",
  "uuid",
 ]

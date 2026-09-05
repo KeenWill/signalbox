@@ -676,14 +676,6 @@ jobs:
           path: ${{ runner.temp }}/terminal-client.tar.zst
           if-no-files-found: error
           retention-days: 1
-      - name: Upload the approval-judge-eval archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-integration-archive-approval-judge-eval
-          path: ${{ runner.temp }}/approval-judge-eval.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-
   # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
   # build and run jobs share the same runner image and absolute work-path shape,
   # which keeps paths embedded in nextest archives valid across their pods.

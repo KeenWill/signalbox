@@ -14,14 +14,13 @@ The harness is the `signalbox-approval-judge-eval` workspace crate, a temporary
 standalone evaluation surface for the three-disposition approval judge that the
 [tool loop](tool-loop.md) owns. Its data is a JSON corpus of synthetic cases.
 Each case pairs a tool request and its frozen authority context with the
-expected disposition and nonempty free-text provenance for that label. A
-portable manifest names the corpus, its version, and the source of its cases.
+expected disposition and free-text provenance for that label. The corpus is
+consumed directly as opaque evaluation input after JSON shape decoding.
 
-The harness has two parts. The library loads a corpus through a pluggable store
-contract, replays each case through the judge, and scores the verdicts into a
-scorecard. Both the disk store and the database store verify the corpus digest
-on load. The offline entry point replays recorded provider responses through a
-scripted model adapter and prints the scorecard as JSON.
+The library loads a corpus, replays each case through the judge, and scores the
+verdicts into a scorecard. The offline entry point replays recorded provider
+responses in corpus order through a scripted model adapter and prints the
+scorecard as JSON.
 
 The live-provider runner in the daemon is not part of the harness. It reads its
 own JSONL case file in its own case shape, sends each case to a configured
@@ -34,11 +33,6 @@ Replay uses the daemon's current approval-judge prompt, renderer,
 structured-output contract, and decoder without entering the daemon's durable
 decision path. Why: the harness measures the deployed judge, not a fork of it.
 
-Repository paths in a manifest are never fetched: the operator supplies a
-checkout that holds the manifest and its source files, and the recorded
-repository identity is provenance only. Why: corpus metadata never drives a
-network request.
-
 Evaluation verdicts gate nothing; every evaluation surface is report-only.
 
 The checked-in seed manifest, corpus, and response file contain synthetic
@@ -46,22 +40,6 @@ strings only, so no real request data enters the repository.
 
 The live-provider runner is an operator-driven surface outside the offline
 harness, because it spends provider quota.
-
-No case field admits a number. Why: RFC 8785 number serialization is not
-implemented, so a numeric field would have no encoder-independent canonical
-form.
-
-## Boundary contracts
-
-The corpus digest is independent of storage form. It is SHA-256 in lowercase
-hexadecimal over the corpus's logical cases, each serialized to canonical JSON
-and ordered by case identifier bytewise. Canonical JSON is the compact
-`serde_json` encoding with object keys sorted bytewise at every level; its
-string escaping matches RFC 8785. For corpus format version one, the preimage is
-the bytes `signalbox-eval-corpus-v1`, one zero byte, the case count as an
-unsigned 64-bit big-endian integer, and then for each case its canonical-JSON
-byte length as an unsigned 64-bit big-endian integer followed by those bytes.
-The harness crate's `corpus_digest` is the one implementation.
 
 ## Planned
 

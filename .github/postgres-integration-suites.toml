@@ -104,10 +104,3 @@ shards = 1
 # A live-credential smoke, owner- and CI-excluded, that the previous `cargo
 # test` invocation excluded with `--skip`.
 skip = ["terminal_client_completes_the_real_anthropic_path"]
-
-[[suite]]
-name = "approval-judge-eval"
-package = "signalbox-approval-judge-eval"
-features = ["postgres-integration"]
-shards = 1
-skip = []
