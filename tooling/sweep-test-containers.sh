@@ -59,7 +59,7 @@ set -m
 # drift.
 readonly DISPOSABLE_LABEL='org.signalbox.disposable=test-container'
 
-# `docker inspect` and `docker rm` name each identifier they could not find on
+# `docker rm` names each identifier it could not find on
 # stderr and still act on every container they did find. A line of this shape is
 # a container that left between one call and the next, which is the outcome this
 # sweep wants; any other line is a real fault that must not be read as
@@ -327,7 +327,7 @@ if [ "$probe_status" -ne 0 ]; then
 fi
 
 listing_status=0
-run_bounded docker ps --all --quiet --filter "label=$DISPOSABLE_LABEL" ||
+run_bounded docker ps --all --filter "label=$DISPOSABLE_LABEL" --format json ||
 	listing_status=$?
 refuse_a_deadline_overrun "$listing_status" "the container listing"
 
@@ -337,93 +337,40 @@ if [ "$listing_status" -ne 0 ]; then
 	exit 1
 fi
 
-candidates="$(cat "$OUTPUT")"
+containers="$(cat "$OUTPUT")"
 
-if [ -z "$candidates" ]; then
+if [ -z "$containers" ]; then
 	echo "sweep-test-containers: no disposable test containers present"
 	finish_clean
 fi
 
-# Identifiers arrive on stdin so a sweep of several thousand containers cannot
-# overflow the argument list.
-inspect_candidates() {
-	printf '%s\n' "$candidates" |
-		xargs docker inspect \
-			--format '{{.Id}} {{.Created}} {{.State.Status}} {{.Config.Image}}'
-}
-
-inspection_status=0
-run_bounded inspect_candidates || inspection_status=$?
-refuse_a_deadline_overrun "$inspection_status" "the container inspection"
-
-inspected="$(cat "$OUTPUT")"
-inspection_errors="$scratch/inspection-errors"
-cp "$ERRORS" "$inspection_errors"
-
-# A container listed a moment ago can be gone by the time it is inspected: a
-# concurrent test run finishing, or a second operator sweeping. That is benign,
-# and the sweep continues with the rest. Every other inspection failure — the
-# daemon restarting after the probe, an authorization policy that permits
-# listing but denies inspection, a nonzero exit carrying nothing on stderr — is
-# a fault, and tolerating it would let a timer report success while the orphans
-# keep accumulating.
-#
-# The two are told apart only when the inspection actually failed, because
-# stderr is not evidence on its own: `docker inspect` writes warnings there
-# while succeeding, and treating those as faults would abort sweeps that had
-# nothing wrong with them. Once the status is nonzero, every candidate must be
-# accounted for — inspected, or named on stderr as gone — and stderr must say
-# nothing else.
-candidate_count="$(printf '%s\n' "$candidates" | grep -c . || true)"
-inspected_count="$(printf '%s\n' "$inspected" | grep -c . || true)"
-
-if [ "$inspection_status" -ne 0 ]; then
-	vanished_count="$(grep -c -E "$MISSING_OBJECT_PATTERN" "$inspection_errors" || true)"
-	unexplained="$(grep -v -E "$MISSING_OBJECT_PATTERN" "$inspection_errors" || true)"
-
-	if [ -n "$unexplained" ] ||
-		[ "$((inspected_count + vanished_count))" -ne "$candidate_count" ]; then
-		echo "sweep-test-containers: docker inspect failed for a reason other than a" \
-			"container disappearing (exit status $inspection_status); removed nothing" >&2
-		cat "$inspection_errors" >&2
-		exit 1
-	fi
-fi
-
-if [ -z "$inspected" ]; then
-	echo "sweep-test-containers: every candidate container was gone before it" \
-		"could be inspected"
-	finish_clean
-fi
-
-# `docker inspect` reports creation time as RFC 3339 with nanosecond precision,
-# which predates `fromisoformat`'s tolerance for anything but 3 or 6 fractional
-# digits; the fraction is truncated rather than parsed since only whole hours
-# matter here.
+# Docker owns the listing schema. Its JSON formatter supplies one object per
+# line, avoiding a second inspect request and any delimiter assumptions about
+# image names, states, or timestamps.
 selected="$(
-	printf '%s\n' "$inspected" |
+	printf '%s\n' "$containers" |
 		python3 -c '
 import datetime as dt, sys
+import json
 
 cutoff_hours = float(sys.argv[1])
 now = dt.datetime.now(dt.timezone.utc)
 for line in sys.stdin:
-    container_id, created, status, image = line.split(" ", 3)
-    stamp = created.replace("Z", "+00:00")
-    if "." in stamp:
-        head, _, tail = stamp.partition(".")
-        fraction_end = 0
-        while fraction_end < len(tail) and tail[fraction_end].isdigit():
-            fraction_end += 1
-        stamp = f"{head}.{tail[:fraction_end][:6]}{tail[fraction_end:]}"
-    age_hours = (now - dt.datetime.fromisoformat(stamp)).total_seconds() / 3600
+    container = json.loads(line)
+    container_id = container["ID"]
+    created = container["CreatedAt"].rsplit(" ", 1)[0]
+    created_at = dt.datetime.strptime(created, "%Y-%m-%d %H:%M:%S %z")
+    age_hours = (now - created_at).total_seconds() / 3600
     if age_hours >= cutoff_hours:
-        print(f"{container_id} {age_hours:.1f} {status} {image.strip()}")
+        print("{} {:.1f} {} {}".format(
+            container_id, age_hours, container["State"], container["Image"]
+        ))
 ' "$older_than_hours"
 )"
 
 if [ -z "$selected" ]; then
-	echo "sweep-test-containers: $inspected_count disposable test container(s)" \
+	container_count="$(printf '%s\n' "$containers" | grep -c . || true)"
+	echo "sweep-test-containers: $container_count disposable test container(s)" \
 		"present, none older than ${older_than_hours}h"
 	finish_clean
 fi

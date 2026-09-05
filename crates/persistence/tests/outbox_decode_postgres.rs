@@ -1,9 +1,8 @@
 //! What the outbox decoder admits, and the stall a row it cannot decode imposes.
 //!
-//! The outbox dispatcher is a singleton over a single global cursor: one
-//! committed row it cannot decode is not a lost event for one session, it is a
-//! cursor that never advances again for *any* session. Two separate lines are
-//! held against that here.
+//! Each outbox dispatcher advances one consumer's global cursor: one committed
+//! row it cannot decode is not a lost event for one session, it stalls that
+//! consumer for *every* session. Two separate lines are held against that here.
 //!
 //! The first is a compile-time line. Every dispatched enum below is enumerated
 //! by an exhaustive `match` with no wildcard arm, which *produces* the
@@ -638,7 +637,7 @@ fn assert_storage_and_decoder_agree<Value: PartialEq + fmt::Debug>(
                 panic!(
                     "durable {column} admits {spelling:?}, which the outbox decoder rejects \
                      ({corruption:?}); a committed row carrying it can never be decoded, and \
-                     stalls the singleton outbox cursor for every session"
+                     stalls each outbox consumer cursor for every session"
                 )
             })
         })
@@ -716,7 +715,7 @@ fn row_decoded_families_are_enumerated() {
 /// This is the arm the tripwire analysis named: `child_result` and
 /// `child_lifecycle_disposition` are written by production code, and mistyping
 /// either routes a committed row to the fail-closed arm, which stalls the
-/// singleton cursor for every session.
+/// selected consumer cursor for every session.
 #[test]
 fn each_delegation_update_kind_spelling_decodes_to_its_variant() {
     assert_eq!(
@@ -916,8 +915,8 @@ async fn delegation_storage_and_decoder_close_over_the_same_spellings() -> Resul
 /// A committed row the dispatcher cannot decode stalls every session, today.
 ///
 /// This pins current behavior rather than endorsing it. The dispatcher offers
-/// exactly the next committed sequence and advances the singleton
-/// `outbox_delivery_state` cursor only after the consumer accepts; a row that
+/// exactly the next committed sequence and advances its `outbox_consumer_cursor`
+/// cursor only after the consumer accepts; a row that
 /// fails to decode never reaches a consumer, so the cursor cannot move and no
 /// later sequence — for any session — is ever offered. The assertions below
 /// state that as a conjunction because it is one contract: the error repeats,
@@ -926,7 +925,7 @@ async fn delegation_storage_and_decoder_close_over_the_same_spellings() -> Resul
 /// behavior regressed.
 ///
 /// The concern this documents: with delegation events flowing through the same
-/// singleton cursor, an undecodable persisted variant is a system-wide stall,
+/// selected consumer cursor, an undecodable persisted variant is a consumer-wide stall,
 /// not a per-session one.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -977,7 +976,7 @@ async fn an_undecodable_committed_row_stalls_every_session() -> Result<(), Box<d
     );
 
     let delivered: rust_decimal::Decimal =
-        sqlx::query_scalar("SELECT delivered_through FROM outbox_delivery_state WHERE singleton")
+        sqlx::query_scalar("SELECT delivered_through FROM outbox_consumer_cursor WHERE consumer_name = 'process_protocol'")
             .fetch_one(&pool)
             .await?;
     assert_eq!(
@@ -1295,7 +1294,7 @@ async fn dispatch_next_kind(
 ///
 /// This is the end the tripwire analysis pointed at: `child_result` and
 /// `child_lifecycle_disposition` are written by production code, and an arm
-/// that cannot decode its own committed row stalls the singleton cursor for
+/// that cannot decode its own committed row stalls its consumer cursor for
 /// every session rather than losing one event.
 ///
 /// Both spawn policies are planted, because `background` and `bound` take

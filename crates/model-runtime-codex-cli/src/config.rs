@@ -24,7 +24,7 @@ pub struct CodexCliConfig {
     pub credential_reference: signalbox_model_runtime::CredentialReference,
     /// Per-profile login homes. Values are path references only; the adapter
     /// never reads their auth material. See
-    /// `docs/spec/configuration-and-credentials.md#the-codex_home-delivery`.
+    /// `docs/spec/configuration-and-credentials.md`.
     pub credential_homes: HashMap<signalbox_model_runtime::CredentialReference, PathBuf>,
     /// Optional positive whole-process timeout representable by the runtime clock.
     pub exchange_timeout: Option<Duration>,

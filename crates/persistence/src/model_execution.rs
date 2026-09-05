@@ -9,7 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -592,6 +592,7 @@ pub struct PostgresModelCallRepository {
     credential_reference: ModelCallCredentialReference,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: CredentialPoolRuntimeCatalog,
+    same_credential_attempt_bound: NonZeroUsize,
     cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
     continuation_usage_limits: ToolContinuationUsageLimitCatalog,
 }
@@ -617,6 +618,7 @@ impl PostgresModelCallRepository {
             credential_reference,
             credential_families: None,
             credential_pools: HashMap::new(),
+            same_credential_attempt_bound: NonZeroUsize::MIN,
             cache_inclusive_input_targets: HashSet::new(),
             continuation_usage_limits: HashMap::new(),
         }
@@ -634,6 +636,12 @@ impl PostgresModelCallRepository {
     /// Enables per-call credential-pool selection and trigger observation.
     pub fn with_credential_pools(mut self, credential_pools: CredentialPoolRuntimeCatalog) -> Self {
         self.credential_pools = credential_pools;
+        self
+    }
+
+    /// Bounds recorded attempts on one credential within a turn.
+    pub fn with_same_credential_attempt_bound(mut self, bound: NonZeroUsize) -> Self {
+        self.same_credential_attempt_bound = bound;
         self
     }
 
@@ -1814,20 +1822,14 @@ impl PostgresModelCallRepository {
                 outbox::lock_sequence_allocator(&mut transaction).await?;
                 let action = policy.action(cause);
                 let mut pool_exhausted_name = None;
-                let current_reference = if action == CredentialPoolRuntimeAction::Stay {
-                    None
-                } else {
-                    Some(
-                        sqlx::query_scalar::<_, String>(
-                            "SELECT credential_reference
-                           FROM model_call
-                          WHERE model_call_id = $1",
-                        )
-                        .bind(observation.call().into_uuid())
-                        .fetch_one(&mut *transaction)
-                        .await?,
-                    )
-                };
+                let current_reference = sqlx::query_scalar::<_, String>(
+                    "SELECT credential_reference
+                       FROM model_call
+                      WHERE model_call_id = $1",
+                )
+                .bind(observation.call().into_uuid())
+                .fetch_one(&mut *transaction)
+                .await?;
                 // A successor reissues the request, so it needs the
                 // adapter's proof that the failed request was never accepted.
                 // Without it the call closes terminally rather than
@@ -1839,51 +1841,77 @@ impl PostgresModelCallRepository {
                     execution.current_attempt().state(),
                     signalbox_domain::CurrentTurnAttemptState::StopRequested { .. }
                 );
-                let substituting = action == CredentialPoolRuntimeAction::SwitchNow
+                let same_credential_attempts = count_turn_credential_attempts(
+                    &mut transaction,
+                    session,
+                    observation.correlation().turn(),
+                    &current_reference,
+                )
+                .await?;
+                let retry_candidate = is_same_credential_retry_cause(cause)
+                    && same_credential_attempts < self.same_credential_attempt_bound.get()
                     && observation.non_acceptance_proven()
                     && !stop_requested;
-                if substituting {
-                    let current_reference = current_reference.as_deref().ok_or(
-                        ModelCallRepositoryError::InvalidTransition(
-                            "switch_now omitted the current credential reference",
-                        ),
-                    )?;
-                    sqlx::query(
-                        "INSERT INTO credential_pool_chain_exclusion
+                let rotation_candidate = action == CredentialPoolRuntimeAction::SwitchNow
+                    && observation.non_acceptance_proven()
+                    && !stop_requested;
+                let mut durable_exclusions = if retry_candidate || rotation_candidate {
+                    Some(
+                        load_durable_pool_exclusions(
+                            &mut transaction,
+                            session,
+                            observation.correlation().turn(),
+                            &policy,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let retrying_same_credential = retry_candidate
+                    && durable_exclusions.as_ref().is_some_and(|exclusions| {
+                        !exclusions.excluded.contains(&current_reference)
+                    });
+                let rotating = !retrying_same_credential && rotation_candidate;
+                if retrying_same_credential || rotating {
+                    let Some(DurablePoolExclusions { mut excluded, .. }) =
+                        durable_exclusions.take()
+                    else {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "availability successor omitted pool exclusions",
+                        ));
+                    };
+                    if rotating {
+                        sqlx::query(
+                            "INSERT INTO credential_pool_chain_exclusion
                             (session_id, turn_id, credential_reference,
                              predecessor_model_call_id, cause_kind)
                          VALUES ($1, $2, $3, $4, $5)
                          ON CONFLICT (session_id, turn_id, credential_reference) DO NOTHING",
-                    )
-                    .bind(session_id_to_uuid(session))
-                    .bind(turn_id_to_uuid(observation.correlation().turn()))
-                    .bind(current_reference)
-                    .bind(observation.call().into_uuid())
-                    .bind(encode_provider_failure_cause(cause))
-                    .execute(&mut *transaction)
-                    .await?;
+                        )
+                        .bind(session_id_to_uuid(session))
+                        .bind(turn_id_to_uuid(observation.correlation().turn()))
+                        .bind(&current_reference)
+                        .bind(observation.call().into_uuid())
+                        .bind(encode_provider_failure_cause(cause))
+                        .execute(&mut *transaction)
+                        .await?;
+                        excluded.insert(current_reference.clone());
+                    }
                     pool_exhausted_name = Some(Arc::<str>::from(policy.name()));
-                    let DurablePoolExclusions { excluded, .. } = load_durable_pool_exclusions(
-                        &mut transaction,
-                        session,
-                        observation.correlation().turn(),
-                        &policy,
-                    )
-                    .await?;
                     if policy
                         .members()
                         .iter()
                         .any(|member| !excluded.contains(member.credential_reference()))
                     {
-                        let failed_members = policy
-                            .members()
-                            .iter()
-                            .filter(|member| excluded.contains(member.credential_reference()))
-                            .count();
                         let backoff = availability_retry_backoff(
                             cause,
                             retry_after,
-                            failed_members,
+                            if retrying_same_credential {
+                                same_credential_attempts
+                            } else {
+                                1
+                            },
                             observation.call(),
                         );
                         let successor = execution
@@ -1917,8 +1945,8 @@ impl PostgresModelCallRepository {
                         Some(cause),
                     )
                     .await?;
-                } else if action != CredentialPoolRuntimeAction::SwitchNow
-                    && let Some(current_reference) = current_reference
+                } else if action != CredentialPoolRuntimeAction::Stay
+                    && action != CredentialPoolRuntimeAction::SwitchNow
                 {
                     persist_credential_pool_member_action(
                         &mut transaction,
@@ -6787,16 +6815,22 @@ async fn select_runtime_pool_credential(
     default_reference: ModelCallCredentialReference,
     policies: &CredentialPoolRuntimeCatalog,
 ) -> Result<SelectedRuntimePoolCredential, ModelCallRepositoryError> {
-    let predecessor: Option<Uuid> = sqlx::query_scalar(
-        "SELECT predecessor_model_call_id
-           FROM credential_pool_availability_successor
-          WHERE successor_turn_attempt_id = $1",
+    let predecessor: Option<(Uuid, bool)> = sqlx::query_as(
+        "SELECT successor.predecessor_model_call_id,
+                EXISTS (
+                    SELECT 1
+                      FROM credential_pool_chain_exclusion AS exclusion
+                     WHERE exclusion.predecessor_model_call_id =
+                           successor.predecessor_model_call_id
+                ) AS rotated
+           FROM credential_pool_availability_successor AS successor
+          WHERE successor.successor_turn_attempt_id = $1",
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)
     .await?;
-    let (policy, predecessor_reference) = match predecessor {
-        Some(predecessor) => {
+    let (policy, predecessor_reference, predecessor_rotated) = match predecessor {
+        Some((predecessor, rotated)) => {
             let policy = load_call_pool_policy(connection, predecessor)
                 .await?
                 .ok_or(ModelCallCorruption::Missing(
@@ -6810,9 +6844,9 @@ async fn select_runtime_pool_credential(
             .bind(predecessor)
             .fetch_one(&mut *connection)
             .await?;
-            (Some(policy), Some(reference))
+            (Some(policy), Some(reference), rotated)
         }
-        None => (policies.get(&target).cloned(), None),
+        None => (policies.get(&target).cloned(), None, false),
     };
     let Some(policy) = policy else {
         return Ok(SelectedRuntimePoolCredential {
@@ -6840,20 +6874,34 @@ async fn select_runtime_pool_credential(
                 .position(|member| member.credential_reference() == reference)
         })
         .map_or(0, |position| position.saturating_add(1));
-    let selected = policy
-        .members()
-        .iter()
-        .find(|member| {
-            sticky_reference.as_deref() == Some(member.credential_reference())
-                && !excluded.contains(member.credential_reference())
-        })
-        .or_else(|| {
+    let selected = predecessor_reference
+        .as_deref()
+        .filter(|reference| !excluded.contains(*reference))
+        .and_then(|reference| {
             policy
                 .members()
                 .iter()
-                .skip(start)
-                .chain(policy.members().iter().take(start))
-                .find(|member| !excluded.contains(member.credential_reference()))
+                .find(|member| member.credential_reference() == reference)
+        })
+        .or_else(|| {
+            if predecessor_reference.is_some() && !predecessor_rotated {
+                return None;
+            }
+            policy
+                .members()
+                .iter()
+                .find(|member| {
+                    sticky_reference.as_deref() == Some(member.credential_reference())
+                        && !excluded.contains(member.credential_reference())
+                })
+                .or_else(|| {
+                    policy
+                        .members()
+                        .iter()
+                        .skip(start)
+                        .chain(policy.members().iter().take(start))
+                        .find(|member| !excluded.contains(member.credential_reference()))
+                })
         })
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
     let pending_consumed_actions = if selected.is_some() {
@@ -8642,19 +8690,47 @@ async fn persist_tool_continuation_headroom_exhaustion(
 const MAX_AVAILABILITY_BACKOFF: Duration = Duration::from_secs(300);
 const MAX_EXPONENTIAL_BACKOFF: Duration = Duration::from_secs(60);
 
+const fn is_same_credential_retry_cause(cause: ProviderModelCallFailureCause) -> bool {
+    matches!(
+        cause,
+        ProviderModelCallFailureCause::RateLimited
+            | ProviderModelCallFailureCause::Overloaded
+            | ProviderModelCallFailureCause::ProviderInternal
+    )
+}
+
+async fn count_turn_credential_attempts(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    credential_reference: &str,
+) -> Result<usize, ModelCallRepositoryError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM model_call
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND credential_reference = $3",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(credential_reference)
+    .fetch_one(&mut *connection)
+    .await?;
+    usize::try_from(count)
+        .map_err(|_| ModelCallCorruption::Inconsistent("same-credential attempt count").into())
+}
+
 fn availability_retry_backoff(
     cause: ProviderModelCallFailureCause,
     retry_after: Option<Duration>,
-    failed_members: usize,
+    failed_attempts: usize,
     call: ModelCallId,
 ) -> Duration {
-    if !matches!(
-        cause,
-        ProviderModelCallFailureCause::RateLimited | ProviderModelCallFailureCause::Overloaded
-    ) {
+    if !is_same_credential_retry_cause(cause) {
         return Duration::ZERO;
     }
-    let exponent = u32::try_from(failed_members.saturating_sub(1).min(6)).unwrap_or(6);
+    let exponent = u32::try_from(failed_attempts.saturating_sub(1).min(6)).unwrap_or(6);
     let ceiling = Duration::from_secs(1_u64 << exponent).min(MAX_EXPONENTIAL_BACKOFF);
     let sample = u64::try_from(call.as_uuid().as_u128() & 1023).unwrap_or(0);
     let ceiling_millis = u64::try_from(ceiling.as_millis()).unwrap_or(u64::MAX);
@@ -10274,8 +10350,31 @@ mod tests {
         ModelCallRepositoryError, StoredTerminalFrontierMember, availability_retry_backoff,
         cancellation_poll_interval, commit_failure_is_ambiguous,
         completed_terminal_frontier_matches, delegation_terminal_relation_decode_error,
-        failed_terminal_frontier_matches, record_reclassified_turn_candidate,
+        failed_terminal_frontier_matches, is_same_credential_retry_cause,
+        record_reclassified_turn_candidate,
     };
+
+    #[test]
+    fn same_credential_retry_causes_are_closed() {
+        for cause in [
+            ProviderModelCallFailureCause::RateLimited,
+            ProviderModelCallFailureCause::Overloaded,
+            ProviderModelCallFailureCause::ProviderInternal,
+        ] {
+            assert!(is_same_credential_retry_cause(cause));
+        }
+        for cause in [
+            ProviderModelCallFailureCause::CredentialRejected,
+            ProviderModelCallFailureCause::PermissionDenied,
+            ProviderModelCallFailureCause::InvalidRequest,
+            ProviderModelCallFailureCause::TargetNotFound,
+            ProviderModelCallFailureCause::RequestTooLarge,
+            ProviderModelCallFailureCause::QuotaExhausted,
+            ProviderModelCallFailureCause::Unrecognized,
+        ] {
+            assert!(!is_same_credential_retry_cause(cause));
+        }
+    }
 
     #[test]
     fn rate_limit_backoff_is_jittered_inside_the_exponential_window() {

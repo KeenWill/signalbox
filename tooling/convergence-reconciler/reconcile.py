@@ -157,7 +157,6 @@ NON_GATING_CHECK_NAMES = frozenset(
     {
         "codecov/patch",
         "codecov/project",
-        "comment the coverage report",
     }
 )
 STATE_VERSION = 1

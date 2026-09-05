@@ -237,9 +237,14 @@ pub async fn verify_pinned_codex_cli_version(
     let version = banner
         .lines()
         .next()
-        .and_then(|line| line.split_whitespace().next_back())
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|token| semver::Version::parse(token).ok())
+        })
         .ok_or(CodexCliVersionProbeError::InvalidBanner)?;
-    if version != SUPPORTED_CODEX_CLI_VERSION {
+    let supported = semver::Version::parse(SUPPORTED_CODEX_CLI_VERSION)
+        .map_err(|_| CodexCliVersionProbeError::InvalidBanner)?;
+    if version != supported {
         return Err(CodexCliVersionProbeError::VersionMismatch);
     }
     Ok(())
@@ -874,7 +879,7 @@ async fn execute_process<C: Clone + Send + Sync>(
     );
     // The selected profile controls this child only; the adapter passes the
     // path reference and never opens the login material, as required by
-    // `docs/spec/configuration-and-credentials.md#the-codex_home-delivery`.
+    // `docs/spec/configuration-and-credentials.md`.
     let environment_overrides = prepared
         .credential_home
         .map(|home| {
@@ -956,6 +961,16 @@ mod tests {
         let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
 
         assert_eq!(result, Err(CodexCliVersionProbeError::VersionMismatch));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_rejects_a_non_semver_banner() {
+        let (_directory, executable) = version_fixture("#!/bin/sh\nprintf 'codex-cli latest\\n'\n");
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
     }
 
     #[cfg(unix)]

@@ -4,12 +4,8 @@ use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde_json::value::RawValue;
 
 const SHA256_PREFIX: &str = "sha256:";
-// numeric-bound: not-a-bound - fixed lowercase SHA-256 hexadecimal width
-const SHA256_HEX_BYTES: usize = 64;
 // numeric-bound: ceiling - bounds retained caller media-type text
 const MAX_DECLARED_MEDIA_TYPE_BYTES: usize = 255;
-// numeric-bound: ceiling - enforces the RFC 6838 restricted-name token width
-const MAX_MEDIA_TYPE_TOKEN_BYTES: usize = 127;
 // numeric-bound: ceiling - bounds retained caller display-name text
 const MAX_DISPLAY_FILENAME_BYTES: usize = 255;
 // numeric-bound: ceiling - bounds registry identity and selector storage
@@ -41,11 +37,7 @@ impl FileDigest {
 
 impl fmt::Display for FileDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(SHA256_PREFIX)?;
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        write!(formatter, "{SHA256_PREFIX}{}", hex::encode(self.0))
     }
 }
 
@@ -56,24 +48,16 @@ impl FromStr for FileDigest {
         let encoded = value
             .strip_prefix(SHA256_PREFIX)
             .ok_or(RegistryValueError::Digest)?;
-        if encoded.len() != SHA256_HEX_BYTES {
+        if encoded.len() != 64
+            || !encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
             return Err(RegistryValueError::Digest);
         }
         let mut bytes = [0_u8; 32];
-        for (destination, pair) in bytes.iter_mut().zip(encoded.as_bytes().chunks_exact(2)) {
-            let high = lowercase_hex(pair[0]).ok_or(RegistryValueError::Digest)?;
-            let low = lowercase_hex(pair[1]).ok_or(RegistryValueError::Digest)?;
-            *destination = (high << 4) | low;
-        }
+        hex::decode_to_slice(encoded, &mut bytes).map_err(|_| RegistryValueError::Digest)?;
         Ok(Self(bytes))
-    }
-}
-
-fn lowercase_hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
     }
 }
 
@@ -249,38 +233,17 @@ impl FromStr for CanonicalMediaType {
     type Err = MediaTypeParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() > MAX_DECLARED_MEDIA_TYPE_BYTES || value.contains(';') {
+        if value.len() > MAX_DECLARED_MEDIA_TYPE_BYTES {
             return Err(MediaTypeParseError);
         }
-        let Some((type_name, subtype_name)) = value.split_once('/') else {
-            return Err(MediaTypeParseError);
-        };
-        if subtype_name.contains('/')
-            || !valid_media_token(type_name)
-            || !valid_media_token(subtype_name)
-        {
+        let parsed = value
+            .parse::<mime::Mime>()
+            .map_err(|_| MediaTypeParseError)?;
+        if parsed.params().next().is_some() || parsed.essence_str() != value {
             return Err(MediaTypeParseError);
         }
         Ok(Self(Arc::from(value)))
     }
-}
-
-fn valid_media_token(value: &str) -> bool {
-    if value.len() > MAX_MEDIA_TYPE_TOKEN_BYTES {
-        return false;
-    }
-    let mut bytes = value.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && bytes.all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(
-                    byte,
-                    b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
-                )
-        })
 }
 
 /// A media type was not a canonical parameter-free essence.
@@ -826,14 +789,14 @@ mod tests {
     }
 
     #[test]
-    fn canonical_media_types_reject_parameters_and_uppercase() {
+    fn canonical_media_types_use_standard_syntax_and_reject_noncanonical_forms() {
         assert!(CanonicalMediaType::from_str("text/plain").is_ok());
+        assert!(CanonicalMediaType::from_str("!text/!plain").is_ok());
         assert!(CanonicalMediaType::from_str("text/plain; charset=utf-8").is_err());
         assert!(CanonicalMediaType::from_str("Text/plain").is_err());
-        assert!(CanonicalMediaType::from_str("!text/plain").is_err());
-        assert!(CanonicalMediaType::from_str("text/!plain").is_err());
-        assert!(CanonicalMediaType::from_str(&format!("{}/b", "a".repeat(128))).is_err());
-        assert!(CanonicalMediaType::from_str(&format!("a/{}", "b".repeat(128))).is_err());
+        assert!(CanonicalMediaType::from_str("text").is_err());
+        assert!(CanonicalMediaType::from_str("text/plain other").is_err());
+        assert!(CanonicalMediaType::from_str(&format!("a/{}", "b".repeat(254))).is_err());
     }
 
     #[test]

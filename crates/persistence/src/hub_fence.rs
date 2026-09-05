@@ -13,10 +13,9 @@ use crate::{MIGRATOR, lock_inventory};
 
 /// Migration through which the durable hub-fence singleton is established.
 ///
-/// The migration reset (docs/proposals/migration-reset.md) collapsed the chain
-/// into a baseline split across the 2026090100NN domain files, which form one
-/// schema and only apply as a whole, so this names the last of them. A later
-/// migration that moved the singleton would move this constant with it.
+/// The baseline files form one schema and apply only as a whole, so this names
+/// the last of them. A later migration that moved the singleton would move this
+/// constant with it.
 pub const HUB_FENCE_MIGRATION_VERSION: i64 = 202609010014;
 
 const HUB_FENCE_NAMESPACE: u64 = 1_396_852_273;

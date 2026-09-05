@@ -60,8 +60,8 @@ pub(crate) fn classify_error(status: u16, token: Option<&str>) -> ProviderErrorK
     }
 }
 
-/// Classifies an error envelope and grants substitution proof only to an
-/// admitted native availability token paired with its documented status.
+/// Classifies an error envelope and grants non-acceptance proof only to an
+/// admitted native transient token paired with its documented status.
 pub(crate) fn classify_error_with_proof(
     status: u16,
     token: Option<&str>,
@@ -70,7 +70,7 @@ pub(crate) fn classify_error_with_proof(
     let non_acceptance_proven = matches!(
         (status, token),
         (429, Some("rate_limit_error")) | (529, Some("overloaded_error"))
-    );
+    ) || (status == 500 && token == Some("api_error"));
     (kind, non_acceptance_proven)
 }
 
@@ -156,6 +156,20 @@ mod tests {
         assert_eq!(
             classify_error_with_proof(529, Some("overloaded_error")),
             (signalbox_model_runtime::ProviderErrorKind::Overloaded, true)
+        );
+        assert_eq!(
+            classify_error_with_proof(500, Some("api_error")),
+            (
+                signalbox_model_runtime::ProviderErrorKind::ProviderInternal,
+                true
+            )
+        );
+        assert_eq!(
+            classify_error_with_proof(529, Some("api_error")),
+            (
+                signalbox_model_runtime::ProviderErrorKind::ProviderInternal,
+                false
+            )
         );
         assert_eq!(
             classify_error_with_proof(429, Some("future_limit_error")),

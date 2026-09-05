@@ -73,7 +73,7 @@ pub enum CredentialDelivery {
     },
     /// An operator-provisioned Codex login directory selected by reference.
     /// The daemon validates directory shape but never reads its auth material,
-    /// per `docs/spec/configuration-and-credentials.md#the-codex_home-delivery`.
+    /// per `docs/spec/configuration-and-credentials.md`.
     CodexHome {
         /// Absolute existing nonempty directory passed only as `CODEX_HOME`.
         path: PathBuf,
@@ -84,7 +84,7 @@ pub enum CredentialDelivery {
 
 /// Typed startup failure for one configured credential home.
 ///
-/// `docs/spec/configuration-and-credentials.md#the-codex_home-delivery` owns
+/// `docs/spec/configuration-and-credentials.md` owns
 /// these fail-closed admission conditions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialHomeAdmissionFailure {

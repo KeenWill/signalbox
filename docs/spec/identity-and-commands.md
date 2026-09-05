@@ -22,8 +22,8 @@ the webhook delivery key [repo-watch](repo-watch.md) records. The daemon mints
 the identity of every other identity-bearing fact it records. Configuration
 reference keys are operator-configured references, not identities: a direct
 model selection or a model alias arrives inside a command payload and names a
-configured selection. `ProviderModelIdentity` is a normalized provider-and-model
-value the operator configures. It is stored on turn and model-call rows and is
+configured selection. `ProviderModelIdentity`, a normalized provider-and-model
+value the operator configures, is stored on turn and model-call rows and is
 neither minted nor a command key.
 
 The identity types are built by the `define_identity!` macro in `crates/domain`.
@@ -48,11 +48,10 @@ the user, daemon core, the model output of one turn, the startup recovery scan,
 or the execution of one tool request. Only submit-input and metadata-replacement
 commands carry an actor in their durable payload. Repository watch and
 commissioned dispatch stamp a module issuer principal on the registry row and
-compose their initial input under the user actor. That module-composed input is
-the one automated action attributed to the user. Actor answers who issued one
-command; a session's creation cause, owned by
-[sessions-and-transcript](sessions-and-transcript.md), answers why the session
-exists, and neither fact substitutes for the other.
+compose their initial input, the one automated action attributed to the user,
+under the user actor. Actor answers who issued one command; a session's creation
+cause, owned by [sessions-and-transcript](sessions-and-transcript.md), answers
+why the session exists, and neither fact substitutes for the other.
 
 ## Design decisions
 
@@ -123,9 +122,9 @@ it. No Postgres column has an identity-generating default.
 Recovery reconstitutes committed facts under their stored identities; the
 startup scan mints identities only for the new facts it records.
 
-On equal replay the recorded receipt is returned. It may name a different
-identity than the fresh candidate generated for that invocation, and the
-candidate is discarded.
+The recorded receipt returned on equal replay may name a different identity than
+the fresh candidate generated for that invocation, and the candidate is
+discarded.
 
 All claimed command identifiers live in one user-global registry; no command
 kind, session, or client has a separate namespace. The registry and every typed
@@ -166,8 +165,7 @@ reconstruction.
 After registry inspection and before it inserts the claim for an unseen
 identifier, a handler may read current state and reject on it; such a rejection
 is an admission error and claims nothing. The handler inserts the claim together
-with its result, applied or rejected; a recorded rejection claims the identifier
-the same way an applied command does.
+with its result, applied or rejected.
 
 Equal semantic content never merges distinct commands, and a caller who needs
 corrected intent after a recorded rejection uses a new identifier.
