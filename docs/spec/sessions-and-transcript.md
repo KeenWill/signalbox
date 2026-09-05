@@ -175,12 +175,13 @@ search returns that session's entries only. A lexical query examines a bounded
 candidate set, and a term absent from the index returns empty at once. The
 producers that feed the search projection are accepted input, steering input,
 final assistant text, tool arguments and results, current session metadata, and
-compaction summaries. Attachment filenames, attachment media metadata, and
-derived text artifacts are content classes the schema admits and a read returns;
-a compaction commit publishes its summary as a derived text artifact, and no
-producer publishes the two attachment classes. The search projection performs no
-implicit attachment reading, OCR, text extraction, or model pass. No browser
-read materializes or scans a session transcript.
+compaction summaries. Each publishes its search projection in the transaction
+that commits the source text. Attachment filenames, attachment media metadata,
+and derived text artifacts are content classes the schema admits and a read
+returns; a compaction commit publishes its summary as a derived text artifact,
+and no producer publishes the two attachment classes. The search projection
+performs no implicit attachment reading, OCR, text extraction, or model pass. No
+browser read materializes or scans a session transcript.
 
 There is no generic text, role, metadata, or other payload; every entry kind is
 a closed semantic fact. Entries reference accepted input and never copy its

@@ -107,7 +107,9 @@ cause; the earlier model-call known-failure closure committed without
 terminalizing and cannot serve a transition happening now. Where the chain has
 issued no call, the same transaction consumes the wait and opens and ends a
 fresh call-free attempt, and the pre-call exhaustion producer appends its
-marker. The release and exhaustion conditions belong to
+marker. On both paths that transaction also reclassifies any steering still
+pending on the source turn as a queued successor. The release and exhaustion
+conditions belong to
 [credential-availability](../spec/credential-availability.md).
 
 ## Compatibility constraints
