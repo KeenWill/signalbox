@@ -12,12 +12,12 @@ selected model.
 
 ## Shape
 
-The screen reads the capability catalog through the process protocol's catalog
-read, described on [process-protocol.md](../spec/process-protocol.md). For the
-selected direct model it offers the reasoning levels in that record, fast mode
-only when the record supports it, and the service tiers in that record. An alias
-is offered through the record of the direct selection it currently resolves to.
-Inherit and provider default are offered for every setting.
+The screen reads the capability catalog through the catalog read on
+[process-protocol.md](../spec/process-protocol.md). For the selected direct
+model it offers the reasoning levels in that record, fast mode only when the
+record supports it, and the service tiers in that record. An alias is offered
+through the record of the direct selection it currently resolves to. Inherit and
+provider default are offered for every setting.
 
 Each override member the screen submits is inherit, clear, or set(value), the
 overlay the settings-carrying commands accept. The screen displays an inherited

@@ -19,9 +19,9 @@ Each override is inherit, clear, or set(value): inherit consults the next layer,
 clear selects the provider default, and set requests the value. The profile
 catalog and the global default are daemon configuration, described on
 [configuration-and-credentials.md](configuration-and-credentials.md). The three
-lower layers are resolved when a session defaults epoch is installed; the
-per-call layer is resolved when an input is accepted, under the turn-binding
-rule on [sessions-and-transcript.md](sessions-and-transcript.md).
+lower layers resolve when a session defaults epoch is installed; the per-call
+layer resolves at input acceptance, under the turn-binding rule on
+[sessions-and-transcript.md](sessions-and-transcript.md).
 
 Every configured model carries one capability record: the reasoning levels and
 service tiers it supports, and how it supports fast mode. Fast mode is either a
@@ -57,10 +57,10 @@ Explicit per-call changes and model-change adjustments are recorded as durable
 events, so neither is left as process-local preparation state.
 
 Sampling controls beyond the output-token ceiling, temperature, top-p, and stop
-sequences are outside this contract.
+sequences are outside this subsystem.
 
 Claude Code's ultracode is workflow orchestration, not a model reasoning level,
-and has no representation in the settings vocabulary.
+and is not in the settings vocabulary.
 
 Signalbox does not infer capability support from model-name prefixes and does
 not run a provider CLI during request preparation.
