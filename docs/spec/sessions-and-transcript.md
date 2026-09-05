@@ -42,10 +42,11 @@ placement belongs to [runner-protocol](runner-protocol.md).
 
 Session configuration defaults are immutable numbered epochs holding the model
 selection, the dangerous-tool blanket, and an optional system prompt. A session
-points at its current epoch, and a turn freezes the current epoch when its
-origin input is accepted. Session metadata is a separate replaceable snapshot of
-title, tags, attributes, and an archive flag. The loaded `Session` aggregate is
-an owned snapshot of one session's current durable state.
+points at its current epoch, and an accepted-input turn freezes that epoch at
+acceptance, while a delegated-task or delegation-wake turn binds the origin
+configuration stored with its delegated origin. Session metadata is a separate
+replaceable snapshot of title, tags, attributes, and an archive flag. The loaded
+`Session` aggregate is an owned snapshot of one session's current durable state.
 
 The transcript is a sequence of semantic entries grouped into frontiers. A
 `SemanticTranscriptEntry` is one immutable semantic-history fact with its own
