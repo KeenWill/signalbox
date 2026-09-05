@@ -63,6 +63,14 @@ BEGIN
         'payload_kind IN (''assistant_text'', ''assistant_tool_use'')',
         'payload_kind IN (''assistant_text'', ''provider_compaction'', ''assistant_tool_use'')'
     );
+    revised_definition := replace(
+        revised_definition,
+        $needle$                    'assistant_text',
+                    'assistant_tool_use'$needle$,
+        $replacement$                    'assistant_text',
+                    'provider_compaction',
+                    'assistant_tool_use'$replacement$
+    );
     IF revised_definition = definition THEN
         RAISE EXCEPTION 'tool-round definition has no assistant response predicate';
     END IF;

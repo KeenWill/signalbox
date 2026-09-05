@@ -43,15 +43,27 @@ pub(crate) fn convert_usage(wire: &WireUsage) -> TokenUsage {
             total.checked_add(field(iteration)?)
         })
     }
+    fn aggregate_optional(
+        iterations: &[crate::wire::WireIterationUsage],
+        field: impl Fn(&crate::wire::WireIterationUsage) -> Option<u64>,
+    ) -> Option<u64> {
+        let mut reported = false;
+        let total = iterations.iter().try_fold(0_u64, |total, iteration| {
+            let value = field(iteration);
+            reported |= value.is_some();
+            total.checked_add(value.unwrap_or(0))
+        })?;
+        reported.then_some(total)
+    }
     if let Some(iterations) = wire.iterations.as_deref().filter(|items| !items.is_empty()) {
         return TokenUsage {
             input_tokens: aggregate(iterations, |item| item.input_tokens),
             output_tokens: aggregate(iterations, |item| item.output_tokens),
-            cache_creation_input_tokens: aggregate(iterations, |item| {
-                Some(item.cache_creation_input_tokens.unwrap_or(0))
+            cache_creation_input_tokens: aggregate_optional(iterations, |item| {
+                item.cache_creation_input_tokens
             }),
-            cache_read_input_tokens: aggregate(iterations, |item| {
-                Some(item.cache_read_input_tokens.unwrap_or(0))
+            cache_read_input_tokens: aggregate_optional(iterations, |item| {
+                item.cache_read_input_tokens
             }),
         };
     }
@@ -639,6 +651,45 @@ mod tests {
                 cache_read_input_tokens: Some(5),
             }
         );
+    }
+
+    #[test]
+    fn iteration_usage_preserves_unreported_cache_axes() {
+        let body = r#"{
+            "id":"msg_usage","type":"message","role":"assistant","model":"model-exact-1",
+            "content":[{"type":"text","text":"done"}],
+            "stop_reason":"end_turn","usage":{
+                "input_tokens":15,"output_tokens":6,
+                "iterations":[
+                    {"input_tokens":10,"output_tokens":2},
+                    {"input_tokens":5,"output_tokens":4,"cache_read_input_tokens":3}
+                ]
+            }
+        }"#;
+        let TerminalEvidence::Completed(completion) = decode(body).0 else {
+            panic!("complete response must remain completion evidence");
+        };
+
+        assert_eq!(completion.usage.cache_creation_input_tokens, None);
+        assert_eq!(completion.usage.cache_read_input_tokens, Some(3));
+    }
+
+    #[test]
+    fn malformed_buffered_compaction_blocks_are_boundary_loss() {
+        for block in [
+            r#"{"type":"compaction","encrypted_content":"opaque"}"#,
+            r#"{"type":"compaction","content":""}"#,
+            r#"{"type":"compaction","content":null,"encrypted_content":1}"#,
+        ] {
+            let body = format!(
+                r#"{{
+                    "id":"msg_compact","type":"message","role":"assistant","model":"model-exact-1",
+                    "content":[{block}],"stop_reason":"end_turn",
+                    "usage":{{"input_tokens":1,"output_tokens":1}}
+                }}"#
+            );
+            assert!(matches!(decode(&body).0, TerminalEvidence::BoundaryLoss(_)));
+        }
     }
 
     #[test]

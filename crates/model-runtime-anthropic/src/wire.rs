@@ -260,6 +260,11 @@ pub(crate) fn parse_response_block(
         data: String,
     }
     #[derive(Deserialize)]
+    struct CompactionBlock {
+        content: serde_json::Value,
+        encrypted_content: Option<serde_json::Value>,
+    }
+    #[derive(Deserialize)]
     struct FallbackBlock {
         to: Option<FallbackModel>,
     }
@@ -292,9 +297,28 @@ pub(crate) fn parse_response_block(
             let block: RedactedThinkingBlock = serde_json::from_str(raw.get())?;
             WireResponseBlock::RedactedThinking { data: block.data }
         }
-        "compaction" => WireResponseBlock::Compaction {
-            raw: serde_json::value::RawValue::from_string(raw.get().to_owned())?,
-        },
+        "compaction" => {
+            let block: CompactionBlock = serde_json::from_str(raw.get())?;
+            let content_valid = matches!(block.content, serde_json::Value::Null)
+                || block
+                    .content
+                    .as_str()
+                    .is_some_and(|content| !content.is_empty());
+            let encrypted_content_valid = block.encrypted_content.is_none_or(|content| {
+                matches!(
+                    content,
+                    serde_json::Value::Null | serde_json::Value::String(_)
+                )
+            });
+            if !content_valid || !encrypted_content_valid {
+                return Err(<serde_json::Error as serde::de::Error>::custom(
+                    "invalid compaction block",
+                ));
+            }
+            WireResponseBlock::Compaction {
+                raw: serde_json::value::RawValue::from_string(raw.get().to_owned())?,
+            }
+        }
         "fallback" => {
             let block: FallbackBlock = serde_json::from_str(raw.get())?;
             WireResponseBlock::Fallback {

@@ -692,6 +692,12 @@ impl StreamDecoder {
                         event.index
                     ));
                 };
+                if content.as_deref() == Some("") {
+                    return self.violation(format!(
+                        "compaction block {} closed with empty content",
+                        event.index
+                    ));
+                }
                 let block_json = serde_json::json!({
                     "type": "compaction",
                     "content": content,
@@ -1166,6 +1172,29 @@ mod tests {
                         .to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn streamed_compaction_rejects_empty_content() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"compaction_delta\",\"content\":\"\",\"encrypted_content\":null}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("empty compaction content must be protocol loss");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
     }
 
     #[test]
