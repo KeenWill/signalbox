@@ -58,7 +58,9 @@ does not cover, and the configured output reservation, and compares the sum with
 the configured context window. The compaction call's own input budget is its
 context window less the output ceiling and the required prompt; when even the
 first safe prefix cannot fit that budget, no call is prepared and one
-transaction fails the turn as a compaction wall.
+transaction fails the turn as a compaction wall. Automatic compaction targets
+the first safe boundary at or beyond half the rendered bytes and falls back to
+the latest safe boundary that fits.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen
@@ -246,19 +248,20 @@ blocks like any other failure rather than staying current forever;
 
 The identity relation is derived from the configured target's own family, never
 from a table of known provider identifiers, so a newly published model needs no
-code change. Alias concretion requires a full date shape rather than any
-trailing segment, so a version extension of the same family name is not read as
-a snapshot. An accepted alias concretion records the identity that served only
-as operator diagnostics, not as a durable per-call provenance row. A reported
-identity reaches operator diagnostics only after the adapter's credential
-redaction and a character-boundary truncation to the configured diagnostic
-bound; [runtime-substrate](runtime-substrate.md) owns the redaction. A
-substitution fails the adapter stage closed with an operator error, because the
-durable substitution provenance it would have to record does not exist; a
-substituted call is therefore classified `Ambiguous` by restart rather than
-`KnownFailed` live. The runtime's exhaustive provider-error classification is
-carried verbatim into the operator cause codes rather than restated, so the
-adapter taxonomy and the operator vocabulary cannot drift apart.
+code change. Alias concretion requires a full date shape, compact or hyphenated
+and never checked for calendar validity, rather than any trailing segment, so a
+version extension of the same family name is not read as a snapshot. An accepted
+alias concretion records the identity that served only as operator diagnostics,
+not as a durable per-call provenance row. A reported identity reaches operator
+diagnostics only after the adapter's credential redaction and a
+character-boundary truncation to the configured diagnostic bound;
+[runtime-substrate](runtime-substrate.md) owns the redaction. A substitution
+fails the adapter stage closed with an operator error, because the durable
+substitution provenance it would have to record does not exist; a substituted
+call is therefore classified `Ambiguous` by restart rather than `KnownFailed`
+live. The runtime's exhaustive provider-error classification is carried verbatim
+into the operator cause codes rather than restated, so the adapter taxonomy and
+the operator vocabulary cannot drift apart.
 
 Every model-call transaction issues the session-scheduler row lock as its first
 statement, so per-session serialization is total and lock-order cycles on one
@@ -394,8 +397,9 @@ thinking blocks are dropped, while thinking with text and redacted thinking fail
 the adapter stage closed as unsupported material, because no durable semantic
 representation exists for either. Tool content and a tool-use finish must agree;
 either one without the other is a known failure. The dedicated compaction call
-rejects every tool and suppressed-tool part, because its completion must be
-summary text. Classification is an adapter contract consuming the
+rejects every tool and suppressed-tool part and accepts a summary only from a
+completion that ended by end turn or stop sequence, because its completion must
+be whole summary text. Classification is an adapter contract consuming the
 full-request-send boundary; the daemon never reinterprets SDK errors by
 retryability or exception type. The identity relation applies to every identity
 the exchange reported, early observations and terminal evidence alike, because
