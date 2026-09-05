@@ -15,10 +15,14 @@ before conversion.
 Usage on an imported entry is source attestation like every other field: the
 entry records the counts the source attested, in the same three-way attestation
 vocabulary the spec page describes, and records nothing the source did not
-state. No dollar amount is persisted. A reader derives cost from the price
-window that covers the entry's attested source timestamp, under the same pricing
-contract native calls use in
-[configuration-and-credentials](../spec/configuration-and-credentials.md).
+state. No dollar amount is persisted. The pricing identity is the provider-model
+spelling the source attested on the same record as the counts. A reader selects
+the rate window whose spelling covers the entry's attested source timestamp on
+the `api` channel, under the same pricing contract native calls use in
+[configuration-and-credentials](../spec/configuration-and-credentials.md). Usage
+whose source attests no spelling, or a spelling no configured window covers, is
+unpriced and yields no figure rather than zero. An imported entry names no
+credential profile, so a derived figure is an equivalent, never a billed amount.
 
 Blob-backed conversion adds a second way to supply source bytes to
 `ImportedConversationConverter`. The caller names a verified blob; the converter
@@ -54,7 +58,7 @@ blob-backed path resolve to one imported conversation with one identity. Peak
 memory of a blob-backed import is the aggregate it returns plus a bounded read
 buffer; the whole source is never held in memory at once. Every stored snapshot
 still reconstitutes under its recorded converter version with no change. An
-imported entry that carries usage exposes a cost at read time computed from the
-window covering its attested timestamp, and no column holds a dollar amount.
-Errors and logs from either path still carry only classes, counts, and
-daemon-generated identifiers.
+imported entry that carries usage exposes a cost at read time from the window
+its attested spelling and timestamp select, and no column holds a dollar amount;
+an entry no configured window covers exposes none. Errors and logs from either
+path still carry only classes, counts, and daemon-generated identifiers.

@@ -141,10 +141,11 @@ Committed tests and fixtures are entirely synthetic.
 
 ## Boundary contracts
 
-Errors, logs, and diagnostic evidence contain classes, counts, and identifiers
-the daemon generated. They never contain source bytes, file paths, provider
-payloads, SQL, or user content. Imported entries are retained source content,
-not diagnostic evidence.
+Errors, logs, and diagnostic evidence contain classes, counts, and canonical
+identifiers. They never contain source bytes, host or credential paths, provider
+payloads, SQL, or user content; a tool failure may name a bounded
+workspace-relative path. Retained source content, such as an imported transcript
+entry, is not diagnostic evidence.
 
 An imported conversation is a durable record, never execution. Ingestion
 performs no session, scheduler, slot, turn, attempt, model-call, tool,
@@ -206,14 +207,16 @@ holding the process-wide bulk-ingest permit; it never fans out concurrently.
 Writers acquire shared raw hashes and globally unique entry identities in their
 respective sorted key order and store physical positions explicitly.
 
-Once a header exists, any hash mismatch, missing member, gap, duplicate, unknown
-version, invalid value, or lineage mismatch is typed corruption. Complete
-storage records pass through the domain-owned reconstitution seam; adapters
-never default or drop a malformed value. For each converter version, that seam
-independently re-derives every expected entry and requires exact agreement in
-count, order, content, speaker, and source metadata. Encoded collection counts
-bound parsing but never drive capacity allocation directly: collections grow
-fallibly after each decoded element.
+Once a header exists, any hash mismatch, missing member, gap, duplicate entry
+identity, unknown version, invalid value, or lineage mismatch is typed
+corruption. The same raw record at two positions is valid when its bytes agree;
+equal hashes over differing bytes are corruption. Complete storage records pass
+through the domain-owned reconstitution seam; adapters never default or drop a
+malformed value. For each converter version, that seam independently re-derives
+every expected entry and requires exact agreement in count, order, content,
+speaker, and source metadata. Encoded collection counts bound parsing but never
+drive capacity allocation directly: collections grow fallibly after each decoded
+element.
 
 An ignored opt-in integration test consumes caller-provided local files only
 when both an explicit enable variable and a source-directory variable are set.
