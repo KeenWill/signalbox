@@ -220,9 +220,11 @@ foreign attempt, or unknown finding fails before any runner is invoked. Repair
 work contains the exact accepted finding inventory only after every sealed
 judgment effect is durably applied. Only evidence committing the exact fixed
 event removes a finding from the publication set; a failed or cancelled repair
-leaves its finding surviving. The publication result must cover the surviving
-inventory exactly; any failed, blocked, or cancelled member yields an incomplete
-publication outcome, never a complete one.
+leaves its finding surviving. A blocked repair member yields an incomplete
+repair outcome and stops the attempt before the publication inventory is sealed.
+The publication result must cover the surviving inventory exactly; any failed,
+blocked, or cancelled member yields an incomplete publication outcome, never a
+complete one.
 
 Every review mutation carries a user-global command identity under the claim
 protocol
@@ -241,9 +243,8 @@ The orchestration loaders derive the current stage only from durable records;
 missing ancestry, an unknown closed value, a noncanonical count, or
 contradictory evidence is corruption and never an inferred result.
 
-Only the code-host bot named `chatgpt-codex-connector` can supply a reviewer
-verdict or a usage-limit response, and the last complete line-anchored
-reviewed-commit record in its comments is the verdict.
+The reviewer-verdict and usage-limit evidence rules belong to
+[tool loop](tool-loop.md).
 
 ## Not built
 
