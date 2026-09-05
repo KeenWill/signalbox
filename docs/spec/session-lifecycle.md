@@ -15,9 +15,11 @@ transitions between them. The turn machine that
 beneath the session machine. For a session that is not parked, the session state
 is a projection of its live turn: a running turn makes the session active, a
 turn awaiting approval or a child makes it waiting, a turn in any recovery phase
-makes it recovering, and a blocked goal with no live turn makes it blocked. Core
-writes the session state in the same transaction as the turn or goal transition
-that changes the projection, so the two machines never disagree.
+makes it recovering, and a blocked goal with no live turn makes it blocked;
+active also covers a session that has run and has no live turn, which the
+attention classifier reads as idle. Core writes the session state in the same
+transaction as the turn or goal transition that changes the projection, so the
+two machines never disagree.
 
 Waiting carries a typed kind and the party expected to end the wait. Only an
 owned session carries a deadline, and its state sets the kind: admission covers
@@ -95,8 +97,8 @@ substrate work are owner decisions made outside the daemon.
 Order comes from commit-ordered sequences, never from comparing wall-clock
 times. A liveness check that cannot query some kind of evidence skips the turn
 instead of ending it, and any event it does not recognize counts as progress.
-When a guard trips, the daemon waits, asks, or parks the session; it never ends
-work on staleness evidence alone.
+When a lifecycle guard trips, the daemon waits, asks, or parks the session; it
+never ends work on staleness evidence alone.
 
 An owned session that waits for an operator is parked, or blocked on a goal that
 no automatic resumption will lift; a pending tool-approval decision is the
@@ -121,9 +123,9 @@ An absent configured bound leaves a deadline unbounded. An owned session in a
 deadline-bearing state with no deadline row is a violation.
 
 Parking overrides the turn projection: it suspends a live turn in place, the
-turn keeps its phase, and no model call, tool execution, or delivery starts
-while the session is parked. Work already in flight is not cancelled by the
-park: an in-flight model call runs to its end and records its result.
+turn keeps its phase, and no new turn starts while the session is parked. Work
+already in flight continues, including the tool execution an in-flight call's
+response requests; that call runs to its end and records its result.
 
 Verified achievement is recorded only when the declared finish check passes.
 
