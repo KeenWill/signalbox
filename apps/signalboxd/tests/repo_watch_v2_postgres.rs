@@ -49,8 +49,9 @@ struct FixedDispatchIds {
 
 impl DispatchReferenceGenerator for FixedDispatchIds {
     fn next_dispatch(&mut self) -> RepoWatchDispatchId {
+        let value = self.value + self.calls as u128;
         self.calls += 1;
-        RepoWatchDispatchId::from_uuid(Uuid::from_u128(self.value))
+        RepoWatchDispatchId::from_uuid(Uuid::from_u128(value))
     }
 }
 
@@ -303,12 +304,45 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         calls: 0,
     };
     let mut factory = FixtureSessionFactory { next_command: 17 };
-    let plans = plan_repository_event(std::slice::from_ref(&rule), &event, &mut ids, &mut factory)?;
+    let plan_batches =
+        plan_repository_event(std::slice::from_ref(&rule), &event, &mut ids, &mut factory)?;
+    assert_eq!(plan_batches.len(), 1);
+    let plans = &plan_batches[0];
     assert_eq!(plans.len(), 2);
     assert_eq!(ids.calls, 1);
     assert_eq!(plans[0].dispatch(), plans[1].dispatch());
     assert_eq!(plans[0].action_ordinal(), 1);
     assert_eq!(plans[1].action_ordinal(), 2);
+    let second_rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("branch-ci-second"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            repository: Some(repository.clone()),
+            labels: RepoWatchLabelMatcher::default(),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("repo-watch-second"))?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::ZERO,
+    )?;
+    let mut grouped_ids = FixedDispatchIds {
+        value: 40,
+        calls: 0,
+    };
+    let mut grouped_factory = FixtureSessionFactory { next_command: 42 };
+    let grouped = plan_repository_event(
+        &[rule.clone(), second_rule],
+        &event,
+        &mut grouped_ids,
+        &mut grouped_factory,
+    )?;
+    assert_eq!(grouped.len(), 2);
+    assert_eq!(grouped[0].len(), 2);
+    assert_eq!(grouped[1].len(), 1);
+    assert_ne!(grouped[0][0].dispatch(), grouped[1][0].dispatch());
     let signalbox_ownership_seam::SessionCommandPayload::CreateSession(created) =
         plans[0].command().clone().into_payload()
     else {
@@ -316,7 +350,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     };
     assert_eq!(created.start_gate(), StartGate::Held);
     assert_eq!(
-        store.record_commands(&plans, observed_at).await?,
+        store.record_commands(plans, observed_at).await?,
         DispatchAdmission::Inserted
     );
     let mut replay_ids = FixedDispatchIds {
@@ -324,14 +358,16 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         calls: 0,
     };
     let mut replay_factory = FixtureSessionFactory { next_command: 31 };
-    let replay_plans = plan_repository_event(
+    let replay_batches = plan_repository_event(
         std::slice::from_ref(&rule),
         &event,
         &mut replay_ids,
         &mut replay_factory,
     )?;
+    assert_eq!(replay_batches.len(), 1);
+    let replay_plans = &replay_batches[0];
     assert_eq!(
-        store.record_commands(&replay_plans, observed_at).await?,
+        store.record_commands(replay_plans, observed_at).await?,
         DispatchAdmission::Replayed
     );
     let retained_commands: i64 = sqlx::query_scalar(
@@ -350,8 +386,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?
     );
     assert_eq!(
-        store.record_commands(&replay_plans, observed_at).await?,
-        DispatchAdmission::InactiveRule
+        store.record_commands(replay_plans, observed_at).await?,
+        DispatchAdmission::Replayed
     );
     let payload: Vec<u8> =
         sqlx::query_scalar("SELECT normalized_payload FROM gh_event WHERE event_id = $1")

@@ -1130,6 +1130,26 @@ impl RepoWatchStore {
         .bind(first.rule_id().as_str())
         .execute(&mut *transaction)
         .await?;
+        let retained_actions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM dispatch_ledger
+              WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3
+                AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5",
+        )
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .bind(Decimal::from(first.rule_revision().get()))
+        .bind(first.event_id().into_uuid())
+        .bind(first.trigger_sequence().map(Decimal::from))
+        .fetch_one(&mut *transaction)
+        .await?;
+        if usize::try_from(retained_actions).ok() == Some(planned.len()) {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::Replayed);
+        }
+        if retained_actions != 0 {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::ConflictingReuse);
+        }
         let active_revision: Option<Decimal> = sqlx::query_scalar(
             "SELECT active_revision FROM rule
               WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
@@ -1173,28 +1193,7 @@ impl RepoWatchStore {
             return Ok(DispatchAdmission::Inserted);
         }
         transaction.rollback().await?;
-        if inserted_count != 0 {
-            return Ok(DispatchAdmission::ConflictingReuse);
-        }
-        let retained_actions: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM dispatch_ledger
-              WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3
-                AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5",
-        )
-        .bind(first.repository().as_str())
-        .bind(first.rule_id().as_str())
-        .bind(Decimal::from(first.rule_revision().get()))
-        .bind(first.event_id().into_uuid())
-        .bind(first.trigger_sequence().map(Decimal::from))
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(
-            if usize::try_from(retained_actions).ok() == Some(planned.len()) {
-                DispatchAdmission::Replayed
-            } else {
-                DispatchAdmission::ConflictingReuse
-            },
-        )
+        Ok(DispatchAdmission::ConflictingReuse)
     }
 
     /// Applies a command-settlement lifecycle event to the module ledger.
@@ -1227,14 +1226,15 @@ pub fn plan_repository_event<Ids, Factory>(
     event: &RepoWatchEvent,
     ids: &mut Ids,
     factory: &mut Factory,
-) -> Result<Vec<PlannedCommand>, PlanRepositoryEventError<Factory::Error>>
+) -> Result<Vec<Vec<PlannedCommand>>, PlanRepositoryEventError<Factory::Error>>
 where
     Ids: DispatchReferenceGenerator,
     Factory: CreateSessionCommandFactory,
 {
-    let mut commands = Vec::new();
+    let mut batches = Vec::new();
     for rule in matching_rules(rules, event) {
         let dispatch = ids.next_dispatch();
+        let mut commands = Vec::with_capacity(rule.actions().len());
         for (index, action) in rule.actions().iter().enumerate() {
             let RepoWatchRuleActionV1::DispatchSession { template } = action;
             let command = factory
@@ -1256,8 +1256,9 @@ where
                 })?,
             ));
         }
+        batches.push(commands);
     }
-    Ok(commands)
+    Ok(batches)
 }
 
 /// Admits a start release or sticky stop driven by a lifecycle event.
