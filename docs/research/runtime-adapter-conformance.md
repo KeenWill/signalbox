@@ -161,14 +161,14 @@ Exemplar paths below are in `crates/model-runtime-anthropic` unless noted.
 04. **`status.rs`: exhaustive single-`match` classifiers** — one for HTTP status
     → `ProviderErrorKind` and one per native error discriminator the provider
     exposes, each with an `Unrecognized` arm; the count is provider-specific,
-    not fixed at two. The per-provider classification precedence (401 first,
-    then recognized native material across every native field, then status) is
-    defined by each adapter's `status.rs`; the runtime page states only that the
-    mapping is exhaustive and unknown material is unrecognized. Exemplar:
-    `src/status.rs` (`classify_error_status`, `classify_error_token`,
-    `classify_error`); the OpenAI `status.rs` (`classify_error_envelope`) shows
-    the multi-field shape — an unrecognized `error.code` falls through to a
-    recognized `error.type` before the status table.
+    not fixed at two. The classification precedence is owned by
+    [Terminal evidence](../spec/runtime-substrate.md), which also states that
+    the mapping is exhaustive and unknown material is unrecognized; each
+    adapter's `status.rs` implements it. Exemplar: `src/status.rs`
+    (`classify_error_status`, `classify_error_token`, `classify_error`); the
+    OpenAI `status.rs` (`classify_error_envelope`) shows the multi-field shape —
+    an unrecognized `error.code` falls through to a recognized `error.type`
+    before the status table.
 05. **`response.rs`: `decode_buffered_response(...)`** — a pure map of a
     buffered success body to `TerminalEvidence`. Which status is success and
     what an unintelligible success body becomes:
@@ -380,7 +380,7 @@ expected terminal variant:
   forced-tool decode.
 - Provider error: each `ProviderErrorKind` the adapter maps, including
   `CredentialRejected` via both the status route and the native-token route
-  (precedence rules: [Provider adapters](../spec/runtime-substrate.md)); refusal
+  (precedence rules: [Terminal evidence](../spec/runtime-substrate.md)); refusal
   without complete-upload proof, asserting the spec-owned downgrade rather than
   surfaced `Refused` evidence.
 - Proven unsent: pre-send cancellation proving zero requests; connect refused
