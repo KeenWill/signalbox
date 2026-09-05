@@ -2279,6 +2279,48 @@ class GitHubGraphQLTests(unittest.TestCase):
             normalized["latestReviewerAt"], "2026-09-05T10:00:00Z"
         )
 
+    def test_trusted_reviewer_follow_up_invalidates_an_earlier_disposition(
+        self,
+    ) -> None:
+        threads = [
+            {
+                "isResolved": True,
+                "comments": {
+                    "nodes": [
+                        {
+                            "author": {"login": "reviewer"},
+                            "authorAssociation": "NONE",
+                            "body": "Finding",
+                            "createdAt": "2026-09-05T10:00:00Z",
+                            "pullRequestReview": {"id": "review-finding"},
+                        },
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "Fixed in commit abcdef123.",
+                            "createdAt": "2026-09-05T10:05:00Z",
+                            "pullRequestReview": {"id": "review-reply"},
+                        },
+                        {
+                            "author": {"login": "member-reviewer"},
+                            "authorAssociation": "MEMBER",
+                            "body": "This remains incorrect.",
+                            "createdAt": "2026-09-05T10:10:00Z",
+                            "pullRequestReview": {"id": "review-follow-up"},
+                        },
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")[0]
+
+        self.assertFalse(normalized["isDispositioned"])
+        self.assertIsNone(normalized["dispositionKind"])
+        self.assertEqual(
+            normalized["latestReviewerAt"], "2026-09-05T10:10:00Z"
+        )
+
     def test_exact_codex_review_command_is_a_review_request(self) -> None:
         head = "a" * 40
         comment = {

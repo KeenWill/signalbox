@@ -1765,6 +1765,15 @@ def normalize_review_threads(
                 if index == 0
                 or comment.get("authorAssociation")
                 not in TRUSTED_REVIEW_REQUEST_ASSOCIATIONS
+                or (
+                    isinstance(comment.get("pullRequestReview"), dict)
+                    and (
+                        pull_request_author is None
+                        or author_login(comment) is None
+                        or author_login(comment).casefold()
+                        != pull_request_author.casefold()
+                    )
+                )
             ),
             default=0,
         )

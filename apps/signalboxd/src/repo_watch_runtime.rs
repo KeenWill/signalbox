@@ -3819,13 +3819,8 @@ impl RepositoryWatchTask {
             RepoWatchCommitOutcome::Committed(cursor)
             | RepoWatchCommitOutcome::Replayed(cursor)
             | RepoWatchCommitOutcome::Unchanged(cursor) => {
-                // The cursor is durable at this point, so the freshness this
-                // poll recorded is legitimately tied to a committed generation,
-                // and clearance revalidation reads exactly that entry to decide
-                // whether the gating-check inventory has stood still since the
-                // observation that raised the candidate. A publication the
-                // sweep never reached would leave every candidate unsettled and
-                // no review would ever be dismissed. A failed attempt still
+                // The cursor is durable at this point, so publish the generation
+                // recorded by this complete poll. A failed attempt still
                 // invalidates every entry on its way out.
                 self.poller.publish_freshness(cursor.generation());
                 // A full poll is the complete reconciliation sweep, so the
