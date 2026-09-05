@@ -237,7 +237,9 @@ placement, grant, lease, failure evidence.
 
 Unsigned 64-bit ordinals are stored as numeric(20,0). What kind of thing an id
 names is known from its table and column, never from the UUID's bytes. No code
-derives order, time, ancestry, ownership, or authority from a UUID.
+derives acceptance order, queue order, lifecycle precedence, ancestry,
+ownership, or authority from a UUID; listing rows by identifier for display or
+paging is not such a derivation.
 
 A new migration's version prefix is greater than every existing one. Once a
 migration is recorded in any deployed database, or once its pull request merges,
@@ -277,9 +279,11 @@ non-database error while awaiting the commit response; every other rejection is
 definite. When the ambiguity flag is set the caller rereads durable state
 instead of assuming either outcome.
 
-At startup the daemon takes the singleton guard and fences the prior pool
-generation, runs `migrate` as its first schema phase, then the startup scan,
-then the runtime.
+At startup the daemon takes the singleton guard and applies the migrations
+through the hub-fence migration on its bootstrap connection, so a fresh database
+holds the fence singleton. It then fences the prior pool generation, applies the
+remaining migrations through the fenced pool, runs the startup scan, and starts
+the runtime.
 
 The bottom pull request of a stack that adds migrations declares a reserved
 prefix block in its description, and sibling stacks pick disjoint blocks.
@@ -346,9 +350,9 @@ The first model-call insertion of a turn takes the transaction-scoped
 model-activity advisory lock keyed by session; inactivity parking takes the
 pull-request target lock and then that same model-activity lock.
 
-Every daemon-owned claim, application, and failure-record transaction installs a
-local `lock_timeout` before it reads or writes anything, floored under the
-caller's configured deadline.
+Every automatic-reconciliation claim, application, and failure-record
+transaction installs a local `lock_timeout` before it reads or writes anything,
+floored under the caller's configured deadline.
 
 A delegated terminal observation locks both endpoint session rows, then both
 endpoint scheduler rows, in ascending session-identity order, and only then the
