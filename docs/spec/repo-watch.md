@@ -100,8 +100,7 @@ disposition exactly once.
 
 The former repository-watch runtime, webhook runtime, convergence task, operator
 routes, and public-schema persistence surface do not exist. The removal
-migration carries an existing headless approval block into the core-owned
-operator-required recovery record before dropping the disposable derived data.
+migration drops the disposable derived data.
 
 Contracts this page relies on but does not own: module-state pruning and outbox
 retention permission in [persistence protocol](persistence-protocol.md), session
