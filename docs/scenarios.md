@@ -601,8 +601,7 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Restart restores the relationship, exact wait, messages,
   and undelivered result. Child failure, stop, or cancellation is delivered as a
   typed outcome. A detached result remains durable after parent termination, as
-  owned by
-  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+  owned by [session delegation](spec/sessions-and-transcript.md).
 - **Required invariants:** INV-003, INV-010, INV-034.
 - **Remaining questions:** Multi-source or merged transcript ancestry remains
   separate and unchanged.
@@ -614,7 +613,7 @@ INV-tagged test names and attached doc comments.
 - **Durable commands:** Parent stop/cancel carries `ParentAlone` or
   `ParentAndDescendants`. The latter atomically records a disposition for each
   evaluated relationship from the durable descendant walk defined by
-  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+  [session delegation](spec/sessions-and-transcript.md).
 - **State transitions:** Background children continue. Bound children apply
   their separately recorded stop/cancel action; `KeepRunning` is itself a typed
   disposition. A child is never deleted and may finish after the parent.

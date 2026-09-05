@@ -24,7 +24,7 @@ content and transcript representation by
 ## UserContent
 
 The caller-supplied immutable content value owned by one accepted input. See
-[user content](spec/sessions-and-transcript.md#user-content).
+[user content](spec/sessions-and-transcript.md).
 
 ## Durable command identity
 
@@ -83,20 +83,19 @@ request. Deferred design; see [tool safety](open-questions.md#tool-safety).
 ## Creation cause
 
 The typed reason a session exists, of which user-initiated is the first
-implementable value. See
-[creation provenance](spec/sessions-and-transcript.md#session-identity-and-creation-provenance).
+implementable value. See [creation provenance](spec/sessions-and-transcript.md).
 
 ## Transcript ancestry
 
 The source frontier from which a session's initial semantic conversation context
 was derived, or an explicit absence of such a source. See
-[creation provenance](spec/sessions-and-transcript.md#session-identity-and-creation-provenance).
+[creation provenance](spec/sessions-and-transcript.md).
 
 ## TranscriptFrontier
 
 The purpose-specific domain boundary identifying an immutable point in a source
 session's semantic transcript history, referenced by transcript ancestry. See
-[creation provenance](spec/sessions-and-transcript.md#session-identity-and-creation-provenance).
+[creation provenance](spec/sessions-and-transcript.md).
 
 ## Input delivery policy
 
@@ -169,7 +168,7 @@ exact still-unacknowledged ambiguous operations and one typed stop reason. See
 ## Semantic transcript entry
 
 One immutable identified semantic-history fact owned by a source session. See
-[semantic transcript entries](spec/sessions-and-transcript.md#semantic-transcript-entries).
+[semantic transcript entries](spec/sessions-and-transcript.md).
 
 ## Context frontier
 
@@ -199,7 +198,7 @@ reconstitution: one gap-free session-scoped interval of accepted inputs. See
 
 A mutable-by-version session-level model-selection value used to resolve
 configuration requests for future origin input. See
-[session defaults](spec/sessions-and-transcript.md#session-defaults-and-replacement).
+[session defaults](spec/sessions-and-transcript.md).
 
 ## Effective configuration
 

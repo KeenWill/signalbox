@@ -802,7 +802,7 @@ recorded canonical frontier, relationship, and defaults and returns equal replay
 or conflicting reuse without resolving the wire address again. An absent
 conversation or position returns `not_found` without claiming the command.
 Resume and fork are explicit and have the semantics owned by
-[sessions-and-transcript](sessions-and-transcript.md#create-from-an-imported-frontier).
+[sessions-and-transcript](sessions-and-transcript.md).
 
 `stop_turn` is the explicit stop verb, and it is the accepted `Interrupt`
 delivery in
@@ -1574,10 +1574,9 @@ the second states that the identity was valid and only the ordinal was outside
 contradictory frame and is rejected rather than presented. The two imported
 details leave the command identity unclaimed — the daemon refuses them before
 the creation service runs, and the service's own misses likewise claim nothing,
-as
-[sessions-and-transcript](sessions-and-transcript.md#create-from-an-imported-frontier)
-states — so the same command identity remains available for a corrected
-conversation or position rather than becoming a conflicting reuse.
+as [sessions-and-transcript](sessions-and-transcript.md) states — so the same
+command identity remains available for a corrected conversation or position
+rather than becoming a conflicting reuse.
 
 An `update_session_placement` rejection is one of
 `session_not_found { session_id }`,

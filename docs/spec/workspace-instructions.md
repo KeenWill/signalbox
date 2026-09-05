@@ -1295,11 +1295,11 @@ selectable and serving target; no token-window conversion or adapter inference
 supplies this value.
 
 Later session-default replacement cannot strand existing admissions. The owning
-[session-default contract](sessions-and-transcript.md#session-defaults-and-replacement)
-rejects a model selection unless every configured target it may select supports
-the typed region and can carry the complete retained region. This check occurs
-before the successor defaults epoch commits; a rejection leaves both defaults
-and admissions unchanged.
+[session-default contract](sessions-and-transcript.md) rejects a model selection
+unless every configured target it may select supports the typed region and can
+carry the complete retained region. This check occurs before the successor
+defaults epoch commits; a rejection leaves both defaults and admissions
+unchanged.
 
 The durable rendered-content hash is SHA-256 over the exact bytes placed in
 prepared model input **after** wrappers, labels, and budget truncation. It is

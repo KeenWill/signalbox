@@ -10,9 +10,8 @@ the phase algebra by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot);
 the storage protocol by
 [persistence protocol](persistence-protocol.md#lock-protocol); the entry
-vocabulary by
-[sessions and the transcript](sessions-and-transcript.md#when-entries-come-to-exist);
-the wire shapes by
+vocabulary by [sessions and the transcript](sessions-and-transcript.md); the
+wire shapes by
 [process protocol](process-protocol.md#credential-pool-preparation-failure); and
 the evidence algebra by
 [terminal evidence](runtime-substrate.md#terminal-evidence).
@@ -181,7 +180,7 @@ Each projection below is a column above, and names the page that owns it:
 - Continuation origins, durable record shapes, and lock order —
   [persistence protocol](persistence-protocol.md#lock-protocol).
 - Transcript producers and semantic entries —
-  [sessions and the transcript](sessions-and-transcript.md#when-entries-come-to-exist).
+  [sessions and the transcript](sessions-and-transcript.md).
 - Snapshot turn state, live events, and `rejected.detail` —
   [process protocol](process-protocol.md#credential-pool-preparation-failure),
   with the operator clear surface at

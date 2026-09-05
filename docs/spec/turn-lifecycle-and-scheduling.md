@@ -21,17 +21,16 @@ accepted-input origin under one frozen effective configuration. Model-selection
 freeze is
 [configuration-and-credentials](configuration-and-credentials.md#model-selection-validation)
 scope; defaults-epoch binding is
-[sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
-scope. Each turn stores one of three lifecycle states
-(`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
-terminal disposition kind closed to `failed`, `completed`, `refused`,
-`cancelled`, `reconciliation_required`, and `retired` (migrations
-`202607220001`, `202607220005`, and `202609020004`). `retired` is the terminal
-disposition of a queued turn that never activated: it carries no lineage, no
-frontier, and no attempt, contributes no terminal frontier, and stays out of
-queue order and predecessor selection. A terminal turn records a non-null typed
-`terminal_cause_kind` from a closed vocabulary its disposition admits, and a
-non-terminal turn records none (migration `202609020001`).
+[sessions-and-transcript](sessions-and-transcript.md) scope. Each turn stores
+one of three lifecycle states (`turn_lifecycle.state_kind`): `queued`, `active`,
+and `terminal`, with the terminal disposition kind closed to `failed`,
+`completed`, `refused`, `cancelled`, `reconciliation_required`, and `retired`
+(migrations `202607220001`, `202607220005`, and `202609020004`). `retired` is
+the terminal disposition of a queued turn that never activated: it carries no
+lineage, no frontier, and no attempt, contributes no terminal frontier, and
+stays out of queue order and predecessor selection. A terminal turn records a
+non-null typed `terminal_cause_kind` from a closed vocabulary its disposition
+admits, and a non-terminal turn records none (migration `202609020001`).
 `unclassified_failure` is the only catch-all spelling. The domain
 `TurnDisposition` algebra carries six variants — `Completed`, `Refused`,
 `Failed`, `Cancelled { cause }`, `ReconciliationRequired { marker }`, `Retired`

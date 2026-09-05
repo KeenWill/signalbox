@@ -1091,7 +1091,7 @@ The same process-lifetime compiled catalog also declares these daemon tools:
   missing-session rejection is a fixed known failure, and ambiguous commit
   acknowledgement returns `Ambiguous` evidence. Metadata value and replacement
   mechanics remain owned by
-  [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
+  [sessions-and-transcript](sessions-and-transcript.md).
 
 Both blob tools authorize only digests present in attachment stubs in the
 rendered frontier for the issuing turn, under the owning
