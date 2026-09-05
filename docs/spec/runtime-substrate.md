@@ -195,8 +195,8 @@ strings appear only as retained detail inside already-classified variants:
   limited, quota exhausted, overloaded, provider internal, unrecognized; the
   kind lives in the core crate, and each HTTP adapter owns an exhaustive mapping
   into it) plus retained `NativeErrorFacts` that classification never reads.
-  Codex CLI rendered failures remain `unrecognized` because their prose is
-  opaque. Retained native message text is credential-redacted, not verbatim:
+  CLI rendered failures remain `unrecognized` because their prose is opaque.
+  Retained native message text is credential-redacted, not verbatim:
   Anthropic and OpenAI retain each complete adapter-bounded fallback body until
   the evidence-redaction boundary, sanitize literal and JSON-escaped
   representations with the exact prepared credential, and only then truncate
