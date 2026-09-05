@@ -143,10 +143,9 @@ current-configuration lookup, and the projection is never paginated or
 truncated; configuration admission bounds each profile and pool name to 256
 UTF-8 bytes and each pool to 1,024 members so the duplicated evidence fits one
 frame under worst-case JSON escaping. The credential-availability wait projects
-as an active turn state retaining the same turn and session slot. Whether the
-predecessor, cause, and successor chain are exposed to clients is undecided and
-recorded in [open-questions.md](../open-questions.md). The endings these shapes
-project belong to
+as an active turn state retaining the same turn and session slot. The after-call
+wait-transition failure projects the predecessor call identity alongside its
+call-free terminal attempt. The endings these shapes project belong to
 [credential-availability.md](../spec/credential-availability.md).
 
 ## Compatibility constraints

@@ -250,6 +250,14 @@ fragment sequence, session, and cursor validate. Snapshot deduplication uses the
 complete semantic identity of source session and entry; a second occurrence of
 that key fails the snapshot.
 
+The imported-conversation read is `imported_conversation_start` naming the
+inspected conversation, one `imported_conversation_entry` per normalized entry,
+then `imported_conversation_end` repeating that name with the entry count. Each
+entry carries its one-based imported position, imported entry identity,
+source-speaker attestation, and content kind. An entry with exact attested text
+also carries a bounded preview of that text and its truncation marker; every
+other entry carries a null preview.
+
 Tool entry arguments and content are JSON strings, never nested untyped JSON
 values, and a client never infers the semantic arm by reparsing either string.
 The projection resolves the domain's reference-only tool entries before crossing
