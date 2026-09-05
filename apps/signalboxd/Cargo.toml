@@ -24,6 +24,7 @@ axum = { version = "0.8.9", default-features = false, features = [
 ] }
 base64 = "0.23.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+hex = "0.4.3"
 hmac = { version = "0.13.0", default-features = false }
 image = { version = "0.25.8", default-features = false, features = [
     "gif",
