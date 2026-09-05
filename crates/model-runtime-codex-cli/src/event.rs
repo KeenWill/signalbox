@@ -384,7 +384,6 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn provider_error_after_exit(
         self,
         fallback: &str,
-        kind: ProviderErrorKind,
         sink: &RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         match self.terminal {
@@ -395,7 +394,7 @@ impl<C: Clone> EventDecoder<C> {
                 provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) | None => {
-                provider_failure_with_kind(self.exchange, self.usage, fallback, kind, sink)
+                provider_failure(self.exchange, self.usage, fallback, sink)
             }
         }
     }
@@ -1152,28 +1151,6 @@ fn provider_failure<C: Clone>(
     })
 }
 
-/// Builds provider-failure evidence with a kind supplied by the process boundary.
-fn provider_failure_with_kind<C: Clone>(
-    exchange: ExchangeFacts,
-    usage: TokenUsage,
-    message: &str,
-    kind: ProviderErrorKind,
-    sink: &RedactingSink<'_, C>,
-) -> TerminalEvidence {
-    TerminalEvidence::ProviderError(ProviderErrorEvidence {
-        exchange,
-        reported_model: None,
-        kind,
-        non_acceptance_proven: false,
-        native: NativeErrorFacts {
-            error_token: Some("codex_cli_error".to_string()),
-            error_code: None,
-            message: Some(sink.redact_terminal_failure_text(message)),
-        },
-        usage,
-    })
-}
-
 /// Boundary loss raised before the response envelope was parsed.
 ///
 /// This adapter cannot answer whether a tool call had opened at such a loss.
@@ -1320,16 +1297,11 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
     }
 
-    fn classify_provider_error_after_exit(_classification: &str) -> ProviderErrorKind {
-        ProviderErrorKind::Unrecognized
-    }
-
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
-        EventDecoder::provider_error_after_exit(self, message, kind, sink)
+        EventDecoder::provider_error_after_exit(self, message, sink)
     }
 }
