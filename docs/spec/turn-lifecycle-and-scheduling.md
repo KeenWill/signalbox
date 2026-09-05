@@ -261,13 +261,13 @@ before recovery completes. Any phase failure is a failed startup with a
 classified, key-bearing log line and a failure exit code.
 
 Each scan transaction classifies the lost tenure by its durable evidence and
-never fabricates a live end. A turn with no model call ends its attempt lost and
-fails. A turn holding a prepared call proves no send authorization existed, so
-startup validates its frontier and leaves call, attempt, and turn for the
-scheduler to retry. A turn holding an unstopped in-flight call ends the call
-ambiguous and the attempt lost, and stays active in the model-call recovery wait
-with no failure entry or frontier; the transaction appends the call's terminal
-transition event and no turn event. A stop-requested attempt with a
+never fabricates a live end. A running turn with no model call ends its attempt
+lost and fails. A turn holding a prepared call proves no send authorization
+existed, so startup validates its frontier and leaves call, attempt, and turn
+for the scheduler to retry. A turn holding an unstopped in-flight call ends the
+call ambiguous and the attempt lost, and stays active in the model-call recovery
+wait with no failure entry or frontier; the transaction appends the call's
+terminal transition event and no turn event. A stop-requested attempt with a
 cancellation-requested call ends both and terminalizes reconciliation-required
 with that call as its exact ambiguity set. A turn already parked in the
 model-call recovery wait is not reclassified; the transaction rolls back and
