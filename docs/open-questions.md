@@ -117,7 +117,7 @@ per-turn provenance. The following extensions remain undecided:
   explicitly rescans roots, which ignore language or depth bound applies,
   whether and how symbolic links may be followed, and which additional vendor
   instruction formats become candidates. See the owning
-  [discovery contract](spec/workspace-instructions.md#discovery).
+  [discovery contract](spec/workspace-instructions.md).
 - **Runner-workspace discovery.** The accepted daemon-local refusal needs a
   placement-revision-correlated runner operation for greedy discovery, typed
   findings, and exact source reads before runner-provisioned workspaces can
@@ -134,7 +134,7 @@ per-turn provenance. The following extensions remain undecided:
 - **Whole-bundle unload.** Projection reserves removal at a later turn boundary,
   but unload authority, tombstone rendering, admitted-set history, and the
   model-facing operation remain foundation work. See the owning
-  [projection contract](spec/workspace-instructions.md#projection-rather-than-transcript-append).
+  [projection contract](spec/workspace-instructions.md#planned).
 
 ## Conversation import
 
@@ -233,9 +233,9 @@ per-turn provenance. The following extensions remain undecided:
   ([configuration-and-credentials](spec/configuration-and-credentials.md)).
   Workspace-instruction eligibility is the separate typed selector and
   allow-list algebra owned by
-  [workspace instructions and skills](spec/workspace-instructions.md#eligibility),
-  so it neither waits on nor satisfies this general configuration question.
-  Reasoning level, fast mode, and provider-tagged service tier are owned by
+  [workspace instructions and skills](spec/workspace-instructions.md), so it
+  neither waits on nor satisfies this general configuration question. Reasoning
+  level, fast mode, and provider-tagged service tier are owned by
   [model and session settings](spec/model-session-settings.md). Compaction
   threshold, target size, and never-compact/full-context controls remain
   deferred here for a separate follow-on slice. Static copy-on-create session

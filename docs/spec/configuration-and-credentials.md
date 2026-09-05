@@ -688,8 +688,8 @@ provenance of these layers are owned by
 
 The optional `[workspace_instructions]` table owns the explicitly registered
 daemon directories used by
-[workspace-instruction discovery](workspace-instructions.md#discovery). Its
-exact version-one grammar is:
+[workspace-instruction discovery](workspace-instructions.md). Its exact
+version-one grammar is:
 
 ```toml
 [workspace_instructions]
