@@ -184,13 +184,14 @@ later command replaced the metadata, and a replayed delegation request returns
 its stored receipt before current attempt state and creates no further effect.
 
 A pre-command refusal claims no command identity and has no replay projection,
-so a corrected request reuses the same identity; the refusals are a turn not
-awaiting reconciliation, a tool request not in the named session, and an unknown
-imported conversation or position. The `reconcile_turn` precondition is skipped
-for a command identity that already names durable intent and for an absent
-session, because the durable boundary owns both answers.
-`commission_target_busy` is a transient rejection naming the authoritative
-session, so the caller retries the same command identity and payload.
+so a corrected request reuses the same identity; such refusals include a turn
+not awaiting reconciliation, a tool request not in the named session, an unknown
+imported conversation or position, and a defaults replacement rejected before
+its repository command. The `reconcile_turn` precondition is skipped for a
+command identity that already names durable intent and for an absent session,
+because the durable boundary owns both answers. `commission_target_busy` is a
+transient rejection naming the authoritative session, so the caller retries the
+same command identity and payload.
 
 The daemon applies the delivery the client selected and never guesses an
 interrupt, steering, or queued treatment. Steer and queue name the exact active
@@ -347,21 +348,19 @@ A client disconnect never cancels model or tool work. A side reread does not
 advance the follow connection's observed cursor; only events consumed from the
 subscribed connection do.
 
-The terminal client reads submitted input from standard input, never from
-process arguments; only the delegation message, spawn task, and goal text flags
-accept their text on the command line or from a file. It sends no local source
-path over the wire; a recorded review finding carries its repository-relative
-path. When no command identity is given, it generates a fresh one and prints it
-to standard error before any socket I/O; every client-generated or
-server-discovered recovery value is printed before the commit it belongs to can
-become ambiguous, each recovery set is printed all or none, and the client never
-substitutes a new command identity for an ambiguous attempt. Its ambiguity
-diagnostic never echoes standard-input content and never synthesizes a shell
-command. It renders every C0 control code point, DEL, and every C1 code point in
-process-derived text as a visible escape, preserving a line feed only in flowing
-text and escaping it in a single-line field such as a provider delta or a
-metadata title or tag. A single explicit raw-output option is the only opt-in to
-unescaped text.
+The terminal client reads submitted conversation input from standard input,
+never from process arguments. A recorded review finding carries an opaque
+caller-supplied file-path key. When no command identity is given, it generates a
+fresh one and prints it to standard error before any socket I/O; every
+client-generated or server-discovered recovery value is printed before the
+commit it belongs to can become ambiguous, each recovery set is printed all or
+none, and the client never substitutes a new command identity for an ambiguous
+attempt. Its ambiguity diagnostic never echoes standard-input content and never
+synthesizes a shell command. It renders every C0 control code point, DEL, and
+every C1 code point in process-derived text as a visible escape, preserving a
+line feed only in flowing text and escaping it in a single-line field such as a
+provider delta or a metadata title or tag. A single explicit raw-output option
+is the only opt-in to unescaped text.
 
 ## Planned
 

@@ -35,16 +35,17 @@ still-broken home. `page_size` is 1 through 100; `after` is null or one complete
 target object and is an exclusive keyset cursor. Results sort by target tag in
 the order above, then by each field's canonical order: UTF-8 bytes for
 configured names, UUID bytes for durable identities, numeric order for
-generations. The response is
-`credential_exclusion_page { exclusions, next_after }` with a null `next_after`
-only at the end. The mutation marks exactly the named active generation or
-predecessor correlation cleared. A newer active generation at the target's own
-exact scope returns `stale_generation` before the named older generation is
-considered; the scope is the profile and origin for a profile quarantine, the
-pool policy and profile for a membership exclusion, and the session, pool
-policy, and profile for a session displacement. A target with no exactly
-matching retained record is `unknown_credential_exclusion`; an exact record an
-earlier command already cleared is `already_cleared`. Success returns
+generations. The read opens with `credential_exclusion_start`, then one
+`credential_exclusion` per row, then
+`credential_exclusion_end { exclusion_count, next_after }` with a null
+`next_after` only at the end. The mutation marks exactly the named active
+generation or predecessor correlation cleared. A newer active generation at the
+target's own exact scope returns `stale_generation` before the named older
+generation is considered; the scope is the profile and origin for a profile
+quarantine, the pool policy and profile for a membership exclusion, and the
+session, pool policy, and profile for a session displacement. A target with no
+exactly matching retained record is `unknown_credential_exclusion`; an exact
+record an earlier command already cleared is `already_cleared`. Success returns
 `credential_exclusion_cleared { target, outcome }` with outcome `cleared` or
 `already_cleared`, and the inactive record is retained so the second answer is
 durable. An equal `command_id` replay returns its stored receipt before current
