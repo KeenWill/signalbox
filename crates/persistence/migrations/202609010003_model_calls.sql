@@ -2585,7 +2585,7 @@ CREATE TABLE credential_pool_availability_successor (
     retry_backoff_milliseconds bigint CONSTRAINT credential_pool_availabilit_retry_backoff_milliseconds_not_null NOT NULL,
     retry_not_before timestamp with time zone CONSTRAINT credential_pool_availability_successo_retry_not_before_not_null NOT NULL,
     CONSTRAINT credential_pool_availability_s_retry_backoff_milliseconds_check CHECK ((retry_backoff_milliseconds >= 0)),
-    CONSTRAINT credential_pool_availability_successor_cause_kind_check CHECK ((cause_kind = ANY (ARRAY['rate_limited'::text, 'quota_exhausted'::text, 'overloaded'::text])))
+    CONSTRAINT credential_pool_availability_successor_cause_kind_check CHECK ((cause_kind = ANY (ARRAY['rate_limited'::text, 'quota_exhausted'::text, 'overloaded'::text, 'provider_internal'::text])))
 );
 
 

@@ -274,16 +274,16 @@ The admitting condition is fixed here because the two readings differ in whether
 another provider call happens. A proof is admitted only when the adapter decoded
 its own documented error envelope and the decoded native token names an admitted
 cause in that adapter's exhaustive mapping — `rate_limit_error`,
-`overloaded_error`, or `api_error` for Anthropic, and `rate_limit_exceeded`,
-`rate_limit_error`, `insufficient_quota`, `server_error`, or
-`internal_server_error` for OpenAI. Codex additionally admits a classified
-availability cause only when its JSONL lifecycle reaches the exact,
-noncontradictory `turn.failed` closure. Every status-derived fallback carries no
-proof: a response whose body is absent, undecodable, or names a token the
-mapping does not cover keeps its status-classified kind and stays an ordinary
-terminal known failure. A native token that contradicts its status carries none
-either, and the credential-rejection precedence over a contradictory body
-applies.
+`overloaded_error`, or `api_error` at HTTP 500 for Anthropic, and
+`rate_limit_exceeded`, `rate_limit_error`, `insufficient_quota`, or
+`server_error`/`internal_server_error` at HTTP 500 for OpenAI. Codex
+additionally admits a classified availability cause only when its JSONL
+lifecycle reaches the exact, noncontradictory `turn.failed` closure. Every
+status-derived fallback carries no proof: a response whose body is absent,
+undecodable, or names a token the mapping does not cover keeps its
+status-classified kind and stays an ordinary terminal known failure. A native
+token that contradicts its status carries none either, and the
+credential-rejection precedence over a contradictory body applies.
 
 The proof is further restricted to an error *response* — an error-status
 exchange whose body is that documented envelope, decoded before any stream

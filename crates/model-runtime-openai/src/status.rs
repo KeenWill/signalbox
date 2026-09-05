@@ -85,7 +85,7 @@ pub(crate) fn classify_error_envelope_with_proof(
             selected_token,
             Some("rate_limit_exceeded" | "rate_limit_error" | "insufficient_quota")
         ))
-        || ((500..=599).contains(&status)
+        || (status == 500
             && matches!(
                 selected_token,
                 Some("server_error" | "internal_server_error")
@@ -164,6 +164,10 @@ mod tests {
         assert_eq!(
             classify_error_envelope_with_proof(500, Some("server_error"), None),
             (ProviderErrorKind::ProviderInternal, true)
+        );
+        assert_eq!(
+            classify_error_envelope_with_proof(503, Some("server_error"), None),
+            (ProviderErrorKind::ProviderInternal, false)
         );
         assert_eq!(
             classify_error_envelope_with_proof(

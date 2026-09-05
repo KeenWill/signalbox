@@ -660,7 +660,7 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
                 first
                     .observation_correlation()
                     .bind_provider_failure_observation_with_retry_after(
-                        ProviderModelCallFailureCause::Overloaded,
+                        ProviderModelCallFailureCause::ProviderInternal,
                         ProviderReportedTokenUsage::unreported(),
                         Some(Duration::from_millis(1)),
                         true,

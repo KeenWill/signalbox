@@ -2031,6 +2031,12 @@ both. Priorities need not be unique or contiguous: equal values are exactly what
 `tie_break` resolves, and gaps let a later profile take an intermediate rank
 without renumbering the rest.
 
+For rate-limit and overload failures, the credential-availability machine
+creates an authorized same-member retry before applying the pinned action while
+that member remains below the configured attempt bound. Provider-internal
+failures use the same retry rule but have no trigger key; they terminalize at
+the bound.
+
 The five admitted actions are:
 
 | Action               | Effect when its trigger fires for a member                                                                                                                                                                                                                                                                            |
@@ -2044,10 +2050,11 @@ The five admitted actions are:
 ### Pool selection and trigger effects
 
 Model-call preparation resolves a pool and persists the selected member and
-immutable call-pinned policy. Observation commit translates the closed quota,
-rate-limit, and overload classifications through that frozen policy and applies
-`stay`, `switch_next_turn`, `switch_now`, `avoid_new_sessions`, or `quarantine`.
-The durable trigger effects below are what this build appends and reads.
+immutable call-pinned policy. Once no same-member retry is authorized,
+observation commit translates the closed quota, rate-limit, and overload
+classifications through that frozen policy and applies `stay`,
+`switch_next_turn`, `switch_now`, `avoid_new_sessions`, or `quarantine`. The
+durable trigger effects below are what this build appends and reads.
 Capacity-derived selection remains committed unimplemented functionality where
 called out below, and so does the whole exclusion lifecycle — reset-aware
 expiry, operator clear, probe recovery, action-head generations, correlation

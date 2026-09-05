@@ -70,7 +70,7 @@ pub(crate) fn classify_error_with_proof(
     let non_acceptance_proven = matches!(
         (status, token),
         (429, Some("rate_limit_error")) | (529, Some("overloaded_error"))
-    ) || ((500..=599).contains(&status) && token == Some("api_error"));
+    ) || (status == 500 && token == Some("api_error"));
     (kind, non_acceptance_proven)
 }
 
@@ -162,6 +162,13 @@ mod tests {
             (
                 signalbox_model_runtime::ProviderErrorKind::ProviderInternal,
                 true
+            )
+        );
+        assert_eq!(
+            classify_error_with_proof(529, Some("api_error")),
+            (
+                signalbox_model_runtime::ProviderErrorKind::ProviderInternal,
+                false
             )
         );
         assert_eq!(

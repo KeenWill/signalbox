@@ -1848,15 +1848,39 @@ impl PostgresModelCallRepository {
                     &current_reference,
                 )
                 .await?;
-                let retrying_same_credential = is_same_credential_retry_cause(cause)
+                let retry_candidate = is_same_credential_retry_cause(cause)
                     && same_credential_attempts < self.same_credential_attempt_bound.get()
                     && observation.non_acceptance_proven()
                     && !stop_requested;
-                let rotating = !retrying_same_credential
-                    && action == CredentialPoolRuntimeAction::SwitchNow
+                let rotation_candidate = action == CredentialPoolRuntimeAction::SwitchNow
                     && observation.non_acceptance_proven()
                     && !stop_requested;
+                let mut durable_exclusions = if retry_candidate || rotation_candidate {
+                    Some(
+                        load_durable_pool_exclusions(
+                            &mut transaction,
+                            session,
+                            observation.correlation().turn(),
+                            &policy,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let retrying_same_credential = retry_candidate
+                    && durable_exclusions.as_ref().is_some_and(|exclusions| {
+                        !exclusions.excluded.contains(&current_reference)
+                    });
+                let rotating = !retrying_same_credential && rotation_candidate;
                 if retrying_same_credential || rotating {
+                    let Some(DurablePoolExclusions { mut excluded, .. }) =
+                        durable_exclusions.take()
+                    else {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "availability successor omitted pool exclusions",
+                        ));
+                    };
                     if rotating {
                         sqlx::query(
                             "INSERT INTO credential_pool_chain_exclusion
@@ -1872,15 +1896,9 @@ impl PostgresModelCallRepository {
                         .bind(encode_provider_failure_cause(cause))
                         .execute(&mut *transaction)
                         .await?;
+                        excluded.insert(current_reference.clone());
                     }
                     pool_exhausted_name = Some(Arc::<str>::from(policy.name()));
-                    let DurablePoolExclusions { excluded, .. } = load_durable_pool_exclusions(
-                        &mut transaction,
-                        session,
-                        observation.correlation().turn(),
-                        &policy,
-                    )
-                    .await?;
                     if policy
                         .members()
                         .iter()
