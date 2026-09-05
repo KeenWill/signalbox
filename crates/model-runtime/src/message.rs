@@ -72,6 +72,11 @@ pub enum MessagePart {
         /// The opaque provider payload.
         data: String,
     },
+    /// An opaque provider-produced compaction block replayed unchanged.
+    ProviderCompaction {
+        /// The complete provider content block as raw JSON.
+        block_json: String,
+    },
 }
 
 /// The caller-produced result of one earlier tool call.
@@ -101,6 +106,11 @@ pub enum AssistantPart {
     RedactedThinking {
         /// The opaque provider payload, retained verbatim.
         data: String,
+    },
+    /// An opaque provider-produced compaction block, retained for replay.
+    ProviderCompaction {
+        /// The complete provider content block as raw JSON.
+        block_json: String,
     },
     /// A proposed tool call. Decoding it into typed arguments is
     /// [`crate::decode_tool_arguments`]; executing it is never this layer's

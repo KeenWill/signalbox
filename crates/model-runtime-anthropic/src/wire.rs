@@ -39,7 +39,29 @@ pub(crate) struct MessagesRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
+    pub context_management: ContextManagement,
     pub stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContextManagement {
+    pub edits: [CompactionEdit; 1],
+}
+
+impl Default for ContextManagement {
+    fn default() -> Self {
+        Self {
+            edits: [CompactionEdit {
+                edit_type: "compact_20260112",
+            }],
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CompactionEdit {
+    #[serde(rename = "type")]
+    edit_type: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,8 +76,15 @@ pub(crate) struct WireMessage {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "type")]
+#[serde(untagged)]
 pub(crate) enum WireRequestBlock {
+    Known(WireKnownRequestBlock),
+    ProviderCompaction(Box<serde_json::value::RawValue>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub(crate) enum WireKnownRequestBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "tool_use")]
@@ -113,6 +142,7 @@ pub(crate) struct CountTokensRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
+    pub context_management: ContextManagement,
 }
 
 impl From<MessagesRequest> for CountTokensRequest {
@@ -125,6 +155,7 @@ impl From<MessagesRequest> for CountTokensRequest {
             speed: request.speed,
             tools: request.tools,
             tool_choice: request.tool_choice,
+            context_management: request.context_management,
         }
     }
 }
@@ -173,6 +204,10 @@ pub(crate) enum WireResponseBlock {
     },
     RedactedThinking {
         data: String,
+    },
+    Compaction {
+        /// The provider's complete content block, retained verbatim.
+        raw: Box<serde_json::value::RawValue>,
     },
     /// The provider's server-side fallback marker: the point in this
     /// response where one model declined and another continued.
@@ -254,6 +289,9 @@ pub(crate) fn parse_response_block(
             let block: RedactedThinkingBlock = serde_json::from_str(raw.get())?;
             WireResponseBlock::RedactedThinking { data: block.data }
         }
+        "compaction" => WireResponseBlock::Compaction {
+            raw: serde_json::value::RawValue::from_string(raw.get().to_owned())?,
+        },
         "fallback" => {
             let block: FallbackBlock = serde_json::from_str(raw.get())?;
             WireResponseBlock::Fallback {
@@ -266,6 +304,15 @@ pub(crate) fn parse_response_block(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WireUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub iterations: Option<Vec<WireIterationUsage>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WireIterationUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
@@ -334,6 +381,11 @@ pub(crate) enum WireDelta {
     Thinking { thinking: String },
     #[serde(rename = "signature_delta")]
     Signature { signature: String },
+    #[serde(rename = "compaction_delta")]
+    Compaction {
+        content: Option<String>,
+        encrypted_content: Option<String>,
+    },
     /// A delta type this adapter does not recognize (the provider documents
     /// that new delta types may be added); tolerated and ignored.
     #[serde(other)]

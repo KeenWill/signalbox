@@ -9,7 +9,8 @@ use signalbox_model_runtime::{
 };
 
 use crate::wire::{
-    MessagesRequest, OutputConfig, WireMessage, WireRequestBlock, WireTool, WireToolChoice,
+    ContextManagement, MessagesRequest, OutputConfig, WireKnownRequestBlock, WireMessage,
+    WireRequestBlock, WireTool, WireToolChoice,
 };
 
 /// Builds the wire request for one operation.
@@ -78,6 +79,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
         speed: (request_fast_mode == FastMode::Enabled).then_some("fast"),
         tools: plan.tools,
         tool_choice: plan.tool_choice,
+        context_management: ContextManagement::default(),
         stream: operation.delivery == DeliveryMode::Streamed,
     })
 }
@@ -418,6 +420,7 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                         MessagePart::ToolCall(_)
                             | MessagePart::Thinking { .. }
                             | MessagePart::RedactedThinking { .. }
+                            | MessagePart::ProviderCompaction { .. }
                     )
             );
         if !valid_role {
@@ -449,7 +452,9 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
         .parts
         .iter()
         .map(|part| match part {
-            MessagePart::Text(text) => Ok(WireRequestBlock::Text { text: text.clone() }),
+            MessagePart::Text(text) => Ok(WireRequestBlock::Known(WireKnownRequestBlock::Text {
+                text: text.clone(),
+            })),
             MessagePart::ToolCall(proposal) => {
                 let input =
                     serde_json::value::RawValue::from_string(proposal.arguments_json.clone())
@@ -468,17 +473,19 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                         ),
                     });
                 }
-                Ok(WireRequestBlock::ToolUse {
+                Ok(WireRequestBlock::Known(WireKnownRequestBlock::ToolUse {
                     id: proposal.id.as_str().to_string(),
                     name: proposal.name.as_str().to_string(),
                     input,
-                })
+                }))
             }
-            MessagePart::ToolResult(result) => Ok(WireRequestBlock::ToolResult {
-                tool_use_id: result.tool_call_id.as_str().to_string(),
-                content: result.content.clone(),
-                is_error: result.is_error,
-            }),
+            MessagePart::ToolResult(result) => {
+                Ok(WireRequestBlock::Known(WireKnownRequestBlock::ToolResult {
+                    tool_use_id: result.tool_call_id.as_str().to_string(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                }))
+            }
             MessagePart::Thinking { text, signature } => match signature {
                 // The provider requires replayed thinking blocks to carry
                 // their integrity signature; sending one without it would
@@ -495,13 +502,38 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                             .to_string(),
                     })
                 }
-                Some(signature) => Ok(WireRequestBlock::Thinking {
+                Some(signature) => Ok(WireRequestBlock::Known(WireKnownRequestBlock::Thinking {
                     thinking: text.clone(),
                     signature: signature.clone(),
-                }),
+                })),
             },
-            MessagePart::RedactedThinking { data } => {
-                Ok(WireRequestBlock::RedactedThinking { data: data.clone() })
+            MessagePart::RedactedThinking { data } => Ok(WireRequestBlock::Known(
+                WireKnownRequestBlock::RedactedThinking { data: data.clone() },
+            )),
+            MessagePart::ProviderCompaction { block_json } => {
+                let block = serde_json::value::RawValue::from_string(block_json.clone()).map_err(
+                    |error| PreparationFailure::UnsupportedOperation {
+                        detail: format!(
+                            "replayed provider compaction block is invalid JSON: {error}"
+                        ),
+                    },
+                )?;
+                #[derive(serde::Deserialize)]
+                struct Tag {
+                    #[serde(rename = "type")]
+                    kind: String,
+                }
+                let tag: Tag = serde_json::from_str(block.get()).map_err(|error| {
+                    PreparationFailure::UnsupportedOperation {
+                        detail: format!("replayed provider compaction block is invalid: {error}"),
+                    }
+                })?;
+                if tag.kind != "compaction" {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "replayed provider compaction block has the wrong type".to_string(),
+                    });
+                }
+                Ok(WireRequestBlock::ProviderCompaction(block))
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -635,6 +667,13 @@ mod tests {
 
         expect![[r#"
             {
+              "context_management": {
+                "edits": [
+                  {
+                    "type": "compact_20260112"
+                  }
+                ]
+              },
               "max_tokens": 64,
               "messages": [
                 {
@@ -720,6 +759,13 @@ mod tests {
     fn minimal_operation_omits_every_unset_optional_field() {
         expect![[r#"
             {
+              "context_management": {
+                "edits": [
+                  {
+                    "type": "compact_20260112"
+                  }
+                ]
+              },
               "max_tokens": 64,
               "messages": [
                 {
@@ -1130,6 +1176,26 @@ mod tests {
         let serialized = serde_json::to_string(&request).expect("request serializes");
 
         assert!(serialized.contains(raw));
+    }
+
+    #[test]
+    fn compaction_is_enabled_and_replayed_without_reserialization() {
+        let raw = r#"{"type":"compaction", "content":"summary", "encrypted_content":"opaque=="}"#;
+        let mut operation = operation("call-provider-compaction");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ProviderCompaction {
+                block_json: raw.to_string(),
+            }],
+        }];
+
+        let request = build_request(&operation).expect("provider compaction history translates");
+        let serialized = serde_json::to_string(&request).expect("request serializes");
+
+        assert!(serialized.contains(raw));
+        assert!(
+            serialized.contains(r#""context_management":{"edits":[{"type":"compact_20260112"}]}"#)
+        );
     }
 
     #[test]

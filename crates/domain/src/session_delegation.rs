@@ -533,6 +533,7 @@ fn delegation_content_from_live_completed(
                 value,
             } => (producing_call, value),
             crate::SemanticTranscriptEntryPayload::Imported { .. }
+            | crate::SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | crate::SemanticTranscriptEntryPayload::DelegatedTask { .. }
             | crate::SemanticTranscriptEntryPayload::DelegationMessage { .. }
             | crate::SemanticTranscriptEntryPayload::DelegationResult { .. }

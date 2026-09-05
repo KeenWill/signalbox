@@ -856,7 +856,7 @@ async fn input_count_uses_the_declared_fast_target() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains(&format!(r#""model":"{}""#, mapped.as_str())));
     assert!(!requests[0].contains(r#""speed":"fast""#));
-    assert!(!requests[0].contains("anthropic-beta: fast-mode-2026-02-01"));
+    assert!(requests[0].contains("anthropic-beta: compact-2026-01-12"));
 }
 
 #[tokio::test]
@@ -900,7 +900,7 @@ async fn input_count_preserves_reasoning_and_same_target_fast_controls() {
     assert!(requests[0].contains(&format!(r#""model":"{}""#, selected.as_str())));
     assert!(requests[0].contains(r#""output_config":{"effort":"low"}"#));
     assert!(requests[0].contains(r#""speed":"fast""#));
-    assert!(requests[0].contains("anthropic-beta: fast-mode-2026-02-01"));
+    assert!(requests[0].contains("anthropic-beta: compact-2026-01-12,fast-mode-2026-02-01"));
 }
 
 #[derive(Debug)]

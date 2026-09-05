@@ -35,6 +35,26 @@ pub(crate) fn map_finish(token: &str, stop_sequence: Option<String>) -> FinishRe
 
 /// Converts wire usage to the neutral usage record.
 pub(crate) fn convert_usage(wire: &WireUsage) -> TokenUsage {
+    fn aggregate(
+        iterations: &[crate::wire::WireIterationUsage],
+        field: impl Fn(&crate::wire::WireIterationUsage) -> Option<u64>,
+    ) -> Option<u64> {
+        iterations.iter().try_fold(0_u64, |total, iteration| {
+            total.checked_add(field(iteration)?)
+        })
+    }
+    if let Some(iterations) = wire.iterations.as_deref().filter(|items| !items.is_empty()) {
+        return TokenUsage {
+            input_tokens: aggregate(iterations, |item| item.input_tokens),
+            output_tokens: aggregate(iterations, |item| item.output_tokens),
+            cache_creation_input_tokens: aggregate(iterations, |item| {
+                Some(item.cache_creation_input_tokens.unwrap_or(0))
+            }),
+            cache_read_input_tokens: aggregate(iterations, |item| {
+                Some(item.cache_read_input_tokens.unwrap_or(0))
+            }),
+        };
+    }
     TokenUsage {
         input_tokens: wire.input_tokens,
         output_tokens: wire.output_tokens,
@@ -70,6 +90,9 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
         WireResponseBlock::RedactedThinking { data } => {
             Some(AssistantPart::RedactedThinking { data })
         }
+        WireResponseBlock::Compaction { raw } => Some(AssistantPart::ProviderCompaction {
+            block_json: raw.get().to_owned(),
+        }),
         // A fallback marker is a routing fact, never assistant material; the
         // buffered decoder handles it before reaching this conversion.
         WireResponseBlock::Fallback { .. } | WireResponseBlock::Unrecognized => None,
@@ -573,6 +596,47 @@ mod tests {
                 output_tokens: Some(34),
                 cache_creation_input_tokens: Some(5),
                 cache_read_input_tokens: Some(6),
+            }
+        );
+    }
+
+    #[test]
+    fn buffered_compaction_block_is_verbatim_and_iteration_usage_is_aggregated() {
+        let raw_block =
+            r#"{"type":"compaction", "content":"summary", "encrypted_content":"opaque=="}"#;
+        let body = format!(
+            r#"{{
+                "id":"msg_compact","type":"message","role":"assistant","model":"model-exact-1",
+                "content":[{raw_block},{{"type":"text","text":"done"}}],
+                "stop_reason":"end_turn","usage":{{
+                    "input_tokens":3,"output_tokens":4,
+                    "iterations":[
+                        {{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":1,"cache_read_input_tokens":3}},
+                        {{"input_tokens":5,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":2}}
+                    ]
+                }}
+            }}"#
+        );
+        let (evidence, _) = decode(&body);
+        let TerminalEvidence::Completed(completion) = evidence else {
+            panic!("compaction response must be completion evidence");
+        };
+        assert_eq!(
+            completion.content,
+            vec![
+                AssistantPart::ProviderCompaction {
+                    block_json: raw_block.to_string(),
+                },
+                AssistantPart::Text("done".to_string()),
+            ]
+        );
+        assert_eq!(
+            completion.usage,
+            TokenUsage {
+                input_tokens: Some(15),
+                output_tokens: Some(6),
+                cache_creation_input_tokens: Some(1),
+                cache_read_input_tokens: Some(5),
             }
         );
     }

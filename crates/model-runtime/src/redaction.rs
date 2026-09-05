@@ -798,6 +798,11 @@ fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> A
         AssistantPart::RedactedThinking { data } => AssistantPart::RedactedThinking {
             data: redact_bounded_text(data, credential),
         },
+        // The provider requires this opaque block to be replayed byte-for-byte.
+        // Credential values are never inserted into it by this boundary.
+        AssistantPart::ProviderCompaction { block_json } => {
+            AssistantPart::ProviderCompaction { block_json }
+        }
         AssistantPart::ToolCall(proposal) => {
             AssistantPart::ToolCall(redact_tool_proposal(proposal, credential))
         }

@@ -375,9 +375,14 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .header("anthropic-version", self.version_header.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        if request_fast_mode == FastMode::Enabled {
-            builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
-        }
+        builder = builder.header(
+            "anthropic-beta",
+            if request_fast_mode == FastMode::Enabled {
+                "compact-2026-01-12,fast-mode-2026-02-01"
+            } else {
+                "compact-2026-01-12"
+            },
+        );
         let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(defect) => {
@@ -679,9 +684,14 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             .header("anthropic-version", self.version_header.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        if request_fast_mode == FastMode::Enabled {
-            builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
-        }
+        builder = builder.header(
+            "anthropic-beta",
+            if request_fast_mode == FastMode::Enabled {
+                "compact-2026-01-12,fast-mode-2026-02-01"
+            } else {
+                "compact-2026-01-12"
+            },
+        );
         let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },

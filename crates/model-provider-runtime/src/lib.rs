@@ -33,8 +33,9 @@ use signalbox_domain::{
     AuthorizedModelCall, CodexCliServiceTier as DomainCodexCliServiceTier, ContextFrontierId,
     DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, FastMode as DomainFastMode,
     FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
-    OpenAiServiceTier as DomainOpenAiServiceTier, ProviderModelCallFailureCause,
-    ProviderReportedTokenUsage, ReasoningLevel as DomainReasoningLevel, ResolvedProviderTarget,
+    OpenAiServiceTier as DomainOpenAiServiceTier, ProviderCompactionBlock,
+    ProviderModelCallFailureCause, ProviderReportedTokenUsage,
+    ReasoningLevel as DomainReasoningLevel, ResolvedProviderTarget,
     ServiceTier as DomainServiceTier, SessionId, ToolArgumentsKind,
     ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind, ToolName as DomainToolName,
     ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId, ValidatedModelSettings,
@@ -1589,6 +1590,27 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 }
                 collecting_tool_results = false;
             }
+            ModelConversationMessage::ProviderCompaction {
+                producing_call,
+                block,
+                ..
+            } => {
+                let part = MessagePart::ProviderCompaction {
+                    block_json: block.as_json().to_owned(),
+                };
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        parts: vec![part],
+                    });
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
             ModelConversationMessage::AssistantToolUse {
                 producing_call,
                 request,
@@ -1959,7 +1981,7 @@ fn classify_terminal(
         TerminalEvidence::Completed(completion) => {
             let finish = completion.finish;
             let mut response_parts = Vec::new();
-            let mut text_parts = Vec::new();
+            let mut has_provider_compaction = false;
             let mut tool_count = 0usize;
             for part in completion.content {
                 match part {
@@ -1970,8 +1992,16 @@ fn classify_terminal(
                                 RuntimeModelCallProviderError::InvalidAssistantText,
                             )
                         })?;
-                        text_parts.push(text.clone());
                         response_parts.push(AssistantResponsePart::Text(text));
+                    }
+                    AssistantPart::ProviderCompaction { block_json } => {
+                        let block = ProviderCompactionBlock::try_new(block_json).map_err(|_| {
+                            ClassificationFailure::bare(
+                                RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                            )
+                        })?;
+                        has_provider_compaction = true;
+                        response_parts.push(AssistantResponsePart::ProviderCompaction(block));
                     }
                     AssistantPart::ToolCall(proposal) => {
                         tool_count += 1;
@@ -2035,12 +2065,27 @@ fn classify_terminal(
                         ModelCallCauseCode::FinishContradictsContent,
                     );
                 }
-                classify(
-                    ModelCallTerminalObservation::Completed {
-                        assistant_text: text_parts,
-                    },
-                    ModelCallCauseCode::Completed,
-                )
+                if has_provider_compaction {
+                    classify(
+                        ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                            response: response_parts,
+                        },
+                        ModelCallCauseCode::Completed,
+                    )
+                } else {
+                    let assistant_text = response_parts
+                        .into_iter()
+                        .filter_map(|part| match part {
+                            AssistantResponsePart::Text(text) => Some(text),
+                            AssistantResponsePart::ProviderCompaction(_)
+                            | AssistantResponsePart::ToolCall(_) => None,
+                        })
+                        .collect();
+                    classify(
+                        ModelCallTerminalObservation::Completed { assistant_text },
+                        ModelCallCauseCode::Completed,
+                    )
+                }
             } else {
                 if !matches!(finish, CompletionFinish::ToolUse) {
                     return classify(

@@ -62,6 +62,9 @@ enum BlockBuilder {
     RedactedThinking {
         data: String,
     },
+    Compaction {
+        delta: Option<(Option<String>, Option<String>)>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -507,6 +510,7 @@ impl StreamDecoder {
                 signature: signature.filter(|value| !value.is_empty()),
             },
             WireResponseBlock::RedactedThinking { data } => BlockBuilder::RedactedThinking { data },
+            WireResponseBlock::Compaction { .. } => BlockBuilder::Compaction { delta: None },
             WireResponseBlock::Fallback { to_model } => {
                 // This adapter never enables server-side fallback, so a
                 // fallback marker mid-stream means the stream is no longer
@@ -616,6 +620,20 @@ impl StreamDecoder {
                 accumulated.push_str(&partial_json);
                 StreamStep::Continue
             }
+            (
+                BlockBuilder::Compaction { delta },
+                WireDelta::Compaction {
+                    content,
+                    encrypted_content,
+                },
+            ) => {
+                if delta.is_some() {
+                    return self
+                        .violation("compaction block carries more than one compaction delta");
+                }
+                *delta = Some((content, encrypted_content));
+                StreamStep::Continue
+            }
             // Additive delta evolution is tolerated on any block type.
             (_, WireDelta::Unrecognized) => StreamStep::Continue,
             _ => self.violation(format!(
@@ -667,6 +685,21 @@ impl StreamDecoder {
                 }
             }
             BlockBuilder::RedactedThinking { data } => AssistantPart::RedactedThinking { data },
+            BlockBuilder::Compaction { delta } => {
+                let Some((content, encrypted_content)) = delta else {
+                    return self.violation(format!(
+                        "compaction block {} closed without its compaction delta",
+                        event.index
+                    ));
+                };
+                let block_json = serde_json::json!({
+                    "type": "compaction",
+                    "content": content,
+                    "encrypted_content": encrypted_content,
+                })
+                .to_string();
+                AssistantPart::ProviderCompaction { block_json }
+            }
             BlockBuilder::ToolUse {
                 id,
                 name,
@@ -793,7 +826,18 @@ impl StreamDecoder {
         }
         if let Some(usage) = event.usage.as_ref() {
             let usage = convert_usage(usage);
-            self.usage.absorb(usage);
+            if event
+                .usage
+                .as_ref()
+                .and_then(|wire| wire.iterations.as_ref())
+                .is_some_and(|iterations| !iterations.is_empty())
+            {
+                // Iteration usage is the complete physical-request total, not
+                // a delta from the message_start input report.
+                self.usage = usage;
+            } else {
+                self.usage.absorb(usage);
+            }
             Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
         }
         StreamStep::Continue
@@ -1092,6 +1136,36 @@ mod tests {
                 fragment: r#"{"city":"Oslo"}"#.to_string(),
             },
         }));
+    }
+
+    #[test]
+    fn streamed_compaction_delta_becomes_replayable_block() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"compaction_delta\",\"content\":\"summary\",\"encrypted_content\":\"opaque==\"}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":7}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("compaction stream gated on message_stop must complete");
+        };
+        assert_eq!(
+            completion.content,
+            vec![AssistantPart::ProviderCompaction {
+                block_json:
+                    r#"{"content":"summary","encrypted_content":"opaque==","type":"compaction"}"#
+                        .to_string(),
+            }]
+        );
     }
 
     #[test]

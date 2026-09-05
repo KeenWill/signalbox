@@ -213,6 +213,7 @@ where
                     AssistantPart::Thinking { text, .. } if text.is_empty() => {}
                     AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::ProviderCompaction { .. }
                     | AssistantPart::ToolCall(_)
                     | AssistantPart::SuppressedToolCall(_) => {
                         return Err(ContextCompactionModelError::NonTextSummary);

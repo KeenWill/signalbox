@@ -857,6 +857,7 @@ impl<C: Clone> EventDecoder<C> {
                     }),
                     AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::ProviderCompaction { .. }
                     | AssistantPart::SuppressedToolCall(_) => {}
                 }
             }
