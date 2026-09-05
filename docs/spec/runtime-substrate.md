@@ -263,19 +263,20 @@ never inferred from `ProviderErrorKind` or provider prose. This proof separates
 the `successor` and `terminal` endings of
 [the credential-availability machine](credential-availability.md); this page
 owns the evidence algebra that carries it. Adapters set the proof alongside
-`ProviderError` for the exact quota-exhausted, rate-limited, and overloaded
-provider responses whose protocol semantics establish non-acceptance. Each
-adapter owns its exhaustive native mapping; the provider bridge preserves the
-proof without deriving it from `ProviderErrorKind`, status retryability, or
+`ProviderError` for the exact quota-exhausted, rate-limited, overloaded, and
+provider-internal responses whose protocol semantics establish non-acceptance.
+Each adapter owns its exhaustive native mapping; the provider bridge preserves
+the proof without deriving it from `ProviderErrorKind`, status retryability, or
 native prose. Classification alone remains insufficient, and absence of the
 proof keeps the known failure terminal.
 
 The admitting condition is fixed here because the two readings differ in whether
 another provider call happens. A proof is admitted only when the adapter decoded
-its own documented error envelope and the decoded native token names one of the
-three causes in that adapter's exhaustive mapping — `rate_limit_error` or
-`overloaded_error` for Anthropic, and `rate_limit_exceeded`, `rate_limit_error`,
-or `insufficient_quota` for OpenAI. Codex additionally admits a classified
+its own documented error envelope and the decoded native token names an admitted
+cause in that adapter's exhaustive mapping — `rate_limit_error`,
+`overloaded_error`, or `api_error` for Anthropic, and `rate_limit_exceeded`,
+`rate_limit_error`, `insufficient_quota`, `server_error`, or
+`internal_server_error` for OpenAI. Codex additionally admits a classified
 availability cause only when its JSONL lifecycle reaches the exact,
 noncontradictory `turn.failed` closure. Every status-derived fallback carries no
 proof: a response whose body is absent, undecodable, or names a token the

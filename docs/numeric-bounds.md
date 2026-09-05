@@ -11,8 +11,8 @@ to bound or size a fixture.
 The live-line merge adds one model-exchange policy to the original audit and the
 automatic-resume lifetime ceiling one goal policy; the liveness watchdog's
 single recovery-attempt constant now answers to two configured policies because
-its two consumers need different ceilings. The 127 rows partition as 36 guards,
-8 derived bounds, 69 configuration policies, 10 representation facts, and 4 test
+its two consumers need different ceilings. The 128 rows partition as 36 guards,
+8 derived bounds, 70 configuration policies, 10 representation facts, and 4 test
 fixtures. Source locations are maintained with the implementation slices that
 move or delete declarations.
 
@@ -122,6 +122,7 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml:108` | `MAX_METADATA_PAGE_SIZE`                          | config | `numeric_bounds.max_metadata_page_size` learned over the daemon connection.          |
 | `config/signalboxd.example.toml:110` | `MAX_REVIEW_FINDINGS_PER_RUN`                     | config | `numeric_bounds.max_review_findings_per_run` learned over the daemon connection.     |
 | `config/signalboxd.example.toml:112` | `MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN`              | config | `numeric_bounds.max_automatic_tool_rounds_per_turn`                                  |
+| `config/signalboxd.example.toml:128` | `MAX_SAME_CREDENTIAL_ATTEMPTS_PER_TURN`           | config | `numeric_bounds.max_same_credential_attempts_per_turn`                               |
 | `config/signalboxd.example.toml:114` | `MAX_REQUIRED_TAGS`                               | config | `numeric_bounds.max_required_tags`                                                   |
 | `config/signalboxd.example.toml:104` | `MAX_CONTENT_UTF8_BYTES`                          | config | `numeric_bounds.max_message_utf8_bytes`                                              |
 | `config/signalboxd.example.toml:116` | `BASELINE_RECONCILIATION_SWEEP_INTERVAL`          | config | `numeric_bounds.reconciliation_sweep_interval`                                       |
