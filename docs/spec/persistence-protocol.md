@@ -134,8 +134,8 @@ database-level invariants stay declarative over current-state rows, while plan
 and goal history is retained product evidence rather than an implementation log.
 
 Immutable fact tables reject update and delete through triggers rather than by
-convention, and the guarded table families reject truncate as well, because
-restart trusts durable rows as evidence.
+convention, and the guarded table families reject truncate as well, except for
+the transactional-outbox pruning boundary below.
 
 The session system prompt joins its selection key through a generated SHA-256
 digest, because megabyte text cannot be a btree key, and an absent prompt is
@@ -292,8 +292,9 @@ deduplicate by cursor. A runner transition event is validated against the
 placement revision it names, never against the session's current placement.
 
 Schemas whose names begin with `mod_` contain only derived or module-local
-state, which may be pruned. Outbox records with a sequence below every
-per-consumer delivery cursor may be pruned.
+state, which may be pruned. The transactional outbox is the sole immutable-fact
+retention exception: a pruning implementation may delete only records whose
+sequence is below every per-consumer delivery cursor.
 
 Domain types carry no SQLx or serialization traits. Each adapter module decodes
 its own rows through explicit fallible functions and assembles a checked input;
