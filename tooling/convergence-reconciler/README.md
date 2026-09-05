@@ -43,7 +43,7 @@ directory before a dispatch child can start.
 
 ## Convergence predicate
 
-An open, watched pull request is converged exactly when all seven facts hold on
+An open, watched pull request is converged exactly when all eight facts hold on
 one current GitHub snapshot:
 
 1. Every ordinary review thread is resolved and has a recognized in-thread fix
@@ -51,6 +51,7 @@ one current GitHub snapshot:
    Question, informational, and note threads require a substantive answer. A
    thread carrying the exact terminal marker `Escalated without disposition`
    remains open and is reported separately without causing another dispatch.
+   No body-only review has the aggregate decision `CHANGES_REQUESTED`.
 2. Unless every changed file is planning-only under the repository banner rule,
    a trusted repository member explicitly requested Codex review naming the
    current head OID, and `chatgpt-codex-connector` subsequently completed either
@@ -58,11 +59,14 @@ one current GitHub snapshot:
    and resolved. Authenticated evidence is retained for an unchanged head across
    later check reruns.
 3. A check rollup exists on the commit whose OID equals the current head OID,
-   and every gating check is green.
+   every gating check is green, and the nonempty check-context inventory is
+   unchanged from the preceding tick.
 4. GitHub reports the pull request `MERGEABLE` against its current base.
 5. The current head contains every commit in the current base branch.
 6. The description contains at most 350 words.
 7. The pull request is not a draft.
+8. Head, base, branch names, body version, draft state, mergeability, and review
+   decision are unchanged in the final revalidation.
 
 The escalation marker is valid at wave five only when no extension was taken,
 and at the wave-eight hard stop. It is not accepted during extension waves six
@@ -103,8 +107,8 @@ connection's `totalCount`, otherwise the tick fails closed. Review-thread
 identity and resolution state and the complete check census are traversed a
 second time and must remain identical before the final OID check. Review-thread
 comments, top-level comments, and reviews are also paginated. REST compare
-requests conservatively classify
-post-review rename-only, source-comment-only, and proven clean base-forward
+requests conservatively classify post-review rename-only, source-comment-only,
+and proven clean base-forward
 changes; a base forward must be a single merge of the reviewed head and exact
 current base whose complete patch matches the base delta. REST pull-request-file
 requests recover base paths for renamed planning files. Previously watched node

@@ -60,6 +60,7 @@ query($ids: [ID!]!) {
       lastEditedAt
       url
       isDraft
+      reviewDecision
       author { login }
       baseRefName
       baseRefOid
@@ -343,6 +344,7 @@ class GitHubGraphQL:
         self._load_base_ancestry(pull_requests)
         self._revalidate_checks(pull_requests)
         self._revalidate_review_threads(pull_requests)
+        self._finalize_check_inventory(pull_requests)
         self._verify_snapshot_oids(pull_requests)
         return pull_requests, tracked
 
@@ -642,6 +644,11 @@ query($id: ID!, $after: String!) {
     ) -> None:
         for pull_request in pull_requests:
             record = pull_request.pop("_persisted_record")
+            pull_request["_prior_check_inventory"] = (
+                record.get("check_inventory")
+                if record.get("head_oid") == pull_request["head_oid"]
+                else None
+            )
             reviews = pull_request.pop("_codex_reviews")
             current_ids = [review["id"] for review in reviews]
             known_ids = [
@@ -1074,6 +1081,19 @@ query($id: ID!, $after: String) {
                     break
                 after = page["pageInfo"]["endCursor"]
 
+    def _finalize_check_inventory(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for pull_request in pull_requests:
+            inventory = sorted(
+                f"{check['__typename']}:{check_name(check)}"
+                for check in pull_request["checks"]
+            )
+            pull_request["check_inventory"] = inventory
+            pull_request["check_inventory_stable"] = bool(inventory) and (
+                inventory == pull_request.pop("_prior_check_inventory", None)
+            )
+
     def _verify_snapshot_oids(
         self,
         pull_requests: list[dict[str, Any]],
@@ -1091,7 +1111,8 @@ query($id: ID!, $after: String) {
                 variables[variable] = pull_request["node_id"]
                 selections.append(
                     f"item{index}: node(id: ${variable}) {{ ... on PullRequest "
-                    "{ baseRefOid headRefOid } }"
+                    "{ state baseRefName baseRefOid headRefName headRefOid "
+                    "isDraft body lastEditedAt mergeable reviewDecision } }"
                 )
             data = self.execute(
                 f"query({', '.join(declarations)}) {{ {' '.join(selections)} }}",
@@ -1101,10 +1122,21 @@ query($id: ID!, $after: String) {
                 node = data.get(f"item{index}")
                 if node is None:
                     raise RuntimeError("pull request became unavailable during revalidation")
-                if (
-                    node["baseRefOid"] != pull_request["base_oid"]
-                    or node["headRefOid"] != pull_request["head_oid"]
-                ):
+                snapshot_changed = (
+                    node.get("state") != "OPEN"
+                    or node.get("baseRefName") != pull_request["base_ref"]
+                    or node.get("baseRefOid") != pull_request["base_oid"]
+                    or node.get("headRefName") != pull_request["head_ref"]
+                    or node.get("headRefOid") != pull_request["head_oid"]
+                    or node.get("isDraft") != pull_request["is_draft"]
+                    or (node.get("body") or "") != pull_request["body"]
+                    or node.get("lastEditedAt")
+                    != pull_request["body_last_edited_at"]
+                    or node.get("mergeable") != pull_request["mergeable"]
+                    or node.get("reviewDecision")
+                    != pull_request["review_decision"]
+                )
+                if snapshot_changed:
                     if raise_on_change:
                         raise RuntimeError(
                             "pull request changed after its convergence snapshot"
@@ -1551,6 +1583,7 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         "head_oid": node["headRefOid"],
         "head_repository": head_repository(node),
         "mergeable": node["mergeable"],
+        "review_decision": node.get("reviewDecision"),
         "checked_head_oid": commit["oid"] if commit else None,
         "review_threads": [],
         "quiet_review_head_oids": [],
@@ -1680,6 +1713,10 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
     if pull_request.get("is_draft", False):
         reasons.append("pull-request-is-draft")
+    if pull_request.get("review_decision") == "CHANGES_REQUESTED":
+        reasons.append("review-changes-requested")
+    if pull_request.get("check_inventory_stable") is False:
+        reasons.append("check-inventory-unsettled")
     if unresolved_threads:
         reasons.append(f"unresolved-review-threads:{unresolved_threads}")
     if undispositioned_threads:
@@ -1950,6 +1987,12 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
                 or not all(isinstance(item, str) for item in value)
             ):
                 raise ValueError(f"unsupported or malformed state file: {path}")
+        check_inventory = record.get("check_inventory")
+        if check_inventory is not None and (
+            not isinstance(check_inventory, list)
+            or not all(isinstance(item, str) for item in check_inventory)
+        ):
+            raise ValueError(f"unsupported or malformed state file: {path}")
         review_wave_base_oid = record.get("review_wave_base_oid")
         if review_wave_base_oid is not None and not isinstance(
             review_wave_base_oid, str
@@ -2123,6 +2166,7 @@ def process_pull_request(
         "known_codex_review_ids", []
     )
     record["review_wave_ids"] = pull_request.get("review_wave_ids", [])
+    record["check_inventory"] = pull_request.get("check_inventory", [])
     base_oid = pull_request.get("base_oid")
     if isinstance(base_oid, str):
         record["review_wave_base_oid"] = base_oid
