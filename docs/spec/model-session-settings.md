@@ -4,7 +4,7 @@ Model and session settings resolve a session's reasoning level, fast mode, and
 service tier from layered overrides, check them against the selected model's
 declared capabilities, and record the result before any provider traffic.
 
-## Map
+## Overview
 
 The subsystem owns three provider-neutral settings: a reasoning level, a
 fast-mode switch, and a provider-tagged service tier. They travel with the
@@ -45,7 +45,7 @@ preparation; the tables live in the adapter crates, and the advisory exceptions
 for controls a CLI cannot enforce are on
 [runtime-substrate.md](runtime-substrate.md).
 
-## Decisions
+## Design decisions
 
 Incompatibility caused by a model change never rejects the model change, because
 model choice outranks setting compatibility.
@@ -70,7 +70,7 @@ and is not in the settings vocabulary.
 Signalbox does not infer capability support from model-name prefixes and does
 not run a provider CLI during request preparation.
 
-## Contracts
+## Boundary contracts
 
 A reasoning level of none is an explicit provider value, distinct from an absent
 reasoning setting, which selects the provider default. Every adapter maps
@@ -107,7 +107,7 @@ Reasoning-level mappings are exhaustive per-adapter tables evaluated during
 preparation. Every adapter answers every level with a provider value or a typed
 refusal.
 
-## Not built
+## Planned
 
 A Swift settings user interface that derives every offered value from the
 daemon's per-model capability record and preserves explicit-versus-inherited

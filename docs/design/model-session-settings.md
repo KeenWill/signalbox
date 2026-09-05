@@ -10,7 +10,7 @@ A Swift client screen reads a session's settings, sets session and per-call
 overrides, and offers only values the daemon declares as supported for the
 selected model.
 
-## Shape
+## Design
 
 The screen reads the capability catalog through the catalog read on
 [process-protocol.md](../spec/process-protocol.md). For the selected direct
@@ -30,7 +30,7 @@ set(value) on the user's behalf.
 The screen shows the automatic adjustments carried on the settings events the
 daemon records; it derives none itself.
 
-## Constraints on present code
+## Compatibility constraints
 
 The capability projection on [process-protocol.md](../spec/process-protocol.md)
 remains the only source of offered values, and it continues to name only
@@ -38,7 +38,7 @@ client-selectable models. The settings overlay on session commands keeps its
 inherit, clear, and set members, so a client can express provenance. No daemon
 change adds a capability derived from a model name or a provider probe.
 
-## Acceptance
+## Acceptance criteria
 
 Every set(value) choice the screen offers for a direct model appears in that
 model's daemon-provided capability record; inherit and clear are overlay states,
