@@ -4222,6 +4222,9 @@ fn reader_body_until(
 }
 
 fn parse_byte_range(value: &HeaderValue, total: u64) -> Result<(u64, u64, bool), ()> {
+    if value.as_bytes().contains(&b',') {
+        return Err(());
+    }
     let mut headers = HeaderMap::new();
     headers.insert(RANGE, value.clone());
     let range = headers
@@ -4903,10 +4906,13 @@ mod tests {
     #[test]
     fn http_byte_ranges_use_rfc_digit_grammar_and_reject_multiple_or_unsatisfied_forms() {
         let multiple = parse_byte_range(&header::HeaderValue::from_static("bytes=0-1,4-5"), 10);
+        let partly_unsatisfied =
+            parse_byte_range(&header::HeaderValue::from_static("bytes=0-1,20-21"), 10);
         let noncanonical = parse_byte_range(&header::HeaderValue::from_static("bytes=01-2"), 10);
         let unsatisfied = parse_byte_range(&header::HeaderValue::from_static("bytes=10-"), 10);
 
         assert_eq!(multiple, Err(()));
+        assert_eq!(partly_unsatisfied, Err(()));
         assert_eq!(noncanonical, Ok((1, 2, true)));
         assert_eq!(unsatisfied, Err(()));
     }
