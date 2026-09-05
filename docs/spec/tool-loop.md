@@ -95,7 +95,9 @@ A configured delegated posture does satisfy `AlwaysConfirm`, because a judge is
 not a blanket but a distinct decider that can still deny or escalate.
 
 Every decision records its source, so unattended operation is inspectable
-without presenting policy as human consent.
+without presenting policy as human consent, and only an explicit user, delegate,
+or consumed-override decision emits an approval-decided event naming its
+decider.
 
 A denial reason is bounded and free of control characters, so a client can
 render it directly.
@@ -337,8 +339,9 @@ reinterpret or erase the ambiguous attempt. Without an interrupt, the daemon
 claims the same ambiguity through the automatic-reconciliation ledger, which
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) owns, and
 terminalizes through the same boundary. Only an admitted executor `KnownFailed`
-observation emits the failed-attempt telemetry event; completed, ambiguous, and
-preflight-only failures emit none.
+observation emits the failed-attempt telemetry event, which carries only the
+catalog name, the closed error kind, the session, and the turn; completed,
+ambiguous, and preflight-only failures emit none.
 
 A result larger than the bound is replaced by the typed `ResultTooLarge` error,
 and oversized bytes are never persisted. The result-text and error-detail bounds
@@ -409,10 +412,11 @@ record first, and missing or cross-wired content fails closed. All text and tool
 proposals from one model call coalesce into one assistant message, and the
 proposal-ordered results into the immediately following user-role message. Every
 provider-visible failure is one compact provider-neutral JSON object with an
-error member carrying detail and kind. Malformed proposal arguments stay exact
-on the durable request but replay to the provider as a fixed placeholder object,
-so the paired typed error reaches either provider; the placeholder is never
-durable evidence.
+error member carrying detail and kind, except a non-content delegation outcome,
+which renders its outcome, reason, and provenance. Malformed proposal arguments
+stay exact on the durable request but replay to the provider as a fixed
+placeholder object, so the paired typed error reaches either provider; the
+placeholder is never durable evidence.
 
 A `web_fetch` request's canonical origin must satisfy the deployment-owned
 web-fetch catalog policy in
