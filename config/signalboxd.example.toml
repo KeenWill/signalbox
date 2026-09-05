@@ -124,6 +124,8 @@ max_metadata_page_size = 100
 max_review_findings_per_run = 32
 # Automatic model tool rounds spent in one turn.
 max_automatic_tool_rounds_per_turn = 32
+# Recorded attempts allowed on one credential within a turn.
+max_same_credential_attempts_per_turn = 2
 # Required tags admitted by one metadata query.
 max_required_tags = 256
 # Time between scheduler reconciliation sweeps.
@@ -356,6 +358,7 @@ credential_pool = "anthropic-main"
 # [codex_cli]
 # executable = "/absolute/path/to/codex"
 # working_directory = "/absolute/path/to/workspace"
+# model_context_window_overrides = { "gpt-5.6-sol" = 1000000 }
 
 # To serve a Claude Code model family with an API credential, provision the file
 # named by the profile below, then add this mapping and process configuration.
@@ -926,13 +929,15 @@ service_tiers = ["auto", "standard_only"]
 # reasoning_levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
 
 # [[models]]
-# # The CLI's own default model. Raw window: 272000; usable window: 258400.
+# # The CLI's own default model. Its configured 1000000-token window is capped
+# # by the pinned CLI at 872000, of which 95 percent (828400) is the usable
+# # total context ceiling.
 # selection_id = "ff15fc0a-bac0-45df-9d59-ab3b79282a95"
 # target_id = "4d4a9f4c-ce89-4c75-ae2e-695cda3ae4bc"
 # model_family = "codex"
 # provider_model = "gpt-5.6-sol"
 # max_output_tokens = 8192
-# context_window_tokens = 258400
+# context_window_tokens = 828400
 # reasoning_levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
 # fast_mode = "request_control"
 # service_tiers = ["priority"]

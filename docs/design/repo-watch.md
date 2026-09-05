@@ -1,7 +1,8 @@
 # Repository watch design
 
-None of this is built; it extends [repository watch](../spec/repo-watch.md) and
-is deleted when each capability lands.
+None of this is built; it extends [repository watch](../spec/repo-watch.md).
+Landed material is removed as each capability lands, and the document is deleted
+when no planned capability remains.
 
 ## Goal
 
