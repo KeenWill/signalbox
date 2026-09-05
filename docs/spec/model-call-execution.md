@@ -50,7 +50,10 @@ transaction an exceeded bound commits the tool results, prepares no continuation
 call, and fails the turn with a headroom record. The guard adds the newest
 reported input for the pinned target, a byte allowance for model-visible content
 that input does not cover, and the configured output reservation, and compares
-the sum with the configured context window.
+the sum with the configured context window. The compaction call's own input
+budget is its context window less the output ceiling and the required prompt;
+when even the first safe prefix cannot fit that budget, no call is prepared and
+one transaction fails the turn as a compaction wall.
 
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
@@ -70,15 +73,15 @@ recovery in `crates/persistence/src/startup.rs` then classifies every retained
 call from durable evidence.
 
 The runtime bridge in `crates/model-provider-runtime` maps the runtime's typed
-terminal evidence to exactly one disposition: completed content to `Completed`,
-refusal to `Refused`, a provider error or other proof of non-acceptance to
-`KnownFailed`, cancellation before send or confirmed cancellation to
-`Cancelled`, and loss after possible acceptance to `Ambiguous`. The requested
-selection, the pinned resolved target, and the provider-reported identity are
-three separate facts, and the bridge is the one place that relates the third to
-the second. Exactly one of three relations holds: exact, alias concretion (the
-configured spelling followed by a dated snapshot qualifier), or different
-lineage.
+terminal evidence to exactly one disposition: completed text and tool-call
+content to `Completed`, refusal to `Refused`, a provider error or other proof of
+non-acceptance to `KnownFailed`, cancellation before send or confirmed
+cancellation to `Cancelled`, and loss after possible acceptance to `Ambiguous`.
+The requested selection, the pinned resolved target, and the provider-reported
+identity are three separate facts, and the bridge is the one place that relates
+the third to the second. Exactly one of three relations holds: exact, alias
+concretion (the configured spelling followed by a dated snapshot qualifier), or
+different lineage.
 
 `apply_terminal_observation` derives one of seven outcomes from fresh state, and
 persistence commits the outcome atomically with its outbox rows. Ambiguity parks
@@ -253,11 +256,11 @@ provider at most once. A retry is a new recorded attempt; no code retries a call
 without recording the retry in the database. Before anything has been sent to
 the provider, the daemon may prepare an unsent call again. After a known failure
 the daemon may start a new attempt with a different credential. It never sends
-again with the credential that failed. A call whose outcome is unknown is never
-retried automatically; the turn parks for recovery. A CLI harness may retry
-inside itself. The daemon records those retries as events of the one attempt and
-adds no retries of its own. A migration constraint enforces one call per
-attempt; the no-retry and no-reuse rules are unenforced.
+again with the credential that failed in that chain. A call whose outcome is
+unknown is never retried automatically; the turn parks for recovery. A CLI
+harness may retry inside itself. The daemon records those retries as events of
+the one attempt and adds no retries of its own. A migration constraint enforces
+one call per attempt; the no-retry and no-reuse rules are unenforced.
 
 The terminal transition stores the input, output, cache-creation, and cache-read
 token axes independently; a null axis means the provider did not supply it, and
@@ -286,10 +289,12 @@ does not remove, rewrite, summarize, or reorder the semantic entries or their
 addressable imported frontier. Delegation messages render through an injected
 user transport role that creates no accepted input, no user actor, and no child
 transcript access; the structured value retains its model- or tool-authored
-spawn provenance. The session system prompt is sourced only from the calling
-turn's frozen defaults epoch, and the bridge sets the operation's system prompt
-from it exactly or leaves it empty;
-[sessions-and-transcript](sessions-and-transcript.md) owns the freeze.
+spawn provenance. A model-identity change projects as an injected user-role
+message naming the newly selected identity and the frozen defaults epoch. The
+session system prompt is sourced only from the calling turn's frozen defaults
+epoch, and the bridge sets the operation's system prompt from it exactly or
+leaves it empty; [sessions-and-transcript](sessions-and-transcript.md) owns the
+freeze.
 
 Missing usage fields stay missing and are never invented; classification does
 not derive usage from the disposition, content, context, or provider family, and
@@ -336,19 +341,23 @@ applied-interrupt proof a physical cancellation is an unstopped known failure,
 and a stop-requested attempt whose call ends known-failed still fails and cannot
 admit a successor, because the physical result has not proven cancellation.
 
-Classification is an adapter contract consuming the full-request-send boundary;
-the daemon never reinterprets SDK errors by retryability or exception type. The
-identity relation applies to every identity the exchange reported, early
-observations and terminal evidence alike, because it is timing-sensitive.
-Different lineage is a substitution: the provider served a model the daemon
-never authorized, and it is never collapsed into the alias case or into an
-ordinary provider failure. When the Anthropic adapter sees the server-side
-fallback block, the response can never complete as the resolved target's output,
-whatever the block names; a block naming the configured target itself classifies
-as ambiguity rather than substitution, because no durable marker-only evidence
-exists to carry a substitution. Every classified outcome and every fail-closed
-bridge defect carries a stable sanitized cause code alongside the shared
-operator failure class defined in [runtime-substrate](runtime-substrate.md).
+`Completed` admits only text and tool-call parts: empty text and empty thinking
+blocks are dropped, while thinking with text and redacted thinking fail the
+adapter stage closed as unsupported material, because no durable semantic
+representation exists for either. Classification is an adapter contract
+consuming the full-request-send boundary; the daemon never reinterprets SDK
+errors by retryability or exception type. The identity relation applies to every
+identity the exchange reported, early observations and terminal evidence alike,
+because it is timing-sensitive. Different lineage is a substitution: the
+provider served a model the daemon never authorized, and it is never collapsed
+into the alias case or into an ordinary provider failure. When the Anthropic
+adapter sees the server-side fallback block, the response can never complete as
+the resolved target's output, whatever the block names; a block naming the
+configured target itself classifies as ambiguity rather than substitution,
+because no durable marker-only evidence exists to carry a substitution. Every
+classified outcome and every fail-closed bridge defect carries a stable
+sanitized cause code alongside the shared operator failure class defined in
+[runtime-substrate](runtime-substrate.md).
 
 A model-call transaction that both appends an outbox event and locks shared
 credential-pool action heads first takes one global transaction-scoped ordering
