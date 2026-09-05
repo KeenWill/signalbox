@@ -79,8 +79,8 @@ branch; a branch dispatch fixes repository and branch. An operator-commissioned
 dispatch (`commissioned_dispatch`) supplies the same immutable authority for a
 session no rule dispatched. When an approval judge escalates under dispatch
 authority, the block it writes claims no release and states that no automatic
-resumption is scheduled, which [goal mode](goal-mode.md) admits as its one
-exception.
+resumption is scheduled, one of the two exceptions [goal mode](goal-mode.md)
+admits.
 
 Every completed poll also records convergence evidence for each pull request at
 the exact head and base revision. A passing assessment for a pull request based
@@ -250,24 +250,29 @@ its head branch the child's base branch, and the component identity is its
 lowest-numbered root, or its lowest-numbered member for a rootless cycle.
 
 The goal statement is synthesized from the dispatching rule, the resolved
-template, and the typed parameters, and states only rule, template, and the pull
-request or branch in its repository. A head branch is qualified by the fork
-holding it, so a consumer cannot misread it as the watched repository's. The
-statement is composed by the dispatch rather than declared by the session,
-because only an already-attached goal admits a model declaration. Commissioning
-records the tagged-context turn as the generation's own first goal turn rather
-than scheduling one, so a dispatched session commits exactly one queued turn and
-runs its template once. Every later turn of that generation is an ordinary goal
-continuation, and the generation is readable from the dispatched turn, so a
-supersession cannot broaden the authority read for it. The approval judge
-resolves either append-only authority source under the same generation-one
-binding, renders both through one rendering, and refuses a session recording
-both as corruption. The commission's durable command identity binds template,
-fence, statement, and initial content digest, so an equal retry replays and a
-different intent under that identity is refused, under the command protocol in
-[identity and commands](identity-and-commands.md). The append-only dispatch
-records identify the sessions responsible for a pull request; no mutable
-assignment flag replaces them.
+template, and the typed parameters, and states only the rule, the template, and,
+in its repository, the pull request with its head and base branches or the
+branch with its workflow and conclusion. A head branch is qualified by the fork
+holding it, so a consumer cannot misread it as the watched repository's. Every
+repository-supplied identifier the statement renders is quoted, with the
+backslash, the quote, and every line terminator escaped, so an identifier cannot
+forge its closing delimiter or leave its line and two distinct identifiers never
+render alike. The statement is composed by the dispatch rather than declared by
+the session, because only an already-attached goal admits a model declaration.
+Commissioning records the tagged-context turn as the generation's own first goal
+turn rather than scheduling one, so a dispatched session commits exactly one
+queued turn and runs its template once; that turn's input is the tagged context
+the dispatch submitted, not a restatement of the statement. Every later turn of
+that generation is an ordinary goal continuation, and the generation is readable
+from the dispatched turn, so a supersession cannot broaden the authority read
+for it. The approval judge resolves either append-only authority source under
+the same generation-one binding, renders both through one rendering, and refuses
+a session recording both as corruption. The commission's durable command
+identity binds template, fence, statement, and initial content digest, so an
+equal retry replays and a different intent under that identity is refused, under
+the command protocol in [identity and commands](identity-and-commands.md). The
+append-only dispatch records identify the sessions responsible for a pull
+request; no mutable assignment flag replaces them.
 
 Further matching facts join an obligation's latest-event projection and
 increment its count, including a match racing release, so one singleton has at
@@ -521,12 +526,16 @@ pull request, replies to or resolves a review thread, or mutates Git. No rule
 discovers or enrolls every open pull request. The sweep interval bounds how long
 unconverged work stays undiscovered while limiting provider request volume, and
 the per-pull-request cool-off gives a commissioned session time to make durable
-progress before another dispatch. After cool-off, repeated sweeps with an
-unchanged head, an unchanged unresolved-thread count, and no recorded model call
-park the target at once as `no_model_activity` with the operator need
-`inspect_inactive_session`. The sweep is a shallow daemon loop that creates no
-reusable program primitive, and it does no prioritization or scheduling beyond
-the configured list.
+progress before another dispatch. A failed census fetch, commission, template
+resolution, or sweep-state read appends a typed failure event and advances the
+count of consecutive failures of that kind; retries back off exponentially
+within configured bounds, the fifth consecutive failure parks the target for an
+operator, and a successful observation resets the count. After cool-off,
+repeated sweeps with an unchanged head, an unchanged unresolved-thread count,
+and no recorded model call park the target at once as `no_model_activity` with
+the operator need `inspect_inactive_session`. The sweep is a shallow daemon loop
+that creates no reusable program primitive, and it does no prioritization or
+scheduling beyond the configured list.
 
 ## Contracts
 
@@ -667,8 +676,8 @@ framing in [process protocol](process-protocol.md).
   [design](../design/repo-watch.md).
 - Shadowing during that cutover as validation only, never delivery owner:
   [design](../design/repo-watch.md).
-- Persisted HTTP validators and per-resource accepted transport snapshots in the
-  cursor, so a restart does not re-fetch every pull request:
+- Persisted HTTP validators and per-resource accepted transport snapshots stored
+  beside the cursor, so a restart does not re-fetch every pull request:
   [design](../design/repo-watch.md).
 - That persisted cache excludes raw provider JSON, credentials, and reactions
   from actors outside the signal-reviewer set:

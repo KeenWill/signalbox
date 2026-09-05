@@ -22,9 +22,13 @@ identities the dispatch transaction already records.
 
 Substrate cutover: each configured rule is replaced by a subscription over the
 repository-watch event vocabulary whose action is a built-in dispatch program.
-Subscription identity, delivery, continuation cursor inheritance, and
-cancellation follow [program substrate](../spec/program-substrate.md). A rule
-may run shadowed beside its subscription while the replacement is validated.
+The cutover commits at one event frontier in one transaction, after every
+old-rule event through that frontier has a terminal evaluation, and transfers
+each occupied singleton batch and cooldown boundary to substrate-owned state, so
+a boundary event is neither omitted nor dispatched twice. Subscription identity,
+delivery, continuation cursor inheritance, and cancellation follow
+[program substrate](../spec/program-substrate.md). A rule may run shadowed
+beside its subscription while the replacement is validated.
 
 Poll-cache persistence: each bounded canonical resource or page key is stored
 with its HTTP validator and a typed, minimal accepted snapshot sufficient to
