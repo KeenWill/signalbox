@@ -4,7 +4,7 @@ The review-workflow context records why review work exists, which repository
 revision it concerns, which session carried each pass, and how findings and
 external code-host objects relate to that evidence.
 
-## Map
+## Overview
 
 The context sits above sessions. Session execution belongs to
 [sessions and the transcript](sessions-and-transcript.md), turn evidence to
@@ -53,7 +53,7 @@ domain validates ownership, state shape, event order, and transitions. A record
 that fails either step is corruption under the rule
 [persistence protocol](persistence-protocol.md) states.
 
-## Decisions
+## Design decisions
 
 Every child record carries its complete ownership reference, so a cross-wired
 target, run, pass, and finding combination cannot be constructed in normal use
@@ -165,7 +165,7 @@ aggregate the loaders can reconstitute.
 How the terminal prints a review mutation's command identity for exact retry
 belongs to [process protocol](process-protocol.md).
 
-## Contracts
+## Boundary contracts
 
 Refreshing a moving change request creates another target snapshot; it never
 rewrites the revision under an existing run.
@@ -245,7 +245,7 @@ contradictory evidence is corruption and never an inferred result.
 The reviewer-verdict and usage-limit evidence rules belong to
 [tool loop](tool-loop.md).
 
-## Not built
+## Planned
 
 - Concrete provider, model, and workspace adapters for the orchestration runner
   ports, with checkout preparation and external-identifier qualification:

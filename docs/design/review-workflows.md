@@ -11,7 +11,7 @@ the application's runner ports; a model runtime returns findings through one
 structured tool call; a blocked repair resumes after its findings are
 reconciled; a completed publication imports the external context it produced.
 
-## Shape
+## Design
 
 Three adapters implement the runner ports the application exposes for
 external-context import, session-backed passes, repair, and reserved
@@ -62,7 +62,7 @@ observation one. A no-change result applies only after that observation exists;
 a resumed pass that finds it recorded binds one. The continuation never infers
 external state from the publication result.
 
-## Constraints on present code
+## Compatibility constraints
 
 Adapter success keeps returning typed evidence that names the exact target,
 policy, run, pass, session, and template inputs, so a concrete adapter fits the
@@ -81,7 +81,7 @@ continuation pass depends on it.
 The external-link attachment stores its identifier as an opaque key and does not
 interpret it.
 
-## Acceptance
+## Acceptance criteria
 
 A start selection against a resolved review library runs import, fan-out,
 judgment, repair, and publication to a complete outcome with no client
