@@ -353,10 +353,11 @@ appears in a log, an error, or a durable record. The daemon redacts the exact
 credential value from provider text before it truncates that text. A credential
 for one repository never authorizes a request to another.
 
-Errors, logs, and diagnostic evidence contain classes, counts, and identifiers
-the daemon generated. They never contain source bytes, file paths, provider
-payloads, SQL, or user content. Retained source content, such as an imported
-transcript entry, is not diagnostic evidence.
+Errors, logs, and diagnostic evidence contain classes, counts, and canonical
+identifiers. They never contain source bytes, host or credential paths, provider
+payloads, SQL, or user content; a tool failure may name a bounded
+workspace-relative path. Retained source content, such as an imported transcript
+entry, is not diagnostic evidence.
 
 `HOME` locates the default PostgreSQL password file and must be a nonempty
 absolute path when a template uses a `$HOME/` prompt reference. The

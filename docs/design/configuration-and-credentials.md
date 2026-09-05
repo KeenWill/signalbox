@@ -284,9 +284,9 @@ generation's effective reset is the latest reset any attached correlation
 reported, and an observation reporting no reset makes the generation indefinite;
 indefinite is absorbing. Only an operator clear, an availability probe that
 costs nothing and calls no model, or another durable availability update ends an
-indefinite generation. An operator clear removes a pending `switch_next_turn`
-displacement or an `avoid_new_sessions` exclusion exactly as it clears a
-quarantine; the request is owned by
+indefinite policy-origin generation. An operator clear removes a pending
+`switch_next_turn` displacement or an `avoid_new_sessions` exclusion exactly as
+it clears a quarantine; the request is owned by
 [process protocol](../spec/process-protocol.md). Each profile carries a durable
 action head, and every transaction that mints, activates, or clears an exclusion
 rereads the current generation under that head's `FOR UPDATE` lock. The first
