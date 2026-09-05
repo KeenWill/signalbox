@@ -37,14 +37,14 @@ attempt names its issuing turn attempt, and a batch parked on an undecided
 approval has no current turn attempt to name.
 
 A request resolved this way is not undecided, so the batch is not parked behind
-it and proposal order continues at the next request. It is resolved for the
-continuation boundary too: it projects one `ToolInadmissible { request }` result
-entry in proposal order, and it satisfies the batch-complete condition that
-creates the continuation turn attempt. A batch whose only proposal is
-inadmissible still prepares its next model call. The projection renders it
-through the same provider-visible error object as any other typed failure; the
-instruction family's two pre-approval reasons select `invalid_arguments` with
-the detail `not_eligible` or JSON null. No new result shape reaches a provider.
+it and proposal order continues at the next request. It is also resolved for the
+continuation boundary: it projects one `ToolInadmissible { request }` result
+entry in proposal order and satisfies the batch-complete condition that creates
+the continuation turn attempt, and a batch whose only proposal is inadmissible
+still prepares its next model call. The projection renders it through the same
+provider-visible error object as any other typed failure, and no new result
+shape reaches a provider; the instruction family's two pre-approval reasons
+select `invalid_arguments` with the detail `not_eligible` or JSON null.
 
 For a successful fresh `instructions_read`, the commit-result transaction also
 locks the session's admitted-set head and atomically appends the

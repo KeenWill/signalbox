@@ -238,18 +238,18 @@ a configured tag, attribute, required-tag, or page-size limit is
 
 Every database-backed read is served from the authoritative tables, with no
 materialized view, cache, or analytical artifact, and takes no row or table lock
-an application mutation waits on. A read whose answer must be coherent across
-statements is one repeatable-read, read-only transaction; a transcript snapshot,
-the conversation list, and the review-orchestration projection each answer from
-one such snapshot. A single-statement read, such as session defaults or a blob
-catalog entry, runs directly on a pooled connection, and the review-findings
-listing takes its run and its findings from separate transactions. A read
-answered from deployment configuration opens no transaction. A transcript
-snapshot observes the outbox cursor, the session's semantic frontier, and every
-turn in acceptance order together. The conversation list orders by conversation
-identity value, a native session before an imported conversation of equal value.
-Every reported duration is clamped nonnegative and sampled against the database
-transaction timestamp, not a client clock.
+an application mutation waits on. A single-statement read, such as session
+defaults or a blob catalog entry, runs directly on a pooled connection, and a
+read answered from deployment configuration opens no transaction. A read whose
+answer must be coherent across statements is one repeatable-read, read-only
+transaction. The transcript snapshot answers from one such snapshot and observes
+the outbox cursor, the session's semantic frontier, and every turn in acceptance
+order together. The conversation list answers from one and orders by
+conversation identity value, a native session before an imported conversation of
+equal value. The review-orchestration projection answers from one, while the
+review-findings listing takes its run and its findings from separate
+transactions. Every reported duration is clamped nonnegative and sampled against
+the database transaction timestamp, not a client clock.
 
 Every read that holds a pooled connection across more than one statement takes
 one snapshot-reader admission; the single-statement defaults read takes none.
@@ -357,8 +357,7 @@ advance the follow connection's observed cursor; only events consumed from the
 subscribed connection do.
 
 The terminal client reads submitted conversation input from standard input,
-never from process arguments. A recorded review finding carries an opaque
-caller-supplied file-path key. When no command identity is given, it generates a
+never from process arguments. When no command identity is given, it generates a
 fresh one and prints it to standard error before any socket I/O; every
 client-generated or server-discovered recovery value is printed before the
 commit it belongs to can become ambiguous, each recovery set is printed all or
@@ -368,7 +367,8 @@ synthesizes a shell command. It renders every C0 control code point, DEL, and
 every C1 code point in process-derived text as a visible escape, preserving a
 line feed only in flowing text and escaping it in a single-line field such as a
 provider delta or a metadata title or tag. A single explicit raw-output option
-is the only opt-in to unescaped text.
+is the only opt-in to unescaped text. A recorded review finding carries an
+opaque caller-supplied file-path key.
 
 ## Planned
 
