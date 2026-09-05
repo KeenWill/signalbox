@@ -1,15 +1,16 @@
-//! PostgreSQL adapter for the core-owned session lifecycle satellite.
+//! PostgreSQL adapter for the core-owned session lifecycle satellite
+//! (docs/spec/session-lifecycle.md).
 //!
 //! The satellite holds the durable session state, its typed detail, the
 //! ownership bit, and the terminal outcome. Two of its three moving parts are
 //! not written here at all, on purpose:
 //!
-//! - The §1 mapping — the states the turn and goal machines derive — is
+//! - The state mapping — the states the turn and goal machines derive — is
 //!   projected by the database from every `turn_lifecycle` and `goal_event`
 //!   write, so a path that moves a turn cannot leave the session state behind
 //!   it, including a path a later change adds.
 //! - The armed deadline is written by the satellite's own trigger from the
-//!   configured bound table, so §1's one-armed-deadline invariant holds by
+//!   configured bound table, so the one-armed-deadline invariant holds by
 //!   construction rather than by every caller remembering to re-arm.
 //!
 //! What this module writes is the part no machine below the session can
@@ -82,10 +83,10 @@ impl Error for SessionLifecycleCorruption {}
 /// Why one lifecycle transition was refused before any row changed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionLifecycleRejection {
-    /// §1's algebra does not admit the transition from the held state.
+    /// The lifecycle algebra does not admit the transition from the held state.
     TransitionNotAdmitted,
     /// `release` on a `parked` session: `parked` is an owned-only state, so
-    /// the park is closed or resumed first (§6).
+    /// the park is closed or resumed first.
     ReleaseWhileParked,
     /// The session already holds the ownership the flip would install.
     OwnershipUnchanged,
@@ -94,7 +95,7 @@ pub enum SessionLifecycleRejection {
     GoalGenerationStillOpen,
     /// The session holds no committed terminal handoff to settle.
     NoPendingTerminal,
-    /// `parked` is an owned-only state (§1), so an unmonitored conversation
+    /// `parked` is an owned-only state, so an unmonitored conversation
     /// cannot be parked: nothing would be watching it afterwards.
     ParkWhileUnmonitored,
     /// A different terminal outcome is already committed to this session's
@@ -105,7 +106,7 @@ pub enum SessionLifecycleRejection {
     GoalOutcomeMismatch,
     /// A failed closure names a cause the park it closes does not hold.
     StandingCauseMismatch,
-    /// `abandoned` is an operator's write-off of a parked session (§2), so no
+    /// `abandoned` is an operator's write-off of a parked session, so no
     /// other classification and no other state records one.
     AbandonRequiresParkedOperator,
     /// The park carries standing evidence its own cause does not name, or an
@@ -249,7 +250,7 @@ impl SessionLifecycleRecord {
         self.pending_terminal_actor
     }
 
-    /// Borrows the finish condition the session declares (§2).
+    /// Borrows the finish condition the session declares.
     pub const fn finish_condition(&self) -> Option<&FinishCondition> {
         self.finish_condition.as_ref()
     }
@@ -310,7 +311,7 @@ impl SessionLifecycleRepository {
     /// phase through the park, so the phase is what says where the session
     /// belongs now.
     ///
-    /// The lift records `operator`: §7 makes leaving a park an operator or
+    /// The lift records `operator`: leaving a park is an operator or
     /// coordinator action, so the classification is fixed rather than supplied.
     /// A blocked goal must instead resume through its goal command so the goal
     /// event and any guidance commit before the park is lifted.
@@ -351,7 +352,7 @@ impl SessionLifecycleRepository {
 
     /// Commits a session to an outcome while its live turn still settles.
     ///
-    /// §2 requires the turn to settle through the committed machinery before
+    /// The turn settles through the committed machinery before
     /// the session records terminal. The handoff is what lets a closure say
     /// what it decided without recording a terminal session over a live turn.
     pub async fn commit_pending_terminal(
@@ -376,7 +377,7 @@ impl SessionLifecycleRepository {
 
     /// Records the outcome a closure committed to, now that the turn settled.
     ///
-    /// The settlement takes no actor: the decision was already made, and §6's
+    /// The settlement takes no actor: the decision was already made, and the
     /// provenance is the deciding actor's. A settlement running in another
     /// worker or after a restart records what was committed, not itself.
     pub async fn settle_pending_terminal(
@@ -793,7 +794,7 @@ async fn release_start_if_held(
     Ok(())
 }
 
-/// Attaching a goal confers ownership (§6): an unmonitored session becomes
+/// Attaching a goal confers ownership: an unmonitored session becomes
 /// owned by whoever attached; an owned one is unchanged.
 pub(crate) async fn confer_ownership_in_transaction(
     connection: &mut PgConnection,
@@ -872,7 +873,7 @@ pub(crate) async fn insert_created(
     journal_ownership(connection, session, transition, actor).await
 }
 
-/// Returns the §6 classification of the agency that created one session.
+/// Returns the actor classification of the agency that created one session.
 ///
 /// The cause is the agency: an interactive creation is the operator's, a
 /// module dispatch is that module's, and a delegated child is the exact tool
@@ -896,7 +897,7 @@ pub(crate) const fn creation_actor(cause: &SessionCreationCause) -> LifecycleAct
 /// Returns the ownership a creation cause establishes.
 ///
 /// A dispatched or delegated session is work the daemon drives to a declared
-/// outcome. An interactive creation is a conversation: §6's unmonitored bit,
+/// outcome. An interactive creation is a conversation: the unmonitored bit,
 /// which is what keeps a person's chat window out of deadlines, auto-resume,
 /// and occupancy accounting.
 pub(crate) const fn creation_ownership(cause: &SessionCreationCause) -> SessionOwnership {
@@ -952,7 +953,7 @@ pub(crate) async fn close_in_transaction(
 }
 
 /// Closes every steering input still pending on the session `not_delivered`
-/// (§8) and settles each one's injection receipt. The handoff closes them
+/// and settles each one's injection receipt. The handoff closes them
 /// too: once a closure is committed no successor turn can exist, so the
 /// turn's settlement reclassifies nothing.
 async fn close_pending_steering(
@@ -1062,7 +1063,7 @@ fn closed_goal_agrees(state: &GoalState, outcome: SessionTerminalOutcome) -> boo
 
 /// Whether the closure is an abandonment its state and actor permit.
 ///
-/// §2 makes `abandoned` the operator's write-off of a parked session, so a
+/// `abandoned` is the operator's write-off of a parked session, so a
 /// session nobody parked is not one anybody wrote off — and the cleanup
 /// obligation it records would name resources no operator ever looked at.
 fn admits_abandonment(
@@ -1796,7 +1797,7 @@ fn decode_failure_cause(
         })
 }
 
-/// Rebuilds one outcome and the exact member §2 gives it.
+/// Rebuilds one outcome and its exact member.
 ///
 /// Outcome and member are decoded together: a stored `failed_structural` whose
 /// cause spelling belongs to the retryable set is corrupt, not a structural
@@ -1876,7 +1877,7 @@ fn cycle_from_stored(cycle: i64) -> Result<u64, SessionLifecycleRepositoryError>
         .map_err(|_| SessionLifecycleCorruption::Inconsistent("blocked cycle").into())
 }
 
-/// Rebuilds the §6 classification and the exact agency behind a core one.
+/// Rebuilds the actor classification and the exact agency behind a core one.
 fn decode_actor(
     kind: String,
     module: Option<String>,

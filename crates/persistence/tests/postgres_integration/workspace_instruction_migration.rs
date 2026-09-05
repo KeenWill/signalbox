@@ -1,9 +1,10 @@
 //! Append-only guarantees of the workspace-instruction evidence tables.
 //!
-//! The one-time backfill this file is named for was proved by staging a
-//! database at the migration before it, which the migration reset
-//! (docs/proposals/migration-reset.md) leaves no way to express; those three
-//! tests went with the chain. What remains never depended on chain history.
+//! The tests cover the truncate guards on every evidence table, the discovery
+//! seal that fixes an exact root, candidate, and finding inventory, canonical
+//! finding paths, completeness paired with terminal limit evidence, candidate
+//! usage within the charged scan totals, and manifests that bind only a
+//! complete discovery under canonical hashes.
 
 use crate::*;
 
