@@ -139,10 +139,11 @@ reinterpreting existing calls.
 Substitution is carried entirely by the reported identity; an alias concretion
 is diagnostics only; a substituted call is `Ambiguous` by restart.
 
-The parked awaiting-recovery phase and the one automatic reconciliation attempt
-are the only present recovery behaviors. The terminal ambiguous call is never
-rewritten, and a later interrupt proof is carried by the reconciliation marker
-and its correlated successor, not by rewriting the ended attempt.
+The parked awaiting-recovery phase and the configured automatic reconciliation
+attempt budget are the only present recovery behaviors. The terminal ambiguous
+call is never rewritten, and a later interrupt proof is carried by the
+reconciliation marker and its correlated successor, not by rewriting the ended
+attempt.
 
 The model operation's system prompt carries only the frozen defaults prompt, and
 no present code concatenates any other source into it.
@@ -169,9 +170,9 @@ pinned policy, or whose adapter or delivery kind differs, fails closed.
 A program-driven turn whose response violates its declared schema fails with a
 typed cause and never commits an unvalidated payload.
 
-An alias concretion leaves a durable provenance row; a substitution ends the
-call `KnownFailed` live; a marker naming the configured target classifies as
-substitution.
+An alias concretion leaving a durable provenance row, a substitution ending the
+call `KnownFailed` live, and a marker naming the configured target classifying
+as substitution become criteria when the open provenance schema decision lands.
 
 A user can accept the duplicate risk on a parked ambiguity, a replacement call
 runs on a new attempt, and the original call stays terminal `Ambiguous`.
