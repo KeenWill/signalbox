@@ -39,34 +39,43 @@ Rendering first applies the compaction projection to the call's exact frontier:
 when summaries exist, the latest summary comes first, every entry after its
 through-boundary follows, and the summary is omitted from its later physical
 position. The projected order becomes provider-neutral messages, and the runtime
-bridge maps those to provider wire messages. Attachments render as the bounded
-textual stubs [blob-storage](blob-storage.md) defines.
+bridge maps those to provider wire messages. The selected summary renders as one
+user-role message, a fixed prior-conversation-summary preface followed by the
+summary text; its provider-neutral message keeps the producing call and the
+summarized range. Attachments render as the bounded textual stubs
+[blob-storage](blob-storage.md) defines.
 
 Context compaction produces its summary through a dedicated physical model call
 with its own durable prepared, in-flight, and terminal lifecycle, separate from
 ordinary calls. A headroom guard runs at two points. Before activating a queued
-turn it may spend one automatic compaction. Inside the tool-result continuation
-transaction an exceeded bound commits the tool results, prepares no continuation
-call, and fails the turn with a headroom record. The guard adds the newest
-reported input for the pinned target, a byte allowance for model-visible content
-that input does not cover, and the configured output reservation, and compares
-the sum with the configured context window. The compaction call's own input
-budget is its context window less the output ceiling and the required prompt;
-when even the first safe prefix cannot fit that budget, no call is prepared and
-one transaction fails the turn as a compaction wall.
+turn it may spend one automatic compaction. When that compaction fails, or the
+request still exceeds the window after it, one transaction fails the queued turn
+with no ordinary call prepared. Inside the tool-result continuation transaction
+an exceeded bound commits the tool results, prepares no continuation call, and
+fails the turn with a headroom record. The guard adds the newest reported input
+for the pinned target, a byte allowance for model-visible content that input
+does not cover, and the configured output reservation, and compares the sum with
+the configured context window. The compaction call's own input budget is its
+context window less the output ceiling and the required prompt; when even the
+first safe prefix cannot fit that budget, no call is prepared and one
+transaction fails the turn as a compaction wall.
 
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
 composed roles: prepare, capability, authorize-send, provider, and
 commit-observation, plus an id generator and a per-attempt dispatch gate. The
 prepare transaction commits the prepared call with its pinned non-secret
-credential reference, the turn-target pin, and a transition outbox event.
-Capability preparation and provider interaction run outside any transaction and
-share one call-scoped cancellation signal that resolves when an authoritative
-reload finds the call cancellation-requested or terminal. The authorize-send
-transaction moves the call to in flight. The commit-observation transaction
-reloads authority and commits the call disposition, the attempt and turn
-transitions, semantic entries, the terminal frontier, and the outbox rows.
+credential reference, the turn-target pin, and a transition outbox event. When
+the frozen selection resolves to no target, that transaction creates no call and
+fails the attempt and turn as target unavailable. Capability preparation and
+provider interaction run outside any transaction and share one call-scoped
+cancellation signal that resolves when an authoritative reload finds the call
+cancellation-requested or terminal, or finds a logical-terminal proof for the
+delegated child turn that owns the call; a retained provider result observed
+after that proof is discarded, not committed. The authorize-send transaction
+moves the call to in flight. The commit-observation transaction reloads
+authority and commits the call disposition, the attempt and turn transitions,
+semantic entries, the terminal frontier, and the outbox rows.
 `FatalExecutionSupervisor` in `apps/signalboxd` wraps execution and stops the
 process when a failure leaves nothing trustworthy to classify live; startup
 recovery in `crates/persistence/src/startup.rs` then classifies every retained
@@ -370,15 +379,18 @@ during preparation is not a stage failure: it carries no ambiguous durable
 effect, returns a nonfatal deferred result, and leaves the scheduler running;
 [blob-storage](blob-storage.md) owns the preparation order and failure classes.
 A later scheduler pass never treats an issued unclassified call as fresh
-authorization. At startup, a durable prepared call proves no send authorization
-existed: recovery leaves the call, attempt, and turn unchanged, and the ordinary
-scheduler later retries preparation of that same unsent call. A durable
-unstopped in-flight call with no surviving evidence ends `Ambiguous`, its
-abandoned attempt ends lost, and the turn parks in the awaiting-recovery phase.
-A durable cancellation-requested call reconstructs its applied interrupt, ends
-the attempt after-cancellation lost, and terminalizes the turn as reconciliation
-required with that call as the ambiguity set. Recovery never itself resumes an
-attempt, redispatches a call, or assumes a request was or was not sent.
+authorization. At startup, a durable prepared ordinary call proves no send
+authorization existed: recovery leaves the call, attempt, and turn unchanged,
+and the ordinary scheduler later retries preparation of that same unsent call. A
+durable unstopped in-flight call with no surviving evidence ends `Ambiguous`,
+its abandoned attempt ends lost, and the turn parks in the awaiting-recovery
+phase. A durable cancellation-requested call reconstructs its applied interrupt,
+ends the attempt after-cancellation lost, and terminalizes the turn as
+reconciliation required with that call as the ambiguity set. A dedicated
+compaction call owns no turn: at startup a prepared one ends `KnownFailed`, an
+in-flight one ends `Ambiguous`, its pending compaction command fails, and no
+summary is written. Recovery never itself resumes an attempt, redispatches a
+call, or assumes a request was or was not sent.
 
 The model-runtime layer imports and redefines no domain identifier type, and a
 runtime-generated identity is never authoritative correlation; the correlation
