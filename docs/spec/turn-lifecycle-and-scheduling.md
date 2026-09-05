@@ -418,12 +418,12 @@ another, and a successor resumes from that boundary.
   runner-loss projection's effect on queued activation and runner execution;
   design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-  \- Recovery-only startup: a runner reconciliation phase between migrations and
+- Recovery-only startup: a runner reconciliation phase between migrations and
   the generic scan; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-  \- The credential-pool availability wait as a distinct active phase, with its
+- The credential-pool availability wait as a distinct active phase, with its
   attempt yield, scheduler wake conditions, and release; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-  \- The instruction-eligibility freeze in the activation transaction and the
+- The instruction-eligibility freeze in the activation transaction and the
   replacement command's lock order; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
