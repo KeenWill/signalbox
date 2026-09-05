@@ -9,13 +9,14 @@ the conventions the pages follow.
 
 ## Homes
 
-A prose claim about the system lives in exactly one of three places.
-`docs/spec/` states built behavior only. `docs/design/` holds one document per
-subsystem with committed but unbuilt design, written for the agent that will
-build it; the document is deleted when its feature lands.
-[open-questions.md](../open-questions.md) holds undecided items. Nothing on a
-spec page describes behavior the code lacks except the lines under Planned. Two
-normative surfaces sit outside those homes:
+A normative claim about a subsystem lives in exactly one of three places;
+[architecture.md](../architecture.md) and [target-model.md](../target-model.md)
+are orientation documents outside that rule. `docs/spec/` states built behavior
+only. `docs/design/` holds one document per subsystem with committed but unbuilt
+design, written for the agent that will build it; the document is deleted when
+its feature lands. [open-questions.md](../open-questions.md) holds undecided
+items. Nothing on a spec page describes behavior the code lacks except the lines
+under Planned. Two normative surfaces sit outside those homes:
 [domain-spine.md](../domain-spine.md) mirrors the public API shapes of the
 domain and application crates, and [invariants.md](../invariants.md) indexes the
 INV-tagged tests.
@@ -36,9 +37,10 @@ contracts, Planned.
 
 Overview says what the subsystem is, its boundary, the shape of its data, its
 major parts, and how they relate. It may name the core type, table, or function
-a reader will look for; it never enumerates types, fields, variants, columns, or
-CLI flags, which live in the code, the migration, and the example TOML. It is
-paragraphs, not lists, unless the content is a real sequence.
+a reader will look for, and a bounded inventory when that inventory is the
+subsystem's data shape; it never otherwise enumerates types, fields, variants,
+columns, or CLI flags, which live in the code, the migration, and the example
+TOML. It is paragraphs, not lists, unless the content is a real sequence.
 
 Design decisions states each rule in one sentence, with its reason in the same
 sentence or in one "Why:" sentence after it. The failure a rule prevents is
@@ -61,13 +63,14 @@ carry no rationale narrative, no metaphor, no hedges, no provenance, no history,
 and no pull-request or branch names. A version number stays when it defines a
 wire or storage contract, and goes when it only records when behavior changed. A
 page says what the system does, not what a reader should do. Code identifiers
-appear only where the map names a core mechanism or a contract names its
-enforcer. A contract also names an identifier that is itself contract data, such
-as a field name, a discriminator, or a preimage. Prose carries no INV tags;
-invariants are tests, and a contract names its enforcer by path. Pages have no
-Open edges section and no paragraph labelled as committed but unimplemented.
-Every link targets a page, never an anchor, unless the anchor is a heading on
-the linking page.
+appear only where the map names a core mechanism, a decision names the thing it
+decides, or a contract names its enforcer. A contract also names an identifier
+that is itself contract data, such as a field name, a discriminator, or a
+preimage. Prose carries no INV tags; invariants are tests, and a contract names
+its enforcer by source path, crate, type, or function. Pages have no Open edges
+section and no paragraph labelled as committed but unimplemented. Every link
+targets a page, never an anchor, unless the anchor is a heading on the linking
+page.
 
 ## Pages
 
