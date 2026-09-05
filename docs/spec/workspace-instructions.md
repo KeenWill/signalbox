@@ -26,11 +26,12 @@ A bundle is one independently addressable instruction source. Discovery
 `crates/application/src/workspace_instructions.rs`) walks every directory under
 two kinds of root: the session's daemon-local resolved workspace, and each
 instruction directory that configuration registers
-([configuration-and-credentials.md](configuration-and-credentials.md)). It skips
-version-control metadata, nested repositories, and build or dependency outputs,
-and it stops at fixed safety limits. One scan produces a discovery snapshot: the
-roots it walked, the candidates it found, a typed finding for every entry it
-could not read or classify, and whether the scan was complete.
+([configuration-and-credentials.md](configuration-and-credentials.md)). Under
+both kinds of root it skips version-control metadata and build or dependency
+outputs; under the workspace root it also skips nested repositories. It stops at
+fixed safety limits. One scan produces a discovery snapshot: the roots it
+walked, the candidates it found, a typed finding for every entry it could not
+read or classify, and whether the scan was complete.
 
 Registration turns each candidate into an `InstructionBundleRegistration`
 (`crates/domain/src/workspace_instruction.rs`). Its identity is a distinct
@@ -41,14 +42,18 @@ to the session. A skill's frontmatter is parsed for its name and description.
 
 The per-turn record is the `TurnInstructionManifest`. Every turn owns one
 turn-start manifest, which names the turn's discovery and carries the hashes of
-the turn's eligibility set and admitted set. The activation transaction
-([turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md)) inserts
-and authenticates that manifest with empty eligibility and admitted sets. It is
-the only manifest the daemon stores. Discovery snapshots, registered bundles,
-and manifests live in the tables that
-`crates/persistence/migrations/202609010007_workspaces.sql` creates;
-`apps/signalboxd/src/workspace_instruction_runtime.rs` runs discovery and
-records the manifest during activation.
+the turn's eligibility set and admitted set, both empty. It is the only manifest
+the daemon stores. Two paths record it
+([turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md)). On the
+ordinary path the daemon scans after activation and records the manifest in a
+transaction of its own while the turn is still active; a turn that stops being
+active first gets no manifest and no model work. The other path prepares the
+turn's initial model call inside the activation transaction; there the daemon
+scans before activation, and the activation transaction records the manifest
+with the activation. Discovery snapshots, registered bundles, and manifests live
+in the tables that `crates/persistence/migrations/202609010007_workspaces.sql`
+creates; `apps/signalboxd/src/workspace_instruction_runtime.rs` runs discovery
+on both paths.
 
 ## Decisions
 
@@ -114,7 +119,7 @@ length-prefixed UTF-8 text, and length-framed variant names. A trigger in the
 migration checks the turn-start manifest's hashes against these preimages.
 
 The turn-start manifest is fixed before the first provider call and
-authenticated whenever that call is prepared or reconstituted. Both activation
+authenticated whenever that call is prepared or reconstituted. Both recording
 paths serialize on the session scheduler lock
 ([persistence-protocol.md](persistence-protocol.md)), and no present command can
 change the empty eligibility or admitted sets.
@@ -125,9 +130,8 @@ instruction projection.
 
 Comparing two manifests does not require the live workspace.
 
-Reconstitution rejects a missing or mismatched manifest, and a bundle identity,
-path, or hash that disagrees with registration, as typed storage corruption
-([persistence-protocol.md](persistence-protocol.md)).
+Reconstitution rejects a missing or mismatched manifest as typed storage
+corruption ([persistence-protocol.md](persistence-protocol.md)).
 
 ## Not built
 
@@ -216,6 +220,9 @@ path, or hash that disagrees with registration, as typed storage corruption
 - Successor manifests: a model-requested admission during a tool round appends
   admission evidence, and the next preparation atomically produces a successor
   manifest while earlier call-boundary manifests stay addressable
+  ([design](../design/workspace-instructions.md)).
+- Bundle reconstitution: a recorded bundle identity, path, or hash that
+  disagrees with registration is typed storage corruption
   ([design](../design/workspace-instructions.md)).
 - Rendered hash: preparation evidence, never delivery evidence; a call that
   fails before provider spawn or send leaves it behind although the model saw

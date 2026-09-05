@@ -150,10 +150,12 @@ call; earlier call-boundary manifests stay addressable. A successor manifest
 records each rendered bundle in projection order with its source hash, rendered
 hash, rendered byte length, admission route, and truncation boundary, and its
 manifest hash covers the admitted-set hash so that two heads with identical
-rendered evidence hash differently. The rendered hash is preparation evidence,
-never delivery evidence: a call that fails before provider spawn or send leaves
-the manifest behind although the model saw nothing, so delivery is read from
-model-call state.
+rendered evidence hash differently. Reconstitution rejects a recorded bundle
+identity, path, or hash that disagrees with registration, or rendered evidence
+over its budget, as typed storage corruption. The rendered hash is preparation
+evidence, never delivery evidence: a call that fails before provider spawn or
+send leaves the manifest behind although the model saw nothing, so delivery is
+read from model-call state.
 
 Whole-bundle unload is reserved. When built, it defines unload authority,
 tombstone visibility, and the admitted-set transition. Only whole bundles leave
