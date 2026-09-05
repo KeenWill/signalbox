@@ -53,8 +53,8 @@ reconciliation of ambiguous operations.
 At startup, before it admits any request, the daemon runs one transaction per
 session with an active turn or a nonterminal standalone compaction call and
 classifies the abandoned tenure from its durable evidence
-(`crates/persistence/src/startup.rs`). The watchdog and the scheduler's
-pass-expiry handoff end turns through that same transition.
+(`crates/persistence/src/startup.rs`). The liveness watchdogs and the
+scheduler's pass-expiry handoff hand turns to that same classification.
 
 An input submitted while a turn holds the slot is rejected, recorded as pending
 steering for the active turn, queued behind it, or applied as an interrupt,
@@ -231,14 +231,18 @@ delays the next scan rather than overlapping it. Terminalizations run one at a
 time and the next scan waits for the last, so a scan ends at most the configured
 window of turns and leaves the remainder. No scan interval leaves the liveness
 task idle until shutdown; no staleness bound leaves automatic reconciliation
-active without stale-turn terminalization. A due turn ends through the same
-committed failed-turn transition startup recovery commits, with the candidate
-predicate re-decided under the scheduler lock. Terminalization emits a
+active without stale-turn terminalization. A due quiescent turn ends through the
+same committed failed-turn transition startup recovery commits, with the
+candidate predicate re-decided under the scheduler lock. Terminalization emits a
 key-bearing operator log line with the cause code
 `turn_liveness_watchdog_stale`, the session, the turn, and the bound in force;
 that code is reserved for a committed terminalization, a candidate left alone
 carries `turn_liveness_candidate_superseded`, and an unacknowledged commit
-carries `turn_liveness_terminalization_ambiguous`.
+carries `turn_liveness_terminalization_ambiguous`. A due slot-held turn is
+instead handed, with its evidence revalidated under the scheduler lock, to the
+startup classification of its current durable shape and takes that
+classification's outcome; a prepared call stays resumable and in-flight work
+ends ambiguous and parks.
 
 If a daemon disappears while a reconciliation attempt is in progress, its
 recorded deadline lets the next daemon classify it as an infrastructure failure.
