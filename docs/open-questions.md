@@ -323,8 +323,9 @@ per-turn provenance. The following extensions remain undecided:
   [the configuration and credentials design](design/configuration-and-credentials.md),
   and no present command or adapter probe clears a quarantine. What remains open
   is whether any adapter can offer a probe that calls no model. Absent one, an
-  operator command is the only clearing path that design admits. Blocks
-  automatic recovery from a rejected credential, not recovery itself. (S22)
+  operator command or another durable availability update are the clearing paths
+  that design admits. Blocks automatic recovery from a rejected credential, not
+  recovery itself. (S22)
 - **Access-token-only Codex CLI conformance evidence.** The committed `oauth`
   delivery contract is owned by
   [credential deliveries](spec/configuration-and-credentials.md#planned). What
