@@ -8,8 +8,8 @@ registration, grants, capability executors, cancellation, and session driving.
 
 A program is registered under a durable identity, runs under an explicit grant
 list, drives sessions and other effects host-side, recovers from a crash without
-a false exactly-once claim, and is cancelled by user authority, while the
-journal stays thin coordination state.
+a false exactly-once claim, and is cancelled by user authority. The journal
+stays thin coordination state.
 
 ## Shape
 

@@ -8,8 +8,7 @@ every nondeterministic act, so a run can be re-executed to the same point.
 Two parts are built: an isolate host in the program-runtime crate and a frame
 journal in the persistence crate. The host, `ProgramHost`, runs one
 already-stripped JavaScript module per execution attempt in a fresh embedded
-`deno_core` isolate, pinned exactly by crate version; no isolate survives
-between attempts. The module's only admitted import is the canonical SDK
+`deno_core` isolate. The module's only admitted import is the canonical SDK
 specifier, which the loader resolves to a host-supplied synthetic module. The
 isolate exposes no filesystem, network, environment, module source, wall clock,
 or unvirtualized randomness. Its only asynchronous operation is the closed
@@ -18,13 +17,13 @@ clock, a randomness draw, a sleep, and an event wait. Each takes exact bytes and
 produces one typed request at the Rust boundary.
 
 The journal is one append-only sequence of frames per program-run identity, held
-by `ProgramJournalRepository`. A frame is a request, what the program asked, or
-a delivery, what the host answered. Requests are journaled in program order and
+by `ProgramJournalRepository`. A frame is a request (what the program asked) or
+a delivery (what the host answered). Requests are journaled in program order and
 deliveries in delivery order, and every row carries one contiguous global
-position, so the interleaving of the two is retained. The request, delivery, and
-fault vocabularies are closed; the domain crate's `RequestKind`, `DeliveryKind`,
-and `FaultCause` and the migration's check constraints fix their members. Only
-the four primitive answerable requests are emitted today. No executor applies
+position, so their interleaving is retained. The request, delivery, and fault
+vocabularies are closed; the domain crate's `RequestKind`, `DeliveryKind`, and
+`FaultCause` and the migration's check constraints fix their members. Only the
+four primitive answerable requests are emitted today. No executor applies
 effects, scope cancellation, terminal admission, capability rejection, or run
 terminalization, and only the nondeterminism fault is produced.
 
@@ -40,7 +39,7 @@ aggregate: no row records a program's registration, grants, or budgets. The
 capability vocabulary is closed and fixed by `ProgramCapability` and the
 migration, and no code grants or exercises a capability. Registration,
 capability executors, event subscriptions, cancellation, and session driving
-have no present code; the Not built section lists the committed items.
+have no present code.
 
 ## Decisions
 
@@ -52,9 +51,9 @@ The typed journal and the database carry every frame discriminator, including
 those nothing produces yet; producing a frame stays with the registration,
 executor, or capability slice that can enforce its transition.
 
-Concurrent outstanding requests are permitted. Recording the delivery order is
-the one discipline that makes promise interleaving identical in live execution
-and replay without restricting the language.
+Concurrent outstanding requests are permitted. Why: recorded delivery order
+alone makes promise interleaving identical in live execution and replay without
+restricting the language.
 
 No checkpointing or journal truncation exists, because a journal that can be
 rewritten is not a journal; the migration's triggers reject deletion, update,
@@ -66,7 +65,7 @@ The canonical SDK specifier is `@signalbox/program-sdk/v<version>`, where the
 version is a positive decimal integer with no leading zero. Frame-contract
 release one admits exactly `@signalbox/program-sdk/v1`. The module loader in the
 program-runtime crate resolves that specifier alone and rejects every other
-import, relative files and the unversioned name included.
+import, including relative files and the unversioned name.
 
 Every nondeterministic act a program performs crosses the typed frame protocol
 and is recorded as an immutable journal row. No capability answers a program
@@ -76,7 +75,7 @@ in `crates/domain/src/program_journal.rs` are the protocol.
 Every request carries a per-run monotone request ordinal, and every delivery
 that resolves a request names that ordinal. Delivery order fixes the
 interleaving and the named ordinal fixes which promise resolves, identically in
-live execution and replay. `DeliveryKind::resolves` carries the name.
+live execution and replay. `DeliveryKind::resolves` carries that ordinal.
 
 Repository watch's durable cursor and event rows are this substrate's event
 source. They stay readable to a matcher outside
