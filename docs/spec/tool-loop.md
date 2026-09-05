@@ -61,12 +61,13 @@ result commit, crash classification, and the continuation checkpoint.
 
 A result entry in the transcript references a durable row rather than carrying
 content: an execution result names the terminal attempt, a denial names the
-request, and `ToolClosed` names a request closed because its turn ended before
-ordinary execution, whether it was still undecided or approved but not yet
-attempted. Once every request in the batch has a resolution, one continuation
-transaction projects the results and prepares the next model call. An approval
-wait is a stored active-turn phase that names the earliest undecided request and
-survives restart.
+request, and `ToolClosed` names a request whose turn ended before it completed
+ordinary execution, whether it was still undecided, approved but not yet
+attempted, or ambiguous when an interrupt or automatic reconciliation
+terminalized the turn. Once every request in the batch has a resolution, one
+continuation transaction projects the results and prepares the next model call.
+An approval wait is a stored active-turn phase that names the earliest undecided
+request and survives restart.
 
 ## Decisions
 
@@ -153,13 +154,15 @@ chain cannot hold the progressing slot indefinitely or exhaust daemon memory.
 
 Pending approval has no timeout.
 
-Only proof-bearing interruption terminalizes a tool recovery wait; resolving
+A tool recovery wait is terminalized only by a proof-bearing interruption or by
+the automatic-reconciliation ledger's claim on that exact ambiguity; resolving
 evidence and accepted-risk continuation are undecided in
 [open questions](../open-questions.md).
 
-After restart the next scheduler pass performs the ordinary next-attempt or
-continuation transaction, never a recovery path that fails the turn or waits for
-process-local wake state.
+After restart, a batch with no persisted in-flight attempt continues through the
+ordinary next-attempt or continuation transaction, never a recovery path that
+fails the turn or waits for process-local wake state; a persisted in-flight
+attempt takes the effect-class crash-loss path.
 
 Foreground waiting on a child through `await_session` is a logical tool
 transition that ends any physical attempt before committing the wait, so restart
@@ -177,10 +180,11 @@ the call.
 
 A tool executor receives checked request content and returns evidence. It writes
 no transcript, request, attempt, approval, turn, placement, grant, or lease
-state. One terminal attempt row holds a tool's output. Result entries reference
-that row; they never copy the output. The tool registry is an input to policy
-and execution; it never determines request content. Approval and dispatch use
-the snapshot frozen when the proposal was made, never a later lookup.
+state directly; a delegation executor persists through its port. One terminal
+attempt row holds a tool's output. Result entries reference that row; they never
+copy the output. The tool registry is an input to policy and execution; it never
+determines request content. Approval and dispatch use the snapshot frozen when
+the proposal was made, never a later lookup.
 
 Contracts owned elsewhere bind here: one recorded attempt per model call in
 [model-call-execution](model-call-execution.md); no transaction across external
@@ -210,10 +214,11 @@ requests execute in proposal order. The next model round does not begin until
 every request has one durable logical resolution: executed, denied, or closed by
 turn end.
 
-A declaration without an explicit posture follows one precedence: the frozen
-approve-all blanket, then the registry default, then fail-closed confirmation
-when no declaration exists. The approval posture is part of the configuration a
-turn binds at origin acceptance
+A declaration without an explicit posture follows one precedence: an
+`AlwaysConfirm` declaration is consulted before any blanket and stays undecided
+under it, then the frozen approve-all blanket, then the registry default, then
+fail-closed confirmation when no declaration exists. The approval posture is
+part of the configuration a turn binds at origin acceptance
 ([sessions-and-transcript](sessions-and-transcript.md)), and steering-derived
 work inherits the frozen value of its source turn. When the provider credential
 boundary suppresses a request's whole argument object, the application records a
@@ -258,11 +263,11 @@ The workspace read, workspace mutation, local Git, and execution families bind
 one workspace root, and that root is per session;
 [configuration-and-credentials](configuration-and-credentials.md) owns its
 derivation. Executors bound to one root are composed once per session and
-retained under a bound, so two concurrent sessions take two independent
-serialization domains. One session holds exactly one such domain at a time, and
-a retained set a request still holds is never released. Every declaration a
-workspace-root-bound family advertises is a property of the family's code, not
-of the repository it binds.
+retained under a bound, so two concurrent sessions bound to distinct derived
+roots take two independent serialization domains. One session holds exactly one
+such domain at a time, and a retained set a request still holds is never
+released. Every declaration a workspace-root-bound family advertises is a
+property of the family's code, not of the repository it binds.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
@@ -323,11 +328,12 @@ after the results, derives the exact prefix-preserving frontier extension, and
 creates the next round's `Prepared` model call against that frontier. These
 effects commit or roll back together. When at least one request entered
 execution, the continuation turn attempt already entered `Running` during
-authorization and owns the new call without moving backward. The number of tool
-rounds one turn may complete is a configured ceiling; after the last admitted
-batch resolves, continuation still projects every result and creates its
-`Prepared` call, and model execution closes that call `KnownFailed` before
-capability preparation or send.
+authorization and owns the new call without moving backward. An optional
+configured ceiling bounds the tool rounds one turn may complete, and a policy of
+none sets no ceiling. After the last batch a ceiling admits resolves,
+continuation still projects every result and creates its `Prepared` call, and
+model execution closes that call `KnownFailed` before capability preparation or
+send.
 
 At most 256 MiB of projected frontier content may be rendered into one call's
 provider messages. The bound counts every kind of content the render clones, not
@@ -355,26 +361,16 @@ every request. Restart never requires the current continuation attempt to
 disappear.
 
 The session-delegation and plan tools take their invoking session, turn, and
-request from trusted dispatch correlation, never from model arguments; no schema
-accepts a session identity. `send_session_message` verifies that the invoker is
-exactly the parent or the child before appending a message, and either side may
-call it while the other is active, idle, stopped, or cancelled. Replaying an
-already delivered wait returns the same mode-specific receipt or outcome. Before
-the application accepts a durable-wait or durable-completion disposition from
-the delegation executor, persistence rereads the parked batch and the ended
-dispatch fence, or authenticates the returned correlation against the ended
-attempt; absent or cross-wired evidence fails closed.
-
-A delegated child's initial task is not accepted user input: the spawn
-transition records a `DelegatedTask` origin bound to the spawning request and
-its parent session and turn, and the child's first turn starts from that entry
-with no accepted-input row or user actor invented. The delivered tool result is
-copied from the child's terminal result record, and the executor never reads or
-returns the child transcript. The child's terminal completion concatenates the
-ordered assistant text entries from its proof-bearing completed call without a
-separator and admits those bytes as the delegation content. Duplicate
-observation is idempotent by spawning request and cannot attach a late result to
-another parent tool call.
+request from trusted dispatch correlation, never from model arguments; a child
+or peer session identity is an ordinary schema argument. `send_session_message`
+verifies that the invoker is exactly the parent or the child before appending a
+message, and either side may call it while the other is active, idle, stopped,
+or cancelled. Replaying an already delivered wait returns the same mode-specific
+receipt or outcome. Before the application accepts a durable-wait or
+durable-completion disposition from the delegation executor, persistence rereads
+the parked batch and the ended dispatch fence, or authenticates the returned
+correlation against the ended attempt; absent or cross-wired evidence fails
+closed.
 
 The provider bridge derives the provider-visible tool-call correlation from
 `ToolRequestId`, so provider-native identifier types and messages never cross
@@ -391,12 +387,13 @@ durable evidence.
 A `web_fetch` request's canonical origin must satisfy the deployment-owned
 web-fetch catalog policy in
 [configuration-and-credentials](configuration-and-credentials.md) before
-dispatch. Failure before request dispatch returns a fixed sanitized known
-failure; timeout, transport, or body loss after dispatch begins is
-commit-ambiguous. For both web tools the shipped human posture supersedes the
-declaration's confirm default and the session blanket, so a request parks before
-it reaches its transport or credential boundary
-([web-egress-threat-model](web-egress-threat-model.md)).
+dispatch, and the transport that carries an admitted request is stated in
+[web-egress-threat-model](web-egress-threat-model.md). Failure before request
+dispatch returns a fixed sanitized known failure; timeout, transport, or body
+loss after dispatch begins is commit-ambiguous. For both web tools the shipped
+human posture supersedes the declaration's confirm default and the session
+blanket, so a request parks before it reaches its transport or credential
+boundary.
 
 The blob tools authorize only digests present in attachment stubs in the
 rendered frontier for the issuing turn. A budget closure or store failure
@@ -411,20 +408,23 @@ Code-host read-only declarations default to automatic approval and the mutations
 to confirmation, so the approval transaction authorizes each mutation before
 credentials resolve. `repository_read_file` requires an exact lowercase 40-hex
 commit revision and never defaults to a branch head. Paths use canonical
-repository-relative spelling with no empty, dot, or parent component, and a bare
-dot is the repository root. A returned node id, head revision, or continuation
+repository-relative spelling with no empty, dot, or parent component; a bare dot
+names the repository root for a file read or directory listing and is rejected
+as a changed-file patch path. A returned node id, head revision, or continuation
 is admitted by the same predicate as its argument counterpart, so it can be
 passed back as an argument. Every returned URL is one absolute credential-free
 HTTPS location. No code-host result has more than 100 collection members or more
 than 512 KiB of encoded JSON. Every bounded review-log list reports whether it
 is truncated together with its continuation cursor, and a verdict never treats a
-partial evidence page as complete. The authenticated job-log endpoint is the
-sole redirect-shaped exchange: after one 302 the adapter validates the location,
-pins a wholly public destination set, and downloads credential-free. A read
-transport or server failure is an executor infrastructure failure, while a
-mutation transport loss, server failure, or malformed acknowledgement is
-commit-ambiguous. The adapter never returns code-host response bodies as error
-detail.
+partial evidence page as complete. The reviewer verdict is parsed from review
+bodies and issue comments merged in code-host timestamp order, and a usage-limit
+response is recognized separately as one exact canonical text. The authenticated
+job-log endpoint is the sole redirect-shaped exchange: after one 302 the adapter
+validates the location, pins a wholly public destination set, and downloads
+credential-free. A read transport or server failure is an executor
+infrastructure failure, while a mutation transport loss, server failure, or
+malformed acknowledgement is commit-ambiguous. The adapter never returns
+code-host response bodies as error detail.
 
 Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round
@@ -440,6 +440,7 @@ trips under the scheduler lock.
   an `InstructionAdmission` and a successor instruction manifest for a
   successful `instructions_read`; see
   [tool-loop design](../design/tool-loop.md).
-- Child creation by `spawn_session`: no present surface creates the child, and
-  the daemon rejects execution until the placement-owned creation transaction
-  exists; see [tool-loop design](../design/tool-loop.md).
+- Child creation by `spawn_session`, the child's `DelegatedTask` origin, and
+  delivery of its terminal result to the parent: no present surface creates the
+  child, and the daemon rejects execution until the placement-owned creation
+  transaction exists; see [tool-loop design](../design/tool-loop.md).

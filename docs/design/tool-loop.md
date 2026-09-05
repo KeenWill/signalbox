@@ -72,11 +72,21 @@ with separately labeled actions for the parent stopping and the parent being
 cancelled. The creation transaction atomically creates one delegated no-ancestry
 child and its initial task work, closes the spawning physical attempt with its
 matching receipt, and returns the child session identity as a durable
-completion. The child's `DelegatedTask` origin and first-turn frontier are as
-the spec page states. Equal physical replay returns that child and reuses the
-same semantic entry and turn origin; a second child cannot attach to the
-request. There is no fixed active-child-count limit; admission checks the
-complete locked relationship inventory for request and child uniqueness.
+completion. The child's initial task is not accepted user input: the spawn
+transition records a `DelegatedTask` origin bound to the spawning request and
+its parent session and turn, and the child's first turn starts from that entry
+with no accepted-input row or user actor invented. Equal physical replay returns
+that child and reuses the same semantic entry and turn origin; a second child
+cannot attach to the request. There is no fixed active-child-count limit;
+admission checks the complete locked relationship inventory for request and
+child uniqueness.
+
+The tool result delivered to the parent is copied from the child's terminal
+result record, and the executor never reads or returns the child transcript. The
+child's terminal completion concatenates the ordered assistant text entries from
+its proof-bearing completed call without a separator and admits those bytes as
+the delegation content. Duplicate observation is idempotent by spawning request
+and cannot attach a late result to another parent tool call.
 
 ## Constraints on present code
 
