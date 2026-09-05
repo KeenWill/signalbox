@@ -19,7 +19,7 @@ use crate::telemetry::TelemetryMetrics;
 /// Why one lifecycle-metric pass exported nothing.
 const PASS_FAILURE_CAUSE: &str = "lifecycle_metric_pass_failed";
 
-/// Periodic exporter for the §12 metrics.
+/// Periodic exporter for the lifecycle metrics.
 pub struct LifecycleMetricsRuntime {
     repository: LifecycleMetricsRepository,
     metrics: Arc<TelemetryMetrics>,

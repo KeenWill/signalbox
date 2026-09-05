@@ -141,6 +141,19 @@ use tokio::{
 };
 use uuid::Uuid;
 
+// numeric-bound: test deadline - starvation allowance for one server response
+// on the local socket, not a latency this suite asserts. Sixteen of these tests
+// share a CI node, each driving its own PostgreSQL container, so a reply the
+// daemon has already written can wait on the scheduler for seconds before this
+// connection is read again; a response that never comes still fails here well
+// inside the job's own cap.
+const RESPONSE_ALLOWANCE: Duration = Duration::from_secs(30);
+// numeric-bound: test deadline - starvation allowance for a scheduler pass or a
+// runtime task to finish work the test has already made eligible, not a
+// throughput this suite asserts. The same node contention applies, and the pass
+// waits on that test's own database container underneath it.
+const RUNTIME_SETTLE_ALLOWANCE: Duration = Duration::from_secs(60);
+
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_process_runtime";
 const DATABASE_USER: &str = "signalbox";
@@ -943,7 +956,7 @@ impl RunningRuntime {
             .runtime_task
             .as_mut()
             .expect("a running runtime has an installed task");
-        timeout(Duration::from_secs(10), runtime_task).await???;
+        timeout(RUNTIME_SETTLE_ALLOWANCE, runtime_task).await???;
         self.runtime_task = None;
         self.restart_after_stop(configuration, template_configuration)
             .await
@@ -1037,7 +1050,7 @@ impl RunningRuntime {
     async fn stop(mut self) -> Result<(), Box<dyn Error>> {
         if let Some(runtime_task) = self.runtime_task.take() {
             self.shutdown.send(true)?;
-            timeout(Duration::from_secs(10), runtime_task).await???;
+            timeout(RUNTIME_SETTLE_ALLOWANCE, runtime_task).await???;
         }
         self.pool.close().await;
         self.socket_directory.cleanup()?;
@@ -1978,7 +1991,7 @@ async fn accepted_successor_model_settings(
 }
 
 async fn response_within(connection: &mut Connection) -> Result<ServerFrame, Box<dyn Error>> {
-    timeout(Duration::from_secs(5), connection.response()).await?
+    timeout(RESPONSE_ALLOWANCE, connection.response()).await?
 }
 
 async fn attach_follower_after_snapshot(
@@ -2338,7 +2351,7 @@ async fn execute_streamed_turn_until(
         }
     };
     assert_eq!(
-        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+        timeout(RUNTIME_SETTLE_ALLOWANCE, scheduler.run_until(shutdown)).await?,
         SchedulerLoopExit::Shutdown
     );
     assert!(!fatal_execution.is_triggered());
@@ -2388,7 +2401,7 @@ async fn execute_recorded_turn(
             () = fatal_shutdown.wait() => {}
         }
     };
-    let scheduler_outcome = timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await;
+    let scheduler_outcome = timeout(RUNTIME_SETTLE_ALLOWANCE, scheduler.run_until(shutdown)).await;
     let Ok(scheduler_exit) = scheduler_outcome else {
         let lifecycle = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT state_kind, active_phase_kind
@@ -2483,7 +2496,7 @@ async fn execute_guarded_turn(
         }
     };
     assert_eq!(
-        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+        timeout(RUNTIME_SETTLE_ALLOWANCE, scheduler.run_until(shutdown)).await?,
         SchedulerLoopExit::Shutdown
     );
     assert!(!fatal_execution.is_triggered());
@@ -2714,8 +2727,8 @@ struct FleetRuntimeTasks {
 impl FleetRuntimeTasks {
     async fn stop(self) -> Result<(), Box<dyn Error>> {
         self.shutdown.send_replace(true);
-        let scheduler_exit = timeout(Duration::from_secs(10), self.scheduler).await??;
-        timeout(Duration::from_secs(10), self.turn_liveness).await??;
+        let scheduler_exit = timeout(RUNTIME_SETTLE_ALLOWANCE, self.scheduler).await??;
+        timeout(RUNTIME_SETTLE_ALLOWANCE, self.turn_liveness).await??;
         if scheduler_exit != SchedulerLoopExit::Shutdown {
             return Err(io::Error::other("fleet scheduler returned a non-shutdown exit").into());
         }
@@ -7446,7 +7459,7 @@ async fn s10_decide_tool_request_final_approval_opens_the_executing_phase()
     runtime.stop().await
 }
 
-/// §8: a decision in flight when the daemon drains is either acknowledged and
+/// A decision in flight when the daemon drains is either acknowledged and
 /// durable or unacknowledged and unclaimed; after the restart the same command
 /// replays to one applied decision with one `delivered` receipt.
 #[tokio::test]
