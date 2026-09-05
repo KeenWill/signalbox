@@ -214,8 +214,9 @@ spec page states.
   alone or beside an expiring exclusion, fails rather than parking: post-failure
   fail at a fresh admission, wait-transition fail (after call) at a release.
 - A contended wait whose bounded candidates all become durably excluded re-runs
-  the exhaustion policy: a `fail` pool terminalizes and a `park` pool converts
-  to exhausted-wait in place.
+  the exhaustion policy: a `fail` pool terminalizes, and a `park` pool converts
+  to exhausted-wait in place only where some member's every active exclusion is
+  one a wake can clear, terminalizing otherwise.
 - A released wait that finds exhaustion terminalizes through a fresh call-free
   attempt; the wait attempt and any predecessor attempt are unchanged.
 - A wake that reruns admission and still selects an exhausted wait rewrites the
