@@ -29,8 +29,11 @@ sees.
 The activation transaction copies the exact ordered eligibility list under the
 session scheduler lock and records its versioned SHA-256 hash in the turn-start
 manifest. The snapshot is immutable for the turn; a replacement affects only
-later activations. A registered bundle absent from the snapshot cannot be
-enumerated, previewed, or admitted.
+later activations. Installed eligibility is revalidated against the live
+configured-root catalog at activation and at startup recovery, and a root the
+configuration no longer declares revokes access to its entries, including for a
+turn retained active across the restart. A registered bundle absent from the
+snapshot cannot be enumerated, previewed, or admitted.
 
 Three tools expose the snapshot to the model. `instructions_list` enumerates the
 snapshot by cursor. `instructions_preview` returns bounded structure for one
@@ -38,9 +41,15 @@ eligible bundle: headings for a document, validated metadata and headings for a
 skill, with the source byte length. `instructions_read` names one eligible
 bundle, requests admission, and returns a typed receipt naming the admission,
 the source hash, the rendered hash, the rendered byte length, and any truncation
-boundary, never the body. List and preview declare the Auto permission default
-and admit nothing. Each tool takes a closed JSON-object argument schema, and no
-schema accepts a session identity.
+boundary, never the body. Preview and read reread the source under the entry's
+authorizing root, compare its length and hash with the registered evidence, and
+reject a mismatch, so no unregistered byte is previewed or admitted. List and
+preview declare the Auto permission default and admit nothing. All three tools
+declare the `EffectFree` effect class: list and preview read only daemon-local
+state, and a read's only durable effect commits with its result, so a daemon
+lost before result commit closes the attempt `KnownFailed`
+([tool-loop.md](../spec/tool-loop.md)). Each tool takes a closed JSON-object
+argument schema, and no schema accepts a session identity.
 
 Nothing is admitted because it is eligible, relevant, near a touched file, or
 named in a template. The only admission route is a model request through
@@ -58,9 +67,12 @@ metadata, sits inside one delimited untrusted-data region under a fixed
 daemon-authored label. The region is carried as the JSON string value of the
 result's `untrusted` member. Members that cannot carry prose, such as identity,
 kind, byte length, hash, and root reference, stay outside it, so a reader can
-address and order a page without parsing untrusted text. The region is four
-LF-separated lines with no leading or trailing byte; the first, second, and
-fourth are literal and identical wherever a region appears:
+address and order a page without parsing untrusted text. The daemon-resolved
+bundle evidence a delegated `instructions_read` decision sends to the approval
+judge is framed the same way, its repository-controlled strings inside this
+region and its prose-free members outside it. The region is four LF-separated
+lines with no leading or trailing byte; the first, second, and fourth are
+literal and identical wherever a region appears:
 
 ```text
 <signalbox_untrusted_repository_data>
@@ -100,7 +112,10 @@ outrank the region.
 
 The region is a fixed preamble, then one wrapper per admitted bundle in
 projection order, with one LF between consecutive parts and no leading or
-trailing byte. The preamble is these exact bytes:
+trailing byte. Projection order is the one canonical order the catalog also
+uses: documents before skills; documents by root, workspace first, then scope
+depth, relative path, and bundle identity; skills by bundle identity; never
+admission order. The preamble is these exact bytes:
 
 ```text
 <signalbox_workspace_instruction_preamble>
