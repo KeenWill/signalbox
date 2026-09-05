@@ -1533,12 +1533,10 @@ cannot; this contract says which for every delivery, and there is no third case.
   refused as undelivered, so no account identity is ever stored, no provisioning
   commit ever runs, and no two members are ever compared.
 
-Two exceptions, and only these two. `quarantine` excludes a member from every
-pool rather than from the one that observed it, so an authorization that turns
-out to be shared is removed everywhere at once instead of surviving under
-another pool's name. The operations policy applies to `codex_home` from the
-Codex CLI's typed terminal classification; the daemon does not inspect the home
-to invent a second signal.
+`quarantine` excludes a member from every pool rather than from the one that
+observed it, so an authorization that turns out to be shared is removed
+everywhere at once instead of surviving under another pool's name. CLI rendered
+failure prose is opaque and does not produce a credential-rejection trigger.
 
 Why this is stated as one property with a per-delivery disposition rather than
 as a list of rejected spellings: a list of rejections can only ever be as long
@@ -2134,17 +2132,10 @@ performed the exchange, and bypasses pool trigger policy: it quarantines the
 profile unconditionally as specified above.
 
 A `codex_home` refresh race is deliberately not given that bypass. The Codex CLI
-reports one undifferentiated authentication failure — the adapter classifies
-from rendered message text and collapses refresh-token phrases, `unauthorized`,
-and invalid keys into the same `CredentialRejected` kind — so nothing can tell a
-lost refresh race from an ordinary rejection of an issued request. Every
-`codex_home` credential rejection therefore follows one policy, the pool's
-configured `on_credential_rejected`, and a deployment that wants a refresh race
-to quarantine configures `quarantine` there. Splitting the branch on evidence
-the adapter cannot produce would force an implementation to either quarantine
-ordinary rejections against `stay` or miss the race entirely. A future typed
-refresh-failure variant from that adapter would let the delivery-layer bypass
-apply here too.
+reports only rendered authentication prose, which remains opaque and does not
+produce `CredentialRejected`. The pool's `on_credential_rejected` action
+therefore does not react to that prose. A future typed refresh-failure variant
+from that adapter would let the delivery-layer bypass apply here too.
 
 `switch_now` is further admitted only where the pool's adapter can supply the
 typed non-acceptance proof for that exact trigger's cause. Every pool's members
@@ -2171,15 +2162,11 @@ and `on_overloaded` for an `anthropic` pool, and `on_rate_limited` and
 `on_quota_exhausted` for an `openai` pool. `on_quota_exhausted` under
 `anthropic` and `on_overloaded` under `openai` are typed startup failures
 because those adapters' mappings carry no native token for those causes and can
-reach them only by status-derived fallback, which carries no proof. Claude Code
-exposes no machine-readable terminal envelope, so `switch_now` on a `claude_cli`
-pool is rejected for all three triggers. Codex is different: rendered failure
-text supplies the narrower cause, but the JSONL `turn.failed` lifecycle envelope
-independently proves the request ended without a successful stream. The Codex
-adapter therefore admits all three availability triggers and never authorizes a
-successor from a malformed, incomplete, or contradictory event stream. Why
-reject an unprovable pair rather than accept and ignore it: a configured
-`switch_now` that can never fire reads as failover the deployment does not have.
+reach them only by status-derived fallback, which carries no proof. The CLI
+adapters expose no machine-readable availability cause, so `switch_now` on a
+`claude_cli` or `codex_cli` pool is rejected for all three triggers. Why reject
+an unprovable pair rather than accept and ignore it: a configured `switch_now`
+that can never fire reads as failover the deployment does not have.
 
 #### Pool-based preparation
 

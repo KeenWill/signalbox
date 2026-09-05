@@ -193,22 +193,22 @@ strings appear only as retained detail inside already-classified variants:
   into the shared `ProviderErrorKind` vocabulary (credential rejected,
   permission denied, invalid request, target not found, request too large, rate
   limited, quota exhausted, overloaded, provider internal, unrecognized; the
-  kind lives in the core crate, and each adapter owns an exhaustive mapping into
-  it) plus retained `NativeErrorFacts` that classification never reads. Retained
-  native message text is credential-redacted, not verbatim: Anthropic and OpenAI
-  retain each complete adapter-bounded fallback body until the
-  evidence-redaction boundary, sanitize literal and JSON-escaped representations
-  with the exact prepared credential, and only then truncate native messages at
-  2048 bytes with the `… [truncated]` suffix. Why: truncating inside an escape
-  can make valid JSON unparseable and hide a reversible credential
-  representation from format-aware redaction; audit evidence must be bounded and
-  secret-free before it leaves the adapter. Quota exhaustion is distinct from
-  rate limiting. Why: a billing condition must never be treated as retry-later
-  backoff. HTTP adapters decode both `Retry-After` delay-seconds and HTTP-date
-  forms; Codex decodes its bounded seconds/minutes retry phrase. The resulting
-  duration is typed exchange evidence, never retained prose. Rate-limit and
-  overload successors use it as a minimum beneath a five-minute cap; quota
-  successors remain immediate.
+  kind lives in the core crate, and each HTTP adapter owns an exhaustive mapping
+  into it) plus retained `NativeErrorFacts` that classification never reads.
+  Codex CLI rendered failures remain `unrecognized` because their prose is
+  opaque. Retained native message text is credential-redacted, not verbatim:
+  Anthropic and OpenAI retain each complete adapter-bounded fallback body until
+  the evidence-redaction boundary, sanitize literal and JSON-escaped
+  representations with the exact prepared credential, and only then truncate
+  native messages at 2048 bytes with the `… [truncated]` suffix. Why: truncating
+  inside an escape can make valid JSON unparseable and hide a reversible
+  credential representation from format-aware redaction; audit evidence must be
+  bounded and secret-free before it leaves the adapter. Quota exhaustion is
+  distinct from rate limiting. Why: a billing condition must never be treated as
+  retry-later backoff. HTTP adapters decode both `Retry-After` delay-seconds and
+  HTTP-date forms. The resulting duration is typed exchange evidence, never
+  retained prose. Rate-limit and overload successors use it as a minimum beneath
+  a five-minute cap; quota successors remain immediate.
 - `CancellationConfirmed`: a definitive provider cancellation response. No
   in-repository adapter constructs one; the variant keeps the vocabulary total
   so observing one never forces a misclassification.
@@ -275,9 +275,7 @@ another provider call happens. A proof is admitted only when the adapter decoded
 its own documented error envelope and the decoded native token names one of the
 three causes in that adapter's exhaustive mapping — `rate_limit_error` or
 `overloaded_error` for Anthropic, and `rate_limit_exceeded`, `rate_limit_error`,
-or `insufficient_quota` for OpenAI. Codex additionally admits a classified
-availability cause only when its JSONL lifecycle reaches the exact,
-noncontradictory `turn.failed` closure. Every status-derived fallback carries no
+or `insufficient_quota` for OpenAI. Every status-derived fallback carries no
 proof: a response whose body is absent, undecodable, or names a token the
 mapping does not cover keeps its status-classified kind and stays an ordinary
 terminal known failure. A native token that contradicts its status carries none
@@ -294,19 +292,14 @@ content, reported usage, or a finish token is already observed. Non-acceptance
 is precisely what such an exchange disproves, so attaching the proof there would
 authorize a second paid call for work the provider already did. An availability
 failure that arrives mid-stream therefore terminalizes the turn as any other
-known failure does, with no successor. The two CLI adapters differ here. The
-Claude Code CLI cannot supply the proof at all: it classifies from the rendered
-failure message by substring, which is exactly the native prose this contract
-already refuses as a derivation, and it surfaces no structured native code its
-mapping could name. Admitting one under it would need that CLI to expose a
-stable machine-readable discriminator first. The Codex CLI classifies from that
-same rendered prose, but its JSONL lifecycle carries the machine-readable
-closure this contract demands, so it does supply the proof — under the exact,
-noncontradictory `turn.failed` closure stated above and never from the prose
-alone. A trailer that contradicts the recorded stream error fails closed and
-carries nothing. An under-decoded rejection loses a substitution the deployment
-had configured, which costs one turn; a status-only or prose-derived inference
-that the provider did not act would authorize a second paid call on evidence the
+known failure does, with no successor. The CLI adapters cannot supply the proof
+at all: they retain rendered failure messages as opaque native evidence and
+expose no structured availability cause. The Codex JSONL lifecycle can close a
+request as `turn.failed`, but it does not identify an availability cause. A
+trailer that contradicts the recorded stream error fails closed and carries
+nothing. An under-decoded rejection loses a substitution the deployment had
+configured, which costs one turn; a status-only or prose-derived inference that
+the provider did not act would authorize a second paid call on evidence the
 provider never gave.
 
 A success-status response whose body is not valid completion material is
@@ -823,14 +816,13 @@ projection as `BoundaryLoss(StreamProtocolViolation)`. Known item lifecycle
 events must carry a nonempty item identity and type even when the adapter does
 not otherwise interpret them. Known events with invalid shapes, non-UTF-8 or
 undecodable JSONL, nonzero or signal process exits, and `turn.failed` fail
-closed as provider error evidence; the rendered CLI message classifier gives
-credential rejection first precedence and maps only explicit native phrases,
-with all other material `Unrecognized`. The CLI reports a failed exchange as a
-stream-level `error` event followed by its `turn.failed` lifecycle echo; the
-decoder accepts exactly that one trailer and keeps the stream-level message as
-the typed provider error, while any other post-terminal event — including one
-contradicting the recorded failure — remains a fail-closed protocol violation.
-Exit zero without `turn.completed` is
+closed as provider error evidence. Rendered CLI failure messages remain opaque,
+so their kind is `Unrecognized` and they carry no parsed retry duration. The CLI
+reports a failed exchange as a stream-level `error` event followed by its
+`turn.failed` lifecycle echo; the decoder accepts exactly that one trailer and
+keeps the stream-level message as the typed provider error, while any other
+post-terminal event — including one contradicting the recorded failure — remains
+a fail-closed protocol violation. Exit zero without `turn.completed` is
 `BoundaryLoss(StreamEndedWithoutTerminalMarker)`, never completion.
 
 `turn.completed` is success evidence only when the last completed agent-message

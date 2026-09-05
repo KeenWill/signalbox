@@ -198,11 +198,9 @@ impl ModelAdapter {
     /// (`docs/spec/runtime-substrate.md`); a status-derived fallback carries
     /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
     /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
-    /// `insufficient_quota` but reaches overload only by status. Codex
-    /// classifies the narrower cause from rendered failure prose only after its
-    /// machine-readable JSONL lifecycle closes the request as `turn.failed`;
-    /// that envelope proves non-acceptance. Claude Code exposes no equivalent
-    /// proof. Listing every pair
+    /// `insufficient_quota` but reaches overload only by status. The CLI
+    /// adapters retain rendered failures as opaque native evidence and expose
+    /// no machine-readable availability cause. Listing every pair
     /// rather than matching on a group makes a later adapter state its own
     /// answer.
     pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
@@ -215,8 +213,7 @@ impl ModelAdapter {
                 true
             }
             (Self::OpenAi, AvailabilityCause::Overloaded) => false,
-            (Self::CodexCli, _) => true,
-            (Self::ClaudeCli, _) => false,
+            (Self::ClaudeCli | Self::CodexCli, _) => false,
         }
     }
 
@@ -7752,14 +7749,16 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
     }
 
     #[test]
-    fn configuration_admits_switch_now_for_a_codex_terminal_failure() {
+    fn configuration_rejects_switch_now_for_an_opaque_codex_failure() {
         let substituting = CONFIGURATION.replace(
             CODEX_POOL,
             &format!("{CODEX_POOL}\non_rate_limited = \"switch_now\""),
         );
 
-        HubModelConfiguration::parse(&substituting)
-            .expect("Codex turn.failed proves that a successor cannot duplicate acceptance");
+        assert!(matches!(
+            HubModelConfiguration::parse(&substituting),
+            Err(HubModelConfigurationError::UnprovableSubstitutionPolicy { .. })
+        ));
     }
 
     #[test]

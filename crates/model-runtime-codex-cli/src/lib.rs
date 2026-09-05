@@ -16,7 +16,6 @@ mod event;
 #[cfg(test)]
 mod redaction;
 mod runtime;
-mod status;
 mod translate;
 mod wire;
 
