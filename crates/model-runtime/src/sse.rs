@@ -115,13 +115,9 @@ impl SseFraming {
                 error: Some(error.clone()),
             };
         }
-        let (valid_bytes, utf8_error) = self.validated_utf8_prefix(chunk);
         let mut records = Vec::new();
-        if let Err(error) = self.accept_lines(&valid_bytes, &mut records) {
+        if let Err(error) = self.accept_utf8(chunk, &mut records) {
             self.failed = Some(error);
-        }
-        if self.failed.is_none() {
-            self.failed = utf8_error;
         }
         SsePushOutcome {
             records,
@@ -179,24 +175,44 @@ impl SseFraming {
         Ok(())
     }
 
-    fn validated_utf8_prefix(&mut self, chunk: &[u8]) -> (Vec<u8>, Option<SseFramingError>) {
-        let mut bytes = std::mem::take(&mut self.utf8_tail);
-        bytes.extend_from_slice(chunk);
-        match std::str::from_utf8(&bytes) {
-            Ok(_) => (bytes, None),
+    fn accept_utf8(
+        &mut self,
+        mut chunk: &[u8],
+        records: &mut Vec<SseRecord>,
+    ) -> Result<(), SseFramingError> {
+        // Only a split scalar is copied before line admission. Complete input
+        // stays borrowed so a large transport chunk cannot bypass the bounds.
+        while !self.utf8_tail.is_empty() {
+            let Some((byte, remaining)) = chunk.split_first() else {
+                return Ok(());
+            };
+            chunk = remaining;
+            self.utf8_tail.push(*byte);
+            match std::str::from_utf8(&self.utf8_tail) {
+                Ok(_) => {
+                    let completed = std::mem::take(&mut self.utf8_tail);
+                    self.accept_lines(&completed, records)?;
+                }
+                Err(error) if error.error_len().is_some() => {
+                    return Err(SseFramingError::InvalidUtf8 {
+                        detail: error.to_string(),
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+        match std::str::from_utf8(chunk) {
+            Ok(_) => self.accept_lines(chunk, records),
             Err(error) => {
                 let valid_up_to = error.valid_up_to();
-                let suffix = bytes.split_off(valid_up_to);
+                self.accept_lines(&chunk[..valid_up_to], records)?;
                 if error.error_len().is_none() {
-                    self.utf8_tail = suffix;
-                    (bytes, None)
+                    self.utf8_tail.extend_from_slice(&chunk[valid_up_to..]);
+                    Ok(())
                 } else {
-                    (
-                        bytes,
-                        Some(SseFramingError::InvalidUtf8 {
-                            detail: error.to_string(),
-                        }),
-                    )
+                    Err(SseFramingError::InvalidUtf8 {
+                        detail: error.to_string(),
+                    })
                 }
             }
         }
@@ -468,6 +484,51 @@ mod tests {
             }],
         );
         assert_eq!(framing.finish(), SseTermination::Clean);
+    }
+
+    #[test]
+    fn a_four_byte_scalar_can_span_four_chunks() {
+        let mut framing = SseFraming::new(32);
+        assert_eq!(framing.push(b"data: \xf0").error, None);
+        assert_eq!(framing.push(b"\x9f").error, None);
+        assert_eq!(framing.push(b"\x98").error, None);
+        assert_eq!(
+            framing.push(b"\x80\n\n").records,
+            vec![SseRecord {
+                event: None,
+                data: String::from("😀")
+            }],
+        );
+        assert_eq!(framing.finish(), SseTermination::Clean);
+    }
+
+    #[test]
+    fn invalid_split_utf8_preserves_preceding_records() {
+        let mut framing = SseFraming::new(32);
+        let first = framing.push(b"data: kept\n\ndata: \xe2");
+        assert_eq!(
+            first.records,
+            vec![SseRecord {
+                event: None,
+                data: String::from("kept")
+            }]
+        );
+        assert_eq!(first.error, None);
+        assert!(matches!(
+            framing.push(b"x").error,
+            Some(SseFramingError::InvalidUtf8 { .. })
+        ));
+    }
+
+    #[test]
+    fn a_large_chunk_hits_the_line_limit_before_later_invalid_utf8() {
+        let mut framing = SseFraming::new(8);
+        let mut chunk = vec![b'x'; 1024 * 1024];
+        chunk.push(0xff);
+        assert_eq!(
+            framing.push(&chunk).error,
+            Some(SseFramingError::RecordTooLarge { limit: 8 }),
+        );
     }
 
     #[test]
