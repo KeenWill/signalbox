@@ -5,15 +5,18 @@
 //! handles and the wider core outbox vocabulary do not cross this boundary.
 
 pub use signalbox_domain::{
-    ContextFrontierId, CreateSession, DeliveryRequest, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, FinishCondition, FinishConditionStatement,
-    GoalGuidance, GoalStatement, GoalUserAction, GoalUserCommand, LifecycleActor, ModelCallId,
-    ModelSelectionOverride, ModelSelectionRequest, ModuleDispatch, PerInputConfigurationChoices,
-    RepoWatchDispatchId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionFailureCause, SessionId, SessionLifecycleCommand, SessionLifecycleOperation,
-    SessionLifecycleState, SessionOwnership, SessionOwnershipTransition, SessionTerminalOutcome,
-    StartGate, StopStickiness, SubmitInput, ToolAttemptId, TurnId, UserContent, UserContentPart,
+    ContextFrontierId, CoreAgency, CreateSession, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DispatchingModule, DurableCommandId, FinishCondition,
+    FinishConditionStatement, GoalBlockedReasonKind, GoalGuidance, GoalStatement, GoalUserAction,
+    GoalUserCommand, LifecycleActor, ModelCallId, ModelSelectionOverride, ModelSelectionRequest,
+    ModuleDispatch, PerInputConfigurationChoices, RepoWatchDispatchId, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionFailureCause, SessionId, SessionLifecycleCommand,
+    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionOwnershipTransition,
+    SessionParkCause, SessionParkResponder, SessionRecoveryOperation, SessionRetirementCause,
+    SessionRetryableCause, SessionStructuralCause, SessionTerminalOutcome, SessionWait, StartGate,
+    StopStickiness, SubmitInput, ToolAttemptId, ToolRequestId, TurnId, UserContent,
+    UserContentPart,
 };
 pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{
