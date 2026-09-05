@@ -25,12 +25,14 @@ layer resolves at input acceptance, under the turn-binding rule on
 [sessions-and-transcript.md](sessions-and-transcript.md).
 
 A model's capability record lists the reasoning levels and service tiers it
-supports, and how it supports fast mode. An operation needs the exact record for
-its target only when it sets an explicit reasoning level, enables fast mode, or
-sets a service tier; a provider-default-only operation needs none. Fast mode is
-either a request control on the selected target or a declared alternate serving
-target. A model change carries the inherited settings to the new model, adjusts
-those the new model does not support, and records each adjustment.
+supports, and how it supports fast mode. Input acceptance needs the exact record
+for its target whenever the per-call overlay has a member other than inherit,
+including clear, or the model changed; an all-inherit overlay on an unchanged
+model needs none. Fast mode is unsupported, a request control on the selected
+target, or a declared alternate serving target; a model that declares no
+fast-mode support is unsupported. A model change carries the inherited settings
+to the new model, adjusts those the new model does not support, and records each
+adjustment.
 
 Two durable events record settings outcomes: `SessionModelSettingsChanged` when
 a defaults replacement changes a setting or model, and
