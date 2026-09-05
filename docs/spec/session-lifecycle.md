@@ -51,9 +51,9 @@ or the watchdog) classified from the domain actor that
 
 The command surface creates a session, releases its start gate, submits input,
 attaches, resumes, or stops a goal, adopts, and releases; a release also settles
-a held start gate, so the session becomes dispatched with its queued work
-admitted. Five further commands close a session or lift a park: a session-level
-stop closes any non-terminal session, supersede closes it in favour of a named
+a held start gate, so a session that already has queued work becomes dispatched.
+Five further commands close a session or lift a park: a session-level stop
+closes any non-terminal session, supersede closes it in favour of a named
 successor, abandon and close as failed close a parked session, and resume
 returns a parked session to its mapped state. A parked session with a blocked
 goal resumes through the goal's resume-with-guidance command; one with a
