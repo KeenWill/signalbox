@@ -1700,11 +1700,6 @@ impl<'de> Deserialize<'de> for ConversationImportSource {
                 let decoded = STANDARD_BASE64.decode(encoded.as_bytes()).map_err(|_| {
                     serde::de::Error::custom("import source is not canonical base64")
                 })?;
-                if STANDARD_BASE64.encode(&decoded) != encoded {
-                    return Err(serde::de::Error::custom(
-                        "import source is not canonical base64",
-                    ));
-                }
                 Ok(ConversationImportSource(decoded))
             }
         }
