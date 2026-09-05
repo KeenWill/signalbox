@@ -17,8 +17,8 @@ See [sessions and transcript](spec/sessions-and-transcript.md).
 One user submission made durable with its explicit delivery request and
 recoverable disposition before acknowledgement. Delivery, disposition, and
 reclassification semantics are owned by
-[occupied-slot input handling](spec/turn-lifecycle-and-scheduling.md#occupied-slot-input-handling);
-content and transcript representation by
+[occupied-slot input handling](spec/turn-lifecycle-and-scheduling.md); content
+and transcript representation by
 [sessions and transcript](spec/sessions-and-transcript.md).
 
 ## UserContent
@@ -42,13 +42,13 @@ command or recorded transition. See
 
 One durable logical request for Signalbox to produce a conversational outcome
 from one typed origin under one frozen effective configuration. See
-[turn states and the active slot](spec/turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
+[turn states and the active slot](spec/turn-lifecycle-and-scheduling.md).
 
 ## Turn attempt
 
 One exclusive physical orchestration tenure that advances an active running turn
 until it ends or yields to a durable wait. See
-[turn attempts](spec/turn-lifecycle-and-scheduling.md#turn-attempts).
+[turn attempts](spec/turn-lifecycle-and-scheduling.md).
 
 ## Model call
 
@@ -103,14 +103,14 @@ session's semantic transcript history, referenced by transcript ancestry. See
 
 The explicit instruction for handling user input relative to authoritative
 session state: start, interrupt, next safe point, or after current turn. See
-[occupied-slot input handling](spec/turn-lifecycle-and-scheduling.md#occupied-slot-input-handling).
+[occupied-slot input handling](spec/turn-lifecycle-and-scheduling.md).
 
 ## Applied interrupt proof
 
 A causal value constructible only from the committed applied result of
 `SubmitInput::Interrupt` for one exact predecessor turn, the sole baseline
 authority for turn cancellation. See
-[turn states and the active slot](spec/turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
+[turn states and the active slot](spec/turn-lifecycle-and-scheduling.md).
 
 ## Runner
 
@@ -164,7 +164,7 @@ effect occurred. See
 
 The immutable payload of `TurnDisposition::ReconciliationRequired`, naming the
 exact still-unacknowledged ambiguous operations and one typed stop reason. See
-[turn states and the active slot](spec/turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
+[turn states and the active slot](spec/turn-lifecycle-and-scheduling.md).
 
 ## Semantic transcript entry
 
@@ -175,25 +175,25 @@ One immutable identified semantic-history fact owned by a source session. See
 
 A session-owned immutable snapshot resolving to the exact ordered-distinct
 semantic-entry references consumed by one model call or fixed at turn start. See
-[context frontier snapshots](spec/turn-lifecycle-and-scheduling.md#context-frontier-snapshots).
+[context frontier snapshots](spec/turn-lifecycle-and-scheduling.md).
 
 ## Queue order
 
 The durable total ordering of accepted-input-origin work derived from immutable
 acceptance positions and typed priority relations. See
-[eligibility derivation](spec/turn-lifecycle-and-scheduling.md#eligibility-derivation).
+[eligibility derivation](spec/turn-lifecycle-and-scheduling.md).
 
 ## Starting lineage
 
 The immutable first-in-session or exact immediate-predecessor relation fixed for
 an accepted-input-origin turn when it becomes eligible. See
-[eligibility derivation](spec/turn-lifecycle-and-scheduling.md#eligibility-derivation).
+[eligibility derivation](spec/turn-lifecycle-and-scheduling.md).
 
 ## Session acceptance tail
 
 The completeness witness carried by an evidence-bearing active-turn
 reconstitution: one gap-free session-scoped interval of accepted inputs. See
-[evidence-bearing reconstitution](spec/turn-lifecycle-and-scheduling.md#evidence-bearing-reconstitution).
+[evidence-bearing reconstitution](spec/turn-lifecycle-and-scheduling.md).
 
 ## Session configuration defaults
 
