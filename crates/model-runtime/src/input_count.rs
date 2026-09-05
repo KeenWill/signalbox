@@ -1,21 +1,26 @@
-//! Exact provider-native rendered-input token counting.
+//! Provider-native rendered-input token estimation.
 
 use std::future::Future;
 
 use crate::{CancellationSignal, ModelOperation};
 
-/// Provider-adapter outcome for one exact input-count request.
+/// Provider-adapter outcome for one input-count estimate request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InputTokenCountOutcome<C> {
-    /// The provider counted the exact translated input.
+    /// The provider estimated the translated input.
     Counted {
         /// Caller-owned operation correlation.
         correlation: C,
-        /// Exact provider-reported rendered-input count.
+        /// Provider-reported rendered-input estimate.
         input_tokens: u64,
     },
     /// Caller cancellation won before a complete count was available.
     Cancelled {
+        /// Caller-owned operation correlation.
+        correlation: C,
+    },
+    /// The selected adapter has no provider-native estimate operation.
+    Unavailable {
         /// Caller-owned operation correlation.
         correlation: C,
     },
@@ -27,7 +32,7 @@ pub enum InputTokenCountOutcome<C> {
     },
 }
 
-/// Provider adapter capable of counting the exact native rendering of one
+/// Provider adapter capable of estimating the native rendering of one
 /// prospective operation without issuing a model-generation request.
 pub trait ModelInputTokenCounter<C> {
     /// Performs at most one provider-native count interaction.

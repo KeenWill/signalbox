@@ -1,14 +1,18 @@
 //! Pre-provider verification of rendered attachment authority.
 
-use std::{collections::BTreeSet, future::Future, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    future::Future,
+    sync::Arc,
+};
 
 use sha2::{Digest as _, Sha256};
 use signalbox_application::{
-    AttachmentPreparationFailure, ModelCallCapabilityPreparation, ModelCallProvider,
-    PreparedModelOperation,
+    AttachmentPreparationFailure, ModelCallCapabilityPreparation, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, ModelCallProvider, PreparedModelOperation,
 };
 use signalbox_blob_store::{BlobStoreFailureKind, ExpectedBlob};
-use signalbox_domain::{BlobDigest, PreparedModelCallRequest};
+use signalbox_domain::{BlobDigest, PreparedModelCallRequest, ResolvedProviderTarget};
 use signalbox_persistence::blob::{
     BlobCatalogEntry, BlobCatalogRepository, BlobCatalogRepositoryError,
 };
@@ -26,6 +30,7 @@ pub struct AttachmentPreparingModelCallProvider<Provider> {
     inner: Provider,
     catalog: BlobCatalogRepository,
     registry: Option<Arc<BlobStoreRegistry>>,
+    count_targets: Option<Arc<HashSet<ResolvedProviderTarget>>>,
 }
 
 impl<Provider> AttachmentPreparingModelCallProvider<Provider> {
@@ -35,6 +40,23 @@ impl<Provider> AttachmentPreparingModelCallProvider<Provider> {
             inner,
             catalog: BlobCatalogRepository::new(pool),
             registry,
+            count_targets: None,
+        }
+    }
+
+    /// Restricts attachment verification before prospective counting to the
+    /// targets whose adapters can perform that provider interaction.
+    pub fn for_counting(
+        inner: Provider,
+        pool: PgPool,
+        registry: Option<Arc<BlobStoreRegistry>>,
+        count_targets: HashSet<ResolvedProviderTarget>,
+    ) -> Self {
+        Self {
+            inner,
+            catalog: BlobCatalogRepository::new(pool),
+            registry,
+            count_targets: Some(Arc::new(count_targets)),
         }
     }
 }
@@ -97,6 +119,69 @@ where
         self.inner
             .invoke(authorized, capability, acceptance_possible, cancellation)
             .await
+    }
+}
+
+impl<Provider> ModelCallInputTokenCounter for AttachmentPreparingModelCallProvider<Provider>
+where
+    Provider: ModelCallInputTokenCounter + Sync,
+{
+    type Error = Provider::Error;
+
+    async fn count_input_tokens<Cancellation>(
+        &self,
+        operation: PreparedModelOperation,
+        cancellation: Cancellation,
+    ) -> Result<ModelCallInputTokenCount, Self::Error>
+    where
+        Cancellation: Future<Output = ()> + Send + 'static,
+    {
+        if self
+            .count_targets
+            .as_ref()
+            .is_some_and(|targets| !targets.contains(&operation.request().call().target()))
+        {
+            return self.inner.count_input_tokens(operation, cancellation).await;
+        }
+        let digests = operation.attachment_digests().collect::<BTreeSet<_>>();
+        if digests.is_empty() {
+            return self.inner.count_input_tokens(operation, cancellation).await;
+        }
+
+        let mut cancellation = Box::pin(cancellation);
+        let prepared = {
+            let preparation = prepare_attachments(
+                &self.catalog,
+                self.registry.as_deref(),
+                operation.request(),
+                digests,
+            );
+            tokio::pin!(preparation);
+            tokio::select! {
+                biased;
+                () = &mut cancellation => {
+                    return Ok(ModelCallInputTokenCount::Cancelled);
+                }
+                prepared = &mut preparation => prepared,
+            }
+        };
+        if let Err(failure) = prepared {
+            return Ok(attachment_count_failure(failure));
+        }
+        self.inner.count_input_tokens(operation, cancellation).await
+    }
+}
+
+fn attachment_count_failure(failure: AttachmentPreparationFailure) -> ModelCallInputTokenCount {
+    match failure {
+        AttachmentPreparationFailure::Unavailable => {
+            ModelCallInputTokenCount::AttachmentUnavailable
+        }
+        AttachmentPreparationFailure::TooLarge { .. }
+        | AttachmentPreparationFailure::Missing
+        | AttachmentPreparationFailure::Corrupt => {
+            ModelCallInputTokenCount::AttachmentFailure(failure)
+        }
     }
 }
 
@@ -241,7 +326,21 @@ mod tests {
     use signalbox_blob_store::ExpectedBlob;
     use signalbox_domain::BlobDigest;
 
-    use super::{StreamVerificationFailure, verify_stream};
+    use signalbox_application::{AttachmentPreparationFailure, ModelCallInputTokenCount};
+
+    use super::{StreamVerificationFailure, attachment_count_failure, verify_stream};
+
+    #[test]
+    fn attachment_count_failures_preserve_transient_and_definitive_classes() {
+        assert_eq!(
+            attachment_count_failure(AttachmentPreparationFailure::Unavailable),
+            ModelCallInputTokenCount::AttachmentUnavailable
+        );
+        assert_eq!(
+            attachment_count_failure(AttachmentPreparationFailure::Missing),
+            ModelCallInputTokenCount::AttachmentFailure(AttachmentPreparationFailure::Missing)
+        );
+    }
 
     fn expected(bytes: &[u8]) -> ExpectedBlob {
         ExpectedBlob::new(

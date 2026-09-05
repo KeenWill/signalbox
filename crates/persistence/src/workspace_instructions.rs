@@ -59,7 +59,7 @@ impl WorkspaceInstructionPlacementObservation {
 }
 
 /// One complete queued-turn snapshot prepared for the activation transaction.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct CountedActivationInstructionEvidence<'a> {
     discovery: InstructionDiscoveryId,
     manifest: &'a TurnInstructionManifest,

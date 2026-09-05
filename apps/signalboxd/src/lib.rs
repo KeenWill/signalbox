@@ -1123,7 +1123,7 @@ impl ExpiredPassRecoveryPolicy {
 }
 
 #[derive(Clone, Debug)]
-struct SchedulerPassOccupancyRecovery {
+pub(crate) struct SchedulerPassOccupancyRecovery {
     pool: sqlx::PgPool,
     eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
     execution_expiry: Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>>,
@@ -1191,6 +1191,27 @@ impl Drop for SchedulerPassCompactionGuard {
 }
 
 impl SchedulerPassOccupancyRecovery {
+    pub(crate) fn new<Execution>(
+        pool: sqlx::PgPool,
+        eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
+        execution: &Execution,
+        policy: ExpiredPassRecoveryPolicy,
+        persistence_bounds: TurnLivenessPersistenceBounds,
+    ) -> Self
+    where
+        Execution: ActivatedTurnExecution,
+    {
+        Self {
+            pool,
+            eligibility_nudge,
+            execution_expiry: execution.occupancy_expiry_handler(),
+            active_turns: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            compacting_sessions: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            policy,
+            persistence_bounds,
+        }
+    }
+
     fn active_turn(&self, session: SessionId) -> Option<TurnId> {
         self.active_turns
             .lock()
@@ -1199,7 +1220,7 @@ impl SchedulerPassOccupancyRecovery {
             .copied()
     }
 
-    fn resume_turn_observer(
+    pub(crate) fn resume_turn_observer(
         &self,
         session: SessionId,
     ) -> (
@@ -1234,7 +1255,7 @@ impl SchedulerPassOccupancyRecovery {
     /// nothing — it is simply found absent. Until the observer fires no
     /// identity is in play, so an expiry inside the read-only preflight
     /// correctly hands over no recovery at all.
-    fn compaction_window(
+    pub(crate) fn compaction_window(
         &self,
         session: SessionId,
     ) -> (
@@ -1367,15 +1388,13 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
     where
         Execution: ActivatedTurnExecution,
     {
-        self.occupancy_recovery = Some(SchedulerPassOccupancyRecovery {
+        self.occupancy_recovery = Some(SchedulerPassOccupancyRecovery::new(
             pool,
             eligibility_nudge,
-            execution_expiry: self.execution.occupancy_expiry_handler(),
-            active_turns: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            compacting_sessions: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            &self.execution,
             policy,
             persistence_bounds,
-        });
+        ));
         self
     }
 

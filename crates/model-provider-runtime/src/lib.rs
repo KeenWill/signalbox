@@ -1011,13 +1011,11 @@ pub enum RuntimeInputTokenCountError {
     InvalidToolSchema,
     /// The runtime returned a different caller-owned correlation.
     CorrelationMismatch,
-    /// The provider-native count request did not return a validated count.
-    CountFailed,
 }
 
 impl fmt::Display for RuntimeInputTokenCountError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("exact model input token counting failed")
+        formatter.write_str("model input token estimation failed")
     }
 }
 
@@ -1026,9 +1024,6 @@ impl Error for RuntimeInputTokenCountError {}
 impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
-            Self::CountFailed => OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false,
-            },
             Self::UnconfiguredTarget | Self::InvalidToolSchema | Self::CorrelationMismatch => {
                 OperatorFailureClass::CallerOrHubBug
             }
@@ -1040,7 +1035,6 @@ impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
             Self::UnconfiguredTarget => "model_input_count_unconfigured_target",
             Self::InvalidToolSchema => "model_input_count_invalid_tool_schema",
             Self::CorrelationMismatch => "model_input_count_correlation_mismatch",
-            Self::CountFailed => "model_input_count_provider_failure",
         }
     }
 }
@@ -1147,26 +1141,38 @@ where
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
-        match self
-            .runtime
-            .count_input_tokens(runtime_operation, CancellationSignal::when(cancellation))
-            .await
-        {
-            signalbox_model_runtime::InputTokenCountOutcome::Counted {
-                correlation: returned,
-                input_tokens,
-            } if returned == correlation => Ok(ModelCallInputTokenCount::Counted(input_tokens)),
-            signalbox_model_runtime::InputTokenCountOutcome::Cancelled {
-                correlation: returned,
-            } if returned == correlation => Ok(ModelCallInputTokenCount::Cancelled),
-            signalbox_model_runtime::InputTokenCountOutcome::Failed {
-                correlation: returned,
-            } if returned == correlation => Err(RuntimeInputTokenCountError::CountFailed),
-            signalbox_model_runtime::InputTokenCountOutcome::Counted { .. }
-            | signalbox_model_runtime::InputTokenCountOutcome::Cancelled { .. }
-            | signalbox_model_runtime::InputTokenCountOutcome::Failed { .. } => {
-                Err(RuntimeInputTokenCountError::CorrelationMismatch)
-            }
+        classify_runtime_input_count(
+            self.runtime
+                .count_input_tokens(runtime_operation, CancellationSignal::when(cancellation))
+                .await,
+            correlation,
+        )
+    }
+}
+
+fn classify_runtime_input_count(
+    outcome: signalbox_model_runtime::InputTokenCountOutcome<ModelCallId>,
+    correlation: ModelCallId,
+) -> Result<ModelCallInputTokenCount, RuntimeInputTokenCountError> {
+    match outcome {
+        signalbox_model_runtime::InputTokenCountOutcome::Counted {
+            correlation: returned,
+            input_tokens,
+        } if returned == correlation => Ok(ModelCallInputTokenCount::Counted(input_tokens)),
+        signalbox_model_runtime::InputTokenCountOutcome::Cancelled {
+            correlation: returned,
+        } if returned == correlation => Ok(ModelCallInputTokenCount::Cancelled),
+        signalbox_model_runtime::InputTokenCountOutcome::Unavailable {
+            correlation: returned,
+        } if returned == correlation => Ok(ModelCallInputTokenCount::Unavailable),
+        signalbox_model_runtime::InputTokenCountOutcome::Failed {
+            correlation: returned,
+        } if returned == correlation => Ok(ModelCallInputTokenCount::Unavailable),
+        signalbox_model_runtime::InputTokenCountOutcome::Counted { .. }
+        | signalbox_model_runtime::InputTokenCountOutcome::Cancelled { .. }
+        | signalbox_model_runtime::InputTokenCountOutcome::Unavailable { .. }
+        | signalbox_model_runtime::InputTokenCountOutcome::Failed { .. } => {
+            Err(RuntimeInputTokenCountError::CorrelationMismatch)
         }
     }
 }
@@ -3543,9 +3549,18 @@ mod tests {
             RuntimeInputTokenCountError::CorrelationMismatch.operator_failure_cause_code(),
             "model_input_count_correlation_mismatch"
         );
+    }
+
+    #[test]
+    fn failed_input_estimate_falls_through_to_durable_call_path() {
         assert_eq!(
-            RuntimeInputTokenCountError::CountFailed.operator_failure_cause_code(),
-            "model_input_count_provider_failure"
+            super::classify_runtime_input_count(
+                signalbox_model_runtime::InputTokenCountOutcome::Failed {
+                    correlation: call(),
+                },
+                call(),
+            ),
+            Ok(signalbox_application::ModelCallInputTokenCount::Unavailable)
         );
     }
 

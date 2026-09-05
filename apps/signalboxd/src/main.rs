@@ -24,9 +24,8 @@ use signalbox_application::{
     ClassifyOperatorFailure, EligibilityNudge, GoalAwareEligibilityPass,
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
     ModelCallCredentialReference, OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop,
-    SchedulerLoopExit, SchedulerPassOccupancyBound, StaleActiveTurnBound, StartEligibleTurnService,
-    StartupScanService, TurnLivenessScanInterval, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator,
+    SchedulerLoopExit, SchedulerPassOccupancyBound, StaleActiveTurnBound, StartupScanService,
+    TurnLivenessScanInterval, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -61,9 +60,9 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ActivatedTurnPass, AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs,
-    BlobStoreRegistry, BlobTools, CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds,
-    ConfiguredApprovalPostureError, ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
+    AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs, BlobStoreRegistry, BlobTools,
+    CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds, ConfiguredApprovalPostureError,
+    ContextGuardedTurnPass, ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
     DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
     ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
     FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
@@ -2422,6 +2421,12 @@ async fn run_hub(
     let web_http_runtime = web_http_listener.into_runtime(process_runtime.monitor());
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
+    let counter = AttachmentPreparingModelCallProvider::for_counting(
+        provider.clone(),
+        scheduler_pool.clone(),
+        blob_store_registry.clone(),
+        model_configuration.provider_input_count_targets(),
+    );
     let model_repository = PostgresModelCallRepository::new(
         scheduler_pool.clone(),
         model_targets,
@@ -2441,20 +2446,20 @@ async fn run_hub(
         StartEligibleTurnRepository::new(scheduler_pool.clone()),
         model_repository.clone(),
         tool_catalog.clone(),
-        runtime_models,
+        runtime_models.clone(),
         model_configuration.clone(),
         Arc::clone(&context_compaction_model),
     );
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
-            model_repository,
+            model_repository.clone(),
             InProcessAttemptDispatchGate::default(),
             provider,
             automatic_tool_round_limit,
         )
-        .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
-        .with_workspace_instructions(workspace_instruction_runtime)
+        .with_tool_loop(tool_dispatch_gate, tool_catalog.clone(), tool_executor)
+        .with_workspace_instructions(workspace_instruction_runtime.clone())
         .with_approval_judge(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),
@@ -2466,14 +2471,18 @@ async fn run_hub(
     // fatal recovery signal through this handle rather than ending an
     // undecidable durable outcome at the client response.
     let process_runtime = process_runtime.with_recovery_reporter(execution.recovery_reporter());
-    let activated_pass = ActivatedTurnPass::new(
-        StartEligibleTurnService::new(
-            UuidV7StartEligibleTurnIdGenerator,
-            StartEligibleTurnRepository::new(scheduler_pool.clone()),
-        ),
+    let activated_pass = ContextGuardedTurnPass::new(
+        StartEligibleTurnRepository::new(scheduler_pool.clone()),
+        model_repository,
+        counter,
+        tool_catalog,
+        runtime_models,
+        model_configuration.clone(),
+        Arc::clone(&context_compaction_model),
         execution,
     )
     .with_reported_usage_compaction(reported_usage_compaction)
+    .with_workspace_instructions(workspace_instruction_runtime)
     .with_occupancy_recovery(
         scheduler_pool.clone(),
         eligibility_nudge.clone(),
