@@ -7,10 +7,10 @@ This design is not built; it extends
 
 Close the gaps the identity and command subsystem has committed to: registry
 kinds for the runner recovery commands, production generators for three identity
-types that have storage but no writer, the two reserved storage versions that
-carry runner placement, and actor attribution on every command family that
-records a caller's intent, including a program arm so a program-driven turn is
-never recorded as user-issued.
+types that have storage but no writer, and the two reserved storage versions
+that carry runner placement. Actor attribution extends to every command family
+that records a caller's intent, including a program arm, so a program-driven
+turn is never recorded as user-issued.
 
 ## Shape
 
@@ -48,7 +48,7 @@ requires of every generator.
 Imported-creation storage version 4 and create-session storage version 5 carry
 an optional runner placement in the command payload. The placement is a
 caller-supplied semantic field, so it participates in replay equality in both
-creation modes, including template-derived creation, and a replay carrying a
+creation modes, including template-derived creation. A replay carrying a
 different placement, or a placement where the first handling had none, is
 conflicting reuse. Each version's decoder accepts the payload and the supported
 version set for its kind becomes contiguous.

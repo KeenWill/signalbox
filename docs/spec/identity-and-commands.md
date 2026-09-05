@@ -8,22 +8,20 @@ without granting that record any authority.
 
 Signalbox names each durable thing with a UUID-backed identity type and each
 caller command with one durable command identifier. This page owns the identity
-types, the command registry, the actor field that records a command's initiating
-agency, and the rule for what operational telemetry may carry. Transaction
-mechanics, locking, and reconstitution belong to
+types, the command registry, the actor field that records who issued a command,
+and the rule for what operational telemetry may carry. Transaction mechanics,
+locking, and reconstitution belong to
 [persistence-protocol](persistence-protocol.md); what each command does belongs
 to the page for its subsystem.
 
 Identities come from three sources. The caller supplies exactly one, the
 `DurableCommandId` that every application request constructor accepts as its
-idempotency key. The daemon mints the identity of every durable fact it records:
-sessions, imported conversations and their entries, accepted inputs, turns and
-turn attempts, transcript entries and frontiers, model calls, tool requests and
-tool attempts. Configuration reference keys are the third source: a direct model
-selection or a model alias arrives inside a command payload and names an
-operator-configured selection. `ProviderModelIdentity` is a normalized
-provider-and-model value the operator configures; it is stored on turn and
-model-call rows and is neither minted nor a command key.
+idempotency key. The daemon mints the identity of every durable fact it records.
+Configuration reference keys are the third source: a direct model selection or a
+model alias arrives inside a command payload and names an operator-configured
+selection. `ProviderModelIdentity` is a normalized provider-and-model value the
+operator configures. It is stored on turn and model-call rows and is neither
+minted nor a command key.
 
 The identity types are built by the `define_identity!` macro in `crates/domain`.
 Generation is an application-layer effect: `crates/domain` depends on `uuid`
@@ -37,7 +35,7 @@ kind has one typed record family keyed one-to-one by command identifier, which
 holds the caller-supplied fields under check constraints and foreign keys. The
 canonical command payload is the typed domain value constructed at the boundary,
 not a serialization, and construction ordinarily precedes registry lookup.
-Reading the registry yields three distinct error families: storage corruption,
+Reading the registry yields three error families: storage corruption,
 infrastructure failure, and recorded domain rejection;
 `crates/persistence/src/command_registry.rs` defines the corruption family.
 
@@ -61,12 +59,12 @@ the effect.
 
 When the number of identities a transition needs is known only under the
 repository lock, orchestration passes a generator closure into the transaction
-port, so the domain transition receives a typed identity while the domain stays
-generation-free and deterministic and no inventory read precedes the lock.
+port. Why: the domain transition receives a typed identity, the domain stays
+generation-free and deterministic, and no inventory read precedes the lock.
 
 Each command's comparison payload and result live in typed relational records,
 so they stay reviewable and constraint-checked; there is no universal JSONB or
-byte-blob payload anywhere.
+byte-blob payload.
 
 A caller retries a failed command by retransmitting under the same identifier.
 Why: a failed transaction claims nothing, so the retry replays or claims
@@ -122,8 +120,8 @@ kind, session, or client has a separate namespace. The registry and every typed
 record table are append-only, enforced by `reject_immutable_record_change`
 triggers, so a claimed identifier's recorded meaning is never rewritten.
 
-The issuer principal on a registry row, its kind and for a module the module
-name, is stamped by the boundary that admitted the command.
+The boundary that admitted a command stamps the issuer principal on its registry
+row: the principal's kind and, for a module, the module name.
 
 Every command payload type implements structural equality by hand, covering
 every caller-supplied semantic field and excluding the command identifier. Why:
