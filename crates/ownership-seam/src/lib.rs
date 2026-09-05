@@ -4,20 +4,18 @@
 //! only the checked command families admitted by [`SessionCommand`]. Database
 //! handles and the wider core outbox vocabulary do not cross this boundary.
 
-use std::future::Future;
-
-pub use signalbox_application::{CreateSessionOutcome, SubmitInputOutcome};
 pub use signalbox_domain::{
     BranchName, CommitSha, ContextFrontierId, CreateSession, DeliveryRequest,
     DescendantTerminationScope, DirectModelSelection, DurableCommandId, FinishCondition,
-    GoalGuidance, GoalStatement, GoalUserAction, GoalUserCommand, LifecycleActor, ModelCallId,
-    ModelSelectionOverride, ModelSelectionRequest, ModuleDispatch, PerInputConfigurationChoices,
-    PullRequestBody, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
-    RepoWatchDispatchId, RepositorySlug, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionFailureCause, SessionId, SessionLifecycleCommand, SessionLifecycleOperation,
-    SessionLifecycleState, SessionOwnership, SessionOwnershipTransition, SessionTerminalOutcome,
-    StartGate, StopStickiness, SubmitInput, ToolAttemptId, TurnId, UserContent, UserContentPart,
+    FinishConditionStatement, GoalGuidance, GoalStatement, GoalUserAction, GoalUserCommand,
+    LifecycleActor, ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModuleDispatch,
+    PerInputConfigurationChoices, PullRequestBody, PullRequestNumber, PullRequestTitle,
+    RepoWatchAuthorLogin, RepoWatchDispatchId, RepositorySlug, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionFailureCause, SessionId, SessionLifecycleCommand,
+    SessionLifecycleOperation, SessionLifecycleState, SessionOwnership, SessionOwnershipTransition,
+    SessionTerminalOutcome, StartGate, StopStickiness, SubmitInput, ToolAttemptId, TurnId,
+    UserContent, UserContentPart,
 };
 pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{
@@ -25,10 +23,6 @@ use signalbox_persistence::outbox::{
     DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
     DispatchedSessionStateKind, DispatchedTurnTerminalDisposition, OutboxConsumer,
     OutboxConsumerReader,
-};
-pub use signalbox_persistence::{
-    goal::GoalCommandHandlingOutcome,
-    session_lifecycle_command::SessionLifecycleCommandHandlingOutcome,
 };
 use sqlx::PgPool;
 pub use sqlx::types::time::OffsetDateTime;
@@ -499,19 +493,6 @@ impl SessionCommand {
     }
 }
 
-/// Exact recorded result returned by the existing core command surface.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SessionCommandOutcome {
-    /// Result of create-session handling.
-    CreateSession(CreateSessionOutcome),
-    /// Result of ordinary input handling.
-    SubmitInput(SubmitInputOutcome),
-    /// Result of goal-command handling.
-    Goal(GoalCommandHandlingOutcome),
-    /// Result of lifecycle-command handling.
-    Lifecycle(SessionLifecycleCommandHandlingOutcome),
-}
-
 /// A typed core command that the ownership seam does not expose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandOutsideSeam;
@@ -524,24 +505,11 @@ impl std::fmt::Display for CommandOutsideSeam {
 
 impl std::error::Error for CommandOutsideSeam {}
 
-/// Existing command handling supplied by daemon core to a compiled-in module.
-pub trait SessionCommandSink {
-    /// Infrastructure failure returned by core command admission.
-    type Error;
-
-    /// Submits one checked command under the module's authenticated principal
-    /// and returns its exact durable result.
-    fn submit(
-        &self,
-        command: SessionCommand,
-    ) -> impl Future<Output = Result<SessionCommandOutcome, Self::Error>> + Send;
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateSession, SessionCommand, SessionLifecycleCommand, SessionLifecycleOperation,
-        SubmitInput,
+        CreateSession, FinishCondition, FinishConditionStatement, SessionCommand,
+        SessionLifecycleCommand, SessionLifecycleOperation, SubmitInput,
     };
     use signalbox_domain::{
         DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
@@ -582,6 +550,14 @@ mod tests {
 
     #[test]
     fn closed_lifecycle_commands_admit_sticky_stop_but_not_supersede() {
+        let statement = FinishConditionStatement::try_new(String::from("merge when green"))
+            .expect("fixture finish condition is admitted");
+        assert!(
+            SessionCommand::lifecycle(lifecycle(SessionLifecycleOperation::Adopt {
+                finish_condition: Some(FinishCondition::Declared(statement)),
+            }))
+            .is_ok()
+        );
         assert!(
             SessionCommand::lifecycle(lifecycle(SessionLifecycleOperation::Stop {
                 sticky: StopStickiness::Sticky,
