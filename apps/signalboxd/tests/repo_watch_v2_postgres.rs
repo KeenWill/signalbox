@@ -377,10 +377,37 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         panic!("matching dispatch action must produce create_session");
     };
     assert_eq!(created.start_gate(), StartGate::Held);
-    assert_eq!(
+    let retained_dispatch = plans[0].dispatch();
+    let retained_command_ids = plans
+        .iter()
+        .map(|planned| planned.command().command_id())
+        .collect::<Vec<_>>();
+    assert!(matches!(
         store.record_commands(plans, observed_at).await?,
         DispatchAdmission::Inserted
-    );
+    ));
+    let lifecycle_command_id = Uuid::from_u128(81);
+    sqlx::query(
+        "INSERT INTO dispatch_ledger
+            (dispatch_ref, action_ordinal, command_id, repository, rule_id,
+             rule_revision, event_id, trigger_sequence, command_kind, status, issued_at)
+         SELECT dispatch_ref, 1, $2, repository, rule_id, rule_revision, event_id,
+                42, 'lifecycle', 'pending', $3
+           FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(retained_command_ids[0].into_uuid())
+    .bind(lifecycle_command_id)
+    .bind(observed_at)
+    .execute(&module_pool)
+    .await?;
+    let retained_reaction: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dispatch_ledger
+          WHERE dispatch_ref = $1 AND trigger_sequence = 42",
+    )
+    .bind(retained_dispatch.into_uuid())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(retained_reaction, 1);
     assert_eq!(
         store
             .record_rule(&repository, &second_rule, observed_at)
@@ -398,12 +425,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         &mut colliding_ids,
         &mut colliding_factory,
     )?;
-    assert_eq!(
+    assert!(matches!(
         store
             .record_commands(&colliding_batches[0], observed_at)
             .await?,
         DispatchAdmission::ConflictingReuse
-    );
+    ));
     let mut replay_ids = FixedDispatchIds {
         value: 30,
         calls: 0,
@@ -417,13 +444,29 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     )?;
     assert_eq!(replay_batches.len(), 1);
     let replay_plans = &replay_batches[0];
+    let DispatchAdmission::Replayed {
+        commands: recovered,
+    } = store.record_commands(replay_plans, observed_at).await?
+    else {
+        panic!("equal replay must return its retained command batch");
+    };
+    assert_eq!(recovered.len(), retained_command_ids.len());
+    assert!(
+        recovered
+            .iter()
+            .all(|planned| planned.dispatch() == retained_dispatch)
+    );
     assert_eq!(
-        store.record_commands(replay_plans, observed_at).await?,
-        DispatchAdmission::Replayed
+        recovered
+            .iter()
+            .map(|planned| planned.command().command_id())
+            .collect::<Vec<_>>(),
+        retained_command_ids
     );
     let retained_commands: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM dispatch_ledger
-          WHERE repository = $1 AND rule_id = $2 AND event_id = $3",
+          WHERE repository = $1 AND rule_id = $2 AND event_id = $3
+            AND trigger_sequence IS NULL",
     )
     .bind(repository.as_str())
     .bind(rule.id().as_str())
@@ -436,10 +479,50 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .deactivate_rule(&repository, rule.id().as_str(), observed_at)
             .await?
     );
+    let DispatchAdmission::Replayed {
+        commands: recovered,
+    } = store.record_commands(replay_plans, observed_at).await?
+    else {
+        panic!("retained commands remain recoverable after deactivation");
+    };
     assert_eq!(
-        store.record_commands(replay_plans, observed_at).await?,
-        DispatchAdmission::Replayed
+        recovered
+            .iter()
+            .map(|planned| planned.command().command_id())
+            .collect::<Vec<_>>(),
+        retained_command_ids
     );
+    let created_session = Uuid::from_u128(82);
+    sqlx::query(
+        "UPDATE dispatch_ledger
+            SET status = 'applied', settled_at = $2, created_session_id = $3
+          WHERE command_id = $1",
+    )
+    .bind(retained_command_ids[0].into_uuid())
+    .bind(observed_at + Duration::from_secs(1))
+    .bind(created_session)
+    .execute(&module_pool)
+    .await?;
+    let linked_session: Uuid =
+        sqlx::query_scalar("SELECT created_session_id FROM dispatch_ledger WHERE command_id = $1")
+            .bind(retained_command_ids[0].into_uuid())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(linked_session, created_session);
+    let invalid_lifecycle_link = sqlx::query(
+        "UPDATE dispatch_ledger
+            SET status = 'applied', settled_at = $2, created_session_id = $3
+          WHERE command_id = $1",
+    )
+    .bind(lifecycle_command_id)
+    .bind(observed_at + Duration::from_secs(1))
+    .bind(created_session)
+    .execute(&module_pool)
+    .await;
+    assert!(matches!(
+        invalid_lifecycle_link,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23514")
+    ));
     let payload: Vec<u8> =
         sqlx::query_scalar("SELECT normalized_payload FROM gh_event WHERE event_id = $1")
             .bind(event.id().into_uuid())
