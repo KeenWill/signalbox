@@ -1412,6 +1412,8 @@ pub enum ModelCallInputTokenCount {
     Counted(u64),
     /// Authority or caller cancellation won before a count completed.
     Cancelled,
+    /// The selected adapter has no exact provider-native count operation.
+    Unavailable,
 }
 
 /// Provider adapter boundary for exact prospective input counting.

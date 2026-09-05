@@ -31,8 +31,27 @@ use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
 use crate::status::{classify_error_status, classify_error_with_proof};
 use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
-use crate::translate::build_request_with_fast_mode;
+use crate::translate::{build_request_with_fast_mode, server_compaction_supported};
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
+
+const CONTEXT_MANAGEMENT_BETAS: &str = "context-management-2025-06-27,compact-2026-01-12";
+const CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS: &str =
+    "context-management-2025-06-27,compact-2026-01-12,fast-mode-2026-02-01";
+const CONTEXT_EDITING_BETA: &str = "context-management-2025-06-27";
+const CONTEXT_EDITING_AND_FAST_MODE_BETAS: &str =
+    "context-management-2025-06-27,fast-mode-2026-02-01";
+
+const fn anthropic_beta_header(
+    request_fast_mode: FastMode,
+    server_compaction: bool,
+) -> &'static str {
+    match (server_compaction, request_fast_mode) {
+        (true, FastMode::Enabled) => CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS,
+        (true, FastMode::Disabled) => CONTEXT_MANAGEMENT_BETAS,
+        (false, FastMode::Enabled) => CONTEXT_EDITING_AND_FAST_MODE_BETAS,
+        (false, FastMode::Disabled) => CONTEXT_EDITING_BETA,
+    }
+}
 
 /// The Anthropic Messages adapter.
 ///
@@ -367,22 +386,19 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             };
         };
         let delivery = operation.delivery;
+        let server_compaction = server_compaction_supported(operation.resolved_target.as_str());
         let stop_sequences = operation.settings.stop_sequences.clone();
-        let mut builder = self
+        let builder = self
             .client
             .post(self.messages_url.clone())
             .header("x-api-key", api_key_header)
             .header("anthropic-version", self.version_header.clone())
+            .header(
+                "anthropic-beta",
+                anthropic_beta_header(request_fast_mode, server_compaction),
+            )
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        builder = builder.header(
-            "anthropic-beta",
-            if request_fast_mode == FastMode::Enabled {
-                "compact-2026-01-12,fast-mode-2026-02-01"
-            } else {
-                "compact-2026-01-12"
-            },
-        );
         let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(defect) => {
@@ -658,6 +674,7 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             Ok(request_fast_mode) => request_fast_mode,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
+        let server_compaction = server_compaction_supported(operation.resolved_target.as_str());
         let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
             Ok(request) => CountTokensRequest::from(request),
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
@@ -677,21 +694,17 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
         let Some(api_key_header) = sensitive_header(&credential) else {
             return InputTokenCountOutcome::Failed { correlation };
         };
-        let mut builder = self
+        let builder = self
             .client
             .post(self.count_tokens_url.clone())
             .header("x-api-key", api_key_header)
             .header("anthropic-version", self.version_header.clone())
+            .header(
+                "anthropic-beta",
+                anthropic_beta_header(request_fast_mode, server_compaction),
+            )
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        builder = builder.header(
-            "anthropic-beta",
-            if request_fast_mode == FastMode::Enabled {
-                "compact-2026-01-12,fast-mode-2026-02-01"
-            } else {
-                "compact-2026-01-12"
-            },
-        );
         let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },

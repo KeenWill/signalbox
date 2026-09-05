@@ -745,6 +745,8 @@ impl PostgresModelCallRepository {
                             WHERE compacted.source_session_id = model_call.session_id
                               AND compacted.producing_model_call_id = model_call.model_call_id
                               AND compacted.payload_kind = 'provider_compaction'
+                              AND compacted.assistant_text_value::jsonb ->> 'content'
+                                  IS NOT NULL
                        ) AS input_is_retained,
                        model_call.terminal_disposition_kind = 'completed' AS output_is_retained,
                        model_call.usage_input_tokens,

@@ -63,6 +63,17 @@ impl ProviderCompactionBlock {
         if parsed.get("type").and_then(serde_json::Value::as_str) != Some("compaction") {
             return Err(ProviderCompactionBlockError);
         }
+        match parsed.get("content") {
+            Some(serde_json::Value::String(content)) if !content.is_empty() => {}
+            Some(serde_json::Value::Null) => {}
+            _ => return Err(ProviderCompactionBlockError),
+        }
+        if !matches!(
+            parsed.get("encrypted_content"),
+            None | Some(serde_json::Value::String(_)) | Some(serde_json::Value::Null)
+        ) {
+            return Err(ProviderCompactionBlockError);
+        }
         Ok(Self(value))
     }
 
@@ -317,6 +328,31 @@ impl SemanticTranscriptEntryReconstitutionInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_compaction_distinguishes_summary_from_failed_noop() {
+        let summary = ProviderCompactionBlock::try_new(String::from(
+            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+        ))
+        .expect("complete summary block is valid");
+        let failed = ProviderCompactionBlock::try_new(String::from(
+            r#"{"type":"compaction","content":null,"encrypted_content":null}"#,
+        ))
+        .expect("failed compaction block is replayable");
+
+        assert_eq!(
+            summary.as_json(),
+            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#
+        );
+        assert_eq!(
+            failed.as_json(),
+            r#"{"type":"compaction","content":null,"encrypted_content":null}"#
+        );
+        assert!(
+            ProviderCompactionBlock::try_new(String::from(r#"{"type":"compaction","content":""}"#))
+                .is_err()
+        );
+    }
     use crate::test_support::{
         accepted_input_id, model_call_id, semantic_transcript_entry_id, session_id,
         tool_request_id, turn_id,

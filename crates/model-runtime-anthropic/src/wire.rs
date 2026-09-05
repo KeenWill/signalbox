@@ -45,23 +45,26 @@ pub(crate) struct MessagesRequest {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ContextManagement {
-    pub edits: [CompactionEdit; 1],
+    pub edits: Vec<ContextManagementEdit>,
 }
 
-impl Default for ContextManagement {
-    fn default() -> Self {
-        Self {
-            edits: [CompactionEdit {
-                edit_type: "compact_20260112",
-            }],
+impl ContextManagement {
+    pub(crate) fn for_target(server_compaction: bool) -> Self {
+        let mut edits = vec![ContextManagementEdit::ClearToolUses];
+        if server_compaction {
+            edits.push(ContextManagementEdit::Compact);
         }
+        Self { edits }
     }
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct CompactionEdit {
-    #[serde(rename = "type")]
-    edit_type: &'static str,
+#[serde(tag = "type")]
+pub(crate) enum ContextManagementEdit {
+    #[serde(rename = "clear_tool_uses_20250919")]
+    ClearToolUses,
+    #[serde(rename = "compact_20260112")]
+    Compact,
 }
 
 #[derive(Debug, Serialize)]

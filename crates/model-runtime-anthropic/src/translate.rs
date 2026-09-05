@@ -79,8 +79,33 @@ pub(crate) fn build_request_with_fast_mode<C>(
         speed: (request_fast_mode == FastMode::Enabled).then_some("fast"),
         tools: plan.tools,
         tool_choice: plan.tool_choice,
-        context_management: ContextManagement::default(),
+        context_management: ContextManagement::for_target(server_compaction_supported(
+            operation.resolved_target.as_str(),
+        )),
         stream: operation.delivery == DeliveryMode::Streamed,
+    })
+}
+
+pub(crate) fn server_compaction_supported(provider_model: &str) -> bool {
+    const SUPPORTED_FAMILIES: [&str; 9] = [
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+    ];
+
+    SUPPORTED_FAMILIES.iter().any(|family| {
+        provider_model == *family
+            || provider_model.strip_prefix(family).is_some_and(|suffix| {
+                suffix
+                    .strip_prefix('-')
+                    .is_some_and(|version| version.bytes().all(|byte| byte.is_ascii_digit()))
+            })
     })
 }
 
@@ -551,7 +576,10 @@ mod tests {
         ToolCallProposal, ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
-    use super::{build_request, build_request_with_fast_mode, validate_model_settings};
+    use super::{
+        build_request, build_request_with_fast_mode, server_compaction_supported,
+        validate_model_settings,
+    };
 
     /// An operation whose correlation seed is the one knob; targets, one
     /// user-role message, and a 64-token ceiling are canonical.
@@ -670,7 +698,7 @@ mod tests {
               "context_management": {
                 "edits": [
                   {
-                    "type": "compact_20260112"
+                    "type": "clear_tool_uses_20250919"
                   }
                 ]
               },
@@ -762,7 +790,7 @@ mod tests {
               "context_management": {
                 "edits": [
                   {
-                    "type": "compact_20260112"
+                    "type": "clear_tool_uses_20250919"
                   }
                 ]
               },
@@ -1182,6 +1210,7 @@ mod tests {
     fn compaction_is_enabled_and_replayed_without_reserialization() {
         let raw = r#"{"type":"compaction", "content":"summary", "encrypted_content":"opaque=="}"#;
         let mut operation = operation("call-provider-compaction");
+        operation.resolved_target = ResolvedTarget::new("claude-opus-5");
         operation.messages = vec![ConversationMessage {
             role: ConversationRole::Assistant,
             parts: vec![MessagePart::ProviderCompaction {
@@ -1194,8 +1223,17 @@ mod tests {
 
         assert!(serialized.contains(raw));
         assert!(
-            serialized.contains(r#""context_management":{"edits":[{"type":"compact_20260112"}]}"#)
+            serialized.contains(r#""context_management":{"edits":[{"type":"clear_tool_uses_20250919"},{"type":"compact_20260112"}]}"#)
         );
+    }
+
+    #[test]
+    fn compaction_is_enabled_only_for_supported_model_families() {
+        assert!(server_compaction_supported("claude-fable-5-1"));
+        assert!(server_compaction_supported("claude-opus-4-6-20260501"));
+        assert!(server_compaction_supported("claude-sonnet-5"));
+        assert!(!server_compaction_supported("claude-haiku-4-5"));
+        assert!(!server_compaction_supported("model-exact-1"));
     }
 
     #[test]
