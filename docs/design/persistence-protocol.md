@@ -17,12 +17,14 @@ material.
 Runner replacement and abandonment are each one orchestration transaction that
 holds authority outside the placement aggregate, moves the placement, and
 appends one runner-state-transition event per affected session in the same
-transaction. Replacement also appends the placement transcript entry: one
-positive placement revision with a foreign key to the same session's placement
-record at that revision, which reconstitution resolves, rejecting a missing,
-cross-session, non-successor, or duplicated reference. The record kind already
-carries the replacement and abandonment states; the transactions that produce
-them do not exist.
+transaction. Replacement of a pinned placement also appends the placement
+transcript entry: one positive placement revision with a foreign key to the same
+session's placement record at that revision, which reconstitution resolves,
+rejecting a missing, cross-session, non-successor, or duplicated reference.
+Replacing a `RunnerLostBeforePin` placement updates only the exact selector and
+returns to `Unpinned`, appending no such entry. The record kind already carries
+the replacement and abandonment states; the transactions that produce them do
+not exist.
 
 A daemon transaction retires a workspace release the lost runner never
 acknowledged, so a lost runner leaves no release outstanding.
@@ -38,7 +40,9 @@ The instruction admitted set is one durable table with one repository operation
 that writes it. Its row locks join `crates/persistence/src/lock_inventory.rs`,
 and a transaction takes the admitted-set head after the session's scheduler row
 and before the current-defaults pointer row and any credential-pool row, FOR
-SHARE to snapshot or replace and FOR UPDATE to admit.
+SHARE to snapshot or replace and FOR UPDATE to admit; admission takes the
+current-defaults pointer FOR SHARE after that head and holds it through commit,
+so admission and defaults replacement serialize.
 
 Credential-pool state, capacity reservations, and availability waits are durable
 rows with locks recorded in the same inventory. A transaction takes the

@@ -41,10 +41,10 @@ record table keyed by that identifier. The claim protocol, replay equality, and
 conflicting reuse are owned by
 [identity-and-commands](identity-and-commands.md); this page owns their storage.
 
-Every SQL statement issued from Rust that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`, and that inventory documents the
-lock order stated under Contracts. Locks taken inside triggers are stated in the
-migrations that define them.
+`crates/persistence/src/lock_inventory.rs` records the row locks it names and
+documents the lock order stated under Contracts. Row locks issued inline
+elsewhere in Rust are stated at the statement that takes them, and locks taken
+inside triggers are stated in the migrations that define them.
 
 Reconstitution turns rows back into domain values and returns one complete value
 or a typed corruption error. Failures that reach an operator are classified in
