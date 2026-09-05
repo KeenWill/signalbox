@@ -1,60 +1,112 @@
 # Living specification
 
-These pages, together with INV-tagged tests indexed in
-[invariants.md](../invariants.md) and public API shapes in
-[domain-spine.md](../domain-spine.md), are the normative specification of
-Signalbox's implemented cross-component and wire behavior. `AGENTS.md` is the
-guidance for agents working on the repository; this README owns the conventions
-the pages follow.
+The pages under `docs/spec/` are the specification of the behavior Signalbox
+has: the contracts between crates and across the wire that an implementing agent
+honors. Each page opens with a map for a reader who knows Signalbox as a whole
+but not that subsystem, then states the decisions and contracts the code keeps.
+`AGENTS.md` is the guidance for agents working on the repository; this file owns
+the conventions the pages follow.
 
-Every paragraph on a specification page belongs to exactly one of three
-categories; a page that cannot say which category a paragraph is in has a
-defect:
+## Homes
 
-- **Implemented behavior**: what a page states by default.
-- **Committed unimplemented functionality**: a capability the owner has decided
-  will exist, recorded because it constrains what a present change may do. Such
-  a paragraph names itself unimplemented, states that no present surface
-  provides it, and carries only that compatibility constraint. It is neither a
-  description of the system nor an open question, and it is admitted only where
-  a present contract must stay compatible with it.
-- **Deferred or undecided work**: recorded in
-  [open-questions.md](../open-questions.md), its one home; a page's "Open edges"
-  section points to it and carries no speculative prose.
+A claim about the system lives in exactly one of three places. `docs/spec/`
+states built behavior only. `docs/design/` holds one document per subsystem with
+committed but unbuilt design, written for the agent that will build it; the
+document is deleted when its feature lands.
+[open-questions.md](../open-questions.md) holds undecided items. Nothing on a
+spec page describes behavior the code lacks except the lines under Not built.
 
-Conventions: pages state implemented behavior, plus the committed unimplemented
-functionality that constrains it, per the three categories above; pages state
-behavior, not rationale — a load-bearing choice may carry one "Why:" sentence;
-invariant references use INV tags resolved through the generated
-[invariants.md](../invariants.md) index; deferred or undecided items are
-recorded in [open-questions.md](../open-questions.md) and surfaced as pointers
-in each page's "Open edges" section; a topic normatively owned by a sibling page
-is linked, never restated.
+A design document is titled `<Subsystem> design`, opens with one sentence saying
+it is not built and which spec page it extends, and has the sections Goal,
+Shape, Constraints on present code, and Acceptance. It keeps decisions, shapes,
+transitions, and acceptance criteria, and links the spec page for built behavior
+instead of restating it.
+
+## Page shape
+
+Every page has one title, one sentence saying what the subsystem is for, and
+exactly four sections in this order: Map, Decisions, Contracts, Not built.
+
+Map says what the subsystem is, its boundary, the shape of its data, its major
+parts, and how they relate. It may name the core type, table, or function a
+reader will look for; it never enumerates types, fields, variants, columns, or
+CLI flags, which live in the code, the migration, and the example TOML. It is
+paragraphs, not lists, unless the content is a real sequence.
+
+Decisions states each rule in one sentence, with its reason in the same sentence
+or in one "Why:" sentence after it. The failure a rule prevents is stated only
+when a reader could not infer it. Owner rulings are decisions, and so are
+fences, phrased as what is deliberately not done. No decision restates a
+contract or a not-built line.
+
+Contracts holds the rules an implementing agent must honor, one paragraph each,
+and names the enforcer when one exists. Each repo-wide contract has one home
+page; every other page links to that page by name and never restates the
+contract.
+
+Not built has one line per committed unbuilt capability, naming it and linking
+its design document. Nothing else about unbuilt design appears on the page.
+
+## Prose standard
+
+Sentences are plain and declarative, about twenty words, one idea each. Pages
+carry no rationale narrative, no metaphor, no hedges, no provenance, no history,
+no version literals, and no pull-request or branch names. A page says what the
+system does, not what a reader should do. Code identifiers appear only where the
+map names a core mechanism or a contract names its enforcer. Prose carries no
+INV tags; invariants are tests, and a contract names its enforcer by path. Pages
+have no Open edges section and no paragraph labelled as committed but
+unimplemented. Every link targets a page, never an anchor, unless the anchor is
+a heading on the linking page.
 
 ## Pages
 
-- [Conversation import](conversation-import.md)
 - [Sessions and the transcript](sessions-and-transcript.md)
+- [Session lifecycle](session-lifecycle.md)
 - [Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md)
 - [Goal mode](goal-mode.md)
 - [Model-call execution](model-call-execution.md)
-- [Usage evidence](usage-evidence.md)
 - [Tool loop](tool-loop.md)
-- [Git authority threat model](git-authority-threat-model.md)
-- [Web egress threat model](web-egress-threat-model.md)
-- [Runner protocol and placement](runner-protocol.md)
-- [Review workflows](review-workflows.md)
-- [Persistence protocol](persistence-protocol.md)
-- [Blob storage](blob-storage.md)
-- [File and media interpretation](file-and-media.md)
-- [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Model-runtime substrate](runtime-substrate.md)
 - [Model and session settings](model-session-settings.md)
 - [Configuration and credentials](configuration-and-credentials.md)
 - [Credential availability](credential-availability.md)
+- [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Process protocol](process-protocol.md)
+- [Persistence protocol](persistence-protocol.md)
+- [Blob storage](blob-storage.md)
+- [File and media interpretation](file-and-media.md)
+- [Conversation import](conversation-import.md)
+- [Runner protocol and placement](runner-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
-- [Pull-request convergence reconciliation](convergence-reconciliation.md)
+- [Review workflows](review-workflows.md)
+- [Git authority threat model](git-authority-threat-model.md)
+- [Web egress threat model](web-egress-threat-model.md)
 - [Workspace instructions and skills](workspace-instructions.md)
 - [Program substrate](program-substrate.md)
 - [Evaluation system](eval-system.md)
+
+## Design documents
+
+- [Sessions and the transcript design](../design/sessions-and-transcript.md)
+- [Session lifecycle design](../design/session-lifecycle.md)
+- [Turn lifecycle and scheduling design](../design/turn-lifecycle-and-scheduling.md)
+- [Model-call execution design](../design/model-call-execution.md)
+- [Tool loop design](../design/tool-loop.md)
+- [Model-runtime substrate design](../design/runtime-substrate.md)
+- [Model and session settings design](../design/model-session-settings.md)
+- [Configuration and credentials design](../design/configuration-and-credentials.md)
+- [Credential availability design](../design/credential-availability.md)
+- [Identity and commands design](../design/identity-and-commands.md)
+- [Process protocol design](../design/process-protocol.md)
+- [Persistence protocol design](../design/persistence-protocol.md)
+- [Blob storage design](../design/blob-storage.md)
+- [File and media interpretation design](../design/file-and-media.md)
+- [Conversation import design](../design/conversation-import.md)
+- [Runner protocol design](../design/runner-protocol.md)
+- [Repository watch design](../design/repo-watch.md)
+- [Review workflows design](../design/review-workflows.md)
+- [Git authority threat model design](../design/git-authority-threat-model.md)
+- [Workspace instructions design](../design/workspace-instructions.md)
+- [Program substrate design](../design/program-substrate.md)
+- [Evaluation system design](../design/eval-system.md)
