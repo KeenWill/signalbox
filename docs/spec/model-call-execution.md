@@ -60,6 +60,14 @@ context window less the output ceiling and the required prompt; when even the
 first safe prefix cannot fit that budget, no call is prepared and one
 transaction fails the turn as a compaction wall.
 
+For compaction-capable Anthropic model families, ordinary calls enable
+provider-default server-side compaction. Each returned compaction block is an
+opaque ordered semantic entry replayed unchanged as Anthropic assistant content;
+other adapters reject it, and earlier semantic entries remain append-only. A
+non-null summary replaces the call's reported input for later headroom
+accounting, while a null summary is a replayable no-op, and Anthropic iteration
+usage is stored as the sum of the reported iterations.
+
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
 composed roles: prepare, capability, authorize-send, provider, and
