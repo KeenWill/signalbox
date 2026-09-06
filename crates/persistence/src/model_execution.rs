@@ -6789,9 +6789,9 @@ async fn load_durable_pool_exclusions(
     excluded.extend(
         sqlx::query_scalar::<_, String>(
             "SELECT DISTINCT credential_reference
-               FROM credential_pool_transient_exclusion
+              FROM credential_pool_transient_exclusion
               WHERE credential_reference = ANY($1)
-                AND reset_at > transaction_timestamp()",
+                AND reset_at > clock_timestamp()",
         )
         .bind(&member_references)
         .fetch_all(&mut *connection)
