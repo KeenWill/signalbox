@@ -454,6 +454,16 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(matching_rules(std::slice::from_ref(&rule), &event), [&rule]);
     let identity = RepoWatchEventContentIdentityV1::from_bytes([15; 32]);
     let occurrence = RepoWatchEventOccurrenceV1::from_parts(event.clone(), identity);
+    let earlier_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(13)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("build"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let earlier_identity = RepoWatchEventContentIdentityV1::from_bytes([14; 32]);
+    let earlier_occurrence =
+        RepoWatchEventOccurrenceV1::from_parts(earlier_event.clone(), earlier_identity);
     let retain_until = observed_at + Duration::from_secs(120);
     assert_eq!(
         store
@@ -461,16 +471,24 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 &projection,
                 0,
                 &frontier,
-                std::slice::from_ref(&occurrence),
+                &[earlier_occurrence, occurrence],
                 observed_at,
                 retain_until,
             )
             .await?,
         FrontierEventAdmission::Committed {
             generation: 1,
-            events: Box::new([EventAdmission::Inserted]),
+            events: Box::new([EventAdmission::Inserted, EventAdmission::Inserted]),
         }
     );
+    let evaluation_order = store.event_evaluation_order(&repository).await?;
+    assert_eq!(evaluation_order.len(), 2);
+    assert_eq!(evaluation_order[0].event(), earlier_event.id());
+    assert_eq!(evaluation_order[0].frontier_generation(), 1);
+    assert_eq!(evaluation_order[0].event_ordinal(), 1);
+    assert_eq!(evaluation_order[1].event(), event.id());
+    assert_eq!(evaluation_order[1].frontier_generation(), 1);
+    assert_eq!(evaluation_order[1].event_ordinal(), 2);
     let late_rule = RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(String::from("late-branch-ci"))?,
         RepoWatchRuleVersion::V1,
@@ -550,20 +568,29 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         signalbox_ownership_seam::CheckConclusion::Success,
     );
     let replayed_occurrence = RepoWatchEventOccurrenceV1::from_parts(replayed_event, identity);
+    let replayed_earlier_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(18)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("build"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let replayed_earlier_occurrence =
+        RepoWatchEventOccurrenceV1::from_parts(replayed_earlier_event, earlier_identity);
     assert_eq!(
         store
             .commit_frontier_candidate(
                 &projection,
                 0,
                 &frontier,
-                std::slice::from_ref(&replayed_occurrence),
+                &[replayed_earlier_occurrence, replayed_occurrence],
                 observed_at + Duration::from_secs(1),
                 retain_until + Duration::from_secs(1),
             )
             .await?,
         FrontierEventAdmission::Committed {
             generation: 1,
-            events: Box::new([EventAdmission::Replayed]),
+            events: Box::new([EventAdmission::Replayed, EventAdmission::Replayed]),
         }
     );
     let projection_row_versions_before: (String, String) = sqlx::query_as(
