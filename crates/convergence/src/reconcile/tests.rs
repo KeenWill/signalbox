@@ -59,6 +59,7 @@ fn red(config: &Config) -> (Value, Evaluation) {
 }
 fn empty(config: &Config) -> State {
     State {
+        version: STATE_VERSION,
         repository: config.repository.clone(),
         pull_requests: BTreeMap::new(),
     }
@@ -238,7 +239,7 @@ fn non_path_configuration_is_rejected() {
 fn non_string_repository_is_rejected_as_malformed() {
     let dir = Directory::new();
     let path = dir.0.join("state.json");
-    fs::write(&path, r#"{"repository":42,"pull_requests":{}}"#).unwrap();
+    fs::write(&path, r#"{"version":2,"repository":42,"pull_requests":{}}"#).unwrap();
     assert!(load_state(&path, "KeenWill/signalbox").is_err());
 }
 #[test]
@@ -247,7 +248,7 @@ fn non_object_pull_request_record_is_rejected() {
     let path = dir.0.join("state.json");
     fs::write(
         &path,
-        r#"{"repository":"KeenWill/signalbox","pull_requests":{"1":[]}}"#,
+        r#"{"version":2,"repository":"KeenWill/signalbox","pull_requests":{"1":[]}}"#,
     )
     .unwrap();
     assert!(load_state(&path, "KeenWill/signalbox").is_err());
@@ -324,12 +325,95 @@ fn state_save_replaces_the_file_and_syncs_persistent_state() {
     let cfg = config(&dir);
     let mut state = empty(&cfg);
     save_state(&cfg.state_file, &state).unwrap();
-    state.pull_requests.insert("1".into(), retained());
+    let mut record = retained();
+    record.evidence =
+        json!({"authenticated_review_head":"current-head","review_wave_ids":["review-id"]});
+    state.pull_requests.insert("1".into(), record);
     save_state(&cfg.state_file, &state).unwrap();
     let loaded = load_state(&cfg.state_file, &cfg.repository).unwrap();
+    assert_eq!(loaded.version, 2);
     assert_eq!(loaded.pull_requests["1"].last_dispatched_at, Some(900.0));
+    assert_eq!(
+        loaded.pull_requests["1"].evidence,
+        state.pull_requests["1"].evidence
+    );
     assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
     assert!(load_state(&cfg.state_file, "another/repository").is_err());
+}
+
+#[test]
+fn state_requires_the_current_version_without_rewriting_other_versions() {
+    let dir = Directory::new();
+    let cfg = config(&dir);
+    for version in [json!(1), json!(3), json!("2"), Value::Null] {
+        let contents = serde_json::to_vec(&json!({
+            "version":version,"repository":cfg.repository,"pull_requests":{}
+        }))
+        .unwrap();
+        fs::write(&cfg.state_file, &contents).unwrap();
+        let error = load_state(&cfg.state_file, &cfg.repository).unwrap_err();
+        assert!(
+            error.to_string().contains("state file"),
+            "{version}: {error}"
+        );
+        assert_eq!(fs::read(&cfg.state_file).unwrap(), contents, "{version}");
+    }
+}
+
+#[test]
+fn state_rejects_unknown_fields_instead_of_discarding_history() {
+    let dir = Directory::new();
+    let cfg = config(&dir);
+    let mut state = empty(&cfg);
+    state.pull_requests.insert("1".into(), retained());
+    for (pointer, field, value) in [
+        ("", "unknown", json!(true)),
+        (
+            "/pull_requests/1",
+            "authenticated_review_head",
+            json!("current-head"),
+        ),
+        ("/pull_requests/1", "review_wave_ids", json!(["review-id"])),
+    ] {
+        let mut document = serde_json::to_value(&state).unwrap();
+        document.pointer_mut(pointer).unwrap()[field] = value;
+        let contents = serde_json::to_vec(&document).unwrap();
+        fs::write(&cfg.state_file, &contents).unwrap();
+        let error = load_state(&cfg.state_file, &cfg.repository).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field"),
+            "{field}: {error}"
+        );
+        assert_eq!(fs::read(&cfg.state_file).unwrap(), contents, "{field}");
+    }
+}
+
+#[test]
+fn state_rejects_missing_version_and_record_fields() {
+    let dir = Directory::new();
+    let cfg = config(&dir);
+    let mut state = empty(&cfg);
+    state.pull_requests.insert("1".into(), retained());
+    for (pointer, field) in [
+        ("", "version"),
+        ("/pull_requests/1", "head_oid"),
+        ("/pull_requests/1", "evidence"),
+        ("/pull_requests/1", "idle_since"),
+    ] {
+        let mut document = serde_json::to_value(&state).unwrap();
+        document
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        fs::write(&cfg.state_file, serde_json::to_vec(&document).unwrap()).unwrap();
+        let error = load_state(&cfg.state_file, &cfg.repository).unwrap_err();
+        assert!(
+            error.to_string().contains("missing field"),
+            "{field}: {error}"
+        );
+    }
 }
 #[test]
 fn nonzero_dispatch_exit_retains_cool_off_fence() {

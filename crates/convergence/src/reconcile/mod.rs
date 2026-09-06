@@ -94,23 +94,33 @@ impl Runtime for Live {
     }
 }
 
+const STATE_VERSION: u32 = 2;
+
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct State {
+    version: u32,
     repository: String,
     pull_requests: BTreeMap<String, Record>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct Record {
     node_id: String,
     head_ref: String,
     head_oid: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     terminal_state: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     terminal_at: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     unconverged_since: Option<f64>,
+    #[serde(deserialize_with = "Option::deserialize")]
     idle_since: Option<f64>,
+    #[serde(deserialize_with = "Option::deserialize")]
     last_dispatched_at: Option<f64>,
+    #[serde(deserialize_with = "Option::deserialize")]
     last_dispatched_head: Option<String>,
     evidence: Value,
 }
@@ -120,20 +130,28 @@ fn load_state(path: &Path, repository: &str) -> Result<State, Error> {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(State {
+                version: STATE_VERSION,
                 repository: repository.into(),
                 pull_requests: BTreeMap::new(),
             });
         }
         Err(error) => return Err(error.into()),
     };
-    let raw: Value = serde_json::from_slice(&bytes)?;
+    let malformed = |error| failure(format!("unsupported or malformed state file: {error}"));
+    let raw: Value = serde_json::from_slice(&bytes).map_err(malformed)?;
     if raw["pull_requests"]
         .as_object()
         .is_none_or(|records| records.values().any(|record| !record.is_object()))
     {
         return Err(failure("state pull requests must be JSON objects"));
     }
-    let state: State = serde_json::from_value(raw)?;
+    let state: State = serde_json::from_value(raw).map_err(malformed)?;
+    if state.version != STATE_VERSION {
+        return Err(failure(format!(
+            "unsupported state file version {}; expected {STATE_VERSION}",
+            state.version
+        )));
+    }
     if !state.repository.eq_ignore_ascii_case(repository) {
         return Err(failure("state file belongs to another repository"));
     }

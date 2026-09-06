@@ -45,6 +45,8 @@ when neither variable is set, configure `--state-file` explicitly. Set
 `state_file` explicitly when a service manager provides a persistent runtime
 directory. Writes use a temporary file, atomic replacement, and synchronization
 of both the file and its parent directory before a dispatch child can start.
+State files require version 2 and the complete record shape; unknown fields,
+missing fields, and other versions are rejected without migration.
 
 ## Convergence evaluation
 
@@ -92,11 +94,12 @@ Commands must therefore accept those final two arguments. Shell pipelines and
 redirection belong in an operator-owned wrapper script, not in the configured
 command. Standard output or error from a failing command, and standard output
 from a successful dispatch, is truncated to 512 characters and attached to the
-decision log. The configurable command timeout bounds GitHub listing,
-convergence evaluation, and operator-command subprocesses to protect tick
-latency; its default is 60 seconds. Each child runs in its own process group;
-timeout or `SIGINT` kills the group and reaps the child. All GitHub requests for
-one evaluation share its timeout budget.
+decision log. The configurable command timeout bounds GitHub and
+operator-command subprocesses; its default is 60 seconds. Each child runs in its
+own process group; timeout or `SIGINT` kills the group and reaps the child. All
+GitHub requests for one evaluation share its timeout budget. In-process snapshot
+construction and evaluation have no deadline and do not check `SIGINT`; stopping
+the loop waits for that CPU work to finish.
 
 An unconverged observation starts `unconverged_since`. An inactive result starts
 `idle_since`; active work or a successful dispatch clears it after the
