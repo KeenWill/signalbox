@@ -39,10 +39,12 @@ recurring event stream. A merged pull request leaves the ordinary observation
 and keeps only a compact baseline of the members the differ needs to recognize
 post-merge changes. A per-repository atomic commit takes the complete current
 repository and pull-request projections, an expected generation, one complete
-cursor candidate, and its ordered batch of event occurrences. A generation
-mismatch is stale unless the complete projections, candidate, and ordered batch
-exactly replay the immediately succeeding commit. An empty event batch with an
-unchanged cursor is unchanged only when both stored projections also match; a
+cursor candidate, and its ordered batch of event occurrences. The projection
+retains the complete normalized differ observation, including signal-reviewer
+provenance, pull requests, workflows, and branch heads. A generation mismatch
+is stale unless the complete projections, candidate, and ordered batch exactly
+replay the immediately succeeding commit. An empty event batch with an unchanged
+cursor is unchanged only when both stored projections also match; a
 projection-only change advances the generation and records the complete commit
 digest. Projection timestamps use PostgreSQL microsecond precision in both the
 stored comparison and commit identity.
@@ -639,10 +641,10 @@ queued turn, its dispatch-to-turn audit link, and a statement of the authority
 it was dispatched under.
 
 Before submission, the module ledger retains an opaque core encoding of every
-complete checked command payload. Recovery reads pending ledger rows without the
-removed or inactive rule, then core decodes and resubmits the exact retained
-commands; newly resolved template or configuration values cannot replace the
-committed payload. A repository-watch `SessionCreated` event settles the next
+complete checked command payload. Pending ledger rows remain recoverable without
+the removed or inactive rule, and newly resolved template or configuration
+values cannot replace the committed payload. A repository-watch `SessionCreated`
+event settles the next
 pending create action for its dispatch and records the new session; replaying
 that event cannot settle another action. Every action and every lifecycle
 reaction in a batch has its own one-based ordinal. A release-start or
