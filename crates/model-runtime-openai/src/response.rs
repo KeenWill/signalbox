@@ -183,6 +183,21 @@ pub(crate) fn decode_response<C: Clone>(
     if let Some(reported) = &response.usage {
         usage.absorb(convert_usage(reported));
     }
+    if let Some(model) = &reported_model {
+        emit(
+            correlation,
+            sink,
+            ObservationFact::ProviderModelReported(model.clone()),
+        );
+    }
+    if response.usage.is_some() || usage != TokenUsage::unreported() {
+        emit(correlation, sink, ObservationFact::UsageReported(usage));
+    }
+    if response.status.as_deref() == Some("failed")
+        && let Some(error) = response.error
+    {
+        return provider_error(error, exchange, reported_model, usage);
+    }
     let items: Result<Vec<WireOutputItem>, _> = response
         .output
         .as_deref()
@@ -201,21 +216,8 @@ pub(crate) fn decode_response<C: Clone>(
             usage,
         })
     };
-    if let Some(model) = &reported_model {
-        emit(
-            correlation,
-            sink,
-            ObservationFact::ProviderModelReported(model.clone()),
-        );
-    }
-    if response.usage.is_some() || usage != TokenUsage::unreported() {
-        emit(correlation, sink, ObservationFact::UsageReported(usage));
-    }
     if response.status.as_deref() == Some("failed") {
-        return match response.error {
-            Some(error) => provider_error(error, exchange, reported_model, usage),
-            None => loss("failed response lacks error".to_string(), None),
-        };
+        return loss("failed response lacks error".to_string(), None);
     }
     if response.object.as_deref() != Some("response")
         || response.id.as_deref().is_none_or(str::is_empty)

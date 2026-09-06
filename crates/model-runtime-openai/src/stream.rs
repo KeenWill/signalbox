@@ -25,8 +25,39 @@ pub(crate) enum LaterRecords {
 
 #[derive(Default)]
 struct ItemParts {
+    kind: Option<String>,
     nonempty: BTreeMap<u32, bool>,
     complete: bool,
+}
+
+impl ItemParts {
+    fn observe_part(&mut self, index: u32, nonempty: bool) -> Result<(), String> {
+        match self.nonempty.get(&index) {
+            Some(&previous) if previous != nonempty => {
+                return Err("content part changed its observed occupancy".to_string());
+            }
+            None if self.complete => {
+                return Err("completed message gained a content part".to_string());
+            }
+            _ => {}
+        }
+        self.nonempty.insert(index, nonempty);
+        Ok(())
+    }
+
+    fn finish(&mut self, parts: BTreeMap<u32, bool>) -> Result<(), String> {
+        if self
+            .nonempty
+            .iter()
+            .any(|(index, nonempty)| parts.get(index) != Some(nonempty))
+            || (self.complete && self.nonempty != parts)
+        {
+            return Err("completed message rewrites its observed content layout".to_string());
+        }
+        self.nonempty = parts;
+        self.complete = true;
+        Ok(())
+    }
 }
 
 struct PendingDelta {
@@ -112,8 +143,9 @@ impl StreamDecoder {
                 let Some(response) = event.response else {
                     return self.violation("terminal event lacks response");
                 };
-                let terminal_has_tools =
-                    output_tool_calls(response.output.as_deref()) == ToolCallsAtLoss::Opened;
+                let failed = event.kind == "response.failed";
+                let terminal_has_tools = !failed
+                    && output_tool_calls(response.output.as_deref()) == ToolCallsAtLoss::Opened;
                 if self.opened_tool_calls
                     && !terminal_has_tools
                     && response.status.as_deref() == Some("completed")
@@ -124,7 +156,12 @@ impl StreamDecoder {
                 if response.status.as_deref() != event.kind.strip_prefix("response.") {
                     return self.violation("terminal event and response status disagree");
                 }
-                if let Err(detail) = self.observe_response(&response, correlation, sink) {
+                let observation = if failed {
+                    self.observe_response_metadata(&response, correlation, sink)
+                } else {
+                    self.observe_response(&response, correlation, sink)
+                };
+                if let Err(detail) = observation {
                     return self.violation(detail);
                 }
                 if response.usage.is_none()
@@ -204,6 +241,16 @@ impl StreamDecoder {
                     return self.violation(detail);
                 }
                 let tool_arguments = event.kind == "response.function_call_arguments.delta";
+                if let Err(detail) = self.observe_item_kind(
+                    index,
+                    if tool_arguments {
+                        "function_call"
+                    } else {
+                        "message"
+                    },
+                ) {
+                    return self.violation(detail);
+                }
                 let content_index = if tool_arguments {
                     if let Err(e) = self
                         .argument_nesting
@@ -213,7 +260,6 @@ impl StreamDecoder {
                     {
                         return self.violation(e.to_string());
                     }
-                    self.item_parts.entry(index).or_default().complete = true;
                     0
                 } else {
                     let Some(content_index) = event.content_index else {
@@ -222,11 +268,11 @@ impl StreamDecoder {
                     content_index
                 };
                 if tool_arguments || !delta.is_empty() {
-                    self.item_parts
-                        .entry(index)
-                        .or_default()
-                        .nonempty
-                        .insert(content_index, true);
+                    let layout = self.item_parts.entry(index).or_default();
+                    if let Err(detail) = layout.observe_part(content_index, true) {
+                        return self.violation(detail);
+                    }
+                    layout.complete |= tool_arguments;
                     self.pending_deltas.push(PendingDelta {
                         output_index: index,
                         content_index,
@@ -254,6 +300,16 @@ impl StreamDecoder {
                 if let Err(detail) = self.observe_item(index, &id) {
                     return self.violation(detail);
                 }
+                let kind = if event.kind.starts_with("response.reasoning_") {
+                    "reasoning"
+                } else if event.kind == "response.function_call_arguments.done" {
+                    "function_call"
+                } else {
+                    "message"
+                };
+                if let Err(detail) = self.observe_item_kind(index, kind) {
+                    return self.violation(detail);
+                }
                 if matches!(
                     event.kind.as_str(),
                     "response.content_part.added" | "response.content_part.done"
@@ -265,12 +321,14 @@ impl StreamDecoder {
                     let Some(text) = part.text() else {
                         return self.violation("unrecognized output content type");
                     };
-                    if !text.is_empty() || event.kind == "response.content_part.done" {
-                        self.item_parts
+                    if (!text.is_empty() || event.kind == "response.content_part.done")
+                        && let Err(detail) = self
+                            .item_parts
                             .entry(index)
                             .or_default()
-                            .nonempty
-                            .insert(content_index, !text.is_empty());
+                            .observe_part(content_index, !text.is_empty())
+                    {
+                        return self.violation(detail);
                     }
                 }
                 StreamStep::Continue
@@ -296,6 +354,33 @@ impl StreamDecoder {
                 ToolCallsAtLoss::NoneOpened => {}
             }
         }
+        self.observe_response_metadata(response, correlation, sink)?;
+        for (index, raw) in response.output.iter().flatten().enumerate() {
+            let item: WireOutputItem = serde_json::from_str(raw.get()).map_err(|error| {
+                self.discarded_unexamined_bytes = true;
+                error.to_string()
+            })?;
+            let id = item.id.as_deref().ok_or("response output item lacks id")?;
+            let index = u32::try_from(index).map_err(|error| error.to_string())?;
+            self.observe_item(index, id)?;
+            self.observe_item_parts(
+                index,
+                &item,
+                matches!(
+                    response.status.as_deref(),
+                    Some("completed" | "incomplete" | "failed")
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn observe_response_metadata<C: Clone>(
+        &mut self,
+        response: &Response,
+        correlation: &C,
+        sink: &mut (dyn ObservationSink<C> + Send),
+    ) -> Result<(), String> {
         if response.id.as_deref().is_none_or(str::is_empty) {
             return Err("response event lacks its response id".to_string());
         }
@@ -330,23 +415,19 @@ impl StreamDecoder {
         if let Some(usage) = &response.usage {
             self.usage.absorb(convert_usage(usage));
         }
-        for (index, raw) in response.output.iter().flatten().enumerate() {
-            let item: WireOutputItem = serde_json::from_str(raw.get()).map_err(|error| {
-                self.discarded_unexamined_bytes = true;
-                error.to_string()
-            })?;
-            let id = item.id.as_deref().ok_or("response output item lacks id")?;
-            let index = u32::try_from(index).map_err(|error| error.to_string())?;
-            self.observe_item(index, id)?;
-            self.observe_item_parts(
-                index,
-                &item,
-                matches!(
-                    response.status.as_deref(),
-                    Some("completed" | "incomplete" | "failed")
-                ),
-            )?;
+        Ok(())
+    }
+
+    fn observe_item_kind(&mut self, index: u32, kind: &str) -> Result<(), String> {
+        let layout = self.item_parts.entry(index).or_default();
+        if layout
+            .kind
+            .as_deref()
+            .is_some_and(|previous| previous != kind)
+        {
+            return Err("output item kind changed at its index".to_string());
         }
+        layout.kind = Some(kind.to_string());
         Ok(())
     }
 
@@ -356,32 +437,25 @@ impl StreamDecoder {
         item: &WireOutputItem,
         complete: bool,
     ) -> Result<(), String> {
+        self.observe_item_kind(index, &item.kind)?;
         let layout = self.item_parts.entry(index).or_default();
         match item.kind.as_str() {
-            "reasoning" => layout.complete = true,
-            "function_call" => {
-                layout.nonempty.insert(0, true);
-                layout.complete = true;
-            }
+            "reasoning" => layout.finish(BTreeMap::new())?,
+            "function_call" => layout.finish(BTreeMap::from([(0, true)]))?,
             "message" => {
-                let parts = item.content.as_deref().unwrap_or_default();
-                if complete {
-                    let part_count =
-                        u32::try_from(parts.len()).map_err(|error| error.to_string())?;
-                    if layout.nonempty.range(part_count..).next().is_some() {
-                        return Err("completed message omits an observed content index".to_string());
-                    }
-                }
-                for (position, part) in parts.iter().enumerate() {
+                let mut parts = BTreeMap::new();
+                for (position, part) in item.content.iter().flatten().enumerate() {
                     let text = part.text().ok_or("unrecognized output content type")?;
-                    if complete || !text.is_empty() {
-                        layout.nonempty.insert(
-                            u32::try_from(position).map_err(|error| error.to_string())?,
-                            !text.is_empty(),
-                        );
+                    let position = u32::try_from(position).map_err(|error| error.to_string())?;
+                    if complete {
+                        parts.insert(position, !text.is_empty());
+                    } else if !text.is_empty() {
+                        layout.observe_part(position, true)?;
                     }
                 }
-                layout.complete |= complete;
+                if complete {
+                    layout.finish(parts)?;
+                }
             }
             _ => {}
         }
@@ -762,6 +836,157 @@ mod tests {
     }
 
     #[test]
+    fn completed_layout_cannot_empty_a_part_targeted_by_an_emitted_delta() {
+        for terminal_snapshot in [false, true] {
+            let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+            let mut sink = Vec::new();
+            apply(
+                &mut decoder,
+                json!({"type":"response.output_text.delta","output_index":0,
+                "content_index":0,"item_id":"msg_fixture","delta":"ready"}),
+                &mut sink,
+            );
+            assert_eq!(
+                sink[0].fact,
+                ObservationFact::TextDelta {
+                    index: 0,
+                    text: "ready".to_string()
+                }
+            );
+            let mut event = terminal();
+            event["response"]["output"][0]["content"][0]["text"] = json!("");
+            if !terminal_snapshot {
+                event = json!({"type":"response.output_item.done","output_index":0,"item":event["response"]["output"][0]});
+            }
+            assert!(
+                matches!(apply(&mut decoder,event,&mut sink), StreamStep::Terminal(evidence)
+                if matches!(*evidence,TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {cause:LossCause::StreamProtocolViolation {..},..})))
+            );
+            assert!(
+                !sink.iter().any(|observation| matches!(
+                    observation.fact,
+                    ObservationFact::FinishReported(_)
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn completed_layout_cannot_grow_and_shift_an_already_emitted_part() {
+        for terminal_snapshot in [false, true] {
+            let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+            let mut sink = Vec::new();
+            let mut event = terminal();
+            apply(
+                &mut decoder,
+                json!({"type":"response.output_item.done","output_index":0,"item":event["response"]["output"][0]}),
+                &mut sink,
+            );
+            apply(
+                &mut decoder,
+                json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_second","delta":"second"}),
+                &mut sink,
+            );
+            assert_eq!(
+                sink[0].fact,
+                ObservationFact::TextDelta {
+                    index: 1,
+                    text: "second".to_string()
+                }
+            );
+            event["response"]["output"][0]["content"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type":"output_text","text":"inserted"}));
+            event["response"]["output"].as_array_mut().unwrap().push(json!({"type":"message","id":"msg_second","role":"assistant","content":[{"type":"output_text","text":"second"}]}));
+            if !terminal_snapshot {
+                event = json!({"type":"response.output_item.done","output_index":0,"item":event["response"]["output"][0]});
+            }
+            assert!(
+                matches!(apply(&mut decoder,event,&mut sink),StreamStep::Terminal(evidence)
+                if matches!(*evidence,TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {cause:LossCause::StreamProtocolViolation {..},..})))
+            );
+            assert!(
+                !sink.iter().any(|observation| matches!(
+                    observation.fact,
+                    ObservationFact::FinishReported(_)
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn text_delta_kind_must_agree_with_item_declarations_in_either_order() {
+        for item_kind in ["reasoning", "function_call"] {
+            for declaration_first in [false, true] {
+                for terminal_snapshot in [false, true] {
+                    let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                    let mut sink = Vec::new();
+                    let item = json!({"type":item_kind,"id":"msg_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+                    let delta = json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"ready"});
+                    let declaration =
+                        json!({"type":"response.output_item.added","output_index":0,"item":item});
+                    let conflicting = if declaration_first {
+                        assert!(matches!(
+                            apply(&mut decoder, declaration, &mut sink),
+                            StreamStep::Continue
+                        ));
+                        delta
+                    } else {
+                        assert!(matches!(
+                            apply(&mut decoder, delta, &mut sink),
+                            StreamStep::Continue
+                        ));
+                        if terminal_snapshot {
+                            let mut event = terminal();
+                            event["response"]["output"] = json!([item]);
+                            event
+                        } else {
+                            declaration
+                        }
+                    };
+                    assert!(
+                        matches!(apply(&mut decoder,conflicting,&mut sink),StreamStep::Terminal(evidence)
+                        if matches!(*evidence,TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {cause:LossCause::StreamProtocolViolation {..},..})))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_terminal_preserves_provider_error_despite_malformed_partial_output() {
+        for item in [
+            json!({"type":"message"}),
+            json!({"type":"message","id":"changed","content":"invalid"}),
+            json!(42),
+        ] {
+            let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+            let mut sink = Vec::new();
+            apply(
+                &mut decoder,
+                json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_fixture","delta":"partial"}),
+                &mut sink,
+            );
+            let mut event = terminal();
+            event["type"] = json!("response.failed");
+            event["response"]["status"] = json!("failed");
+            event["response"]["error"] =
+                json!({"code":"server_error","message":"generation failed"});
+            event["response"]["output"] = json!([item]);
+            let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                panic!("failed terminal must terminate");
+            };
+            let TerminalEvidence::ProviderError(error) = *evidence else {
+                panic!("partial output must not erase a definitive provider error");
+            };
+            assert_eq!(error.kind, ProviderErrorKind::ProviderInternal);
+            assert_eq!(error.native.message.as_deref(), Some("generation failed"));
+            assert!(!error.non_acceptance_proven);
+        }
+    }
+
+    #[test]
     fn unknown_snapshot_output_withholds_the_no_tool_claim() {
         for kind in [
             "response.in_progress",
@@ -980,10 +1205,17 @@ mod tests {
             for id in ["item_established", "item_conflicting"] {
                 let mut decoder = StreamDecoder::new(ExchangeFacts::default());
                 let mut sink = Vec::new();
+                let item_kind = if kind.starts_with("response.reasoning_") {
+                    "reasoning"
+                } else if kind == "response.function_call_arguments.done" {
+                    "function_call"
+                } else {
+                    "message"
+                };
                 apply(
                     &mut decoder,
                     json!({"type":"response.output_item.added",
-                    "output_index":0,"item":{"type":"reasoning","id":"item_established"}}),
+                    "output_index":0,"item":{"type":item_kind,"id":"item_established"}}),
                     &mut sink,
                 );
                 let mut event = json!({"type":kind,"output_index":0,"item_id":id});
@@ -1010,7 +1242,7 @@ mod tests {
 
     #[test]
     fn terminal_output_must_preserve_item_ids_at_their_established_indices() {
-        for status in ["completed", "incomplete", "failed"] {
+        for status in ["completed", "incomplete"] {
             for swap_items in [false, true] {
                 let mut decoder = StreamDecoder::new(ExchangeFacts::default());
                 let mut sink = Vec::new();

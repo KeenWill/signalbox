@@ -399,12 +399,17 @@ fn wire_messages(
         ConversationRole::User => "user",
         ConversationRole::Assistant => "assistant",
     };
-    for part in &message.parts {
+    let mut parts = message.parts.iter().peekable();
+    while let Some(part) = parts.next() {
         match part {
-            MessagePart::Text(text) => out.push(WireInputItem::Message {
-                role,
-                content: text.clone(),
-            }),
+            MessagePart::Text(text) => {
+                let mut content = text.clone();
+                while let Some(MessagePart::Text(text)) = parts.peek() {
+                    content.push_str(text);
+                    parts.next();
+                }
+                out.push(WireInputItem::Message { role, content });
+            }
             MessagePart::ToolCall(call) => {
                 if message.role != ConversationRole::Assistant {
                     return Err(unsupported("tool calls require assistant history"));
@@ -705,6 +710,60 @@ mod tests {
 
         assert_eq!(value["stream"], serde_json::json!(true));
         assert_eq!(value["store"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn adjacent_text_parts_share_a_message_without_crossing_calls_or_message_boundaries() {
+        let mut candidate = operation("call-adjacent-text");
+        candidate.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![
+                    MessagePart::Text("hello".to_string()),
+                    MessagePart::Text(" there".to_string()),
+                ],
+            },
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![
+                    MessagePart::Text("first".to_string()),
+                    MessagePart::Text(" second".to_string()),
+                    MessagePart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call_fixture"),
+                        name: ToolName::new("lookup"),
+                        arguments_json: "{}".to_string(),
+                    }),
+                    MessagePart::Text("after".to_string()),
+                    MessagePart::Text(" call".to_string()),
+                ],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![
+                    MessagePart::ToolResult(ToolResultRecord {
+                        tool_call_id: ToolCallId::new("call_fixture"),
+                        content: "result".to_string(),
+                        is_error: false,
+                    }),
+                    MessagePart::Text("done".to_string()),
+                    MessagePart::Text(" now".to_string()),
+                ],
+            },
+            ConversationMessage::user_text("next boundary"),
+        ];
+        let request = serde_json::to_value(build_request(&candidate).unwrap()).unwrap();
+        assert_eq!(
+            request["input"],
+            serde_json::json!([
+                {"type":"message","role":"user","content":"hello there"},
+                {"type":"message","role":"assistant","content":"first second"},
+                {"type":"function_call","call_id":"call_fixture","name":"lookup","arguments":"{}"},
+                {"type":"message","role":"assistant","content":"after call"},
+                {"type":"function_call_output","call_id":"call_fixture","output":"result"},
+                {"type":"message","role":"user","content":"done now"},
+                {"type":"message","role":"user","content":"next boundary"}
+            ])
+        );
     }
 
     #[test]
