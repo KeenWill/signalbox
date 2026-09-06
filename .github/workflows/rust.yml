@@ -121,6 +121,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Install Python checker dependencies
+        run: python3 -m pip install --user --break-system-packages -r tooling/requirements-mdformat.txt
       - name: Check generated invariant index
         run: python3 scripts/generate_invariants.py --check
       - name: Check generated domain API declarations
@@ -165,6 +167,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install Python checker dependencies
+        run: python3 -m pip install --user --break-system-packages -r tooling/requirements-mdformat.txt
       - name: Test domain API digest
         run: python3 scripts/test_domain_spine_digest.py
       - name: Test domain API renderer
@@ -565,6 +569,8 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Install Python checker dependencies
+        run: python3 -m pip install --user --break-system-packages -r tooling/requirements-mdformat.txt
       # First, so a malformed manifest fails before any compilation. The run
       # job expands this into its shard matrix, which is why adding a shard is
       # a one-line manifest edit and touches nothing here.

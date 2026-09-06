@@ -339,6 +339,9 @@ pub enum ModelCallCapabilityPreparation<Capability> {
 pub enum ModelCallInputTokenCount {
     Counted(u64),
     Cancelled,
+    AttachmentUnavailable,
+    AttachmentFailure(model_execution::AttachmentPreparationFailure),
+    Unavailable,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

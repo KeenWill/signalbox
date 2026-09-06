@@ -71,19 +71,13 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = Path(".github/postgres-integration-suites.toml")
 WORKFLOW = Path(".github/workflows/rust.yml")
 EMITTER = "scripts/postgres_integration_suites.py"
-UPLOAD_ACTION = re.compile(
-    r"^(?P<indent>[ ]*)(?:-[ ]+)?uses:[ ]*actions/upload-artifact"
-)
-ARCHIVE_ARTIFACT = re.compile(
-    r"^[ ]*name:[ ]*"
-    r"(?P<suite>postgres-integration-archive-[A-Za-z0-9][A-Za-z0-9-]*)[ ]*$"
-)
 SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
-RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^#\n]+?)[ ]*$", re.MULTILINE)
 # Untrusted (fork or Dependabot) pull requests route to a hosted runner; the
 # self-hosted arm of that expression is the target this manifest pins.
 DYNAMIC_RUNS_ON = re.compile(
@@ -97,10 +91,6 @@ DYNAMIC_RUNS_ON = re.compile(
 def _resolved_runs_on(value: str) -> str:
     match = DYNAMIC_RUNS_ON.match(value)
     return match.group("pool") if match else value
-SHELL_SCALAR = re.compile(r"^(?P<indent>[ ]*)(?:-[ ]+)?(?:run|command):(?P<inline>.*)$")
-# A block header carries its chomping and indentation indicators in either
-# order: `|2-` and `|-2` are the same scalar.
-BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]\d*|\d+[+-]?)?")
 REQUIRED_MODES = ("--archive-plan", "--matrix")
 INTERPRETERS = ("python3", "python")
 COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&\n]")
@@ -114,10 +104,6 @@ ENV_VALUE_OPTIONS = ("-u", "--unset", "-C", "--chdir", "-S", "--split-string")
 PACKAGE_SPEC = re.compile(r"(?:.*#)?(?P<name>[^@#/]+?)(?:@[^@]*)?$")
 MATRIX_BINDING = re.compile(r"\$\{\{[ ]*matrix\.(?P<field>[A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}")
 MATRIX_FIELDS = ("suite", "partition", "partitions", "filter")
-MATRIX_ENV_BINDING = re.compile(
-    r"(?P<variable>[A-Za-z_][A-Za-z0-9_]*):[ ]*"
-    r"\$\{\{[ ]*matrix\.(?P<field>[A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}"
-)
 # Which matrix field each archived-run option must resolve from. A `$` alone is
 # not enough: `--partition "count:1/$PARTITIONS"` expands a variable and still
 # pins every shard to partition 1.
@@ -132,19 +118,9 @@ RUN_JOB = "postgres-integration-run"
 BUILD_JOB = "postgres-integration-build"
 BUILD_RUNNER = "signalbox-docker"
 RUN_RUNNER = "signalbox-docker"
-# A step or job that may fail without failing anything above it. The archived
-# run carrying this would let every shard fail while the matrix job reports
-# success and the aggregate's assertion passes.
-CONTINUE_ON_ERROR = re.compile(
-    r"^[ ]*(?:-[ ]+)?continue-on-error:[ ]*(?P<value>.*?)[ ]*$"
-)
 # Bash's `command [-pVv] name [args]` runs `name`; only `-v`/`-V` print instead.
 COMMAND_BUILTIN_OPTIONS = ("-p",)
-ENV_KEY = re.compile(r"^(?P<indent>[ ]*)(?P<dash>-[ ]+)?env:[ ]*$")
 ALWAYS_CONDITION = re.compile(r"^[ ]*if:.*\balways\(\)", re.MULTILINE)
-# A path value may contain spaces inside a `${{ … }}` expression, so it runs
-# to the end of the line rather than to the first space.
-ARTIFACT_PATH = re.compile(r"^[ ]*path:[ ]*(?P<path>.+?)[ ]*$")
 NEEDS_RESULT = re.compile(
     r"(?P<variable>[A-Za-z_][A-Za-z0-9_]*):[ ]*"
     r"\$\{\{[ ]*needs\.postgres-integration-(?P<job>build|run)\.result[ ]*\}\}"
@@ -370,26 +346,26 @@ def archive_plan(suites: tuple[Suite, ...]) -> str:
     return "".join(f"{row}\n" for row in rows)
 
 
-def strip_shell_comment(line: str) -> str:
-    """Drop a trailing `#` comment from one shell line, honouring quotes.
+def workflow_document(text: str) -> dict[str, object]:
+    """Decode one GitHub Actions workflow with the maintained YAML parser."""
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        raise ManifestError(f"{WORKFLOW} is not valid YAML: {error}") from error
+    if not isinstance(document, dict):
+        raise ManifestError(f"{WORKFLOW} is not a YAML mapping")
+    return document
 
-    A `#` only opens a comment at the start of a word, and never inside a
-    quoted string — `echo 'a # b'` prints the hash. Without this, a comment is
-    indistinguishable from the command it follows, and every containment check
-    below can be satisfied by text the runner never executes.
-    """
-    quote: str | None = None
-    previous = " "
-    for position, character in enumerate(line):
-        if quote is not None:
-            if character == quote:
-                quote = None
-        elif character in ("'", '"'):
-            quote = character
-        elif character == "#" and previous.isspace():
-            return line[:position].rstrip()
-        previous = character
-    return line.rstrip()
+
+def mappings(value: object):
+    """Yield every mapping nested in a decoded YAML value."""
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from mappings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from mappings(child)
 
 
 def uploaded_artifacts(text: str) -> list[tuple[str, str | None]]:
@@ -400,31 +376,21 @@ def uploaded_artifacts(text: str) -> list[tuple[str, str | None]]:
     would otherwise still count as published, and the docs gate would keep
     asserting that a suite whose archive no longer exists is executed.
     """
-    lines = text.splitlines()
     uploads: list[tuple[str, str | None]] = []
-    for index, line in enumerate(lines):
-        match = UPLOAD_ACTION.match(line)
-        if match is None:
+    for step in mappings(workflow_document(text)):
+        action = step.get("uses")
+        if not isinstance(action, str) or not action.startswith("actions/upload-artifact@"):
             continue
-        indentation = len(match.group("indent"))
-        name: str | None = None
-        path: str | None = None
-        for following in lines[index + 1 :]:
-            if not following.strip():
-                continue
-            depth = len(following) - len(following.lstrip(" "))
-            if depth < indentation or (
-                depth == indentation and following.lstrip().startswith("- ")
-            ):
-                break
-            named = ARCHIVE_ARTIFACT.match(following)
-            if named is not None:
-                name = named.group("suite")
-            located = ARTIFACT_PATH.match(following)
-            if located is not None:
-                path = located.group("path")
-        if name is not None:
-            uploads.append((name, path))
+        settings = step.get("with")
+        if not isinstance(settings, dict):
+            continue
+        name = settings.get("name")
+        path = settings.get("path")
+        if (
+            isinstance(name, str)
+            and name.startswith("postgres-integration-archive-")
+        ):
+            uploads.append((name, path if isinstance(path, str) else None))
     return uploads
 
 
@@ -436,164 +402,36 @@ def job_lines(text: str, name: str) -> list[str]:
     sitting in an unrelated job says nothing about whether branch protection
     consults the shards.
     """
-    lines = text.splitlines()
-    opening = re.compile(rf"^(?P<indent>[ ]+){re.escape(name)}:[ ]*$")
-    for index, line in enumerate(lines):
-        match = opening.match(line)
-        if match is None:
-            continue
-        indent = len(match.group("indent"))
-        for end in range(index + 1, len(lines)):
-            following = lines[end]
-            if following.strip() and (
-                len(following) - len(following.lstrip(" ")) <= indent
-            ):
-                return lines[index:end]
-        return lines[index:]
-    return []
-
-
-def step_span(lines: list[str], run_index: int, indent: int) -> tuple[int, int]:
-    """Return the line range of the step enclosing one `run:` scalar.
-
-    The step is the list item containing the command, bounded by the nearest
-    `- ` at the command key's own indentation on either side.
-    """
-    start = 0
-    for index in range(run_index, -1, -1):
-        line = lines[index]
-        depth = len(line) - len(line.lstrip(" "))
-        if line.strip() and depth <= indent and line.lstrip().startswith("- "):
-            start = index
-            break
-    end = len(lines)
-    for index in range(run_index + 1, len(lines)):
-        line = lines[index]
-        if not line.strip():
-            continue
-        depth = len(line) - len(line.lstrip(" "))
-        if depth < indent or (depth == indent and line.lstrip().startswith("- ")):
-            end = index
-            break
-    return start, end
-
-
-def step_is_blocking(lines: list[str], start: int, end: int) -> bool:
-    """Return whether a step's failure still fails its job.
-
-    `continue-on-error` on the archived run would let every shard fail while
-    the matrix job reported success and the aggregate's assertion passed — the
-    required check green with nothing enforced. The archived run has to be
-    unconditionally blocking, so only a literal `false` counts as blocking.
-    """
-    for line in lines[start:end]:
-        match = CONTINUE_ON_ERROR.match(line)
-        if match is None:
-            continue
-        # Only a literal `false` keeps the step blocking. `true`, an expression
-        # (`${{ … }}`), and anything else are all read as non-blocking, because
-        # what an expression evaluates to is not decidable here and a step that
-        # might be allowed to fail cannot be credited with enforcing anything.
-        if match.group("value").strip("\"'") != "false":
-            return False
-    return True
-
-
-def step_matrix_variables(lines: list[str], run_index: int, indent: int) -> dict[str, str]:
-    """Return the matrix bindings in scope for one `run:` scalar's own step.
-
-    Collected from the step the command belongs to, never from the file: a run
-    step pinning `PARTITION: "1"` while some other step still binds
-    `PARTITION: ${{ matrix.partition }}` would otherwise read as parameterised
-    while every shard ran the same partition.
-
-    The step is the list item enclosing the command — bounded by the nearest
-    `- ` at the command key's own indentation on either side.
-    """
-    start, end = step_span(lines, run_index, indent)
-    return {
-        match.group("field"): match.group("variable")
-        for line in lines[start:end]
-        for match in MATRIX_ENV_BINDING.finditer(line)
-    }
+    jobs = workflow_document(text).get("jobs")
+    if not isinstance(jobs, dict) or name not in jobs:
+        return []
+    return yaml.safe_dump(
+        {"jobs": {name: jobs[name]}}, sort_keys=False
+    ).splitlines()
 
 
 def workflow_shell_commands(
     text: str,
 ) -> list[tuple[str, dict[str, str], bool]]:
-    """Return each `run:`/`command:` scalar in a workflow, flattened to one line.
-
-    A shell command in a workflow can be spelled four ways — inline, a literal
-    `|` block, a folded `>-` block, or backslash continuations — and a check
-    that reads only physical lines sees a different command in each. So every
-    scalar is collected whole: the opening key's own text plus every following
-    line indented past it, joined with spaces, comment lines and continuation
-    backslashes dropped.
-
-    This is containment, not interpretation. It answers "does this text appear
-    inside a command" without reconstructing what the command selects — the
-    inference the suite manifest exists to make unnecessary.
-    """
-    lines = text.splitlines()
-    # A `run:`/`command:` key nested under `env:` is an environment value, not
-    # a command the runner executes. Left in, a conforming nextest string
-    # parked in one would satisfy the archived-run requirement while no step
-    # ran anything.
-    inert = set()
-    for index, line in enumerate(lines):
-        opening = ENV_KEY.match(line)
-        if opening is None:
-            continue
-        # `- env:` puts the key two columns right of the list item, and its
-        # sibling `run:` sits at the key's indent — not inside the mapping.
-        indent = len(opening.group("indent")) + len(opening.group("dash") or "")
-        for following in range(index + 1, len(lines)):
-            entry = lines[following]
-            if entry.strip() and len(entry) - len(entry.lstrip(" ")) <= indent:
-                break
-            inert.add(following)
-
+    """Return each decoded `run:`/`command:` scalar and its step settings."""
     commands: list[tuple[str, dict[str, str], bool]] = []
-    index = 0
-    while index < len(lines):
-        match = SHELL_SCALAR.match(lines[index])
-        if match is None or index in inert:
-            index += 1
+    for step in mappings(workflow_document(text)):
+        command = step.get("run", step.get("command"))
+        if not isinstance(command, str):
             continue
-        indentation = len(match.group("indent"))
-        variables = step_matrix_variables(lines, index, indentation)
-        blocking = step_is_blocking(lines, *step_span(lines, index, indentation))
-        # `|`, `>-`, `|+2` and friends open a block; they are not command text.
-        # Which one decides how the block's lines rejoin: a literal `|` block
-        # keeps its newlines, and a newline separates commands, while a folded
-        # `>` block and an inline scalar wrap one command across lines.
-        inline = match.group("inline").strip()
-        opens_block = BLOCK_INDICATOR.fullmatch(inline) is not None
-        separator = "\n" if opens_block and inline.startswith("|") else " "
-        body = ["" if opens_block else inline]
-        index += 1
-        while index < len(lines):
-            line = lines[index]
-            if line.strip() and len(line) - len(line.lstrip(" ")) <= indentation:
-                break
-            if line.strip():
-                body.append(line.strip())
-            index += 1
-        # Comments are stripped per physical line, before the lines rejoin: a
-        # comment ends its own line, not the rest of the block. A line ending
-        # in a backslash continues regardless of the block style.
-        joined = ""
-        pending = " "
-        for part in body:
-            stripped = strip_shell_comment(part)
-            continues = stripped.endswith("\\")
-            stripped = stripped.removesuffix("\\").strip()
-            if not stripped:
-                continue
-            joined = stripped if not joined else f"{joined}{pending}{stripped}"
-            pending = " " if continues else separator
-        if joined:
-            commands.append((joined, variables, blocking))
+        environment = step.get("env")
+        variables: dict[str, str] = {}
+        if isinstance(environment, dict):
+            for variable, value in environment.items():
+                if not isinstance(variable, str) or not isinstance(value, str):
+                    continue
+                match = re.fullmatch(r"\$\{\{[ ]*matrix\.([A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}", value)
+                if match is not None:
+                    variables[match.group(1)] = variable
+        continue_on_error = step.get("continue-on-error", False)
+        blocking = continue_on_error is False or continue_on_error == "false"
+        if command.strip():
+            commands.append((command.strip(), variables, blocking))
     return commands
 
 
@@ -605,6 +443,7 @@ def simple_commands(command: str) -> list[list[str]]:
     a piece that does not tokenize is dropped rather than raised, since prose
     reaches here as readily as a command does.
     """
+    command = re.sub(r"\\\r?\n[ \t]*", " ", command)
     segments = [command]
     segments.extend(match.group("body") for match in SUBSTITUTION.finditer(command))
     executed: list[list[str]] = []
@@ -810,10 +649,13 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         RUN_JOB: RUN_RUNNER,
     }
     raw_selections = {}
+    jobs = workflow_document(text).get("jobs")
+    jobs = jobs if isinstance(jobs, dict) else {}
     shards_resolve_clean = True
     for job, expected_target in expected_targets.items():
-        job_text = "\n".join(job_lines(text, job))
-        raw = {match.group("target") for match in RUNS_ON.finditer(job_text)}
+        job_value = jobs.get(job)
+        runs_on = job_value.get("runs-on") if isinstance(job_value, dict) else None
+        raw = {runs_on} if isinstance(runs_on, str) else set()
         raw_selections[job] = raw
         targets = {_resolved_runs_on(value) for value in raw}
         if targets != {expected_target}:
