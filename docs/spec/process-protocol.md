@@ -71,14 +71,16 @@ cascade rules are owned by
 
 Durable events reach followers through the dispatcher. It reads the
 transactional outbox owned by [persistence-protocol.md](persistence-protocol.md)
-one sequence at a time and offers each session event that has a wire projection
-to two process-local fan-outs: one durable-only and one composite that also
-admits deltas; a sessionless receipt or an event kind with no projection
-advances the cursor and reaches no follower. A database-scoped advisory guard
-and a generation fence in `crates/persistence/src/hub_fence.rs` enforce one
-active daemon process per database, and therefore one dispatcher and its
-fan-outs. The guard is taken on a dedicated connection before migrations run and
-held until shutdown.
+one sequence at a time through the `process_protocol` consumer cursor and offers
+each session event that has a wire projection to two process-local fan-outs: one
+durable-only and one composite that also admits deltas; a sessionless receipt or
+an event kind with no projection advances that cursor and reaches no follower.
+The compiled-in repository-watch consumer reads the same typed events through
+its independent `repo_watch` cursor. A database-scoped advisory guard and a
+generation fence in `crates/persistence/src/hub_fence.rs` enforce one active
+daemon process per database, and therefore one dispatcher and its fan-outs. The
+guard is taken on a dedicated connection before migrations run and held until
+shutdown.
 
 ## Design decisions
 
@@ -123,7 +125,10 @@ provider-native model identifier, or mutable configuration operation. The
 imported-entry projection carries no tool fields, results, thinking, media,
 source-event payload, absence detail, or raw record, so the immutable aggregate
 stays the authority. No delegation event embeds or links the child transcript.
-Storage-version columns are not exposed as wire-version fields.
+Storage-version columns are not exposed as wire-version fields. An opaque
+provider-compaction semantic entry projects only a non-text marker carrying its
+turn and producing-call identities; its provider replay bytes never cross
+protocol output.
 
 Pool construction requires a non-cloneable capability that borrows the live
 fence session, so a copied generation value cannot construct work after the
@@ -236,18 +241,18 @@ a configured tag, attribute, required-tag, or page-size limit is
 
 Every database-backed read is served from the authoritative tables, with no
 materialized view, cache, or analytical artifact, and takes no row or table lock
-an application mutation waits on. A read whose answer must be coherent across
-statements is one repeatable-read, read-only transaction; a transcript snapshot,
-the conversation list, and the review-orchestration projection each answer from
-one such snapshot. A single-statement read, such as session defaults or a blob
-catalog entry, runs directly on a pooled connection, and the review-findings
-listing takes its run and its findings from separate transactions. A read
-answered from deployment configuration opens no transaction. A transcript
-snapshot observes the outbox cursor, the session's semantic frontier, and every
-turn in acceptance order together. The conversation list orders by conversation
-identity value, a native session before an imported conversation of equal value.
-Every reported duration is clamped nonnegative and sampled against the database
-transaction timestamp, not a client clock.
+an application mutation waits on. A single-statement read, such as session
+defaults or a blob catalog entry, runs directly on a pooled connection, and a
+read answered from deployment configuration opens no transaction. A read whose
+answer must be coherent across statements is one repeatable-read, read-only
+transaction. The transcript snapshot answers from one such snapshot and observes
+the outbox cursor, the session's semantic frontier, and every turn in acceptance
+order together. The conversation list answers from one and orders by
+conversation identity value, a native session before an imported conversation of
+equal value. The review-orchestration projection answers from one, while the
+review-findings listing takes its run and its findings from separate
+transactions. Every reported duration is clamped nonnegative and sampled against
+the database transaction timestamp, not a client clock.
 
 Every read that holds a pooled connection across more than one statement takes
 one snapshot-reader admission; the single-statement defaults read takes none.
@@ -355,8 +360,7 @@ advance the follow connection's observed cursor; only events consumed from the
 subscribed connection do.
 
 The terminal client reads submitted conversation input from standard input,
-never from process arguments. A recorded review finding carries an opaque
-caller-supplied file-path key. When no command identity is given, it generates a
+never from process arguments. When no command identity is given, it generates a
 fresh one and prints it to standard error before any socket I/O; every
 client-generated or server-discovered recovery value is printed before the
 commit it belongs to can become ambiguous, each recovery set is printed all or
@@ -366,7 +370,8 @@ synthesizes a shell command. It renders every C0 control code point, DEL, and
 every C1 code point in process-derived text as a visible escape, preserving a
 line feed only in flowing text and escaping it in a single-line field such as a
 provider delta or a metadata title or tag. A single explicit raw-output option
-is the only opt-in to unescaped text.
+is the only opt-in to unescaped text. A recorded review finding carries an
+opaque caller-supplied file-path key.
 
 ## Planned
 

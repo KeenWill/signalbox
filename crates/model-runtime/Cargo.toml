@@ -11,6 +11,9 @@ publish.workspace = true
 cli-process = ["dep:rustix", "dep:tokio"]
 
 [dependencies]
+eventsource-stream = "0.2.3"
+futures-channel = "0.3.31"
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 httpdate = "1.0.3"
 schemars = "1.0.4"
 serde = "1.0.219"

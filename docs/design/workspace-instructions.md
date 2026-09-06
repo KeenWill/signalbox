@@ -16,41 +16,42 @@ and the user's request.
 
 ## Design
 
-Eligibility is an allow-list of registered bundle identities. A session template
-supplies instruction selectors that the session carries until its first
-turn-start manifest; the transaction that records that manifest resolves them
-against the turn's discovery and installs the allow-list
+Eligibility is an allow-list of registered bundle identities, and an absent
+allow-list makes no bundle eligible. A session template supplies instruction
+selectors that the session carries until its first turn-start manifest; the
+transaction that records that manifest resolves them against the turn's
+discovery and installs the allow-list
 ([configuration-and-credentials.md](../spec/configuration-and-credentials.md)).
 A session-specific replacement is its own durable command and carries at most as
-many selectors as a template's selector array. An absent allow-list makes no
-bundle eligible. Each entry pairs a bundle identity with the authorizing root
-the session reaches it through, because one bundle may be registered under
-several roots and the root fixes the paths and scope the model sees. A bundle
-registered under more than one root is eligible only through its primary root,
+many selectors as a template's selector array. Each entry pairs a bundle
+identity with the authorizing root the session reaches it through, because one
+bundle may be registered under several roots and the root fixes the paths and
+scope the model sees. Such a bundle is eligible only through its primary root,
 the first root whose rules yield it; a selector naming another root does not
 resolve it.
 
 The transaction that records a turn-start manifest copies the exact ordered
 eligibility list under the session scheduler lock and records its versioned
-SHA-256 hash in that manifest. The snapshot is immutable for the turn; a
-replacement affects only later activations. A replacement that removes an
+SHA-256 hash in that manifest. The snapshot is immutable for the turn, and a
+registered bundle absent from it cannot be enumerated, previewed, or admitted. A
+replacement affects only later activations, and a replacement that removes an
 identity already admitted, or one the active turn's frozen snapshot can still
 admit, is rejected, because unload remains the only mechanism that removes an
 admission. Installed eligibility is revalidated against the live configured-root
 catalog at activation and at startup recovery, and a root the configuration no
 longer declares closes its entries to listing, preview, and new admission,
 including for a turn retained active across the restart; an admission already
-recorded keeps its stored wrapper. A registered bundle absent from the snapshot
-cannot be enumerated, previewed, or admitted.
+recorded keeps its stored wrapper.
 
-Three tools expose the snapshot to the model. `instructions_list` enumerates the
-snapshot by cursor; a page carries a fixed maximum entry count within a fixed
-maximum encoded size below the tool-result ceiling, cuts deterministically at
-whichever bound it reaches first, and returns a next cursor.
-`instructions_preview` returns bounded structure for one eligible bundle:
-headings for a document, validated metadata and headings for a skill, with the
-source byte length. A preview is capped by a fixed maximum heading count and a
-fixed maximum encoded result size, and truncates deterministically at either
+Three tools expose the snapshot to the model, each through a closed JSON-object
+argument schema that accepts no session identity. `instructions_list` enumerates
+the snapshot by cursor; a page carries a fixed maximum entry count within a
+fixed maximum encoded size below the tool-result ceiling, cuts deterministically
+at whichever bound it reaches first, and returns a next cursor.
+`instructions_preview` returns bounded structure for one eligible bundle,
+headings for a document and, for a skill, validated metadata and headings, with
+the source byte length; a preview is capped by a fixed maximum heading count and
+a fixed maximum encoded result size, and truncates deterministically at either
 bound. `instructions_read` names one eligible bundle, requests admission, and
 returns a typed receipt naming the admission, the source hash, the rendered
 hash, the rendered byte length, and any truncation boundary, never the body.
@@ -61,8 +62,7 @@ byte is previewed or admitted. List and preview declare the Auto permission
 default and admit nothing. All three tools declare the `EffectFree` effect
 class: list and preview read only daemon-local state, and a read's only durable
 effect commits with its result, so a daemon lost before result commit closes the
-attempt `KnownFailed` ([tool-loop.md](../spec/tool-loop.md)). Each tool takes a
-closed JSON-object argument schema, and no schema accepts a session identity.
+attempt `KnownFailed` ([tool-loop.md](../spec/tool-loop.md)).
 
 Nothing is admitted because it is eligible, relevant, near a touched file, or
 named in a template. The only admission route is a model request through
@@ -81,18 +81,17 @@ tokens: `stale_source`, `aggregate_exhaustion`, `target_capability`, and
 Every repository-controlled string a list or preview result carries, such as a
 display name, a source or scope path, a description, heading text, or skill
 metadata, sits inside one delimited untrusted-data region under a fixed
-daemon-authored label. The region is carried as the JSON string value of the
-result's `untrusted` member. Members that cannot carry prose, such as identity,
-kind, byte length, hash, and root reference, stay outside it, so a reader can
-address and order a page without parsing untrusted text. The daemon-resolved
-bundle evidence a delegated `instructions_read` decision sends to the approval
-judge is framed the same way, its repository-controlled strings inside this
-region and its prose-free members outside it. Every path a list result, a
-preview result, or that judge evidence carries is root-relative, never a
-canonical absolute path. A configured-root path names its root by the
-provider-safe reference
-([configuration-and-credentials.md](../spec/configuration-and-credentials.md));
-a workspace path names the closed workspace root kind. The region is four
+daemon-authored label, carried as the JSON string value of the result's
+`untrusted` member. Members that cannot carry prose, such as identity, kind,
+byte length, hash, and root reference, stay outside it, so a reader can address
+and order a page without parsing untrusted text. The daemon-resolved bundle
+evidence a delegated `instructions_read` decision sends to the approval judge is
+framed the same way, its repository-controlled strings inside this region and
+its prose-free members outside it. Every path a list result, a preview result,
+or that judge evidence carries is root-relative, never a canonical absolute
+path; a configured-root path names its root by the provider-safe reference
+([configuration-and-credentials.md](../spec/configuration-and-credentials.md)),
+and a workspace path names the closed workspace root kind. The region is four
 LF-separated lines with no leading or trailing byte; the first, second, and
 fourth are literal and identical wherever a region appears:
 
@@ -110,16 +109,16 @@ the model-input contract preserves; an adapter that cannot carry it fails rather
 than presenting the fragments bare.
 
 A successful fresh read appends one immutable admission row inside the tool
-result-commit transaction ([tool-loop.md](../spec/tool-loop.md)). The row names
-the prior admitted-set head, the bundle, the rendered hash and byte length, the
-exact rendered wrapper bytes, and the request identity, and the session's
-admitted-set head advances to it. The row is the plaintext authority for every
-later projection even if the workspace source changes or disappears or its root
-leaves the configuration. A second request for an admitted bundle still in the
-effective eligibility view returns its durable already-admitted receipt without
-rereading the source and appends nothing, while a request for a revoked identity
-resolves as ineligible; a replay returns its recorded receipt. Process memory
-and the live workspace are never authority for the admitted set.
+result-commit transaction ([tool-loop.md](../spec/tool-loop.md)), and the
+session's admitted-set head advances to it. The row names the prior admitted-set
+head, the bundle, the rendered hash and byte length, the exact rendered wrapper
+bytes, and the request identity. It is the plaintext authority for every later
+projection even if the workspace source changes or disappears or its root leaves
+the configuration; process memory and the live workspace are never authority for
+the admitted set. A second request for an admitted bundle still in the effective
+eligibility view returns its durable already-admitted receipt without rereading
+the source and appends nothing, while a request for a revoked identity resolves
+as ineligible; a replay returns its recorded receipt.
 
 Admitted instructions are a model-input projection rebuilt each turn from the
 rendered bytes the admission rows retain, not transcript entries. Signalbox
@@ -169,8 +168,8 @@ The metadata line comes from one encoder: the compact `serde_json` encoding
 whose string escaping matches RFC 8785, extended so `<`, `>`, and `&` become the
 six-character escapes above. That fixed order and that fixed escaping make two
 implementations render identical wrapper bytes for the same admission. Content
-replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;`. No repository byte
-can therefore terminate or fabricate an envelope. Canonical absolute paths never
+replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;`, so no repository
+byte can terminate or fabricate an envelope; canonical absolute paths never
 enter the region. The rendered hash is SHA-256 over the complete escaped
 wrapper.
 

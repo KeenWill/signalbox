@@ -2553,7 +2553,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inv048_scheduler_event_ordinal_exhaustion_is_a_typed_continuation_outcome() {
+    fn scheduler_event_ordinal_exhaustion_is_a_typed_continuation_outcome() {
         let outcome = scheduler_failure_rejection(GoalTransitionFailure::EventOrdinalExhausted)
             .expect("event ordinal exhaustion is typed, not corruption");
 

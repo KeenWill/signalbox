@@ -335,9 +335,9 @@ does not replace those join keys.
 
 A code comment states a constraint, rationale, or contract directly. Process
 artifacts, dates, reviews, and decision-history documents are provenance for git
-history, not authorities cited in source comments. Cite an owning spec by name,
-or an applicable scenario or invariant identifier, without a process-rule or
-section number.
+history, not authorities cited in source comments. Citations name the owning
+spec without a process-rule or section number; test comments may retain existing
+`SNN` grouping labels.
 
 When code defends against a failure the type system cannot express, such as
 stack depth, timing, or resource exhaustion, its comment names the failure the
@@ -415,10 +415,10 @@ rule is added to it only once the tree has no violations of that rule.
 | SR-12 | every clap argument and `ValueEnum` variant carries a doc comment |
 | SR-13 | no proc-macro diagnostic is spanned on the macro call site        |
 
-The other conventions in this guide are checked in review, because the fact they
-depend on (who owns a bound, whether two helpers are the same helper, whether an
-error value is safe to render) is not in the text. Do not add a blanket
-crate-level `allow` to silence a lint warning.
+The other conventions in this guide are applied by the author when writing the
+change, because the fact they depend on (who owns a bound, whether two helpers
+are the same helper, whether an error value is safe to render) is not in the
+text. Do not add a blanket crate-level `allow` to silence a lint warning.
 
 ## Rust mechanics (appendix)
 

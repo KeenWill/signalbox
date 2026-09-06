@@ -240,31 +240,23 @@ impl RepoWatchEventIdentityFrontierV1 {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why an occurrence frontier could not represent another event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchEventIdentityFrontierError {
+    #[error("repository-watch identity frontier repeats a stream")]
     /// Stored entries named one stream twice, so its sequence is ambiguous.
     DuplicateStream,
+    #[error("repository-watch identity frontier exceeds 1000000 streams")]
     /// The repository holds the most recurring streams a frontier may carry.
     ///
     /// Reached only when assembling a stored frontier or introducing a new
     /// stream; a stream already counted keeps advancing at the ceiling.
     StreamLimit,
+    #[error("repository-watch identity occurrence sequence is exhausted")]
     /// One stream assigned every occurrence number a `u64` can hold.
     SequenceExhausted,
 }
-
-impl fmt::Display for RepoWatchEventIdentityFrontierError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::DuplicateStream => "repository-watch identity frontier repeats a stream",
-            Self::StreamLimit => "repository-watch identity frontier exceeds 1000000 streams",
-            Self::SequenceExhausted => "repository-watch identity occurrence sequence is exhausted",
-        })
-    }
-}
-
-impl Error for RepoWatchEventIdentityFrontierError {}
 
 /// One normalized event paired with its source-independent content identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -346,20 +338,13 @@ impl RepoWatchCheckCompletionGeneration {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error(
+    "repository-watch check completion generation must contain 1 to {MAX_CHECK_COMPLETION_GENERATION_BYTES} NUL-free bytes"
+)]
 /// Invalid provider check-completion generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchCheckCompletionGenerationError;
-
-impl fmt::Display for RepoWatchCheckCompletionGenerationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "repository-watch check completion generation must contain 1 to {MAX_CHECK_COMPLETION_GENERATION_BYTES} NUL-free bytes"
-        )
-    }
-}
-
-impl Error for RepoWatchCheckCompletionGenerationError {}
 
 /// One completed check-suite identity and its aggregate outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -623,20 +608,11 @@ impl RepoWatchConvergenceAssessment {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("repository-watch convergence evidence is incoherent")]
 /// Incoherent convergence evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchConvergenceAssessmentError;
-
-impl fmt::Display for RepoWatchConvergenceAssessmentError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "repository-watch convergence evidence is incoherent"
-        )
-    }
-}
-
-impl Error for RepoWatchConvergenceAssessmentError {}
 
 /// One stale blocking review eligible for conservative automatic dismissal.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -721,19 +697,13 @@ impl RepoWatchStaleReviewClearanceCandidate {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error(
+    "repository-watch stale review clearance requires an older-head review and no blocker except changes requested"
+)]
 /// A review is not stale, or another exact-head convergence blocker remains.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchStaleReviewClearanceCandidateError;
-
-impl fmt::Display for RepoWatchStaleReviewClearanceCandidateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(
-            "repository-watch stale review clearance requires an older-head review and no blocker except changes requested",
-        )
-    }
-}
-
-impl Error for RepoWatchStaleReviewClearanceCandidateError {}
 
 /// One current review-thread projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1326,56 +1296,30 @@ impl RepoWatchObservation {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why normalized repository state could not be made canonical.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchRepositoryStateError {
+    #[error("duplicate pull request {}", field_0.get())]
     DuplicatePullRequest(PullRequestNumber),
+    #[error("repository-watch cursor exceeds 1000000 merged baselines")]
     MergedPullRequestBaselineLimit,
+    #[error("duplicate check suite {}", field_0.get())]
     DuplicateCheckSuite(GitHubObjectId),
+    #[error("duplicate check run {}", field_0.get())]
     DuplicateCheckRun(GitHubObjectId),
+    #[error("duplicate review {}", field_0.get())]
     DuplicateReview(GitHubObjectId),
+    #[error("duplicate review thread {}", field_0.as_str())]
     DuplicateThread(ReviewThreadId),
+    #[error("duplicate branch workflow {}/{}", branch.as_str(), workflow_id.get())]
     DuplicateWorkflow {
         branch: BranchName,
         workflow_id: GitHubObjectId,
     },
+    #[error("duplicate branch head {}", field_0.as_str())]
     DuplicateBranchHead(BranchName),
 }
-
-impl fmt::Display for RepoWatchRepositoryStateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DuplicatePullRequest(number) => {
-                write!(formatter, "duplicate pull request {}", number.get())
-            }
-            Self::MergedPullRequestBaselineLimit => {
-                formatter.write_str("repository-watch cursor exceeds 1000000 merged baselines")
-            }
-            Self::DuplicateCheckSuite(id) => {
-                write!(formatter, "duplicate check suite {}", id.get())
-            }
-            Self::DuplicateCheckRun(id) => write!(formatter, "duplicate check run {}", id.get()),
-            Self::DuplicateReview(id) => write!(formatter, "duplicate review {}", id.get()),
-            Self::DuplicateThread(thread) => {
-                write!(formatter, "duplicate review thread {}", thread.as_str())
-            }
-            Self::DuplicateWorkflow {
-                branch,
-                workflow_id,
-            } => write!(
-                formatter,
-                "duplicate branch workflow {}/{}",
-                branch.as_str(),
-                workflow_id.get()
-            ),
-            Self::DuplicateBranchHead(branch) => {
-                write!(formatter, "duplicate branch head {}", branch.as_str())
-            }
-        }
-    }
-}
-
-impl Error for RepoWatchRepositoryStateError {}
 
 enum RepoWatchEventStreamKeyV1<'value> {
     PullRequestKind {
@@ -3231,42 +3175,20 @@ impl SubmitInputIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a validated rule could not be prepared for its atomic dispatch port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchDispatchPreparationError {
-    Context(RepoWatchDispatchContextError),
+    #[error("repository-watch event could not form dispatch context")]
+    Context(#[source] RepoWatchDispatchContextError),
+    #[error("repository-watch rule names an unknown session template")]
     UnknownTemplate(SessionTemplateName),
+    #[error("repository-watch session preparation failed")]
     SessionPreparation,
+    #[error("repository-watch singleton scope is incompatible with the event target")]
     InvalidSingletonTarget,
-    GoalStatement(GoalTextError),
-}
-
-impl fmt::Display for RepoWatchDispatchPreparationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Context(_) => "repository-watch event could not form dispatch context",
-            Self::UnknownTemplate(_) => "repository-watch rule names an unknown session template",
-            Self::SessionPreparation => "repository-watch session preparation failed",
-            Self::InvalidSingletonTarget => {
-                "repository-watch singleton scope is incompatible with the event target"
-            }
-            Self::GoalStatement(_) => {
-                "repository-watch dispatch could not form its synthesized goal statement"
-            }
-        })
-    }
-}
-
-impl Error for RepoWatchDispatchPreparationError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Context(error) => Some(error),
-            Self::GoalStatement(error) => Some(error),
-            Self::UnknownTemplate(_) | Self::SessionPreparation | Self::InvalidSingletonTarget => {
-                None
-            }
-        }
-    }
+    #[error("repository-watch dispatch could not form its synthesized goal statement")]
+    GoalStatement(#[source] GoalTextError),
 }
 
 /// Coordinates pure matching and current-interface session preparation.
@@ -3385,10 +3307,13 @@ where
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Nonterminal rule-dispatch orchestration failure.
 #[derive(Debug)]
 pub enum RepoWatchDispatchServiceError<TransactionError> {
+    #[error(transparent)]
     Preparation(RepoWatchDispatchPreparationError),
+    #[error(transparent)]
     Transaction(TransactionError),
 }
 
@@ -3487,24 +3412,6 @@ fn stack_root_pull_request(
         .map(|(number, _)| number)
         .or_else(|| component.into_iter().next())
         .unwrap_or_else(|| context.number())
-}
-
-/// Display and error forwarding for repository-watch dispatch service failures.
-impl<TransactionError> fmt::Display for RepoWatchDispatchServiceError<TransactionError>
-where
-    TransactionError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Preparation(error) => error.fmt(formatter),
-            Self::Transaction(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl<TransactionError> Error for RepoWatchDispatchServiceError<TransactionError> where
-    TransactionError: Error + 'static
-{
 }
 
 #[cfg(test)]
@@ -3738,7 +3645,7 @@ mod tests {
     }
 
     #[test]
-    fn inv072_current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
+    fn current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
         let assessment = convergence_assessment(ConvergenceFacts {
             base_branch: BASE_BRANCH,
             mergeable_state: MergeableState::Mergeable,

@@ -1,6 +1,6 @@
 //! Transport-independent GitHub webhook payload projection for repository watch.
 
-use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64};
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use serde_json::{Map, Value};
 use signalbox_domain::{
@@ -411,34 +411,14 @@ pub enum RepoWatchObservationApplyV1 {
     },
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Internal-coherence failure while rebuilding canonical state after a patch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookApplyError {
-    RepositoryState(RepoWatchRepositoryStateError),
+    #[error("webhook patch produced noncanonical repository state: {field_0}")]
+    RepositoryState(#[source] RepoWatchRepositoryStateError),
+    #[error("webhook patch conflicts with retained {field_0}")]
     ConflictingImmutableFact(&'static str),
-}
-
-impl fmt::Display for RepoWatchWebhookApplyError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RepositoryState(error) => write!(
-                formatter,
-                "webhook patch produced noncanonical repository state: {error}"
-            ),
-            Self::ConflictingImmutableFact(fact) => {
-                write!(formatter, "webhook patch conflicts with retained {fact}")
-            }
-        }
-    }
-}
-
-impl Error for RepoWatchWebhookApplyError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::RepositoryState(error) => Some(error),
-            Self::ConflictingImmutableFact(_) => None,
-        }
-    }
 }
 
 impl From<RepoWatchRepositoryStateError> for RepoWatchWebhookApplyError {
@@ -944,33 +924,21 @@ pub enum RepoWatchWebhookMappingV1 {
     Ignored(RepoWatchWebhookIgnoredReasonV1),
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why an admitted body could not be decoded into its declared event family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookMappingError {
+    #[error("webhook body is not valid JSON")]
     MalformedJson,
+    #[error("webhook body is missing {field_0}")]
     MissingField(&'static str),
+    #[error("webhook body has invalid {field_0}")]
     InvalidField(&'static str),
+    #[error("webhook body repository does not match admitted repository")]
     RepositoryMismatch,
+    #[error("webhook body action does not match admitted action")]
     ActionMismatch,
 }
-
-impl fmt::Display for RepoWatchWebhookMappingError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MalformedJson => formatter.write_str("webhook body is not valid JSON"),
-            Self::MissingField(field) => write!(formatter, "webhook body is missing {field}"),
-            Self::InvalidField(field) => write!(formatter, "webhook body has invalid {field}"),
-            Self::RepositoryMismatch => {
-                formatter.write_str("webhook body repository does not match admitted repository")
-            }
-            Self::ActionMismatch => {
-                formatter.write_str("webhook body action does not match admitted action")
-            }
-        }
-    }
-}
-
-impl Error for RepoWatchWebhookMappingError {}
 
 /// Maps an authenticated delivery without depending on HTTP or persistence types.
 pub fn map_repo_watch_webhook_delivery_v1(

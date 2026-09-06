@@ -1,0 +1,22 @@
+{
+  "source": "informational-answer.json",
+  "edge": "trivial information",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/0/body",
+      "value": "Question: why is this interval configurable?"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/0/body",
+      "value": "Question: why is this interval configurable?"
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "ack"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "ack"
+    }
+  ]
+}

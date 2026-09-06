@@ -64,8 +64,8 @@ pub(crate) fn classify_error_envelope(
     classify_error(status, None)
 }
 
-/// Classifies an error envelope and grants substitution proof only when the
-/// precedence-selected native availability token agrees with HTTP 429.
+/// Classifies an error envelope and grants non-acceptance proof only when the
+/// precedence-selected native transient token agrees with its HTTP status.
 pub(crate) fn classify_error_envelope_with_proof(
     status: u16,
     code: Option<&str>,
@@ -80,11 +80,16 @@ pub(crate) fn classify_error_envelope_with_proof(
         (true, false) => error_type,
         (true, true) => std::option::Option::None,
     };
-    let non_acceptance_proven = status == 429
+    let non_acceptance_proven = (status == 429
         && matches!(
             selected_token,
             Some("rate_limit_exceeded" | "rate_limit_error" | "insufficient_quota")
-        );
+        ))
+        || (status == 500
+            && matches!(
+                selected_token,
+                Some("server_error" | "internal_server_error")
+            ));
     (kind, non_acceptance_proven)
 }
 
@@ -155,6 +160,14 @@ mod tests {
         assert_eq!(
             classify_error_envelope_with_proof(401, Some("rate_limit_error"), None),
             (ProviderErrorKind::CredentialRejected, false)
+        );
+        assert_eq!(
+            classify_error_envelope_with_proof(500, Some("server_error"), None),
+            (ProviderErrorKind::ProviderInternal, true)
+        );
+        assert_eq!(
+            classify_error_envelope_with_proof(503, Some("server_error"), None),
+            (ProviderErrorKind::ProviderInternal, false)
         );
         assert_eq!(
             classify_error_envelope_with_proof(
