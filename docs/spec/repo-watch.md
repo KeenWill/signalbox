@@ -624,6 +624,16 @@ transaction. No dispatched session is visible without its accepted input, its
 queued turn, its dispatch-to-turn audit link, and a statement of the authority
 it was dispatched under.
 
+Before submission, the module ledger retains an opaque core encoding of every
+complete checked command payload. Recovery replans only to rediscover the
+evaluation identity, then core decodes and resubmits the exact retained batch;
+newly resolved template or configuration values cannot replace the committed
+payload. Every action and every lifecycle reaction in a batch has its own
+one-based ordinal. A release-start or sticky-stop reaction remains admissible
+after rule deactivation when it names a committed dispatch from that rule
+revision; deactivation prevents new matching dispatches, not reactions owed by
+an existing one.
+
 An operator commission through `commission_session`, and every sweep dispatch,
 commits in one transaction the template session, the append-only
 commissioned-dispatch fence, the caller's context as first accepted input, and

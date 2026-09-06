@@ -4,7 +4,7 @@
 //! unqualified and must run on a pool whose effective role and search path are
 //! confined to `mod_repo_watch`.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -16,8 +16,8 @@ use signalbox_ownership_seam::{
     RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
     RepoWatchEventOccurrenceV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleActionV1,
     RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState, SessionCommand,
-    SessionCommandKind, SessionCommandPayload, SessionLifecycleCommand, SessionLifecycleOperation,
-    SessionOwnership, StartGate, StopStickiness,
+    SessionCommandKind, SessionLifecycleCommand, SessionLifecycleOperation, SessionOwnership,
+    StartGate, StopStickiness,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -179,7 +179,7 @@ pub enum DispatchAdmission {
     Inserted,
     /// This rule revision and event already have a retained action batch.
     Replayed {
-        /// The retained command identities paired with the regenerated payloads.
+        /// The exact retained command batch decoded by core.
         commands: Box<[PlannedCommand]>,
     },
     /// A durable dispatch or command identity was already bound elsewhere.
@@ -267,51 +267,14 @@ impl PlannedCommand {
         self.command
     }
 
-    fn with_retained_identity(
+    fn with_retained_command(
         mut self,
         dispatch: RepoWatchDispatchId,
-        command_id: signalbox_ownership_seam::DurableCommandId,
-    ) -> Result<Self, StoreError> {
+        command: SessionCommand,
+    ) -> Self {
         self.dispatch = dispatch;
-        self.command = match self.command.into_payload() {
-            SessionCommandPayload::CreateSession(command) => {
-                let recreated = match command.template_provenance() {
-                    Some(template) => CreateSession::new_from_template_with_placement(
-                        command_id,
-                        command.provenance(),
-                        template.clone(),
-                        command.initial_configuration_defaults().clone(),
-                        command.placement().clone(),
-                    ),
-                    None => CreateSession::new_with_placement(
-                        command_id,
-                        command.provenance(),
-                        command.initial_configuration_defaults().clone(),
-                        command.placement().clone(),
-                    ),
-                }
-                .with_lifecycle(
-                    command.start_gate(),
-                    command.ownership(),
-                    command.finish_condition().cloned(),
-                );
-                SessionCommand::create_session(recreated)
-                    .map_err(|_: CommandOutsideSeam| StoreError::InvalidDispatchBatch)?
-            }
-            SessionCommandPayload::Lifecycle(command) => {
-                let recreated = SessionLifecycleCommand::new(
-                    command_id,
-                    command.session(),
-                    command.operation().clone(),
-                );
-                SessionCommand::lifecycle(recreated)
-                    .map_err(|_: CommandOutsideSeam| StoreError::InvalidDispatchBatch)?
-            }
-            SessionCommandPayload::SubmitInput(_) | SessionCommandPayload::Goal(_) => {
-                return Err(StoreError::InvalidDispatchBatch);
-            }
-        };
-        Ok(self)
+        self.command = command;
+        self
     }
 }
 
@@ -327,6 +290,18 @@ pub trait CreateSessionCommandFactory {
         template: &signalbox_ownership_seam::SessionTemplateName,
         event: &RepoWatchEvent,
     ) -> Result<CreateSession, Self::Error>;
+}
+
+/// Core-owned durable encoding for commands retained in the module ledger.
+///
+/// The module treats the bytes as opaque. Core must encode the complete checked
+/// command payload and decode that same representation after restart.
+pub trait SessionCommandCodec {
+    /// Encodes one complete checked command payload.
+    fn encode(&mut self, command: &SessionCommand) -> Option<Vec<u8>>;
+
+    /// Decodes one complete checked command payload.
+    fn decode(&mut self, payload: &[u8]) -> Option<SessionCommand>;
 }
 
 /// Module-local source of opaque dispatch references.
@@ -420,6 +395,8 @@ pub enum StoreError {
     InvalidRuleFieldInventory,
     /// Planned commands do not form one complete ordered rule/event batch.
     InvalidDispatchBatch,
+    /// Core could not encode or decode an exact retained command payload.
+    InvalidRetainedCommand,
 }
 
 impl fmt::Display for StoreError {
@@ -443,6 +420,7 @@ impl fmt::Display for StoreError {
             Self::InvalidDispatchBatch => {
                 "repository-watch commands do not form one ordered dispatch batch"
             }
+            Self::InvalidRetainedCommand => "repository-watch retained command payload is invalid",
         })
     }
 }
@@ -457,7 +435,8 @@ impl Error for StoreError {
             | Self::InvalidFrontierGeneration
             | Self::EventRepositoryMismatch
             | Self::InvalidRuleFieldInventory
-            | Self::InvalidDispatchBatch => None,
+            | Self::InvalidDispatchBatch
+            | Self::InvalidRetainedCommand => None,
         }
     }
 }
@@ -1302,10 +1281,11 @@ const fn reaction_change_storage(value: ReactionChange) -> &'static str {
 
 impl RepoWatchStore {
     /// Atomically records one complete emitted action batch before submission.
-    pub async fn record_commands(
+    pub async fn record_commands<Codec: SessionCommandCodec>(
         &self,
         planned: &[PlannedCommand],
         issued_at: OffsetDateTime,
+        codec: &mut Codec,
     ) -> Result<DispatchAdmission, StoreError> {
         let Some(first) = planned.first() else {
             return Err(StoreError::InvalidDispatchBatch);
@@ -1322,6 +1302,14 @@ impl RepoWatchStore {
         }) {
             return Err(StoreError::InvalidDispatchBatch);
         }
+        let encoded_commands = planned
+            .iter()
+            .map(|command| {
+                codec
+                    .encode(command.command())
+                    .ok_or(StoreError::InvalidRetainedCommand)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(
@@ -1357,8 +1345,8 @@ impl RepoWatchStore {
             transaction.rollback().await?;
             return Ok(DispatchAdmission::ConflictingReuse);
         }
-        let retained_actions: Vec<(Uuid, Decimal, Uuid, String)> = sqlx::query_as(
-            "SELECT dispatch_ref, action_ordinal, command_id, command_kind
+        let retained_actions: Vec<(Uuid, Decimal, Uuid, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT dispatch_ref, action_ordinal, command_id, command_kind, command_payload
                FROM dispatch_ledger
               WHERE repository = $1 AND rule_id = $2 AND rule_revision = $3
                 AND event_id = $4 AND trigger_sequence IS NOT DISTINCT FROM $5
@@ -1373,7 +1361,7 @@ impl RepoWatchStore {
         .await?;
         if retained_actions.len() == planned.len() {
             let mut commands = Vec::with_capacity(planned.len());
-            for (planned, (dispatch, ordinal, command_id, kind)) in
+            for (planned, (dispatch, ordinal, command_id, kind, payload)) in
                 planned.iter().cloned().zip(retained_actions)
             {
                 if ordinal != Decimal::from(planned.action_ordinal())
@@ -1382,10 +1370,19 @@ impl RepoWatchStore {
                     transaction.rollback().await?;
                     return Ok(DispatchAdmission::ConflictingReuse);
                 }
-                commands.push(planned.with_retained_identity(
-                    RepoWatchDispatchId::from_uuid(dispatch),
-                    signalbox_ownership_seam::DurableCommandId::from_uuid(command_id),
-                )?);
+                let command = codec
+                    .decode(&payload)
+                    .ok_or(StoreError::InvalidRetainedCommand)?;
+                if command.command_id().into_uuid() != command_id
+                    || command.kind() != planned.command().kind()
+                {
+                    transaction.rollback().await?;
+                    return Err(StoreError::InvalidRetainedCommand);
+                }
+                commands.push(
+                    planned
+                        .with_retained_command(RepoWatchDispatchId::from_uuid(dispatch), command),
+                );
             }
             transaction.rollback().await?;
             return Ok(DispatchAdmission::Replayed {
@@ -1396,26 +1393,48 @@ impl RepoWatchStore {
             transaction.rollback().await?;
             return Ok(DispatchAdmission::ConflictingReuse);
         }
-        let active_revision: Option<Decimal> = sqlx::query_scalar(
-            "SELECT active_revision FROM rule
-              WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
-        )
-        .bind(first.repository().as_str())
-        .bind(first.rule_id().as_str())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if active_revision != Some(Decimal::from(first.rule_revision().get())) {
-            transaction.rollback().await?;
-            return Ok(DispatchAdmission::InactiveRule);
+        if first.trigger_sequence().is_some() {
+            let committed_origin: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM dispatch_ledger
+                     WHERE dispatch_ref = $1 AND repository = $2 AND rule_id = $3
+                       AND rule_revision = $4 AND event_id = $5
+                       AND trigger_sequence IS NULL)",
+            )
+            .bind(first.dispatch().into_uuid())
+            .bind(first.repository().as_str())
+            .bind(first.rule_id().as_str())
+            .bind(Decimal::from(first.rule_revision().get()))
+            .bind(first.event_id().into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !committed_origin {
+                transaction.rollback().await?;
+                return Ok(DispatchAdmission::ConflictingReuse);
+            }
+        } else {
+            let active_revision: Option<Decimal> = sqlx::query_scalar(
+                "SELECT active_revision FROM rule
+                  WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
+            )
+            .bind(first.repository().as_str())
+            .bind(first.rule_id().as_str())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if active_revision != Some(Decimal::from(first.rule_revision().get())) {
+                transaction.rollback().await?;
+                return Ok(DispatchAdmission::InactiveRule);
+            }
         }
         let mut inserted_count = 0_usize;
-        for command in planned {
+        for (command, payload) in planned.iter().zip(encoded_commands) {
             inserted_count += usize::from(
                 sqlx::query(
                     "INSERT INTO dispatch_ledger
                         (dispatch_ref, action_ordinal, command_id, repository, rule_id,
-                         rule_revision, event_id, trigger_sequence, command_kind, status, issued_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10)
+                         rule_revision, event_id, trigger_sequence, command_kind, command_payload,
+                         status, issued_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11)
                      ON CONFLICT DO NOTHING",
                 )
                 .bind(command.dispatch().into_uuid())
@@ -1427,6 +1446,7 @@ impl RepoWatchStore {
                 .bind(command.event_id().into_uuid())
                 .bind(command.trigger_sequence().map(Decimal::from))
                 .bind(command_kind_storage(command.command().kind()))
+                .bind(payload)
                 .bind(issued_at)
                 .execute(&mut *transaction)
                 .await?
@@ -1522,6 +1542,7 @@ pub fn plan_lifecycle_reaction(
     dispatch: RepoWatchDispatchId,
     rule: &RepoWatchRule,
     event: &RepoWatchEvent,
+    action_ordinal: NonZeroU64,
     command: SessionLifecycleCommand,
 ) -> Result<PlannedCommand, LifecycleReactionError> {
     if !matches!(
@@ -1530,6 +1551,24 @@ pub fn plan_lifecycle_reaction(
     ) {
         return Err(LifecycleReactionError::UnsupportedTrigger);
     }
+    plan_lifecycle_reaction_at_sequence(
+        trigger.sequence(),
+        dispatch,
+        rule,
+        event,
+        action_ordinal,
+        command,
+    )
+}
+
+fn plan_lifecycle_reaction_at_sequence(
+    trigger_sequence: u64,
+    dispatch: RepoWatchDispatchId,
+    rule: &RepoWatchRule,
+    event: &RepoWatchEvent,
+    action_ordinal: NonZeroU64,
+    command: SessionLifecycleCommand,
+) -> Result<PlannedCommand, LifecycleReactionError> {
     let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
         || matches!(
             command.operation(),
@@ -1545,12 +1584,35 @@ pub fn plan_lifecycle_reaction(
         .map_err(|_| LifecycleReactionError::UnsupportedCommand)?;
     Ok(PlannedCommand::new(
         dispatch,
-        1,
+        action_ordinal.get(),
         rule,
         event,
-        Some(trigger.sequence()),
+        Some(trigger_sequence),
         command,
     ))
+}
+
+/// Builds a lifecycle reaction from an explicit positive trigger sequence.
+///
+/// This constructor exists only for persistence-boundary integration tests;
+/// production callers must supply a typed [`LifecycleEvent`].
+#[cfg(feature = "test-support")]
+pub fn plan_lifecycle_reaction_for_test(
+    trigger_sequence: NonZeroU64,
+    dispatch: RepoWatchDispatchId,
+    rule: &RepoWatchRule,
+    event: &RepoWatchEvent,
+    action_ordinal: NonZeroU64,
+    command: SessionLifecycleCommand,
+) -> Result<PlannedCommand, LifecycleReactionError> {
+    plan_lifecycle_reaction_at_sequence(
+        trigger_sequence.get(),
+        dispatch,
+        rule,
+        event,
+        action_ordinal,
+        command,
+    )
 }
 
 /// Returns configured rules whose checked matcher accepts one normalized fact.
