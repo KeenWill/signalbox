@@ -775,7 +775,7 @@ impl RepoWatchStore {
         .await?;
         if unchanged {
             if events.is_empty() && projections_match {
-                transaction.commit().await?;
+                transaction.rollback().await?;
                 return Ok(FrontierEventAdmission::Unchanged);
             }
             if !events.is_empty() {
