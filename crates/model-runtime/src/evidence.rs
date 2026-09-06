@@ -52,6 +52,15 @@ pub enum TerminalEvidence {
     /// A complete, correlated provider response with a terminal success
     /// status and valid completion material.
     Completed(CompletionEvidence),
+    /// A completed response containing provider compaction, with the
+    /// provider-reported retained input that remains relevant to the next
+    /// request. This measure is distinct from the iteration-aggregated usage
+    /// retained on `completion` for billing.
+    CompletedWithProviderCompaction {
+        completion: CompletionEvidence,
+        retained_input_tokens: u64,
+        retained_output_tokens: u64,
+    },
     /// A complete exchange whose response reports the provider's refusal
     /// outcome rather than completion material.
     Refused(RefusalEvidence),
@@ -244,6 +253,10 @@ pub struct RefusalEvidence {
     /// Any response parts produced before the refusal, in provider order.
     pub content: Vec<AssistantPart>,
     pub usage: TokenUsage,
+    /// Provider-reported input retained after an in-response compaction.
+    pub retained_input_tokens: Option<u64>,
+    /// Provider-reported output from the final physical compaction iteration.
+    pub retained_output_tokens: Option<u64>,
 }
 
 /// Evidence for a complete, correlated definitive provider error response.

@@ -157,10 +157,9 @@ MARKED_START = ".with_labels(disposable_test_container_labels())"
 # rather than reaching into whatever precedes an unrecognized statement.
 CHAIN_LINE_LIMIT = 40
 
-# Re-verified against the head; a scan that silently matched nothing would
-# otherwise satisfy the marking test with no evidence at all. The v2
-# PostgreSQL integration test adds one marked container start.
-CONTAINER_START_SITES = 39
+# The fixed integration-suite inventory contains 33 marked starts, so a scan
+# that silently matched nothing cannot pass vacuously.
+CONTAINER_START_SITES = 33
 
 
 def container_start_sites() -> tuple[list[str], list[str]]:

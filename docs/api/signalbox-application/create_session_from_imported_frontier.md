@@ -10,12 +10,12 @@ pub struct CreateSessionFromImportedFrontierRequest {/* private */}
 impl CreateSessionFromImportedFrontierRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
-        imported_frontier: imported_conversation::ImportedTranscriptFrontier,
+        imported_frontier: entry::ImportedTranscriptFrontier,
         relationship: session::ImportedSessionRelationship,
         initial_configuration_defaults: configuration::SessionConfigurationDefaults,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
-    pub const fn imported_frontier(&self) -> imported_conversation::ImportedTranscriptFrontier;
+    pub const fn imported_frontier(&self) -> entry::ImportedTranscriptFrontier;
     pub const fn relationship(&self) -> session::ImportedSessionRelationship;
     pub const fn initial_configuration_defaults(
         &self,
@@ -56,7 +56,7 @@ pub enum CreateSessionFromImportedFrontierOutcome {
         conversation: signalbox_domain::ImportedConversationId,
     },
     ImportedFrontierNotFound {
-        frontier: imported_conversation::ImportedTranscriptFrontier,
+        frontier: entry::ImportedTranscriptFrontier,
     },
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,

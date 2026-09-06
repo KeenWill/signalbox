@@ -65,10 +65,8 @@ constructible only by the program substrate's host-side session capability, with
 the same validated-reference and no-conferred-authority semantics as every other
 arm. Submit-input gains a program admissibility path that fixes that actor.
 
-Repository watch and commissioned dispatch create no program run, so the program
-arm does not cover their initial inputs. Whether they gain a module arm naming
-the dispatch is pending an owner decision; until it is made those inputs keep
-the user attribution the spec page documents.
+Repository watch creates no program run and emits only a held `create_session`
+command. It submits no initial input, so the program actor does not apply.
 
 The program arm follows the existing storage convention: a closed `actor_kind`
 spelling, a variant-shaped reference column under a check constraint, and

@@ -2,38 +2,97 @@
 
 # tool
 
-## ToolName
+## ToolApprovalDecision
 
 ```rust
-pub struct ToolName(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ToolName {
-    pub fn try_new(value: string::String) -> result::Result<Self, ToolNameError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
+pub enum ToolApprovalDecision {
+    Approve,
+    Deny {
+        reason: option::Option<ToolDenialReason>,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ToolApprovalResolution
+
+```rust
+pub struct ToolApprovalResolution {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ToolApprovalResolution {
+    pub const fn request(&self) -> ToolRequestId;
+    pub const fn decision(&self) -> &ToolApprovalDecision;
+    pub const fn source(&self) -> ToolDecisionSource;
+    pub const fn decider(&self) -> option::Option<&ToolApprovalDecider>;
+    pub const fn rationale(&self) -> option::Option<&ToolDecisionRationale>;
+    pub const fn is_approved(&self) -> bool;
 }
 ```
 
-## ToolNameFailure
+## ToolApprovalResolutionReconstitutionInput
 
 ```rust
-pub enum ToolNameFailure {
-    Empty,
-    TooLong { bytes: usize },
-    InvalidCharacter { byte_index: usize, character: char },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ToolNameError
-
-```rust
-pub struct ToolNameError {/* private */}
+pub struct ToolApprovalResolutionReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ToolNameError {
-    pub fn value(&self) -> &str;
-    pub const fn failure(&self) -> ToolNameFailure;
-    pub fn into_parts(self) -> (string::String, ToolNameFailure);
+impl ToolApprovalResolutionReconstitutionInput {
+    pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
+    pub fn delegate(
+        approval: DelegateToolApproval,
+        stored_denial_reason: option::Option<ToolDenialReason>,
+    ) -> Self;
+    pub const fn policy_auto(request: ToolRequestId) -> Self;
+    pub const fn session_blanket(
+        request: ToolRequestId,
+        frozen_posture: DangerousToolAutoApproval,
+    ) -> Self;
+    pub const fn runtime_safety(request: ToolRequestId) -> Self;
+    pub const fn lifecycle_closure(request: ToolRequestId) -> Self;
+    pub const fn user_override(
+        request: ToolRequestId,
+        command: DurableCommandId,
+        denied_request: ToolRequestId,
+        frozen_posture: ToolApprovalPosture,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> result::Result<ToolApprovalResolution, ToolApprovalResolutionReconstitutionError>;
+}
+```
+
+## ToolApprovalResolutionReconstitutionError
+
+```rust
+pub struct ToolApprovalResolutionReconstitutionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ToolApprovalResolutionReconstitutionError {
+    pub const fn input(&self) -> &ToolApprovalResolutionReconstitutionInput;
+    pub fn into_input(self) -> ToolApprovalResolutionReconstitutionInput;
+}
+impl fmt::Display for ToolApprovalResolutionReconstitutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for ToolApprovalResolutionReconstitutionError {}
+```
+
+## InitialToolApproval
+
+```rust
+pub enum InitialToolApproval {
+    Confirm,
+    AlwaysConfirm,
+    Human,
+    Delegated,
+    PolicyAuto,
+    SessionBlanket,
+    RuntimeSafetyDeny,
+    UserOverride {
+        command: DurableCommandId,
+        denied_request: ToolRequestId,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl InitialToolApproval {
+    pub const fn requires_decision(self) -> bool;
 }
 ```
 
@@ -92,100 +151,287 @@ impl ToolArgumentsError {
 }
 ```
 
-## ToolRequestOrdinal
+## DecideToolRequest
 
 ```rust
-pub struct ToolRequestOrdinal(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ToolRequestOrdinal {
-    pub fn try_from_usize(value: usize) -> option::Option<Self>;
-    pub const fn from_u32(value: u32) -> Self;
-    pub const fn as_u32(self) -> u32;
+pub struct DecideToolRequest {/* private */}
+// derives: clone::Clone, fmt::Debug
+impl DecideToolRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        request: ToolRequestId,
+        decision: ToolApprovalDecision,
+    ) -> result::Result<Self, DecideToolRequestConstructionError>;
+    pub const fn command_id(&self) -> DurableCommandId;
+    pub const fn request(&self) -> ToolRequestId;
+    pub const fn decision(&self) -> &ToolApprovalDecision;
+    pub fn prepare_applied(
+        self,
+        request: &ToolRequest,
+    ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
+    pub fn prepare_lifecycle_closure_applied(
+        self,
+        request: &ToolRequest,
+    ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
+    pub const fn prepare_request_not_found(self) -> PreparedDecideToolRequest;
+    pub const fn prepare_already_resolved(self) -> PreparedDecideToolRequest;
+    pub const fn prepare_not_earliest(self, earliest: ToolRequestId) -> PreparedDecideToolRequest;
+}
+impl cmp::PartialEq for DecideToolRequest {
+    fn eq(&self, other: &Self) -> bool;
+}
+impl cmp::Eq for DecideToolRequest {}
+impl hash::Hash for DecideToolRequest {
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
 
-## ToolCallProposal
+## DecideToolRequestConstructionError
 
 ```rust
-pub struct ToolCallProposal {/* private */}
+pub struct DecideToolRequestConstructionError {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl DecideToolRequestConstructionError {
+    pub const fn command_id(self) -> DurableCommandId;
+}
+```
+
+## DecideToolRequestResult
+
+```rust
+pub enum DecideToolRequestResult {
+    Applied(DecideToolRequestAppliedResult),
+    Rejected(DecideToolRequestRejectedResult),
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ToolCallProposal {
-    pub const fn new(name: ToolName, arguments: NormalizedToolArguments) -> Self;
-    pub fn suppressed(name: ToolName) -> Self;
-    pub const fn name(&self) -> &ToolName;
-    pub const fn arguments(&self) -> &NormalizedToolArguments;
-    pub const fn is_suppressed(&self) -> bool;
-}
 ```
 
-## AssistantResponsePart
+## DecideToolRequestAppliedResult
 
 ```rust
-pub enum AssistantResponsePart {
-    Text(AssistantText),
-    ToolCall(ToolCallProposal),
-}
+pub struct DecideToolRequestAppliedResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ToolUsingAssistantResponse
-
-```rust
-pub struct ToolUsingAssistantResponse {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ToolUsingAssistantResponse {
-    pub fn try_from_parts(
-        parts: vec::Vec<AssistantResponsePart>,
-    ) -> result::Result<Self, ToolUsingAssistantResponseError>;
-    pub fn parts(&self) -> &[AssistantResponsePart];
-    pub const fn tool_count(&self) -> usize;
+impl DecideToolRequestAppliedResult {
+    pub const fn resolution(&self) -> &ToolApprovalResolution;
 }
 ```
 
-## ToolUsingAssistantResponseError
+## DecideToolRequestRejectedResult
 
 ```rust
-pub struct ToolUsingAssistantResponseError {/* private */}
+pub enum DecideToolRequestRejectedResult {
+    RequestNotFound {
+        request: ToolRequestId,
+    },
+    AlreadyResolved {
+        request: ToolRequestId,
+    },
+    NotEarliestUndecided {
+        request: ToolRequestId,
+        earliest: ToolRequestId,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## PreparedDecideToolRequest
+
+```rust
+pub struct PreparedDecideToolRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ToolUsingAssistantResponseError {
-    pub fn into_parts(self) -> vec::Vec<AssistantResponsePart>;
+impl PreparedDecideToolRequest {
+    pub const fn command(&self) -> &DecideToolRequest;
+    pub const fn result(&self) -> &DecideToolRequestResult;
+    pub fn into_parts(self) -> (DecideToolRequest, DecideToolRequestResult);
 }
 ```
 
-## ToolRequest
+## DecideToolRequestPreparationError
 
 ```rust
-pub struct ToolRequest {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ToolRequest {
-    pub const fn id(&self) -> ToolRequestId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn turn(&self) -> TurnId;
-    pub const fn producing_call(&self) -> ModelCallId;
-    pub const fn ordinal(&self) -> ToolRequestOrdinal;
-    pub const fn name(&self) -> &ToolName;
-    pub const fn arguments(&self) -> &NormalizedToolArguments;
-    pub const fn approval_posture(&self) -> ToolApprovalPosture;
-}
-```
-
-## ToolRequestReconstitutionInput
-
-```rust
-pub struct ToolRequestReconstitutionInput {/* private */}
+pub struct DecideToolRequestPreparationError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ToolRequestReconstitutionInput {
+impl DecideToolRequestPreparationError {
+    pub const fn command(&self) -> &DecideToolRequest;
+    pub const fn provided_request(&self) -> ToolRequestId;
+    pub fn into_parts(self) -> (DecideToolRequest, ToolRequestId);
+}
+```
+
+## ToolName
+
+```rust
+pub struct ToolName(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ToolName {
+    pub fn try_new(value: string::String) -> result::Result<Self, ToolNameError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## ToolNameFailure
+
+```rust
+pub enum ToolNameFailure {
+    Empty,
+    TooLong { bytes: usize },
+    InvalidCharacter { byte_index: usize, character: char },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ToolNameError
+
+```rust
+pub struct ToolNameError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ToolNameError {
+    pub fn value(&self) -> &str;
+    pub const fn failure(&self) -> ToolNameFailure;
+    pub fn into_parts(self) -> (string::String, ToolNameFailure);
+}
+```
+
+## RecordedUserOverride
+
+```rust
+pub struct RecordedUserOverride {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl RecordedUserOverride {
     pub const fn new(
-        id: ToolRequestId,
+        command: DurableCommandId,
         session: SessionId,
-        turn: TurnId,
-        producing_call: ModelCallId,
-        ordinal: ToolRequestOrdinal,
-        name: ToolName,
+        denied_request: ToolRequestId,
+        judge_call: ModelCallId,
+        tool: ToolName,
         arguments: NormalizedToolArguments,
     ) -> Self;
-    pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
-    pub fn into_request(self) -> ToolRequest;
+    pub const fn command(&self) -> DurableCommandId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn denied_request(&self) -> ToolRequestId;
+    pub const fn judge_call(&self) -> ModelCallId;
+    pub const fn tool(&self) -> &ToolName;
+    pub const fn arguments(&self) -> &NormalizedToolArguments;
+    pub fn matches_proposal(&self, proposal: &ToolCallProposal) -> bool;
+}
+```
+
+## OverrideDeniedToolRequest
+
+```rust
+pub struct OverrideDeniedToolRequest {/* private */}
+// derives: clone::Clone, fmt::Debug
+impl OverrideDeniedToolRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        denied_request: ToolRequestId,
+    ) -> result::Result<Self, OverrideDeniedToolRequestConstructionError>;
+    pub const fn command_id(&self) -> DurableCommandId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn denied_request(&self) -> ToolRequestId;
+    pub fn prepare(
+        self,
+        request: &ToolRequest,
+        approval: option::Option<&ToolApprovalResolution>,
+        terminal_resolution: option::Option<ToolRequestResolution>,
+        existing_override_command: option::Option<DurableCommandId>,
+    ) -> result::Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError>;
+    pub fn reconstitute_applied(
+        self,
+        recorded: RecordedUserOverride,
+    ) -> result::Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError>;
+    pub const fn prepare_request_not_found(self) -> PreparedOverrideDeniedToolRequest;
+    pub const fn prepare_request_not_in_session(self) -> PreparedOverrideDeniedToolRequest;
+    pub const fn prepare_not_delegate_denied(self) -> PreparedOverrideDeniedToolRequest;
+    pub const fn prepare_not_terminally_denied(self) -> PreparedOverrideDeniedToolRequest;
+    pub const fn prepare_already_overridden(self) -> PreparedOverrideDeniedToolRequest;
+}
+impl cmp::PartialEq for OverrideDeniedToolRequest {
+    fn eq(&self, other: &Self) -> bool;
+}
+impl cmp::Eq for OverrideDeniedToolRequest {}
+impl hash::Hash for OverrideDeniedToolRequest {
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
+}
+```
+
+## OverrideDeniedToolRequestConstructionError
+
+```rust
+pub struct OverrideDeniedToolRequestConstructionError {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl OverrideDeniedToolRequestConstructionError {
+    pub const fn command_id(self) -> DurableCommandId;
+}
+```
+
+## OverrideDeniedToolRequestResult
+
+```rust
+pub enum OverrideDeniedToolRequestResult {
+    Applied(OverrideDeniedToolRequestAppliedResult),
+    Rejected(OverrideDeniedToolRequestRejectedResult),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## OverrideDeniedToolRequestAppliedResult
+
+```rust
+pub struct OverrideDeniedToolRequestAppliedResult {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl OverrideDeniedToolRequestAppliedResult {
+    pub const fn recorded(&self) -> &RecordedUserOverride;
+}
+```
+
+## OverrideDeniedToolRequestRejectedResult
+
+```rust
+pub enum OverrideDeniedToolRequestRejectedResult {
+    RequestNotFound {
+        denied_request: ToolRequestId,
+    },
+    RequestNotInSession {
+        session: SessionId,
+        denied_request: ToolRequestId,
+    },
+    NotDelegateDenied {
+        denied_request: ToolRequestId,
+    },
+    NotTerminallyDenied {
+        denied_request: ToolRequestId,
+    },
+    AlreadyOverridden {
+        denied_request: ToolRequestId,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## PreparedOverrideDeniedToolRequest
+
+```rust
+pub struct PreparedOverrideDeniedToolRequest {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl PreparedOverrideDeniedToolRequest {
+    pub const fn command(&self) -> &OverrideDeniedToolRequest;
+    pub const fn result(&self) -> &OverrideDeniedToolRequestResult;
+    pub fn into_parts(self) -> (OverrideDeniedToolRequest, OverrideDeniedToolRequestResult);
+}
+```
+
+## OverrideDeniedToolRequestPreparationError
+
+```rust
+pub struct OverrideDeniedToolRequestPreparationError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl OverrideDeniedToolRequestPreparationError {
+    pub const fn command(&self) -> &OverrideDeniedToolRequest;
+    pub const fn provided_request(&self) -> ToolRequestId;
+    pub fn into_parts(self) -> (OverrideDeniedToolRequest, ToolRequestId);
 }
 ```
 
@@ -379,346 +625,101 @@ impl ToolDenialReasonError {
 }
 ```
 
-## ToolApprovalDecision
+## ToolRequestOrdinal
 
 ```rust
-pub enum ToolApprovalDecision {
-    Approve,
-    Deny {
-        reason: option::Option<ToolDenialReason>,
-    },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ToolApprovalResolution
-
-```rust
-pub struct ToolApprovalResolution {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ToolApprovalResolution {
-    pub const fn request(&self) -> ToolRequestId;
-    pub const fn decision(&self) -> &ToolApprovalDecision;
-    pub const fn source(&self) -> ToolDecisionSource;
-    pub const fn decider(&self) -> option::Option<&ToolApprovalDecider>;
-    pub const fn rationale(&self) -> option::Option<&ToolDecisionRationale>;
-    pub const fn is_approved(&self) -> bool;
-}
-```
-
-## ToolApprovalResolutionReconstitutionInput
-
-```rust
-pub struct ToolApprovalResolutionReconstitutionInput {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ToolApprovalResolutionReconstitutionInput {
-    pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
-    pub fn delegate(
-        approval: DelegateToolApproval,
-        stored_denial_reason: option::Option<ToolDenialReason>,
-    ) -> Self;
-    pub const fn policy_auto(request: ToolRequestId) -> Self;
-    pub const fn session_blanket(
-        request: ToolRequestId,
-        frozen_posture: DangerousToolAutoApproval,
-    ) -> Self;
-    pub const fn runtime_safety(request: ToolRequestId) -> Self;
-    pub const fn lifecycle_closure(request: ToolRequestId) -> Self;
-    pub const fn user_override(
-        request: ToolRequestId,
-        command: DurableCommandId,
-        denied_request: ToolRequestId,
-        frozen_posture: ToolApprovalPosture,
-    ) -> Self;
-    pub fn reconstitute(
-        self,
-    ) -> result::Result<ToolApprovalResolution, ToolApprovalResolutionReconstitutionError>;
-}
-```
-
-## ToolApprovalResolutionReconstitutionError
-
-```rust
-pub struct ToolApprovalResolutionReconstitutionError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ToolApprovalResolutionReconstitutionError {
-    pub const fn input(&self) -> &ToolApprovalResolutionReconstitutionInput;
-    pub fn into_input(self) -> ToolApprovalResolutionReconstitutionInput;
-}
-impl fmt::Display for ToolApprovalResolutionReconstitutionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for ToolApprovalResolutionReconstitutionError {}
-```
-
-## InitialToolApproval
-
-```rust
-pub enum InitialToolApproval {
-    Confirm,
-    AlwaysConfirm,
-    Human,
-    Delegated,
-    PolicyAuto,
-    SessionBlanket,
-    RuntimeSafetyDeny,
-    UserOverride {
-        command: DurableCommandId,
-        denied_request: ToolRequestId,
-    },
-}
+pub struct ToolRequestOrdinal(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl InitialToolApproval {
-    pub const fn requires_decision(self) -> bool;
+impl ToolRequestOrdinal {
+    pub fn try_from_usize(value: usize) -> option::Option<Self>;
+    pub const fn from_u32(value: u32) -> Self;
+    pub const fn as_u32(self) -> u32;
 }
 ```
 
-## DecideToolRequest
+## ToolCallProposal
 
 ```rust
-pub struct DecideToolRequest {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl DecideToolRequest {
-    pub fn try_new(
-        command_id: DurableCommandId,
-        request: ToolRequestId,
-        decision: ToolApprovalDecision,
-    ) -> result::Result<Self, DecideToolRequestConstructionError>;
-    pub const fn command_id(&self) -> DurableCommandId;
-    pub const fn request(&self) -> ToolRequestId;
-    pub const fn decision(&self) -> &ToolApprovalDecision;
-    pub fn prepare_applied(
-        self,
-        request: &ToolRequest,
-    ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
-    pub fn prepare_lifecycle_closure_applied(
-        self,
-        request: &ToolRequest,
-    ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
-    pub const fn prepare_request_not_found(self) -> PreparedDecideToolRequest;
-    pub const fn prepare_already_resolved(self) -> PreparedDecideToolRequest;
-    pub const fn prepare_not_earliest(self, earliest: ToolRequestId) -> PreparedDecideToolRequest;
-}
-impl cmp::PartialEq for DecideToolRequest {
-    fn eq(&self, other: &Self) -> bool;
-}
-impl cmp::Eq for DecideToolRequest {}
-impl hash::Hash for DecideToolRequest {
-    fn hash<H: hash::Hasher>(&self, state: &mut H);
+pub struct ToolCallProposal {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ToolCallProposal {
+    pub const fn new(name: ToolName, arguments: NormalizedToolArguments) -> Self;
+    pub fn suppressed(name: ToolName) -> Self;
+    pub const fn name(&self) -> &ToolName;
+    pub const fn arguments(&self) -> &NormalizedToolArguments;
+    pub const fn is_suppressed(&self) -> bool;
 }
 ```
 
-## DecideToolRequestConstructionError
+## AssistantResponsePart
 
 ```rust
-pub struct DecideToolRequestConstructionError {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl DecideToolRequestConstructionError {
-    pub const fn command_id(self) -> DurableCommandId;
-}
-```
-
-## DecideToolRequestResult
-
-```rust
-pub enum DecideToolRequestResult {
-    Applied(DecideToolRequestAppliedResult),
-    Rejected(DecideToolRequestRejectedResult),
+pub enum AssistantResponsePart {
+    Text(AssistantText),
+    ProviderCompaction(ProviderCompactionBlock),
+    ToolCall(ToolCallProposal),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
 
-## DecideToolRequestAppliedResult
+## ToolUsingAssistantResponse
 
 ```rust
-pub struct DecideToolRequestAppliedResult {/* private */}
+pub struct ToolUsingAssistantResponse {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl DecideToolRequestAppliedResult {
-    pub const fn resolution(&self) -> &ToolApprovalResolution;
+impl ToolUsingAssistantResponse {
+    pub fn try_from_parts(
+        parts: vec::Vec<AssistantResponsePart>,
+    ) -> result::Result<Self, ToolUsingAssistantResponseError>;
+    pub fn parts(&self) -> &[AssistantResponsePart];
+    pub const fn tool_count(&self) -> usize;
 }
 ```
 
-## DecideToolRequestRejectedResult
+## ToolUsingAssistantResponseError
 
 ```rust
-pub enum DecideToolRequestRejectedResult {
-    RequestNotFound {
-        request: ToolRequestId,
-    },
-    AlreadyResolved {
-        request: ToolRequestId,
-    },
-    NotEarliestUndecided {
-        request: ToolRequestId,
-        earliest: ToolRequestId,
-    },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## PreparedDecideToolRequest
-
-```rust
-pub struct PreparedDecideToolRequest {/* private */}
+pub struct ToolUsingAssistantResponseError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl PreparedDecideToolRequest {
-    pub const fn command(&self) -> &DecideToolRequest;
-    pub const fn result(&self) -> &DecideToolRequestResult;
-    pub fn into_parts(self) -> (DecideToolRequest, DecideToolRequestResult);
+impl ToolUsingAssistantResponseError {
+    pub fn into_parts(self) -> vec::Vec<AssistantResponsePart>;
 }
 ```
 
-## DecideToolRequestPreparationError
+## ToolRequest
 
 ```rust
-pub struct DecideToolRequestPreparationError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl DecideToolRequestPreparationError {
-    pub const fn command(&self) -> &DecideToolRequest;
-    pub const fn provided_request(&self) -> ToolRequestId;
-    pub fn into_parts(self) -> (DecideToolRequest, ToolRequestId);
-}
-```
-
-## RecordedUserOverride
-
-```rust
-pub struct RecordedUserOverride {/* private */}
+pub struct ToolRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl RecordedUserOverride {
+impl ToolRequest {
+    pub const fn id(&self) -> ToolRequestId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn producing_call(&self) -> ModelCallId;
+    pub const fn ordinal(&self) -> ToolRequestOrdinal;
+    pub const fn name(&self) -> &ToolName;
+    pub const fn arguments(&self) -> &NormalizedToolArguments;
+    pub const fn approval_posture(&self) -> ToolApprovalPosture;
+}
+```
+
+## ToolRequestReconstitutionInput
+
+```rust
+pub struct ToolRequestReconstitutionInput {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ToolRequestReconstitutionInput {
     pub const fn new(
-        command: DurableCommandId,
+        id: ToolRequestId,
         session: SessionId,
-        denied_request: ToolRequestId,
-        judge_call: ModelCallId,
-        tool: ToolName,
+        turn: TurnId,
+        producing_call: ModelCallId,
+        ordinal: ToolRequestOrdinal,
+        name: ToolName,
         arguments: NormalizedToolArguments,
     ) -> Self;
-    pub const fn command(&self) -> DurableCommandId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn denied_request(&self) -> ToolRequestId;
-    pub const fn judge_call(&self) -> ModelCallId;
-    pub const fn tool(&self) -> &ToolName;
-    pub const fn arguments(&self) -> &NormalizedToolArguments;
-    pub fn matches_proposal(&self, proposal: &ToolCallProposal) -> bool;
-}
-```
-
-## OverrideDeniedToolRequest
-
-```rust
-pub struct OverrideDeniedToolRequest {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl OverrideDeniedToolRequest {
-    pub fn try_new(
-        command_id: DurableCommandId,
-        session: SessionId,
-        denied_request: ToolRequestId,
-    ) -> result::Result<Self, OverrideDeniedToolRequestConstructionError>;
-    pub const fn command_id(&self) -> DurableCommandId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn denied_request(&self) -> ToolRequestId;
-    pub fn prepare(
-        self,
-        request: &ToolRequest,
-        approval: option::Option<&ToolApprovalResolution>,
-        terminal_resolution: option::Option<ToolRequestResolution>,
-        existing_override_command: option::Option<DurableCommandId>,
-    ) -> result::Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError>;
-    pub fn reconstitute_applied(
-        self,
-        recorded: RecordedUserOverride,
-    ) -> result::Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError>;
-    pub const fn prepare_request_not_found(self) -> PreparedOverrideDeniedToolRequest;
-    pub const fn prepare_request_not_in_session(self) -> PreparedOverrideDeniedToolRequest;
-    pub const fn prepare_not_delegate_denied(self) -> PreparedOverrideDeniedToolRequest;
-    pub const fn prepare_not_terminally_denied(self) -> PreparedOverrideDeniedToolRequest;
-    pub const fn prepare_already_overridden(self) -> PreparedOverrideDeniedToolRequest;
-}
-impl cmp::PartialEq for OverrideDeniedToolRequest {
-    fn eq(&self, other: &Self) -> bool;
-}
-impl cmp::Eq for OverrideDeniedToolRequest {}
-impl hash::Hash for OverrideDeniedToolRequest {
-    fn hash<H: hash::Hasher>(&self, state: &mut H);
-}
-```
-
-## OverrideDeniedToolRequestConstructionError
-
-```rust
-pub struct OverrideDeniedToolRequestConstructionError {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl OverrideDeniedToolRequestConstructionError {
-    pub const fn command_id(self) -> DurableCommandId;
-}
-```
-
-## OverrideDeniedToolRequestResult
-
-```rust
-pub enum OverrideDeniedToolRequestResult {
-    Applied(OverrideDeniedToolRequestAppliedResult),
-    Rejected(OverrideDeniedToolRequestRejectedResult),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## OverrideDeniedToolRequestAppliedResult
-
-```rust
-pub struct OverrideDeniedToolRequestAppliedResult {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl OverrideDeniedToolRequestAppliedResult {
-    pub const fn recorded(&self) -> &RecordedUserOverride;
-}
-```
-
-## OverrideDeniedToolRequestRejectedResult
-
-```rust
-pub enum OverrideDeniedToolRequestRejectedResult {
-    RequestNotFound {
-        denied_request: ToolRequestId,
-    },
-    RequestNotInSession {
-        session: SessionId,
-        denied_request: ToolRequestId,
-    },
-    NotDelegateDenied {
-        denied_request: ToolRequestId,
-    },
-    NotTerminallyDenied {
-        denied_request: ToolRequestId,
-    },
-    AlreadyOverridden {
-        denied_request: ToolRequestId,
-    },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## PreparedOverrideDeniedToolRequest
-
-```rust
-pub struct PreparedOverrideDeniedToolRequest {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl PreparedOverrideDeniedToolRequest {
-    pub const fn command(&self) -> &OverrideDeniedToolRequest;
-    pub const fn result(&self) -> &OverrideDeniedToolRequestResult;
-    pub fn into_parts(self) -> (OverrideDeniedToolRequest, OverrideDeniedToolRequestResult);
-}
-```
-
-## OverrideDeniedToolRequestPreparationError
-
-```rust
-pub struct OverrideDeniedToolRequestPreparationError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl OverrideDeniedToolRequestPreparationError {
-    pub const fn command(&self) -> &OverrideDeniedToolRequest;
-    pub const fn provided_request(&self) -> ToolRequestId;
-    pub fn into_parts(self) -> (OverrideDeniedToolRequest, ToolRequestId);
+    pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
+    pub fn into_request(self) -> ToolRequest;
 }
 ```
 

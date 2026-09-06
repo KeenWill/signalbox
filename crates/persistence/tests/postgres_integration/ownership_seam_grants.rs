@@ -76,8 +76,14 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
         module_tables,
         [
             "core_event_cursor",
+            "dispatch_ledger",
+            "frontier",
+            "gh_event",
             "pr_state",
             "repository_state",
+            "rule",
+            "rule_field_fingerprint",
+            "rule_revision",
             "webhook_body",
             "webhook_delivery",
             "webhook_disposition",
@@ -137,6 +143,52 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
 
     drop(connection);
     drop(module_pool);
+    drop(pool);
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn v1_retirement_preserves_commissioned_dispatch_validation() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT conname
+           FROM pg_constraint
+          WHERE conrelid = 'commissioned_dispatch'::regclass
+            AND conname IN (
+                'commissioned_dispatch_base_branch_check',
+                'commissioned_dispatch_branch_check',
+                'commissioned_dispatch_head_branch_check',
+                'commissioned_dispatch_head_repository_check',
+                'commissioned_dispatch_repository_check'
+            )
+          ORDER BY conname",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        constraints,
+        [
+            "commissioned_dispatch_base_branch_check",
+            "commissioned_dispatch_branch_check",
+            "commissioned_dispatch_head_branch_check",
+            "commissioned_dispatch_head_repository_check",
+            "commissioned_dispatch_repository_check",
+        ]
+    );
+
+    let validation: (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT repo_watch_repository_is_valid('owner/repository'),
+                repo_watch_repository_is_valid('invalid'),
+                repo_watch_branch_is_valid('main'),
+                repo_watch_branch_is_valid('')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(validation, (true, false, true, false));
+
     drop(pool);
     drop(container);
     Ok(())

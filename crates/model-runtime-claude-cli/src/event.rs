@@ -704,6 +704,8 @@ impl<C: Clone> EventDecoder<C> {
                 reported_model: self.reported_model,
                 content,
                 usage: self.usage,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
             });
         }
         let has_proposals = !self.proposal_indexes.is_empty();
@@ -866,7 +868,8 @@ impl<C: Clone> EventDecoder<C> {
                         }
                         AssistantPart::Text(_)
                         | AssistantPart::Thinking { .. }
-                        | AssistantPart::RedactedThinking { .. } => false,
+                        | AssistantPart::RedactedThinking { .. }
+                        | AssistantPart::ProviderCompaction { .. } => false,
                     }) =>
             {
                 Err(format!("Claude tool choice permits only `{name}`"))
@@ -906,6 +909,9 @@ impl<C: Clone> EventDecoder<C> {
                 AssistantPart::RedactedThinking { data } => Some(AssistantPart::RedactedThinking {
                     data: redact_text(&data),
                 }),
+                AssistantPart::ProviderCompaction { block_json } => {
+                    Some(AssistantPart::ProviderCompaction { block_json })
+                }
                 AssistantPart::ToolCall(mut call) => {
                     call.arguments_json = redact_json(&call.arguments_json);
                     Some(AssistantPart::ToolCall(call))
@@ -1131,16 +1137,13 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
     }
 
-    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind {
-        classify_error(None, "process_exit", classification)
-    }
-
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
+        classification: &str,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
+        let kind = classify_error(None, "process_exit", classification);
         EventDecoder::provider_error_after_exit(self, message, kind, sink)
     }
 }

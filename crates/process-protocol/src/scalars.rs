@@ -108,19 +108,19 @@ pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
 // numeric-bound: guard - protects review-request memory and wire size
 pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
 
+#[derive(signalbox_derive::Accessors)]
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CanonicalUuid(Uuid);
+pub struct CanonicalUuid(
+    /// Returns the underlying UUID for an explicit adapter mapping.
+    #[get(copy, as = "into_uuid")]
+    Uuid,
+);
 
 impl CanonicalUuid {
     /// Constructs the canonical wire value from a UUID.
     pub const fn from_uuid(value: Uuid) -> Self {
         Self(value)
-    }
-
-    /// Returns the underlying UUID for an explicit adapter mapping.
-    pub const fn into_uuid(self) -> Uuid {
-        self.0
     }
 
     fn parse(value: &str) -> Result<Self, CanonicalValueError> {
@@ -207,20 +207,20 @@ impl<'de> Deserialize<'de> for CommandId {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A full-range unsigned 64-bit value encoded as its shortest decimal string.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CanonicalU64(u64);
+pub struct CanonicalU64(
+    /// Returns the numeric value after canonical decoding.
+    #[get(copy, as = "value")]
+    u64,
+);
 
 impl CanonicalU64 {
     /// Wraps an unsigned value for precision-safe wire encoding.
     pub const fn new(value: u64) -> Self {
         Self(value)
-    }
-
-    /// Returns the numeric value after canonical decoding.
-    pub const fn value(self) -> u64 {
-        self.0
     }
 }
 
@@ -238,10 +238,15 @@ impl From<CanonicalU64> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A positive unsigned 64-bit value encoded as its shortest decimal string.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct PositiveCanonicalU64(u64);
+pub struct PositiveCanonicalU64(
+    /// Returns the positive numeric value.
+    #[get(copy, as = "value")]
+    u64,
+);
 
 impl PositiveCanonicalU64 {
     /// Checks that the represented wire integer is positive.
@@ -250,11 +255,6 @@ impl PositiveCanonicalU64 {
             return Err(CanonicalValueError::Decimal);
         }
         Ok(Self(value))
-    }
-
-    /// Returns the positive numeric value.
-    pub const fn value(self) -> u64 {
-        self.0
     }
 }
 
@@ -278,10 +278,15 @@ impl From<signalbox_domain::RunnerGeneration> for PositiveCanonicalU64 {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A lowercase 32-byte digest encoded as exactly 64 hexadecimal characters.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CanonicalDigest(String);
+pub struct CanonicalDigest(
+    /// Borrows the exact canonical hexadecimal spelling.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CanonicalDigest {
     /// Checks the exact lowercase hexadecimal digest spelling.
@@ -291,11 +296,6 @@ impl CanonicalDigest {
             return Err(CanonicalValueError::Digest);
         }
         Ok(Self(value))
-    }
-
-    /// Borrows the exact canonical hexadecimal spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Transfers the exact canonical hexadecimal spelling.
@@ -318,9 +318,14 @@ impl From<CanonicalDigest> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact external blob identity including its fixed SHA-256 algorithm tag.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CanonicalBlobDigest(BlobDigest);
+pub struct CanonicalBlobDigest(
+    /// Returns the validated digest for an explicit adapter mapping.
+    #[get(copy, as = "into_digest")]
+    BlobDigest,
+);
 
 impl CanonicalBlobDigest {
     /// Constructs the exact SHA-256 identity from an already-computed digest.
@@ -331,11 +336,6 @@ impl CanonicalBlobDigest {
     /// Wraps one validated domain digest for the process boundary.
     pub const fn from_digest(value: BlobDigest) -> Self {
         Self(value)
-    }
-
-    /// Returns the validated digest for an explicit adapter mapping.
-    pub const fn into_digest(self) -> BlobDigest {
-        self.0
     }
 }
 
@@ -378,10 +378,15 @@ impl<'de> Deserialize<'de> for CanonicalBlobDigest {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Request correlation identity. Zero is reserved for uncorrelated errors.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RequestId(u64);
+pub struct RequestId(
+    /// Returns the numeric identity after canonical decoding.
+    #[get(copy, as = "value")]
+    u64,
+);
 
 impl RequestId {
     /// Constructs a client-usable nonzero request identity.
@@ -396,11 +401,6 @@ impl RequestId {
     /// Returns the reserved identity for a frame that cannot be correlated.
     pub const fn uncorrelated() -> Self {
         Self(0)
-    }
-
-    /// Returns the numeric identity after canonical decoding.
-    pub const fn value(self) -> u64 {
-        self.0
     }
 
     pub(crate) const fn is_correlated(self) -> bool {
@@ -422,20 +422,20 @@ impl From<RequestId> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact user input content carried to the application admission boundary.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct InputContent(String);
+pub struct InputContent(
+    /// Borrows exact decoded text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl InputContent {
     /// Wraps decoded content without applying application admission policy.
     pub fn new(value: String) -> Self {
         Self(value)
-    }
-
-    /// Borrows exact decoded text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Transfers ownership of the exact decoded text.
@@ -444,10 +444,15 @@ impl InputContent {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded transcript-content fragment.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct ContentFragment(String);
+pub struct ContentFragment(
+    /// Borrows exact fragment text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl ContentFragment {
     /// Applies the per-fragment UTF-8 byte bound.
@@ -457,11 +462,6 @@ impl ContentFragment {
         } else {
             Ok(Self(value))
         }
-    }
-
-    /// Borrows exact fragment text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -507,10 +507,15 @@ pub enum ModelCallCostLabel {
     MeteredEquivalent,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical nonnegative decimal USD text with no exponent or redundant zeroes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CanonicalDollarAmount(String);
+pub struct CanonicalDollarAmount(
+    /// Borrows the canonical decimal spelling.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CanonicalDollarAmount {
     /// Validates one shortest nonnegative base-ten decimal spelling.
@@ -551,11 +556,6 @@ impl CanonicalDollarAmount {
             Ok(Self(value))
         }
     }
-
-    /// Borrows the canonical decimal spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl TryFrom<String> for CanonicalDollarAmount {
@@ -572,10 +572,15 @@ impl From<CanonicalDollarAmount> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded deployment-owned rate version carried as cost provenance.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct BillingRateVersion(String);
+pub struct BillingRateVersion(
+    /// Borrows the exact rate version.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl BillingRateVersion {
     /// Validates a nonempty, unpadded, NUL-free version spelling.
@@ -589,11 +594,6 @@ impl BillingRateVersion {
         } else {
             Ok(Self(value))
         }
-    }
-
-    /// Borrows the exact rate version.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -637,13 +637,18 @@ impl From<ContentFragment> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One exact session system prompt on the wire.
 ///
 /// A present prompt is nonempty and rejects U+0000; absence is JSON null on
 /// the owning member, never empty text. The daemon applies deployment policy.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct SystemPromptText(String);
+pub struct SystemPromptText(
+    /// Borrows the exact admitted prompt text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl SystemPromptText {
     /// Applies the structural nonempty and U+0000-free admission rules.
@@ -653,11 +658,6 @@ impl SystemPromptText {
         } else {
             Ok(Self(value))
         }
-    }
-
-    /// Borrows the exact admitted prompt text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Transfers ownership of the exact admitted prompt text.
@@ -769,62 +769,54 @@ impl Iterator for ContentFragments<'_> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Invalid canonical scalar at the wire boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CanonicalValueError {
+    #[error("UUID is not canonical lowercase hyphenated text")]
     /// UUID was not lowercase canonical hyphenated text.
     Uuid,
+    #[error("command identity is a reserved sentinel")]
     /// Command UUID used a reserved sentinel.
     CommandId,
+    #[error("unsigned integer is not canonical decimal text")]
     /// Decimal text was not the shortest full-range unsigned spelling.
     Decimal,
+    #[error("client request identity must be nonzero")]
     /// Client request identity was zero.
     RequestId,
+    #[error("content fragment exceeds the process-protocol UTF-8 byte bound")]
     /// A transcript fragment exceeded its UTF-8 byte bound.
     Content,
+    #[error("session metadata value is invalid")]
     /// Session metadata violated its exact string, set, map, or page bound.
     Metadata,
+    #[error("digest is not canonical lowercase 64-character hexadecimal text")]
     /// Digest was not exactly 64 lowercase hexadecimal characters.
     Digest,
+    #[error("session system prompt is empty, oversized, or contains U+0000")]
     /// A session system prompt was empty, contained U+0000, or exceeded its
     /// UTF-8 byte bound.
     SystemPrompt,
+    #[error("session placement is invalid")]
     /// A dotted session placement or root-global-read decision was invalid.
     Placement,
+    #[error("runner working directory is invalid")]
     /// Runner working-directory text was empty, NUL-bearing, or oversized.
     RunnerWorkingDirectory,
+    #[error("runner catalog name is invalid")]
     /// Runner capability, credential-profile, or repository name was invalid.
     RunnerCatalogName,
+    #[error("runner projection state is invalid")]
     /// Runner projection state and exact-runner evidence were inconsistent.
     RunnerProjection,
+    #[error("dollar amount is not canonical nonnegative decimal text")]
     /// Dollar amount was not canonical bounded nonnegative decimal text.
     DollarAmount,
+    #[error("billing rate version is invalid")]
     /// Billing rate version was empty, padded, NUL-bearing, or oversized.
     RateVersion,
 }
-
-impl fmt::Display for CanonicalValueError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Uuid => "UUID is not canonical lowercase hyphenated text",
-            Self::CommandId => "command identity is a reserved sentinel",
-            Self::Decimal => "unsigned integer is not canonical decimal text",
-            Self::RequestId => "client request identity must be nonzero",
-            Self::Content => "content fragment exceeds the process-protocol UTF-8 byte bound",
-            Self::Metadata => "session metadata value is invalid",
-            Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
-            Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
-            Self::Placement => "session placement is invalid",
-            Self::RunnerWorkingDirectory => "runner working directory is invalid",
-            Self::RunnerCatalogName => "runner catalog name is invalid",
-            Self::RunnerProjection => "runner projection state is invalid",
-            Self::DollarAmount => "dollar amount is not canonical nonnegative decimal text",
-            Self::RateVersion => "billing rate version is invalid",
-        })
-    }
-}
-
-impl Error for CanonicalValueError {}
 
 /// Exact source format selected for one conversation import.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -876,19 +868,19 @@ pub enum ConversationImportRejectionClass {
     InvalidToolResult,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact caller-supplied source bytes carried as canonical padded base64.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConversationImportSource(Vec<u8>);
+pub struct ConversationImportSource(
+    /// Borrows the exact decoded source snapshot.
+    #[get(slice, as = "as_bytes")]
+    Vec<u8>,
+);
 
 impl ConversationImportSource {
     /// Wraps one complete source snapshot without interpreting it.
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
-    }
-
-    /// Borrows the exact decoded source snapshot.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
     }
 
     /// Transfers ownership of the exact decoded source snapshot.
@@ -970,14 +962,6 @@ pub(crate) fn parse_decimal_u64(value: &str) -> Result<u64, CanonicalValueError>
     Ok(parsed)
 }
 
-pub(crate) fn values_are_distinct<ValueT>(values: &[ValueT]) -> bool
-where
-    ValueT: Eq + std::hash::Hash,
-{
-    let mut distinct = HashSet::with_capacity(values.len());
-    values.iter().all(|value| distinct.insert(value))
-}
-
 pub(crate) fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
     deserializer: DeserializerT,
 ) -> Result<Option<ValueT>, DeserializerT::Error>
@@ -998,111 +982,99 @@ where
     ValueT::deserialize(deserializer).map(Some)
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A structurally invalid frame value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameValidationError {
+    #[error("frame version is unsupported")]
     /// In-memory frame used another version.
     UnsupportedVersion,
+    #[error("client request identity is uncorrelated")]
     /// A client request used reserved correlation identity zero.
     UncorrelatedClientRequest,
+    #[error("successful server message is uncorrelated")]
     /// A success response used reserved correlation identity zero.
     UncorrelatedSuccess,
+    #[error("application server error is uncorrelated")]
     /// A non-framing error used reserved correlation identity zero.
     UncorrelatedApplicationError,
+    #[error("server error detail does not match its code")]
     /// Rejection detail did not match the error code.
     ErrorDetailShape,
+    #[error("transcript turn state is inconsistent")]
     /// A transcript turn carried an impossible correlated state shape.
     TurnStateShape,
+    #[error("tool approval event shape is inconsistent")]
     /// A tool approval event carried inconsistent decision provenance.
     ToolApprovalShape,
+    #[error("session metadata frame shape is inconsistent")]
     /// A metadata request or response carried an invalid correlated shape.
     MetadataShape,
+    #[error("unified conversation-listing frame shape is inconsistent")]
     /// A unified conversation-listing frame carried an invalid shape.
     ConversationListShape,
-    /// A repository-watch operator-status row carried an invalid shape.
+    #[error("operator-status frame shape is inconsistent")]
+    /// An operator-status row carried an invalid shape.
     OperatorStatusShape,
+    #[error("frame omits its required system-prompt member")]
     SystemPromptShape,
+    #[error("conversation-import frame shape is inconsistent")]
     /// A chunked conversation-import frame carried a contradictory shape.
     ConversationImportShape,
+    #[error("blob-upload frame shape is inconsistent")]
     /// A chunked immutable-blob frame carried a contradictory shape.
     BlobUploadShape,
+    #[error("blob-read frame shape is inconsistent")]
     /// A blob metadata, range, or range-rejection value contradicted its bounds.
     BlobReadShape,
+    #[error("imported frontier position is not positive")]
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
+    #[error("compaction through position is not positive")]
     /// A context-compaction request carried a nonpositive position.
     ContextCompactionShape,
+    #[error("imported conversation entry position is not positive")]
     /// An imported-conversation entry carried a nonpositive position.
     ImportedConversationEntryShape,
+    #[error("imported text preview shape is inconsistent")]
     /// An imported text preview exceeded its bound or contradicted its own
     /// truncation marker.
     ImportedTextPreviewShape,
+    #[error("imported frontier rejection range is inconsistent")]
     /// An out-of-range imported rejection stated a range its own requested
     /// position falls inside, or an empty selectable range.
     ImportedFrontierRangeShape,
+    #[error("submit-input delivery shape is inconsistent")]
     /// A submit-input delivery carried forbidden or missing correlated fields.
     InputDeliveryShape,
+    #[error("ordered user content shape is inconsistent")]
     /// Ordered user parts violated their canonical shape or resource bounds.
     UserContentShape,
+    #[error("session-template frame shape is inconsistent")]
     /// A template name or positive version carried an invalid shape.
     TemplateShape,
+    #[error("review workflow frame shape is inconsistent")]
     /// A review lifecycle or orchestration frame carried an invalid shape.
     ReviewShape,
+    #[error("model-call usage frame shape is inconsistent")]
     /// A model-call usage row carried cost without any reported usage axis.
     ModelCallUsageShape,
+    #[error("commissioned-goal frame shape is inconsistent")]
     /// A goal request, state, or event carried an invalid shape.
     GoalShape,
+    #[error("session-delegation frame shape is inconsistent")]
     /// A delegation update carried an invalid correlated shape.
     DelegationShape,
+    #[error("model-settings frame shape is inconsistent")]
     /// Model settings or capability data carried a contradictory shape.
     ModelSettingsShape,
+    #[error("session-placement frame shape is inconsistent")]
     /// A dotted placement or its root-global-read acknowledgement is invalid.
     PlacementShape,
+    #[error("commissioned-session fence shape is inconsistent")]
     /// A commissioned-session authority fence carried an invalid shape.
     DispatchFenceShape,
 }
-
-impl fmt::Display for FrameValidationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::UnsupportedVersion => "frame version is unsupported",
-            Self::UncorrelatedClientRequest => "client request identity is uncorrelated",
-            Self::UncorrelatedSuccess => "successful server message is uncorrelated",
-            Self::UncorrelatedApplicationError => "application server error is uncorrelated",
-            Self::ErrorDetailShape => "server error detail does not match its code",
-            Self::TurnStateShape => "transcript turn state is inconsistent",
-            Self::ToolApprovalShape => "tool approval event shape is inconsistent",
-            Self::MetadataShape => "session metadata frame shape is inconsistent",
-            Self::ConversationListShape => {
-                "unified conversation-listing frame shape is inconsistent"
-            }
-            Self::OperatorStatusShape => "operator-status frame shape is inconsistent",
-            Self::SystemPromptShape => "frame omits its required system-prompt member",
-            Self::ConversationImportShape => "conversation-import frame shape is inconsistent",
-            Self::BlobUploadShape => "blob-upload frame shape is inconsistent",
-            Self::BlobReadShape => "blob-read frame shape is inconsistent",
-            Self::ImportedFrontierShape => "imported frontier position is not positive",
-            Self::ContextCompactionShape => "compaction through position is not positive",
-            Self::ImportedConversationEntryShape => {
-                "imported conversation entry position is not positive"
-            }
-            Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
-            Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
-            Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
-            Self::UserContentShape => "ordered user content shape is inconsistent",
-            Self::TemplateShape => "session-template frame shape is inconsistent",
-            Self::ReviewShape => "review workflow frame shape is inconsistent",
-            Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
-            Self::GoalShape => "commissioned-goal frame shape is inconsistent",
-            Self::DelegationShape => "session-delegation frame shape is inconsistent",
-            Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
-            Self::PlacementShape => "session-placement frame shape is inconsistent",
-            Self::DispatchFenceShape => "commissioned-session fence shape is inconsistent",
-        })
-    }
-}
-
-impl Error for FrameValidationError {}
 
 /// Stable classification of an incoming line failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1158,35 +1130,19 @@ impl fmt::Display for FrameDecodeError {
 
 impl Error for FrameDecodeError {}
 
+#[derive(signalbox_derive::OperatorError)]
 /// Outgoing frame could not be encoded within the protocol boundary.
 #[derive(Debug)]
 pub enum FrameEncodeError {
+    #[error("invalid process-protocol frame: {field_0}")]
     /// In-memory value violated its closed frame shape.
-    Validation(FrameValidationError),
+    Validation(#[source] FrameValidationError),
+    #[error("process-protocol frame serialization failed")]
     /// JSON serialization failed.
-    Json(serde_json::Error),
+    Json(#[source] serde_json::Error),
+    #[error("process-protocol frame is oversized")]
     /// Encoded frame exceeded the inclusive byte cap.
     OversizedFrame,
-}
-
-impl fmt::Display for FrameEncodeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Validation(error) => write!(formatter, "invalid process-protocol frame: {error}"),
-            Self::Json(_) => formatter.write_str("process-protocol frame serialization failed"),
-            Self::OversizedFrame => formatter.write_str("process-protocol frame is oversized"),
-        }
-    }
-}
-
-impl Error for FrameEncodeError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Validation(error) => Some(error),
-            Self::Json(error) => Some(error),
-            Self::OversizedFrame => None,
-        }
-    }
 }
 
 impl From<FrameValidationError> for FrameEncodeError {

@@ -1,11 +1,12 @@
 # Pull-request convergence reconciler
 
-`reconcile.py` keeps selected GitHub pull requests moving. It lists candidates
-with `gh api graphql` and calls `signalbox-converge evaluate` for each current
-snapshot and verdict. It invokes operator-supplied commands when an unconverged
-pull request has no active work. Only pull requests whose head repository is the
-configured repository are eligible. The loop, dispatch fence, and cool-off state
-are Python; evidence rules are in
+`signalbox-converge reconcile` keeps selected GitHub pull requests moving. It
+lists candidates with `gh api graphql` and calls the crate's fetch and evidence
+functions in process for each current snapshot and verdict. It invokes
+operator-supplied commands when an unconverged pull request has no active work.
+Only pull requests whose head repository is the configured repository are
+eligible. The loop, dispatch fence, and cool-off state are in the Rust binary;
+evidence rules are in
 [signalbox-convergence](../../crates/convergence/README.md).
 
 The script writes one JSON log record for every decision. By default those
@@ -17,8 +18,8 @@ file is bound to one repository and is rejected under another.
 
 ## Requirements and invocation
 
-Runtime requires Python 3, an authenticated `gh` CLI, and `signalbox-converge`
-on `PATH`. Build the CLI and run one non-mutating tick:
+Runtime requires an authenticated `gh` CLI and `signalbox-converge` on `PATH`.
+Build the CLI and run one tick without dispatch:
 
 ```console
 cargo build -p signalbox-convergence --bin signalbox-converge
@@ -26,8 +27,9 @@ export PATH="$PWD/target/debug:$PATH"
 ```
 
 ```console
-python3 tooling/convergence-reconciler/reconcile.py \
+signalbox-converge reconcile \
   --repo OWNER/REPOSITORY \
+  --policy /path/to/repository.toml \
   --active-command 'session-control is-active' \
   --dry-run \
   --once
@@ -38,24 +40,26 @@ the end of the previous tick. `SIGINT` stops the loop. A once-only tick returns
 nonzero when its GitHub snapshot fails; a continuing loop logs a `tick-error`
 and tries again at the next interval.
 
-The default state location follows `XDG_STATE_HOME`, falling back to the current
-user's standard local state directory. Set `state_file` explicitly when a
-service manager provides a persistent runtime directory. Writes use a temporary
-file, atomic replacement, and synchronization of both the file and its parent
-directory before a dispatch child can start.
+The default state location uses `XDG_STATE_HOME`, then `$HOME/.local/state`;
+when neither variable is set, configure `--state-file` explicitly. Set
+`state_file` explicitly when a service manager provides a persistent runtime
+directory. Writes use a temporary file, atomic replacement, and synchronization
+of both the file and its parent directory before a dispatch child can start.
+State files require version 2 and the complete record shape; unknown fields,
+missing fields, and other versions are rejected without migration.
 
 ## Convergence evaluation
 
 The [shared policy](../../crates/convergence/examples/repository.toml)
-configures reviewers, evidence grammars, check exemptions, and limits.
-`--policy` selects a TOML or JSON policy file; `--repo` selects the repository
-for live reads.
+configures reviewers, evidence grammars, check exemptions, and limits. An
+explicit TOML or JSON policy is required via `--policy`, its environment
+variable, or JSON configuration; `--repo` selects the repository for live reads.
 
-Each evaluation receives its pull request's prior state through the CLI's
-`--state` file. The returned state is persisted with driver timing and dispatch
-records. The CLI supplies refreshed identity, checks, thread evidence, verdict,
-and every reason; an evaluation error takes the tick-error path without
-dispatch. A new check inventory must settle across observations.
+Each evaluation receives its pull request's prior evidence state in process. The
+returned state is persisted with driver timing and dispatch records. The crate
+supplies refreshed identity, checks, thread evidence, verdict, and every reason;
+an evaluation error takes the tick-error path without dispatch. A new check
+inventory must settle across observations.
 
 ## Decision flow
 
@@ -90,10 +94,12 @@ Commands must therefore accept those final two arguments. Shell pipelines and
 redirection belong in an operator-owned wrapper script, not in the configured
 command. Standard output or error from a failing command, and standard output
 from a successful dispatch, is truncated to 512 characters and attached to the
-decision log. The configurable command timeout bounds GitHub listing,
-convergence evaluation, and operator-command subprocesses to protect tick
-latency; its default is 60 seconds. An evaluation timeout terminates the CLI's
-process group, including its GitHub subprocesses.
+decision log. The configurable command timeout bounds GitHub and
+operator-command subprocesses; its default is 60 seconds. Each child runs in its
+own process group; timeout or `SIGINT` kills the group and reaps the child. All
+GitHub requests for one evaluation share its timeout budget. In-process snapshot
+construction and evaluation have no deadline and do not check `SIGINT`; stopping
+the loop waits for that CPU work to finish.
 
 An unconverged observation starts `unconverged_since`. An inactive result starts
 `idle_since`; active work or a successful dispatch clears it after the
@@ -105,13 +111,14 @@ terminal states likewise record the final duration before clearing both clocks.
 ## Configuration
 
 Values are selected in this order: command-line flag, environment variable, JSON
-configuration file, then default. `repository` and `active_command` are
-required. `dispatch_command` is required unless dry-run is enabled.
+configuration file, then default. `repository`, `convergence_policy`, and
+`active_command` are required. `dispatch_command` is required unless dry-run is
+enabled.
 
 | JSON key                  | Environment variable                             | Flag                        | Default                       |
 | ------------------------- | ------------------------------------------------ | --------------------------- | ----------------------------- |
 | `repository`              | `CONVERGENCE_RECONCILER_REPOSITORY`              | `--repo`                    | required                      |
-| `convergence_policy`      | `CONVERGENCE_RECONCILER_CONVERGENCE_POLICY`      | `--policy`                  | repository policy example     |
+| `convergence_policy`      | `CONVERGENCE_RECONCILER_CONVERGENCE_POLICY`      | `--policy`                  | required                      |
 | `head_pattern`            | `CONVERGENCE_RECONCILER_HEAD_PATTERN`            | `--head-pattern`            | `agent/*`                     |
 | `interval_seconds`        | `CONVERGENCE_RECONCILER_INTERVAL_SECONDS`        | `--interval-seconds`        | `300`                         |
 | `cool_off_seconds`        | `CONVERGENCE_RECONCILER_COOL_OFF_SECONDS`        | `--cool-off-seconds`        | `1800`                        |
@@ -126,7 +133,8 @@ required. `dispatch_command` is required unless dry-run is enabled.
 
 Set the configuration-file path with `--config` or
 `CONVERGENCE_RECONCILER_CONFIG`. Command values in JSON may be arrays, which
-avoid quoting ambiguity:
+avoid quoting ambiguity. Flags and environment values also accept JSON argv
+arrays or shell-like quoted strings; no shell expansion occurs:
 
 ```json
 {
@@ -148,10 +156,11 @@ The equivalent environment-oriented shape is useful under a service manager:
 
 ```console
 export CONVERGENCE_RECONCILER_REPOSITORY=OWNER/REPOSITORY
+export CONVERGENCE_RECONCILER_CONVERGENCE_POLICY=/path/to/repository.toml
 export CONVERGENCE_RECONCILER_ACTIVE_COMMAND='session-control is-active'
 export CONVERGENCE_RECONCILER_DISPATCH_COMMAND='session-control dispatch'
 export CONVERGENCE_RECONCILER_STATE_FILE=runtime/convergence-state.json
-python3 tooling/convergence-reconciler/reconcile.py
+signalbox-converge reconcile
 ```
 
 These examples intentionally use placeholders and relative paths. Deployment
@@ -161,14 +170,12 @@ service supervision owns that singleton policy.
 
 ## Tests
 
-Driver tests exercise decisions, state persistence, and dispatch fences with
-recorded convergence results. The
+Rust driver tests exercise decisions, state persistence, dispatch fences, and
+process-group timeouts with recorded evidence and an injected GitHub reader. The
 [fixture corpus](../../crates/convergence/fixtures/) covers evidence rules with
-frozen differential expectations. The CLI regression runner checks those
-verdicts and reason sets without a second predicate implementation.
+frozen differential expectations. Cargo tests check those verdicts and reason
+sets without a second predicate implementation.
 
 ```console
-cargo build -p signalbox-convergence --bin signalbox-converge
-python3 tooling/convergence-reconciler/test_reconcile.py
-python3 tooling/convergence-reconciler/differential.py
+cargo test --no-fail-fast -p signalbox-convergence --all-features
 ```

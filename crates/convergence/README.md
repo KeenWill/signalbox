@@ -29,8 +29,14 @@ identity read follows pagination and checks; `checks_green` describes those
 refreshed checks.
 
 JSON also includes the revalidated pull-request identity for operational
-drivers. The Python [reconciler](../../tooling/convergence-reconciler/README.md)
-delegates its evidence evaluation to this CLI.
+drivers. The
+[`reconcile` subcommand](../../tooling/convergence-reconciler/README.md) runs
+the candidate loop, dispatch fence, and cool-off bookkeeping with in-process
+fetch and evaluation.
+
+All three subcommands use clap-derived flags and `--help`. Reconciliation
+requires an explicit policy path through `--policy`, environment, or JSON
+configuration.
 
 State records the complete policy value as its identity. A policy change
 discards retained review authentication and wave counts and qualifies current
@@ -91,10 +97,9 @@ and
 are available together at the fixed checkpoint. Runtime evidence evaluation has
 one implementation in this crate.
 
-Run `python3 tooling/convergence-reconciler/differential.py` after building the
-CLI. It checks convergence and the complete reason set against the frozen
-expectations and rejects an incomplete fixture inventory. It cannot rewrite the
-oracle.
+Run `cargo test --no-fail-fast -p signalbox-convergence --all-features` to check
+convergence and the complete reason set against the frozen expectations and
+exercise the reconciliation loop without live GitHub requests.
 
 [Fixtures](fixtures/) contain losslessly compressed, unredacted provider
 responses for thirty real pull requests. Each [mutation](fixtures/mutations/)

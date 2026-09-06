@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+signalbox-derive = { path = "../derive" }
 futures-timer = "3.0.3"
 futures-util = "0.3.31"
 hex = "0.4.3"

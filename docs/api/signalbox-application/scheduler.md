@@ -2,12 +2,6 @@
 
 # scheduler
 
-## scheduler_ordinary_pass_limit
-
-```rust
-pub const fn scheduler_ordinary_pass_limit(max_in_flight_passes: usize) -> usize;
-```
-
 ## SchedulerPassOccupancyBound
 
 ```rust
@@ -28,9 +22,11 @@ impl SchedulerPassOccupancyBound {
 pub struct InvalidSchedulerPassOccupancyBound;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for InvalidSchedulerPassOccupancyBound {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for InvalidSchedulerPassOccupancyBound {}
+impl error::Error for InvalidSchedulerPassOccupancyBound {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## SchedulerOldestInFlightPass
@@ -80,9 +76,11 @@ impl ReconciliationSweepInterval {
 pub struct InvalidReconciliationSweepInterval;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for InvalidReconciliationSweepInterval {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for InvalidReconciliationSweepInterval {}
+impl error::Error for InvalidReconciliationSweepInterval {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## EligibilityNudgeOutcome
@@ -102,12 +100,6 @@ pub enum EligibilityNudgeOutcome {
 ```rust
 pub trait EligibilityNudge {
     fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
-    fn nudge_dispatch_start(
-        &self,
-        session: signalbox_domain::SessionId,
-    ) -> EligibilityNudgeOutcome {
-        /* provided */
-    }
 }
 ```
 
@@ -131,20 +123,9 @@ pub struct EligibilitySweepBatch {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl EligibilitySweepBatch {
     pub fn new(sessions: vec::Vec<signalbox_domain::SessionId>, continuation: bool) -> Self;
-    pub fn with_dispatch_starts(
-        sessions: vec::Vec<signalbox_domain::SessionId>,
-        dispatch_starts: set::HashSet<signalbox_domain::SessionId>,
-        continuation: bool,
-    ) -> Self;
     #[must_use]
     pub fn with_unmonitored(self, unmonitored: set::HashSet<signalbox_domain::SessionId>) -> Self;
-    pub fn into_parts(
-        self,
-    ) -> (
-        vec::Vec<signalbox_domain::SessionId>,
-        set::HashSet<signalbox_domain::SessionId>,
-        bool,
-    );
+    pub fn into_parts(self) -> (vec::Vec<signalbox_domain::SessionId>, bool);
     pub const fn unmonitored(&self) -> &set::HashSet<signalbox_domain::SessionId>;
 }
 ```
@@ -162,23 +143,7 @@ pub trait EligibilityWorkSource {
             <Self as EligibilityWorkSource>::Error,
         >,
     > + marker::Send;
-    fn take_returned_dispatch_start(&mut self, _session: signalbox_domain::SessionId) -> bool {
-        /* provided */
-    }
     fn take_returned_unmonitored(&mut self, _session: signalbox_domain::SessionId) -> bool {
-        /* provided */
-    }
-    fn take_pending_dispatch_start(&mut self) -> option::Option<signalbox_domain::SessionId> {
-        /* provided */
-    }
-    fn next_pending_dispatch_start(
-        &mut self,
-    ) -> impl future::Future<
-        Output = result::Result<
-            signalbox_domain::SessionId,
-            <Self as EligibilityWorkSource>::Error,
-        >,
-    > + marker::Send {
         /* provided */
     }
 }
@@ -208,14 +173,6 @@ pub trait EligibilityPass {
     ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
            + 'static;
-    fn run_dispatch_start(
-        &mut self,
-        session: signalbox_domain::SessionId,
-    ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
-           + marker::Send
-           + 'static {
-        /* provided */
-    }
 }
 ```
 
@@ -307,12 +264,6 @@ where
     ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
            + 'static;
-    fn run_dispatch_start(
-        &mut self,
-        session: signalbox_domain::SessionId,
-    ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
-           + marker::Send
-           + 'static;
 }
 ```
 
@@ -323,8 +274,6 @@ pub struct InProcessEligibilityNudge {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl EligibilityNudge for InProcessEligibilityNudge {
     fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
-    fn nudge_dispatch_start(&self, session: signalbox_domain::SessionId)
-        -> EligibilityNudgeOutcome;
 }
 ```
 
@@ -370,11 +319,6 @@ where
         &mut self,
     ) -> result::Result<signalbox_domain::SessionId, <Self as EligibilityWorkSource>::Error>;
     fn take_returned_unmonitored(&mut self, session: signalbox_domain::SessionId) -> bool;
-    fn take_returned_dispatch_start(&mut self, session: signalbox_domain::SessionId) -> bool;
-    fn take_pending_dispatch_start(&mut self) -> option::Option<signalbox_domain::SessionId>;
-    async fn next_pending_dispatch_start(
-        &mut self,
-    ) -> result::Result<signalbox_domain::SessionId, <Self as EligibilityWorkSource>::Error>;
 }
 ```
 

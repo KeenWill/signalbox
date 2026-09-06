@@ -21,9 +21,9 @@ pub struct PreparedAttemptIdentities {
 
 ```rust
 pub struct PreparedAttemptProposal {
-    pub name: tool::ToolName,
-    pub arguments: tool::NormalizedToolArguments,
-    pub effect_class: tool::ToolEffectClass,
+    pub name: name::ToolName,
+    pub arguments: arguments::NormalizedToolArguments,
+    pub effect_class: policy::ToolEffectClass,
     pub approval: PreparedAttemptApproval,
 }
 // derives: clone::Clone, fmt::Debug
@@ -48,7 +48,7 @@ pub enum PreparedAttemptApproval {
 pub fn prepared_single_attempt_batch(
     identities: PreparedAttemptIdentities,
     proposal: PreparedAttemptProposal,
-) -> tool_execution::ToolBatch;
+) -> batch::ToolBatch;
 ```
 
 ## FixtureTransactionFailures
@@ -68,12 +68,9 @@ pub struct FixtureToolExecutionTransaction<Error> {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl<Error> FixtureToolExecutionTransaction<Error> {
     #[must_use]
-    pub const fn new(
-        batch: tool_execution::ToolBatch,
-        failures: FixtureTransactionFailures<Error>,
-    ) -> Self;
+    pub const fn new(batch: batch::ToolBatch, failures: FixtureTransactionFailures<Error>) -> Self;
     #[must_use]
-    pub const fn batch(&self) -> &tool_execution::ToolBatch;
+    pub const fn batch(&self) -> &batch::ToolBatch;
 }
 impl<Error> ToolExecutionTransaction for FixtureToolExecutionTransaction<Error>
 where
@@ -98,16 +95,13 @@ where
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
-    ) -> result::Result<
-        option::Option<tool_execution::ToolBatch>,
-        <Self as ToolExecutionTransaction>::Error,
-    >;
+    ) -> result::Result<option::Option<batch::ToolBatch>, <Self as ToolExecutionTransaction>::Error>;
     async fn prepare_next_attempt(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::ToolAttemptId,
-        _effect_class: tool::ToolEffectClass,
+        _effect_class: policy::ToolEffectClass,
     ) -> result::Result<
         option::Option<tool_attempt::CurrentToolAttempt>,
         <Self as ToolExecutionTransaction>::Error,

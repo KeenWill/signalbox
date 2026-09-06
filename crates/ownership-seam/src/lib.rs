@@ -4,13 +4,33 @@
 //! only the checked command families admitted by [`SessionCommand`]. Database
 //! handles and the wider core outbox vocabulary do not cross this boundary.
 
+pub use signalbox_application::{
+    CreateSessionOutcome, RepoWatchBranchHead, RepoWatchCheckCompletionGeneration,
+    RepoWatchCheckRunObservation, RepoWatchCheckSuiteObservation, RepoWatchEventContentIdentityV1,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierError,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
+    RepoWatchMergedCheckRunBaselineV1, RepoWatchMergedCheckSuiteBaselineV1,
+    RepoWatchMergedPullRequestBaselineInputV1, RepoWatchMergedPullRequestBaselineV1,
+    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    derive_repo_watch_events,
+};
 pub use signalbox_domain::{
-    BranchName, CommitSha, ContextFrontierId, CoreAgency, CreateSession, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DispatchingModule, DurableCommandId,
-    FinishCondition, FinishConditionStatement, GoalBlockedReasonKind, GoalGuidance, GoalStatement,
-    GoalUserAction, GoalUserCommand, LifecycleActor, ModelCallId, ModelSelectionOverride,
-    ModelSelectionRequest, ModuleDispatch, PerInputConfigurationChoices, PullRequestBody,
-    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepositorySlug,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, ContextFrontierId,
+    CoreAgency, CreateSession, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DispatchingModule, DurableCommandId, FinishCondition, FinishConditionStatement, GitHubObjectId,
+    GoalBlockedReasonKind, GoalGuidance, GoalStatement, GoalUserAction, GoalUserCommand, LabelName,
+    LifecycleActor, MergeableState, ModelCallId, ModelSelectionOverride, ModelSelectionRequest,
+    ModuleDispatch, PerInputConfigurationChoices, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionChange,
+    ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
+    RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId, RepoWatchRuleIdentityField,
+    RepoWatchRuleIdentityFieldDigest, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionFailureCause, SessionId,
     SessionLifecycleCommand, SessionLifecycleOperation, SessionLifecycleState, SessionOwnership,
@@ -18,7 +38,7 @@ pub use signalbox_domain::{
     SessionRetirementCause, SessionRetryableCause, SessionStructuralCause,
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
     SessionTerminalOutcome, SessionWait, StartGate, StopStickiness, SubmitInput, ToolAttemptId,
-    ToolRequestId, TurnId, UserContent, UserContentPart,
+    ToolRequestId, TurnId, UserContent, UserContentPart, WorkflowName,
 };
 pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{
@@ -208,6 +228,22 @@ impl LifecycleEvent {
     /// Borrows the closed typed payload.
     pub const fn kind(&self) -> &LifecycleEventKind {
         &self.kind
+    }
+
+    /// Builds a session-created event for persistence-boundary integration tests.
+    #[cfg(feature = "test-support")]
+    pub const fn session_created_for_test(
+        sequence: u64,
+        recorded_at: OffsetDateTime,
+        session: SessionId,
+        created: SessionCreated,
+    ) -> Self {
+        Self {
+            sequence,
+            recorded_at,
+            session: Some(session),
+            kind: LifecycleEventKind::SessionCreated(created),
+        }
     }
 }
 
@@ -431,6 +467,19 @@ pub struct SessionCommand {
     payload: SessionCommandPayload,
 }
 
+/// Stable discriminator stored in a module's dispatch ledger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionCommandKind {
+    /// Create one session.
+    CreateSession,
+    /// Submit one input.
+    SubmitInput,
+    /// Mutate one goal lineage.
+    Goal,
+    /// Mutate session lifecycle or ownership.
+    Lifecycle,
+}
+
 impl SessionCommand {
     /// Admits a repository-watch-dispatched create-session command.
     pub fn create_session(command: CreateSession) -> Result<Self, CommandOutsideSeam> {
@@ -498,6 +547,26 @@ impl SessionCommand {
     /// Consumes the wrapper and returns the existing typed core command.
     pub fn into_payload(self) -> SessionCommandPayload {
         self.payload
+    }
+
+    /// Returns the durable command identity claimed by the checked payload.
+    pub const fn command_id(&self) -> DurableCommandId {
+        match &self.payload {
+            SessionCommandPayload::CreateSession(command) => command.command_id(),
+            SessionCommandPayload::SubmitInput(command) => command.command_id(),
+            SessionCommandPayload::Goal(command) => command.command_id(),
+            SessionCommandPayload::Lifecycle(command) => command.command_id(),
+        }
+    }
+
+    /// Returns the ledger discriminator for the checked payload family.
+    pub const fn kind(&self) -> SessionCommandKind {
+        match self.payload {
+            SessionCommandPayload::CreateSession(_) => SessionCommandKind::CreateSession,
+            SessionCommandPayload::SubmitInput(_) => SessionCommandKind::SubmitInput,
+            SessionCommandPayload::Goal(_) => SessionCommandKind::Goal,
+            SessionCommandPayload::Lifecycle(_) => SessionCommandKind::Lifecycle,
+        }
     }
 }
 

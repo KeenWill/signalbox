@@ -6,8 +6,6 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
-    error::Error,
-    fmt,
     num::NonZeroU64,
 };
 
@@ -155,13 +153,17 @@ impl BlobReadAdmission {
 
 const STORAGE_VERSION: i16 = 1;
 
+#[derive(signalbox_derive::OperatorError)]
 /// Stored tool-loop facts failed checked domain reconstruction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolLoopCorruption {
+    #[error("missing tool-loop {field_0}")]
     /// A required row or value is absent.
     Missing(&'static str),
+    #[error("inconsistent tool-loop {field_0}")]
     /// Stored facts disagree about an exact relationship.
     Inconsistent(&'static str),
+    #[error("unsupported tool-loop {field}: {value}")]
     /// A closed discriminator has an unknown spelling.
     Unsupported {
         /// Storage field.
@@ -169,83 +171,39 @@ pub enum ToolLoopCorruption {
         /// Unsupported value.
         value: String,
     },
+    #[error("tool batch reconstitution failed: {field_0:?}")]
     /// Complete batch facts failed aggregate reconstruction.
     Batch(ToolBatchReconstitutionFailure),
 }
 
-impl fmt::Display for ToolLoopCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(value) => write!(formatter, "missing tool-loop {value}"),
-            Self::Inconsistent(value) => write!(formatter, "inconsistent tool-loop {value}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported tool-loop {field}: {value}")
-            }
-            Self::Batch(failure) => {
-                write!(formatter, "tool batch reconstitution failed: {failure:?}")
-            }
-        }
-    }
-}
-
-impl Error for ToolLoopCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, replay, corruption, or rejected transition at the tool boundary.
 #[derive(Debug)]
 pub enum ToolLoopRepositoryError {
+    #[error("tool-loop database failure: {source}")]
     /// PostgreSQL failure.
     Database {
+        #[source]
         /// Original driver error.
         source: sqlx::Error,
         /// Whether a failed commit acknowledgement leaves outcome unknown.
         commit_ambiguous: bool,
     },
+    #[error("tool-loop identity candidate already exists")]
     /// A fresh application-owned identity collided with durable state.
     IdentityCollision,
+    #[error(transparent)]
     /// Durable facts failed closed reconstruction.
-    Corruption(ToolLoopCorruption),
+    Corruption(#[source] ToolLoopCorruption),
+    #[error("command identity already belongs to another kind")]
     /// The command identity belongs to another durable command kind.
     DifferentCommandKind,
+    #[error("command replay payload differs from the durable command")]
     /// The command identity is recorded with a different decision payload.
     ConflictingCommandReuse,
+    #[error("tool-loop transition rejected: {field_0}")]
     /// Caller supplied a transition the current batch does not authorize.
     InvalidTransition(&'static str),
-}
-
-impl fmt::Display for ToolLoopRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "tool-loop database failure: {source}")
-            }
-            Self::IdentityCollision => {
-                formatter.write_str("tool-loop identity candidate already exists")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::DifferentCommandKind => {
-                formatter.write_str("command identity already belongs to another kind")
-            }
-            Self::ConflictingCommandReuse => {
-                formatter.write_str("command replay payload differs from the durable command")
-            }
-            Self::InvalidTransition(value) => {
-                write!(formatter, "tool-loop transition rejected: {value}")
-            }
-        }
-    }
-}
-
-impl Error for ToolLoopRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision
-            | Self::DifferentCommandKind
-            | Self::ConflictingCommandReuse
-            | Self::InvalidTransition(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for ToolLoopRepositoryError {
@@ -457,35 +415,6 @@ impl PostgresToolLoopRepository {
                         )
                     )
                 )",
-        )
-        .bind(session_id_to_uuid(session))
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(turn.map(turn_id_from_uuid))
-    }
-
-    /// Finds an active relevant turn that has not prepared its first model call.
-    pub async fn find_dispatch_start_turn(
-        &self,
-        session: SessionId,
-    ) -> Result<Option<TurnId>, ToolLoopRepositoryError> {
-        let turn = sqlx::query_scalar::<_, Uuid>(
-            "SELECT lifecycle.turn_id
-               FROM turn_lifecycle AS lifecycle
-              WHERE lifecycle.session_id = $1
-                AND lifecycle.state_kind = 'active'
-                AND NOT lifecycle.delegation_runtime_terminal
-                AND goal_turn_is_runtime_relevant(
-                    lifecycle.session_id, lifecycle.turn_id
-                )
-                AND NOT EXISTS (
-                    SELECT 1
-                      FROM model_call AS call
-                     WHERE call.session_id = lifecycle.session_id
-                       AND call.turn_id = lifecycle.turn_id
-                )
-              ORDER BY lifecycle.acceptance_position
-              LIMIT 1",
         )
         .bind(session_id_to_uuid(session))
         .fetch_optional(&self.pool)

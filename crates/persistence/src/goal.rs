@@ -3,7 +3,7 @@
 //! The event stream is authoritative. Loads decode every durable event and
 //! replay it through the domain aggregate; no mutable current-state row exists.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::num::NonZeroU64;
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -108,30 +108,26 @@ pub enum GoalTransitionOutcome {
     NotCurrentGoalTurn,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One latest execution-failure block selected for daemon reconciliation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PendingGoalExecutionFailure {
+    /// Returns the session whose goal remains blocked.
+    #[get(copy)]
     session: SessionId,
+    /// Returns the exact blocked event the reconciliation must answer.
+    #[get(copy)]
     blocked: GoalEventOrdinal,
 }
 
-impl PendingGoalExecutionFailure {
-    /// Returns the session whose goal remains blocked.
-    pub const fn session(self) -> SessionId {
-        self.session
-    }
-
-    /// Returns the exact blocked event the reconciliation must answer.
-    pub const fn blocked(self) -> GoalEventOrdinal {
-        self.blocked
-    }
-}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable goal shape that cannot reconstruct domain values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GoalCorruption {
+    #[error("missing goal {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported goal {field}: {value}")]
     /// A closed discriminator is unsupported.
     Unsupported {
         /// The unsupported field.
@@ -139,103 +135,48 @@ pub enum GoalCorruption {
         /// The exact stored spelling.
         value: String,
     },
+    #[error("inconsistent goal {field_0}")]
     /// Stored variant fields or relationships disagree.
     Inconsistent(&'static str),
+    #[error("invalid goal column representation: {field_0}")]
     /// A PostgreSQL column could not decode into its declared Rust representation.
     Column(&'static str),
+    #[error("invalid goal ordinal: {field_0}")]
     /// A positive stored ordinal cannot map to the domain.
-    InvalidOrdinal(PositiveOrdinalMappingError),
+    InvalidOrdinal(#[source] PositiveOrdinalMappingError),
+    #[error("invalid goal text: {field_0}")]
     /// Stored bounded text cannot map to the domain.
-    InvalidText(GoalTextError),
+    InvalidText(#[source] GoalTextError),
+    #[error("invalid goal command identity: {field_0}")]
     /// Stored user-command provenance uses a sentinel identity.
-    InvalidCommandId(DurableCommandIdMappingError),
+    InvalidCommandId(#[source] DurableCommandIdMappingError),
+    #[error("goal reconstitution failed: {field_0:?}")]
     /// The complete history failed domain-owned replay.
     Domain(GoalReconstitutionFailure),
+    #[error("goal turn Session is invalid: {field_0}")]
     /// The session configuration needed to accept a goal turn is corrupt.
-    Session(SessionCorruption),
-}
-impl fmt::Display for GoalCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing goal {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported goal {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent goal {relationship}")
-            }
-            Self::Column(reason) => {
-                write!(formatter, "invalid goal column representation: {reason}")
-            }
-            Self::InvalidOrdinal(reason) => write!(formatter, "invalid goal ordinal: {reason}"),
-            Self::InvalidText(reason) => write!(formatter, "invalid goal text: {reason}"),
-            Self::InvalidCommandId(reason) => {
-                write!(formatter, "invalid goal command identity: {reason}")
-            }
-            Self::Domain(reason) => write!(formatter, "goal reconstitution failed: {reason:?}"),
-            Self::Session(reason) => write!(formatter, "goal turn Session is invalid: {reason}"),
-        }
-    }
+    Session(#[source] SessionCorruption),
 }
 
-impl Error for GoalCorruption {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidOrdinal(error) => Some(error),
-            Self::InvalidText(error) => Some(error),
-            Self::InvalidCommandId(error) => Some(error),
-            Self::Session(error) => Some(error),
-            Self::Missing(_)
-            | Self::Unsupported { .. }
-            | Self::Inconsistent(_)
-            | Self::Column(_)
-            | Self::Domain(_) => None,
-        }
-    }
-}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure, ambiguous commit, wrong load purpose, or corruption.
 #[derive(Debug)]
 pub enum GoalRepositoryError {
+    #[error("goal database failure: {field_0}")]
     /// PostgreSQL could not complete the operation.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("goal commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL did not reveal whether the final commit took effect.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("durable command {command_id:?} does not name a goal command")]
     /// A purpose-specific load named another admitted command kind.
     DifferentCommandKind {
         /// The user-global identity naming another command kind.
         command_id: DurableCommandId,
     },
+    #[error(transparent)]
     /// Durable rows cannot reconstruct the requested value.
-    Corruption(GoalCorruption),
-}
-
-impl fmt::Display for GoalRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "goal database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(formatter, "goal commit outcome is ambiguous: {error}")
-            }
-            Self::DifferentCommandKind { command_id } => {
-                write!(
-                    formatter,
-                    "durable command {command_id:?} does not name a goal command"
-                )
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for GoalRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::DifferentCommandKind { .. } => None,
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] GoalCorruption),
 }
 
 impl From<sqlx::Error> for GoalRepositoryError {
@@ -456,13 +397,7 @@ impl GoalRepository {
             GoalCommandResult::Rejected(_) => false,
         };
         match &result {
-            GoalCommandResult::Applied(event) => {
-                lock_terminal_repo_watch_dispatch_cohort(
-                    &mut transaction,
-                    command.session(),
-                    event,
-                )
-                .await?;
+            GoalCommandResult::Applied(_) => {
                 lock_scheduler(&mut transaction, command.session()).await?;
             }
             GoalCommandResult::Rejected(_) => {}
@@ -1202,52 +1137,6 @@ impl GoalRepository {
     }
 }
 
-/// Applies scheduler failure authority inside a transaction that already owns
-/// the session lock and has terminalized the exact failed turn.
-///
-/// Approval-judge headless closeout uses this boundary so its turn failure,
-/// blocked goal event, repository-watch requeue, and singleton release share
-/// one commit. The ordinary public method remains the entry point for
-/// independent scheduler passes.
-pub(crate) async fn block_execution_failure_locked(
-    connection: &mut PgConnection,
-    session: SessionId,
-    need: GoalNeed,
-    provenance: GoalSchedulerProvenance,
-) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
-    let Some(goal) = load_goal_from_connection(connection, session).await? else {
-        return Ok(GoalTransitionOutcome::GoalNotAttached);
-    };
-    if let Some(event) = recorded_scheduler_failure(&goal, provenance.turn()) {
-        return Ok(GoalTransitionOutcome::Applied(event.clone()));
-    }
-    let generation = goal_turn_generation(connection, session, provenance.turn()).await?;
-    if generation != Some(goal.current().generation()) {
-        return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-    }
-    if current_goal_turn(connection, session, goal.current().generation()).await?
-        != Some(provenance.turn())
-    {
-        return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-    }
-    if goal_turn_terminal_state(connection, session, provenance.turn()).await?
-        != GoalTurnTerminalState::Unsuccessful
-    {
-        return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-    }
-    let transitioned = match goal.block_execution_failure(need, provenance) {
-        Ok(goal) => goal,
-        Err(error) => return Ok(GoalTransitionOutcome::Rejected(error)),
-    };
-    let event = latest_event(&transitioned)?;
-    insert_event(connection, session, &event).await?;
-    // Same monitor-visibility requirement as `handle_system_transition`: a
-    // blocked transition that retires a queued turn from the live projection
-    // must surface as a durable outbox event.
-    retire_ineligible_queued_goal_turn(connection, session).await?;
-    Ok(GoalTransitionOutcome::Applied(event))
-}
-
 /// Records an operator-required recovery cause inside the transaction that
 /// terminalizes the exact failed turn.
 pub(crate) async fn record_execution_failure_recovery_cause(
@@ -1375,27 +1264,6 @@ fn event_may_retire_queued_turn(event: &GoalEvent) -> bool {
     }
 }
 
-async fn lock_terminal_repo_watch_dispatch_cohort(
-    connection: &mut PgConnection,
-    session: SessionId,
-    event: &GoalEvent,
-) -> Result<(), GoalRepositoryError> {
-    if !matches!(
-        event.kind(),
-        GoalEventKind::Blocked { .. }
-            | GoalEventKind::Achieved { .. }
-            | GoalEventKind::UserStopped { .. }
-            | GoalEventKind::SessionClosed { .. }
-    ) {
-        return Ok(());
-    }
-    sqlx::query(crate::lock_inventory::REPO_WATCH_TERMINAL_GOAL_COHORT)
-        .bind(session_id_to_uuid(session))
-        .execute(&mut *connection)
-        .await?;
-    Ok(())
-}
-
 fn scheduler_failure_rejection(
     failure: GoalTransitionFailure,
 ) -> Result<GoalTurnContinuationOutcome, GoalCorruption> {
@@ -1481,89 +1349,6 @@ pub(crate) async fn insert_fresh_commissioned_goal(
         turn,
     )
     .await
-}
-
-/// Composes a parent-only stop for a repository-watch commission that is still
-/// the session's original pursuing generation.
-///
-/// Repository watch owns the commission it created, but it must not stop a
-/// later user-authored generation or a goal that has already ended. The session
-/// lock makes that check and the stop one atomic decision. The ordinary durable
-/// stop receipt, termination cascade, and event shapes are retained.
-pub(crate) async fn insert_repo_watch_composed_stop(
-    connection: &mut PgConnection,
-    command: GoalUserCommand,
-) -> Result<bool, GoalRepositoryError> {
-    if !matches!(
-        command.action(),
-        GoalUserAction::Stop {
-            descendant_scope: DescendantTerminationScope::ParentAlone,
-        }
-    ) {
-        return Err(GoalCorruption::Inconsistent(
-            "repository-watch cutoff command is not a parent-only stop",
-        )
-        .into());
-    }
-    if !lock_session(connection, command.session()).await? {
-        return Err(GoalCorruption::Missing("dispatched cutoff session").into());
-    }
-    if session_holds_committed_closure(connection, command.session()).await? {
-        return Ok(false);
-    }
-    let Some(goal) = load_goal_from_connection(connection, command.session()).await? else {
-        return Err(GoalCorruption::Missing("dispatched cutoff goal").into());
-    };
-    if goal.current().generation().get() != 1
-        || !matches!(
-            goal.current().state(),
-            GoalState::Pursuing | GoalState::Blocked { .. }
-        )
-    {
-        return Ok(false);
-    }
-    let issuer =
-        crate::command_registry::issuer_columns(signalbox_domain::CommandPrincipal::Module {
-            module: signalbox_domain::DispatchingModule::RepositoryWatch,
-        });
-    let claimed = sqlx::query(
-        "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at,
-             issuer_kind, issuer_module)
-         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(durable_command_id_to_uuid(command.command_id()))
-    .bind(GOAL_KIND)
-    .bind(STORAGE_VERSION)
-    .bind(issuer.0)
-    .bind(issuer.1)
-    .execute(&mut *connection)
-    .await?
-    .rows_affected()
-        == 1;
-    if !claimed {
-        return Err(
-            GoalCorruption::Inconsistent("fresh repository-watch cutoff command identity").into(),
-        );
-    }
-    let result = apply_unconditional_user_command(connection, &command).await?;
-    let GoalCommandResult::Applied(event) = &result else {
-        return Err(GoalCorruption::Inconsistent(
-            "repository-watch cutoff stop was rejected after locking",
-        )
-        .into());
-    };
-    lock_terminal_repo_watch_dispatch_cohort(connection, command.session(), event).await?;
-    lock_scheduler(connection, command.session()).await?;
-    insert_command(connection, &command, &result).await?;
-    insert_event(connection, command.session(), event).await?;
-    retire_ineligible_queued_goal_turn(connection, command.session()).await?;
-    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1, 'stopped')")
-        .bind(durable_command_id_to_uuid(command.command_id()))
-        .execute(&mut *connection)
-        .await?;
-    Ok(true)
 }
 
 fn event_starts_pursuit(event: &GoalEvent) -> bool {
@@ -2576,6 +2361,8 @@ mod tests {
 
 #[cfg(test)]
 mod diagnostic_tests {
+    use std::error::Error;
+
     use super::*;
 
     #[test]

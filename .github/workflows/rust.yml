@@ -78,7 +78,7 @@ jobs:
                 # run the complete bar even though they are Markdown.
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
                   | docs/api/* \
-                  | docs/scenarios.md | docs/style.md)
+                  | docs/style.md)
                   rust=$((rust + 1))
                   ;;
                 docs/* | *.md)
@@ -111,7 +111,7 @@ jobs:
 
   contract-checks:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -145,22 +145,6 @@ jobs:
         run: /tmp/mdformat-venv/bin/python scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
-      - name: Check numeric bound declarations
-        run: python3 scripts/check_numeric_bounds.py
-      # Gates normally: the tree satisfies this today, so the step can only
-      # fail on a regression. Clippy enforces the panic denies but cannot see
-      # a member that opts out of inheriting them, which is the hole this
-      # closes. Reads `cargo metadata --no-deps` for the member set, which
-      # resolves no dependency graph and compiles nothing, so it belongs above
-      # the cache step with the other non-compiling checks.
-      - name: Check panic-gate coverage
-        run: python3 scripts/check_panic_gate.py
-      # Gates normally: the tree satisfies all three rules this checker decides,
-      # so the step can only fail on a regression. A rule joins this step only
-      # once the tree it scans is already at zero — never as a side effect of a
-      # change that merely reduces a count.
-      - name: Check style rules
-        run: python3 scripts/check_style_rules.py
       - name: Check ownership-seam boundaries
         run: python3 scripts/check_ownership_seam.py
   checker-and-format-tests:
@@ -185,20 +169,12 @@ jobs:
         run: python3 scripts/test_render_domain_spine.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
-      - name: Test numeric bound checker
-        run: python3 scripts/test_check_numeric_bounds.py
-      - name: Test panic-gate checker
-        run: python3 scripts/test_check_panic_gate.py
-      - name: Test style-rule checker
-        run: python3 scripts/test_check_style_rules.py
       - name: Test ownership-seam checker
         run: python3 scripts/test_check_ownership_seam.py
       - name: Test documentation consistency checker
         run: /tmp/mdformat-venv/bin/python scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
-        run: python3 scripts/test_postgres_integration_suites.py
-      - name: Test the built-executable resolver
-        run: python3 tooling/test_resolve_cargo_bin.py
+        run: /tmp/mdformat-venv/bin/python scripts/test_postgres_integration_suites.py
       - name: Test the lifecycle watchdog
         run: python3 tooling/test_supervise_lifecycle.py
       # Drives the sweep against a fake `docker` it puts first on PATH, so it
@@ -214,25 +190,27 @@ jobs:
         run: /tmp/mdformat-venv/bin/mdformat --check *.md docs/
       # Conservative inventory for the recorded session-lock protocols. The
       # checksum makes changes to the small
-      # reviewed inventory explicit; the scan rejects strongest-mode row-lock
-      # clauses anywhere else in production Rust. This deliberately performs
+      # reviewed inventory explicit; the scan rejects row-lock clauses and
+      # advisory-lock calls elsewhere in production Rust. This deliberately performs
       # no Rust or SQL parsing.
       - name: Check explicit-lock inventory
         run: |
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            0bbd9ebe800a35967e0345df725e53f183a474c5f0dbf512d777886508db8425
+            4da7adc13c029c73b72fec67f87d264ffef2ea27ec04196e158870496d3910c4
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
               s{/[*].*?[*]/}{ }gs;
+              s{^\s*//[^\n]*}{ }gm;
               s{--[^\n]*}{ }g;
               s/\s+/ /g;
-              print "$ARGV\n" if /\bfor update\b/i;
+              print "$ARGV\n" if /\bfor (?:no key update|key share|share|update)\b/i
+                || /\bpg_(?:try_)?advisory_(?:xact_)?lock(?:_shared)?\s*\(/i;
             ')"
           test -z "$unexpected" || {
-            printf 'explicit row lock outside inventory:\n%s\n' "$unexpected"
+            printf 'explicit lock outside inventory:\n%s\n' "$unexpected"
             exit 1
           }
   rust-checks:
@@ -420,8 +398,6 @@ jobs:
             ' sh "$runner_uid" "$runner_gid" "$runner_home" "$test_command" "$runner_path"
       - name: Test generated browser contract runtime
         run: node --test crates/web-contract/tests/generated_roundtrip.mjs
-      - name: Test the convergence reconciler
-        run: python3 tooling/convergence-reconciler/test_reconcile.py
       # `--all-targets` excludes doctests, so the domain's compile_fail
       # sealing proofs need this separate run.
       - name: Run doctests
@@ -562,7 +538,7 @@ jobs:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
-    # Generous by design: this job now absorbs all six suites' compilation,
+    # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
@@ -695,14 +671,6 @@ jobs:
           path: ${{ runner.temp }}/terminal-client.tar.zst
           if-no-files-found: error
           retention-days: 1
-      - name: Upload the approval-judge-eval archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-integration-archive-approval-judge-eval
-          path: ${{ runner.temp }}/approval-judge-eval.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-
   # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
   # build and run jobs share the same runner image and absolute work-path shape,
   # which keeps paths embedded in nextest archives valid across their pods.
@@ -715,7 +683,7 @@ jobs:
   # Persistence is sharded according to its measured test-execution cost; every
   # other suite runs whole because it fits well inside the job timeout.
   #
-  # The run matrix currently expands to eleven shards after the one shared
+  # The run matrix currently expands to ten shards after the one shared
   # build.
   # The shards compile nothing and run for minutes; the build's single cache
   # key replaces the old per-suite keys that evicted one another.

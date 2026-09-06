@@ -856,6 +856,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: Some(3),
             },
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         });
 
         let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {

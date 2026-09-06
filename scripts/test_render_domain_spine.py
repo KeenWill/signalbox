@@ -327,6 +327,26 @@ pub struct Token;
         self.assertIn('| example | 3 | 1 | 1 | [example](example.md) |', files['README.md'])
         self.assertNotIn('Documentation must not', text)
 
+    def test_nested_source_span_stays_in_its_top_level_module_page(self):
+        document = fixture()
+        document['index']['1']['span']['filename'] = 'src/example/inner.rs'
+        renderer = Renderer(document)
+        modules = renderer.modules()
+        self.assertEqual(list(modules), ['example'])
+        self.assertIn(renderer.item(1), modules['example'])
+        files = renderer.files('sample')
+        self.assertEqual(set(files), {'example.md', 'README.md'})
+        self.assertIn('pub struct Record<T>', files['example.md'])
+
+    def test_external_reexport_uses_the_export_name_when_item_name_is_null(self):
+        document = fixture()
+        export = document['index']['30']
+        export['name'] = None
+        export['inner']['use'].update(source='external::Value', name='Alias', id=100)
+        files = Renderer(document).files('sample')
+        self.assertIn('## Alias\n\n```rust\npub use external::Value as Alias;\n```',
+                      files['example.md'])
+
     def test_generic_constraints_and_external_paths_are_preserved(self):
         document = fixture()
         renderer = Renderer(document)
@@ -364,7 +384,7 @@ pub struct Token;
         }}
         self.assertEqual(renderer.type(reference), '&mut (impl fmt::Debug + marker::Send)')
 
-    def test_module_at_800_lines_splits_by_kind_and_links_every_part(self):
+    def test_module_at_line_limit_splits_by_kind_and_links_every_part(self):
         document = fixture()
         renderer = Renderer(document)
         original_lines = len(renderer.files('sample')['example.md'].splitlines())

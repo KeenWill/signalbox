@@ -11,11 +11,12 @@ use signalbox_model_runtime::{
     BoundaryLossEvidence, CancellationSignal, CredentialRedactingSink, DeliveryMode, ExchangeFacts,
     InputTokenCountOutcome, LossCause,
     MAX_BUFFERED_PROVIDER_RESPONSE_BYTES as MAX_BUFFERED_RESPONSE_BYTES,
-    MAX_STREAMED_PROVIDER_RESPONSE_BYTES as MAX_STREAMED_RESPONSE_BYTES, ModelInputTokenCounter,
-    ModelOperation, ModelRuntime, NativeErrorFacts, ObservationFact, ObservationSink,
-    PreparationDefect, PreparationFailure, PreparationOutcome, ProviderErrorEvidence,
-    ProviderErrorKind, ProviderRequestId, ResponsePrefixBudget as PrefixBudget, SseFraming,
-    StreamInterruption, TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
+    MAX_STREAMED_PROVIDER_RESPONSE_BYTES as MAX_STREAMED_RESPONSE_BYTES, MessagePart,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, NativeErrorFacts, ObservationFact,
+    ObservationSink, PreparationDefect, PreparationFailure, PreparationOutcome,
+    ProviderCompactionMode, ProviderErrorEvidence, ProviderErrorKind, ProviderRequestId,
+    ResponsePrefixBudget as PrefixBudget, SseFraming, StreamInterruption, TerminalEvidence,
+    TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
     boundary_loss_evidence as exchange_loss, emit_provider_observation as emit, parse_retry_after,
     pre_exchange_loss_evidence as pre_exchange_loss, proven_unsent_evidence as proven_unsent,
     provider_response_body_too_large as response_body_too_large,
@@ -24,8 +25,10 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
+use signalbox_model_runtime::{
+    AssistantPart, FastMode, ModelCapabilityCatalog, ModelCapabilityError,
+};
 use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
-use signalbox_model_runtime::{FastMode, ModelCapabilityCatalog, ModelCapabilityError};
 
 use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
@@ -34,7 +37,37 @@ use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
 use crate::translate::build_request_with_fast_mode;
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
 
+const CONTEXT_MANAGEMENT_BETAS: &str = "context-management-2025-06-27,compact-2026-01-12";
+const CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS: &str =
+    "context-management-2025-06-27,compact-2026-01-12,fast-mode-2026-02-01";
 const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
+
+const fn anthropic_beta_header(
+    request_fast_mode: FastMode,
+    server_compaction: bool,
+) -> Option<&'static str> {
+    match (server_compaction, request_fast_mode) {
+        (true, FastMode::Enabled) => Some(CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS),
+        (true, FastMode::Disabled) => Some(CONTEXT_MANAGEMENT_BETAS),
+        (false, FastMode::Enabled) => Some(FAST_MODE_BETA),
+        (false, FastMode::Disabled) => None,
+    }
+}
+
+fn provider_compaction_beta_required<C>(
+    operation: &ModelOperation<C>,
+    provider_compaction_supported: bool,
+    server_compaction: bool,
+) -> bool {
+    server_compaction
+        || (provider_compaction_supported
+            && operation.messages.iter().any(|message| {
+                message
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::ProviderCompaction { .. }))
+            }))
+}
 
 /// The Anthropic Messages adapter.
 ///
@@ -78,6 +111,7 @@ struct ExecutionSettings {
     delivery: DeliveryMode,
     sse_record_limit: usize,
     stop_sequences: Vec<String>,
+    provider_compaction_enabled: bool,
 }
 
 impl<A> std::fmt::Debug for AnthropicRuntime<A> {
@@ -324,7 +358,12 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                 };
             }
         };
-        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
+        let provider_compaction_supported = operation.provider_compaction_supported;
+        let wire_request = match build_request_with_fast_mode(
+            &operation,
+            request_fast_mode,
+            provider_compaction_supported,
+        ) {
             Ok(request) => request,
             Err(failure) => {
                 return PreparationOutcome::Failed {
@@ -369,6 +408,13 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             };
         };
         let delivery = operation.delivery;
+        let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
+            && provider_compaction_supported;
+        let provider_compaction_beta = provider_compaction_beta_required(
+            &operation,
+            provider_compaction_supported,
+            server_compaction,
+        );
         let stop_sequences = operation.settings.stop_sequences.clone();
         let mut builder = self
             .client
@@ -377,8 +423,10 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .header("anthropic-version", self.version_header.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        if request_fast_mode == FastMode::Enabled {
-            builder = builder.header("anthropic-beta", FAST_MODE_BETA);
+        if let Some(beta_header) =
+            anthropic_beta_header(request_fast_mode, provider_compaction_beta)
+        {
+            builder = builder.header("anthropic-beta", beta_header);
         }
         let request = match build_http_request(builder) {
             Ok(request) => request,
@@ -397,6 +445,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                     delivery,
                     sse_record_limit: self.sse_record_limit,
                     stop_sequences,
+                    provider_compaction_enabled: server_compaction,
                 },
             },
             correlation,
@@ -495,7 +544,14 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             Some(Err(cause)) => return exchange_loss(cause, exchange),
             Some(Ok(bytes)) => bytes,
         };
-        decode_buffered_response(&body, exchange, &settings.stop_sequences, correlation, sink)
+        decode_buffered_response(
+            &body,
+            exchange,
+            &settings.stop_sequences,
+            settings.provider_compaction_enabled,
+            correlation,
+            sink,
+        )
     }
 
     async fn finish_streamed<C: Clone + Send + Sync>(
@@ -508,8 +564,11 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
         let mut framing = SseFraming::new(settings.sse_record_limit);
-        let mut decoder =
-            StreamDecoder::with_stop_sequences(exchange, settings.stop_sequences.clone());
+        let mut decoder = StreamDecoder::with_stop_sequences(
+            exchange,
+            settings.stop_sequences.clone(),
+            settings.provider_compaction_enabled,
+        );
         let mut body = response.bytes_stream();
         let mut streamed_bytes = 0usize;
         loop {
@@ -655,7 +714,19 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             Ok(request_fast_mode) => request_fast_mode,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
-        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
+        let provider_compaction_supported = operation.provider_compaction_supported;
+        let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
+            && provider_compaction_supported;
+        let provider_compaction_beta = provider_compaction_beta_required(
+            &operation,
+            provider_compaction_supported,
+            server_compaction,
+        );
+        let wire_request = match build_request_with_fast_mode(
+            &operation,
+            request_fast_mode,
+            provider_compaction_supported,
+        ) {
             Ok(request) => CountTokensRequest::from(request),
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
@@ -681,8 +752,10 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             .header("anthropic-version", self.version_header.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        if request_fast_mode == FastMode::Enabled {
-            builder = builder.header("anthropic-beta", FAST_MODE_BETA);
+        if let Some(beta_header) =
+            anthropic_beta_header(request_fast_mode, provider_compaction_beta)
+        {
+            builder = builder.header("anthropic-beta", beta_header);
         }
         let request = match build_http_request(builder) {
             Ok(request) => request,
@@ -776,6 +849,19 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicR
 
 fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
     match evidence {
+        TerminalEvidence::Refused(refusal)
+            if refusal.retained_input_tokens.is_some()
+                && refusal.retained_output_tokens.is_some()
+                && refusal
+                    .content
+                    .iter()
+                    .any(provider_compaction_replaced_context) =>
+        {
+            // A completed provider-compaction block proves the provider
+            // processed and replaced request context even when the final stop
+            // reason is refusal. Preserve that durable replay evidence.
+            TerminalEvidence::Refused(refusal)
+        }
         TerminalEvidence::Refused(refusal) => {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: refusal.exchange,
@@ -792,6 +878,19 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
         }
         evidence => evidence,
     }
+}
+
+fn provider_compaction_replaced_context(part: &AssistantPart) -> bool {
+    let AssistantPart::ProviderCompaction { block_json } = part else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(block_json)
+        .ok()
+        .is_some_and(|block| {
+            block
+                .get("content")
+                .is_some_and(|content| !content.is_null())
+        })
 }
 
 async fn finish_error(
@@ -932,16 +1031,34 @@ fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
 #[cfg(test)]
 mod tests {
     use signalbox_model_runtime::{
-        CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts, LossCause,
-        Observation, ObservationFact, ObservationSink, PreparationDefect, RefusalEvidence,
-        SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
+        AssistantPart, CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts,
+        FastMode, LossCause, Observation, ObservationFact, ObservationSink, PreparationDefect,
+        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
     };
 
     use super::{
-        MAX_STREAMED_RESPONSE_BYTES, build_http_request, process_streamed_chunk,
-        without_unproven_refusal,
+        CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS, CONTEXT_MANAGEMENT_BETAS, FAST_MODE_BETA,
+        MAX_STREAMED_RESPONSE_BYTES, anthropic_beta_header, build_http_request,
+        process_streamed_chunk, without_unproven_refusal,
     };
     use crate::stream::StreamDecoder;
+
+    #[test]
+    fn beta_header_follows_enabled_request_features() {
+        assert_eq!(anthropic_beta_header(FastMode::Disabled, false), None);
+        assert_eq!(
+            anthropic_beta_header(FastMode::Enabled, false),
+            Some(FAST_MODE_BETA)
+        );
+        assert_eq!(
+            anthropic_beta_header(FastMode::Disabled, true),
+            Some(CONTEXT_MANAGEMENT_BETAS)
+        );
+        assert_eq!(
+            anthropic_beta_header(FastMode::Enabled, true),
+            Some(CONTEXT_MANAGEMENT_AND_FAST_MODE_BETAS)
+        );
+    }
 
     #[test]
     fn refusal_without_full_upload_proof_is_known_failure_evidence() {
@@ -956,6 +1073,8 @@ mod tests {
                 cache_creation_input_tokens: Some(2),
                 cache_read_input_tokens: Some(3),
             },
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         });
 
         let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
@@ -964,6 +1083,54 @@ mod tests {
         assert_eq!(error.native.error_token.as_deref(), Some("refusal"));
         assert_eq!(error.usage.input_tokens, Some(13));
         assert_eq!(error.usage.output_tokens, Some(5));
+    }
+
+    #[test]
+    fn refusal_after_provider_compaction_is_preserved() {
+        let refusal = TerminalEvidence::Refused(RefusalEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: vec![AssistantPart::ProviderCompaction {
+                block_json: String::from(
+                    r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                ),
+            }],
+            usage: TokenUsage::unreported(),
+            retained_input_tokens: Some(21),
+            retained_output_tokens: Some(3),
+        });
+
+        assert!(matches!(
+            without_unproven_refusal(refusal),
+            TerminalEvidence::Refused(RefusalEvidence {
+                retained_input_tokens: Some(21),
+                retained_output_tokens: Some(3),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn refusal_after_only_no_op_provider_compaction_is_not_preserved() {
+        let refusal = TerminalEvidence::Refused(RefusalEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: vec![AssistantPart::ProviderCompaction {
+                block_json: String::from(
+                    r#"{"type":"compaction","content":null,"encrypted_content":"opaque"}"#,
+                ),
+            }],
+            usage: TokenUsage::unreported(),
+            retained_input_tokens: Some(21),
+            retained_output_tokens: Some(3),
+        });
+
+        let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
+            panic!("a no-op compaction does not prove that the complete upload was processed");
+        };
+        assert_eq!(error.native.error_token.as_deref(), Some("refusal"));
     }
 
     #[test]
@@ -1021,7 +1188,8 @@ mod tests {
     fn streamed_response_overflow_is_typed_protocol_loss() {
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new(), false);
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -1059,7 +1227,8 @@ mod tests {
         bytes.extend_from_slice(b"coalesced trailing bytes");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - terminal_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new(), false);
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -1096,7 +1265,8 @@ mod tests {
         bytes.extend_from_slice(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - in_budget_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new(), false);
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -1151,7 +1321,8 @@ mod tests {
         });
         let mut streamed_bytes = 0;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new(), false);
         let mut sink = CancelOnModel {
             observations: Vec::new(),
             sender: Some(sender),

@@ -1,7 +1,5 @@
 //! Atomic persistence and replay for session-defaults replacement.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::{
@@ -71,11 +69,14 @@ pub enum ReplaceSessionDefaultsRejectionOnlyOutcome {
     CurrentVersionMatched,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct one recorded replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReplaceSessionDefaultsCorruption {
+    #[error("missing durable ReplaceSessionDefaults {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported ReplaceSessionDefaults {field}: {value}")]
     /// A closed discriminator or representation version is unsupported.
     Unsupported {
         /// The record field that could not be decoded.
@@ -83,8 +84,10 @@ pub enum ReplaceSessionDefaultsCorruption {
         /// The durable spelling that was observed.
         value: String,
     },
+    #[error("inconsistent ReplaceSessionDefaults {field_0}")]
     /// Typed record relationships or variant fields disagree.
     Inconsistent(&'static str),
+    #[error("invalid ReplaceSessionDefaults {field}: {reason}")]
     /// A stored positive ordinal cannot construct a domain version.
     InvalidOrdinal {
         /// The ordinal-bearing record field.
@@ -92,97 +95,36 @@ pub enum ReplaceSessionDefaultsCorruption {
         /// Why the numeric value is outside the domain.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("ReplaceSessionDefaults current Session is invalid: {field_0}")]
     /// The current session projection is incomplete or invalid.
     CurrentSession(SessionCorruption),
+    #[error("ReplaceSessionDefaults domain reconstitution failed: {field_0:?}")]
     /// Complete checked receipt values fail domain-owned correlation.
     Domain(ReplaceSessionDefaultsReconstitutionFailure),
 }
 
-impl fmt::Display for ReplaceSessionDefaultsCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => {
-                write!(formatter, "missing durable ReplaceSessionDefaults {field}")
-            }
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "unsupported ReplaceSessionDefaults {field}: {value}"
-                )
-            }
-            Self::Inconsistent(relationship) => {
-                write!(
-                    formatter,
-                    "inconsistent ReplaceSessionDefaults {relationship}"
-                )
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(
-                    formatter,
-                    "invalid ReplaceSessionDefaults {field}: {reason}"
-                )
-            }
-            Self::CurrentSession(error) => {
-                write!(
-                    formatter,
-                    "ReplaceSessionDefaults current Session is invalid: {error}"
-                )
-            }
-            Self::Domain(failure) => write!(
-                formatter,
-                "ReplaceSessionDefaults domain reconstitution failed: {failure:?}"
-            ),
-        }
-    }
-}
-
-impl Error for ReplaceSessionDefaultsCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure, wrong purpose-specific load, or integrity failure.
 #[derive(Debug)]
 pub enum ReplaceSessionDefaultsRepositoryError {
+    #[error("ReplaceSessionDefaults database failure: {source}")]
     /// PostgreSQL could not complete the operation.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether the failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error("durable command {command_id:?} does not name ReplaceSessionDefaults")]
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
+    #[error(transparent)]
     /// Durable records cannot reconstruct the requested domain value.
-    Corruption(ReplaceSessionDefaultsCorruption),
-}
-
-impl fmt::Display for ReplaceSessionDefaultsRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(
-                    formatter,
-                    "ReplaceSessionDefaults database failure: {source}"
-                )
-            }
-            Self::DifferentCommandKind { command_id } => write!(
-                formatter,
-                "durable command {command_id:?} does not name ReplaceSessionDefaults"
-            ),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ReplaceSessionDefaultsRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::DifferentCommandKind { .. } => None,
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] ReplaceSessionDefaultsCorruption),
 }
 
 impl From<sqlx::Error> for ReplaceSessionDefaultsRepositoryError {

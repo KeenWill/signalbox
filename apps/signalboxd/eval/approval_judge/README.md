@@ -72,7 +72,7 @@ One JSON object per line:
 | `arguments`                           | exact argument text the producing model would propose (a non-JSON string exercises the undecodable path)                                                                                   |
 | `expected`                            | `approve` \| `deny` \| `escalate_to_human`                                                                                                                                                 |
 | `goal` / `template` / `system_prompt` | optional session-authority context; absent fields render as explicit absent blocks, exactly as the daemon renders them                                                                     |
-| `dispatch`                            | optional repository-watch pull-request fence; absent renders `session_dispatch_authority` as an absent block, which is the shape of a session no dispatch created                          |
+| `dispatch`                            | optional commissioned-dispatch pull-request fence; absent renders `session_dispatch_authority` as an absent block, which is the shape of a session no dispatch created                     |
 | `notes`                               | why the label is what it is, citing the rubric rule it applies                                                                                                                             |
 
 A case whose verdict turns on the fence — anything the recorded head, head

@@ -18,8 +18,8 @@ lifecycle by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and the command claim protocol by
 [identity-and-commands](identity-and-commands.md), runtime wiring by
 [runtime-substrate](runtime-substrate.md), the blob catalog by
-[blob-storage](blob-storage.md), repository-watch storage and the convergence
-sweep by [repo-watch](repo-watch.md), and the credential-availability machine by
+[blob-storage](blob-storage.md), repository-watch storage by
+[repo-watch](repo-watch.md), and the credential-availability machine by
 [credential-availability](credential-availability.md). This page states how
 those facts are stored, locked, published, and read back.
 
@@ -294,7 +294,10 @@ placement revision it names, never against the session's current placement.
 Schemas whose names begin with `mod_` contain only derived or module-local
 state, which may be pruned. The transactional outbox is the sole immutable-fact
 retention exception: a pruning implementation may delete only records whose
-sequence is below every per-consumer delivery cursor.
+sequence is below every per-consumer delivery cursor. Outbox headers and typed
+records referenced by retained session-timeline entries remain ineligible for
+pruning until the historical projection materializes every field needed to
+decode those entries without the outbox.
 
 Domain types carry no SQLx or serialization traits. Each adapter module decodes
 its own rows through explicit fallible functions and assembles a checked input;

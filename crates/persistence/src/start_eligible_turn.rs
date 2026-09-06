@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL activation of the earliest eligible accepted-input turn.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::num::NonZeroU64;
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StartEligibleTurnOutcome,
@@ -44,115 +44,62 @@ use crate::{
 };
 
 /// Which fresh activation identity collided with an existing durable identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum StartEligibleTurnIdentityCollision {
     /// The proposed model-identity boundary semantic entry already exists.
+    #[error("model-identity semantic-entry identity already exists")]
     ModelIdentityEntry,
     /// The proposed semantic origin-entry identity already exists.
+    #[error("origin semantic-entry identity already exists")]
     OriginEntry,
     /// The proposed starting context-frontier identity already exists.
+    #[error("starting context-frontier identity already exists")]
     StartingFrontier,
     /// The proposed initial turn-attempt identity already exists.
+    #[error("initial turn-attempt identity already exists")]
     InitialAttempt,
 }
 
-impl fmt::Display for StartEligibleTurnIdentityCollision {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let identity = match self {
-            Self::ModelIdentityEntry => "model-identity semantic-entry",
-            Self::OriginEntry => "origin semantic-entry",
-            Self::StartingFrontier => "starting context-frontier",
-            Self::InitialAttempt => "initial turn-attempt",
-        };
-        write!(formatter, "{identity} identity already exists")
-    }
-}
-
-impl Error for StartEligibleTurnIdentityCollision {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct or commit one eligibility pass.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StartEligibleTurnCorruption {
+    #[error("missing StartEligibleTurn {field_0}")]
     /// One required durable record is absent.
     Missing(&'static str),
+    #[error("inconsistent StartEligibleTurn {field_0}")]
     /// Correlated durable records disagree.
     Inconsistent(&'static str),
+    #[error("StartEligibleTurn current Session is invalid: {field_0}")]
     /// The current session projection is invalid.
     CurrentSession(SessionCorruption),
+    #[error("StartEligibleTurn scheduling projection is invalid: {field_0}")]
     /// Complete scheduling records fail their checked persistence mapping.
     Scheduling(SubmitInputCorruption),
 }
 
-impl fmt::Display for StartEligibleTurnCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(record) => write!(formatter, "missing StartEligibleTurn {record}"),
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent StartEligibleTurn {relationship}")
-            }
-            Self::CurrentSession(error) => {
-                write!(
-                    formatter,
-                    "StartEligibleTurn current Session is invalid: {error}"
-                )
-            }
-            Self::Scheduling(error) => {
-                write!(
-                    formatter,
-                    "StartEligibleTurn scheduling projection is invalid: {error}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for StartEligibleTurnCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database, integrity, or identity-collision failure during eligibility.
 #[derive(Debug)]
 pub enum StartEligibleTurnRepositoryError {
+    #[error("StartEligibleTurn database failure: {source}")]
     /// PostgreSQL could not complete the transaction.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether the failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Durable records cannot reconstruct or commit the accepted domain shape.
-    Corruption(StartEligibleTurnCorruption),
+    Corruption(#[source] StartEligibleTurnCorruption),
+    #[error(transparent)]
     /// A supplied fresh identity already names a durable record.
-    IdentityCollision(StartEligibleTurnIdentityCollision),
+    IdentityCollision(#[source] StartEligibleTurnIdentityCollision),
+    #[error("StartEligibleTurn hub invariant failed: {field_0}")]
     /// Checked activation output violated an internal hub invariant.
     HubInvariant(&'static str),
-}
-
-impl fmt::Display for StartEligibleTurnRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "StartEligibleTurn database failure: {source}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::IdentityCollision(error) => error.fmt(formatter),
-            Self::HubInvariant(invariant) => {
-                write!(
-                    formatter,
-                    "StartEligibleTurn hub invariant failed: {invariant}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for StartEligibleTurnRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision(error) => Some(error),
-            Self::HubInvariant(_) => None,
-        }
-    }
 }
 
 impl ClassifyOperatorFailure for StartEligibleTurnRepositoryError {
@@ -195,35 +142,19 @@ impl StartEligibleTurnRepositoryError {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure while atomically binding a counted activation to its Prepared call.
 #[derive(Debug)]
 pub enum CommitActivationPreviewError {
+    #[error(transparent)]
     /// Activation revalidation, persistence, or commit failed.
-    Activation(StartEligibleTurnRepositoryError),
+    Activation(#[source] StartEligibleTurnRepositoryError),
+    #[error(transparent)]
     /// The exact initial model-call checkpoint could not be persisted.
-    ModelCall(crate::model_execution::ModelCallRepositoryError),
+    ModelCall(#[source] crate::model_execution::ModelCallRepositoryError),
+    #[error(transparent)]
     /// Complete instruction evidence could not join the activation commit.
-    WorkspaceInstructions(WorkspaceInstructionRepositoryError),
-}
-
-impl fmt::Display for CommitActivationPreviewError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Activation(error) => error.fmt(formatter),
-            Self::ModelCall(error) => error.fmt(formatter),
-            Self::WorkspaceInstructions(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for CommitActivationPreviewError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Activation(error) => Some(error),
-            Self::ModelCall(error) => Some(error),
-            Self::WorkspaceInstructions(error) => Some(error),
-        }
-    }
+    WorkspaceInstructions(#[source] WorkspaceInstructionRepositoryError),
 }
 
 impl ClassifyOperatorFailure for CommitActivationPreviewError {
@@ -236,18 +167,14 @@ impl ClassifyOperatorFailure for CommitActivationPreviewError {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Read-only exact activation candidate retained for guarded commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedActivationPreview {
     identities: AcceptedInputTurnActivationIdentities,
-    prepared: PreparedTurnActivation,
-}
-
-impl PreparedActivationPreview {
     /// Borrows the exact checked candidate used for prospective model rendering.
-    pub const fn prepared(&self) -> &PreparedTurnActivation {
-        &self.prepared
-    }
+    #[get]
+    prepared: PreparedTurnActivation,
 }
 
 /// Outcome of committing a previously counted activation preview.
@@ -331,10 +258,6 @@ impl StartEligibleTurnRepository {
             transaction.rollback().await?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
-        if dispatch_start_lease_is_expired(&mut transaction, session).await? {
-            transaction.rollback().await?;
-            return Ok(CommitActivationPreviewOutcome::Stale);
-        }
         let Some(current) = prepare_preview(&mut transaction, session, preview.identities).await?
         else {
             transaction.rollback().await?;
@@ -383,17 +306,6 @@ impl StartEligibleTurnRepository {
             || session_refuses_new_work(&mut transaction, session)
                 .await
                 .map_err(CommitActivationPreviewError::Activation)?
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(StartEligibleTurnRepositoryError::from)
-                .map_err(CommitActivationPreviewError::Activation)?;
-            return Ok(CommitActivationPreviewOutcome::Stale);
-        }
-        if dispatch_start_lease_is_expired(&mut transaction, session)
-            .await
-            .map_err(CommitActivationPreviewError::Activation)?
         {
             transaction
                 .rollback()
@@ -490,17 +402,6 @@ impl StartEligibleTurnRepository {
             || session_refuses_new_work(&mut transaction, session)
                 .await
                 .map_err(CommitActivationPreviewError::Activation)?
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(StartEligibleTurnRepositoryError::from)
-                .map_err(CommitActivationPreviewError::Activation)?;
-            return Ok(CommitCountedAttachmentFailurePreviewOutcome::Stale);
-        }
-        if dispatch_start_lease_is_expired(&mut transaction, session)
-            .await
-            .map_err(CommitActivationPreviewError::Activation)?
         {
             transaction
                 .rollback()
@@ -1073,17 +974,6 @@ async fn prepare_delegated_wake_preview(
     })
 }
 
-async fn dispatch_start_lease_is_expired(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<bool, StartEligibleTurnRepositoryError> {
-    sqlx::query_scalar(crate::lock_inventory::EXPIRED_DISPATCH_START_LEASE)
-        .bind(session_id_to_uuid(session))
-        .fetch_one(connection)
-        .await
-        .map_err(Into::into)
-}
-
 /// Whether the locked session is suspended in place.
 /// A held start gate keeps queued input from activating until `release_start`,
 /// including across a module park and resume.
@@ -1157,12 +1047,6 @@ async fn handle_in_transaction(
     if session_refuses_new_work(connection, requested_session).await?
         || session_start_gate_is_held(connection, requested_session).await?
     {
-        return Ok(TransactionDecision::Rollback(
-            StartEligibleTurnOutcome::NoEligibleTurn,
-        ));
-    }
-
-    if dispatch_start_lease_is_expired(connection, requested_session).await? {
         return Ok(TransactionDecision::Rollback(
             StartEligibleTurnOutcome::NoEligibleTurn,
         ));
@@ -1297,6 +1181,7 @@ async fn insert_prepared_accepted_activation(
         | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+        | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -1380,6 +1265,7 @@ async fn insert_prepared_accepted_activation(
             | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
             | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
             | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+            | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }

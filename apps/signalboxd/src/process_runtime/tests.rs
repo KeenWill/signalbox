@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn s19_descendant_scope_decode_is_exact() {
+    fn descendant_scope_decode_is_exact() {
         assert_eq!(
             super::decode_descendant_scope(
                 signalbox_process_protocol::DescendantTerminationScope::ParentAlone,
@@ -783,7 +783,7 @@ mod tests {
         SessionId::from_uuid(Uuid::from_u128(1))
     }
 
-    /// S03: an explicit compaction whose commit outcome cannot be
+    /// an explicit compaction whose commit outcome cannot be
     /// decided raises the same fatal recovery signal its automatic sibling
     /// raises through the scheduler pass, and still answers the client with the
     /// stable ambiguous code.
@@ -794,7 +794,7 @@ mod tests {
     /// and the startup scan that does reconcile this state only runs in the
     /// next incarnation.
     #[tokio::test]
-    async fn s03_ambiguous_explicit_compaction_commit_raises_the_fatal_recovery_signal()
+    async fn ambiguous_explicit_compaction_commit_raises_the_fatal_recovery_signal()
     -> Result<(), Box<dyn Error>> {
         let (supervisor, signal) = FatalExecutionSupervisor::new(());
         let reporter = supervisor.recovery_reporter();
@@ -824,11 +824,11 @@ mod tests {
         Ok(())
     }
 
-    /// S03: a failure proven to precede the commit boundary is
+    /// a failure proven to precede the commit boundary is
     /// ordinary unavailability and raises no recovery signal, so the reaction
     /// stays scoped to the one declared class that needs it.
     #[tokio::test]
-    async fn s03_decided_explicit_compaction_failure_raises_no_recovery_signal()
+    async fn decided_explicit_compaction_failure_raises_no_recovery_signal()
     -> Result<(), Box<dyn Error>> {
         let (supervisor, signal) = FatalExecutionSupervisor::new(());
         let reporter = supervisor.recovery_reporter();
@@ -2834,7 +2834,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_imported_entries_map_only_to_conservative_shapes() -> Result<(), Box<dyn Error>> {
+    async fn imported_entries_map_only_to_conservative_shapes() -> Result<(), Box<dyn Error>> {
         let request_id = RequestId::try_new(11)?;
         let source_session = SessionId::from_uuid(Uuid::from_u128(1));
         let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(2));
@@ -3274,10 +3274,10 @@ mod tests {
         );
     }
 
-    /// S17: committing an internal delivery wake makes the exact
+    /// committing an internal delivery wake makes the exact
     /// recipient eligible without projecting the wake onto follow streams.
     #[test]
-    fn s17_internal_delegation_wake_nudges_exact_recipient() {
+    fn internal_delegation_wake_nudges_exact_recipient() {
         let recipient = SessionId::from_uuid(Uuid::from_u128(10));
         let spawning_request = ToolRequestId::from_uuid(Uuid::from_u128(11));
         let nudge = RecordingEligibilityNudge::default();

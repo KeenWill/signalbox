@@ -84,124 +84,6 @@ impl hash::Hash for SubmitInput {
 }
 ```
 
-## SubmitInputResult
-
-```rust
-pub enum SubmitInputResult {
-    Applied(SubmitInputAppliedResult),
-    Rejected(SubmitInputRejectedResult),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## SubmitInputAppliedResult
-
-```rust
-pub enum SubmitInputAppliedResult {
-    TurnOrigin(SubmitInputTurnOriginAppliedResult),
-    PendingSteering(SubmitInputPendingSteeringAppliedResult),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl SubmitInputAppliedResult {
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn acceptance_position(&self) -> SessionInputPosition;
-    pub const fn disposition(&self) -> AcceptedInputDisposition;
-    pub const fn turn_origin(&self) -> option::Option<&SubmitInputTurnOriginAppliedResult>;
-    pub const fn pending_steering(
-        &self,
-    ) -> option::Option<&SubmitInputPendingSteeringAppliedResult>;
-}
-```
-
-## SubmitInputTurnOriginAppliedResult
-
-```rust
-pub struct SubmitInputTurnOriginAppliedResult {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl SubmitInputTurnOriginAppliedResult {
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn turn(&self) -> TurnId;
-    pub const fn disposition(&self) -> AcceptedInputDisposition;
-    pub const fn queue_order(&self) -> AcceptedInputQueueOrder;
-    pub const fn acceptance_position(&self) -> SessionInputPosition;
-    pub const fn origin_configuration(&self) -> &OriginConfiguration;
-    pub const fn applied_interrupt(&self) -> option::Option<&AppliedInterruptCommandResult>;
-    pub fn model_settings_event(&self) -> option::Option<TurnModelSettingsResolved>;
-}
-```
-
-## SubmitInputPendingSteeringAppliedResult
-
-```rust
-pub struct SubmitInputPendingSteeringAppliedResult {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl SubmitInputPendingSteeringAppliedResult {
-    pub const fn accepted_input(&self) -> AcceptedInputId;
-    pub const fn session(&self) -> SessionId;
-    pub const fn acceptance_position(&self) -> SessionInputPosition;
-    pub const fn binding(&self) -> SteeringBinding;
-}
-```
-
-## SubmitInputRejectedResult
-
-```rust
-pub enum SubmitInputRejectedResult {
-    AttachmentBlobNotFound {
-        digest: BlobDigest,
-    },
-    AttachmentByteBudgetExceeded {
-        maximum_bytes: u64,
-    },
-    SessionNotFound {
-        session: SessionId,
-    },
-    NoActiveTurn {
-        session: SessionId,
-        expected_active_turn: TurnId,
-    },
-    ActiveTurnPresent {
-        session: SessionId,
-        active_turn: TurnId,
-    },
-    ActiveTurnMismatch {
-        session: SessionId,
-        expected_active_turn: TurnId,
-        actual_active_turn: TurnId,
-    },
-    SessionDefaultsVersionMismatch {
-        session: SessionId,
-        expected: SessionConfigurationDefaultsVersion,
-        current: SessionConfigurationDefaultsVersion,
-    },
-    UnknownModelAlias {
-        session: SessionId,
-        alias: ModelAlias,
-    },
-    AcceptancePositionExhausted {
-        session: SessionId,
-        last: SessionInputPosition,
-    },
-    SafePointUnavailableWhileStopping {
-        session: SessionId,
-        active_turn: TurnId,
-        existing_command: DurableCommandId,
-    },
-    InterruptAlreadyApplied {
-        session: SessionId,
-        active_turn: TurnId,
-        existing_command: DurableCommandId,
-    },
-    InterruptUnavailableWhileAwaitingApproval {
-        session: SessionId,
-        active_turn: TurnId,
-    },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
 ## PreparedSubmitInput
 
 ```rust
@@ -242,6 +124,138 @@ impl SubmitInputPreparationError {
     pub const fn command(&self) -> &SubmitInput;
     pub const fn failure(&self) -> SubmitInputPreparationFailure;
     pub fn into_parts(self) -> (SubmitInput, SubmitInputPreparationFailure);
+}
+```
+
+## SubmitInputReconstitutionFailure
+
+```rust
+pub enum SubmitInputReconstitutionFailure {
+    StoredActorMismatch,
+    AppliedDeliveryIsNotTurnOrigin,
+    AppliedDeliveryIsNotNextSafePoint,
+    ResultSessionMismatch,
+    AttachmentDigestMismatch,
+    AttachmentBudgetMismatch,
+    AcceptedCommandMismatch,
+    AcceptedInputMismatch,
+    AcceptedSessionMismatch,
+    AcceptedContentMismatch,
+    AcceptedDeliveryMismatch,
+    AcceptedDispositionMismatch,
+    SteeringSourceTurnMismatch,
+    SteeringSourceTurnOriginMismatch,
+    SteeringSourceAcceptedInputReused,
+    SteeringSourceCommandReused,
+    SteeringAcceptanceDoesNotFollowSourceOrigin,
+    QueueSessionMismatch,
+    QueueTurnMismatch,
+    AfterCurrentPredecessorOriginMismatch,
+    AfterCurrentPredecessorAcceptedInputReused,
+    AfterCurrentPredecessorCommandReused,
+    AfterCurrentAcceptanceDoesNotFollowPredecessorOrigin,
+    QueuePositionMismatch,
+    QueuePriorityMismatch,
+    ActiveTurnPresentRejectionMismatch,
+    ExpectedActiveTurnMismatch,
+    RejectedActiveTurnsAreEqual,
+    RejectionActiveTurnOriginMismatch,
+    RejectionActiveTurnOriginCommandReused,
+    RejectionHasNoExplicitOriginConfiguration,
+    ExpectedDefaultsVersionMismatch,
+    RejectedDefaultsVersionsAreEqual,
+    DefaultsSessionMismatch,
+    DefaultsVersionMismatch,
+    RequestedModelMismatch,
+    FrozenModelMismatch,
+    UnknownAliasMismatch,
+    RejectionDidNotSelectAlias,
+    PositionIsNotExhausted,
+    StoppingRejectionMismatch,
+    ExistingInterruptMismatch,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## SubmitInputReconstitutionError
+
+```rust
+pub struct SubmitInputReconstitutionError {/* private */}
+// derives: clone::Clone, fmt::Debug
+impl SubmitInputReconstitutionError {
+    pub const fn failure(&self) -> SubmitInputReconstitutionFailure;
+    pub const fn input(&self) -> &SubmitInputReconstitutionInput;
+    pub fn into_parts(
+        self,
+    ) -> (
+        SubmitInputReconstitutionInput,
+        SubmitInputReconstitutionFailure,
+    );
+}
+```
+
+## ReconstitutedSubmitInput
+
+```rust
+pub struct ReconstitutedSubmitInput {/* private */}
+// derives: clone::Clone, fmt::Debug
+impl ReconstitutedSubmitInput {
+    pub const fn command(&self) -> &SubmitInput;
+    pub const fn result(&self) -> &SubmitInputResult;
+    pub fn into_parts(self) -> (SubmitInput, SubmitInputResult);
+}
+```
+
+## SubmitInputReconstitutionInput
+
+```rust
+pub struct SubmitInputReconstitutionInput {/* private */}
+// derives: clone::Clone, fmt::Debug
+impl SubmitInputReconstitutionInput {
+    pub fn applied_turn_origin(input: SubmitInputAppliedTurnOriginReconstitutionInput) -> Self;
+    pub fn applied_pending_steering(
+        input: SubmitInputAppliedPendingSteeringReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_attachment_blob_not_found(
+        input: SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_attachment_byte_budget_exceeded(
+        input: SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_session_not_found(
+        input: SubmitInputRejectedSessionNotFoundReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_no_active_turn(
+        input: SubmitInputRejectedNoActiveTurnReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_active_turn_present(
+        input: SubmitInputRejectedActiveTurnPresentReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_active_turn_mismatch(
+        input: SubmitInputRejectedActiveTurnMismatchReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_defaults_version_mismatch(
+        input: SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_unknown_model_alias(
+        input: SubmitInputRejectedUnknownModelAliasReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_acceptance_position_exhausted(
+        input: SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_safe_point_unavailable_while_stopping(
+        input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_interrupt_already_applied(
+        input: SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_interrupt_unavailable_while_awaiting_approval(
+        input: SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
+    ) -> Self;
+    pub const fn command(&self) -> &SubmitInput;
+    pub fn reconstitute(
+        self,
+    ) -> result::Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError>;
 }
 ```
 
@@ -593,134 +607,120 @@ pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstit
 // derives: clone::Clone, fmt::Debug
 ```
 
-## SubmitInputReconstitutionInput
+## SubmitInputResult
 
 ```rust
-pub struct SubmitInputReconstitutionInput {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl SubmitInputReconstitutionInput {
-    pub fn applied_turn_origin(input: SubmitInputAppliedTurnOriginReconstitutionInput) -> Self;
-    pub fn applied_pending_steering(
-        input: SubmitInputAppliedPendingSteeringReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_attachment_blob_not_found(
-        input: SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_attachment_byte_budget_exceeded(
-        input: SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_session_not_found(
-        input: SubmitInputRejectedSessionNotFoundReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_no_active_turn(
-        input: SubmitInputRejectedNoActiveTurnReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_active_turn_present(
-        input: SubmitInputRejectedActiveTurnPresentReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_active_turn_mismatch(
-        input: SubmitInputRejectedActiveTurnMismatchReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_defaults_version_mismatch(
-        input: SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_unknown_model_alias(
-        input: SubmitInputRejectedUnknownModelAliasReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_acceptance_position_exhausted(
-        input: SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_safe_point_unavailable_while_stopping(
-        input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_interrupt_already_applied(
-        input: SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_interrupt_unavailable_while_awaiting_approval(
-        input: SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
-    ) -> Self;
-    pub const fn command(&self) -> &SubmitInput;
-    pub fn reconstitute(
-        self,
-    ) -> result::Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError>;
+pub enum SubmitInputResult {
+    Applied(SubmitInputAppliedResult),
+    Rejected(SubmitInputRejectedResult),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## SubmitInputAppliedResult
+
+```rust
+pub enum SubmitInputAppliedResult {
+    TurnOrigin(SubmitInputTurnOriginAppliedResult),
+    PendingSteering(SubmitInputPendingSteeringAppliedResult),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl SubmitInputAppliedResult {
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn disposition(&self) -> AcceptedInputDisposition;
+    pub const fn turn_origin(&self) -> option::Option<&SubmitInputTurnOriginAppliedResult>;
+    pub const fn pending_steering(
+        &self,
+    ) -> option::Option<&SubmitInputPendingSteeringAppliedResult>;
 }
 ```
 
-## SubmitInputReconstitutionFailure
+## SubmitInputTurnOriginAppliedResult
 
 ```rust
-pub enum SubmitInputReconstitutionFailure {
-    StoredActorMismatch,
-    AppliedDeliveryIsNotTurnOrigin,
-    AppliedDeliveryIsNotNextSafePoint,
-    ResultSessionMismatch,
-    AttachmentDigestMismatch,
-    AttachmentBudgetMismatch,
-    AcceptedCommandMismatch,
-    AcceptedInputMismatch,
-    AcceptedSessionMismatch,
-    AcceptedContentMismatch,
-    AcceptedDeliveryMismatch,
-    AcceptedDispositionMismatch,
-    SteeringSourceTurnMismatch,
-    SteeringSourceTurnOriginMismatch,
-    SteeringSourceAcceptedInputReused,
-    SteeringSourceCommandReused,
-    SteeringAcceptanceDoesNotFollowSourceOrigin,
-    QueueSessionMismatch,
-    QueueTurnMismatch,
-    AfterCurrentPredecessorOriginMismatch,
-    AfterCurrentPredecessorAcceptedInputReused,
-    AfterCurrentPredecessorCommandReused,
-    AfterCurrentAcceptanceDoesNotFollowPredecessorOrigin,
-    QueuePositionMismatch,
-    QueuePriorityMismatch,
-    ActiveTurnPresentRejectionMismatch,
-    ExpectedActiveTurnMismatch,
-    RejectedActiveTurnsAreEqual,
-    RejectionActiveTurnOriginMismatch,
-    RejectionActiveTurnOriginCommandReused,
-    RejectionHasNoExplicitOriginConfiguration,
-    ExpectedDefaultsVersionMismatch,
-    RejectedDefaultsVersionsAreEqual,
-    DefaultsSessionMismatch,
-    DefaultsVersionMismatch,
-    RequestedModelMismatch,
-    FrozenModelMismatch,
-    UnknownAliasMismatch,
-    RejectionDidNotSelectAlias,
-    PositionIsNotExhausted,
-    StoppingRejectionMismatch,
-    ExistingInterruptMismatch,
+pub struct SubmitInputTurnOriginAppliedResult {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl SubmitInputTurnOriginAppliedResult {
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn disposition(&self) -> AcceptedInputDisposition;
+    pub const fn queue_order(&self) -> AcceptedInputQueueOrder;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn origin_configuration(&self) -> &OriginConfiguration;
+    pub const fn applied_interrupt(&self) -> option::Option<&AppliedInterruptCommandResult>;
+    pub fn model_settings_event(&self) -> option::Option<TurnModelSettingsResolved>;
 }
+```
+
+## SubmitInputPendingSteeringAppliedResult
+
+```rust
+pub struct SubmitInputPendingSteeringAppliedResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## SubmitInputReconstitutionError
-
-```rust
-pub struct SubmitInputReconstitutionError {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl SubmitInputReconstitutionError {
-    pub const fn failure(&self) -> SubmitInputReconstitutionFailure;
-    pub const fn input(&self) -> &SubmitInputReconstitutionInput;
-    pub fn into_parts(
-        self,
-    ) -> (
-        SubmitInputReconstitutionInput,
-        SubmitInputReconstitutionFailure,
-    );
+impl SubmitInputPendingSteeringAppliedResult {
+    pub const fn accepted_input(&self) -> AcceptedInputId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn acceptance_position(&self) -> SessionInputPosition;
+    pub const fn binding(&self) -> SteeringBinding;
 }
 ```
 
-## ReconstitutedSubmitInput
+## SubmitInputRejectedResult
 
 ```rust
-pub struct ReconstitutedSubmitInput {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl ReconstitutedSubmitInput {
-    pub const fn command(&self) -> &SubmitInput;
-    pub const fn result(&self) -> &SubmitInputResult;
-    pub fn into_parts(self) -> (SubmitInput, SubmitInputResult);
+pub enum SubmitInputRejectedResult {
+    AttachmentBlobNotFound {
+        digest: BlobDigest,
+    },
+    AttachmentByteBudgetExceeded {
+        maximum_bytes: u64,
+    },
+    SessionNotFound {
+        session: SessionId,
+    },
+    NoActiveTurn {
+        session: SessionId,
+        expected_active_turn: TurnId,
+    },
+    ActiveTurnPresent {
+        session: SessionId,
+        active_turn: TurnId,
+    },
+    ActiveTurnMismatch {
+        session: SessionId,
+        expected_active_turn: TurnId,
+        actual_active_turn: TurnId,
+    },
+    SessionDefaultsVersionMismatch {
+        session: SessionId,
+        expected: SessionConfigurationDefaultsVersion,
+        current: SessionConfigurationDefaultsVersion,
+    },
+    UnknownModelAlias {
+        session: SessionId,
+        alias: ModelAlias,
+    },
+    AcceptancePositionExhausted {
+        session: SessionId,
+        last: SessionInputPosition,
+    },
+    SafePointUnavailableWhileStopping {
+        session: SessionId,
+        active_turn: TurnId,
+        existing_command: DurableCommandId,
+    },
+    InterruptAlreadyApplied {
+        session: SessionId,
+        active_turn: TurnId,
+        existing_command: DurableCommandId,
+    },
+    InterruptUnavailableWhileAwaitingApproval {
+        session: SessionId,
+        active_turn: TurnId,
+    },
 }
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```

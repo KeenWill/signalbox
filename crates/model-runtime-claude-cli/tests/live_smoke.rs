@@ -287,7 +287,8 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
         // silently inheriting this panic path — a new terminal classification
         // must be reviewed for whether it counts as decoded compatibility
         // evidence, not absorbed as an ordinary rejection.
-        rejected @ (TerminalEvidence::ProviderError(_)
+        rejected @ (TerminalEvidence::CompletedWithProviderCompaction { .. }
+        | TerminalEvidence::ProviderError(_)
         | TerminalEvidence::CancellationConfirmed(_)
         | TerminalEvidence::ProvenUnsent(_)
         | TerminalEvidence::BoundaryLoss(_)) => {
@@ -1726,6 +1727,8 @@ fn decoded_response_accepts_refusal_without_completion_material() {
         reported_model: Some(fixture_reported_model()),
         content: Vec::new(),
         usage: fixture_usage(),
+        retained_input_tokens: None,
+        retained_output_tokens: None,
     });
 
     let decoded = require_decoded_response(evidence);

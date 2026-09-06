@@ -1,7 +1,5 @@
 //! Atomic persistence and replay for the admitted `CreateSession` slice.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::{CreateSessionOutcome, CreateSessionTransaction};
@@ -54,11 +52,14 @@ pub enum CreateSessionHandlingOutcome {
     },
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct the admitted domain value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CreateSessionCorruption {
+    #[error("missing durable CreateSession {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported CreateSession {field}: {value}")]
     /// A closed discriminator or representation version is unsupported.
     Unsupported {
         /// The record field that could not be decoded.
@@ -66,8 +67,10 @@ pub enum CreateSessionCorruption {
         /// The durable spelling that was observed.
         value: String,
     },
+    #[error("inconsistent CreateSession {field_0}")]
     /// A typed record relationship disagrees with another durable record.
     Inconsistent(&'static str),
+    #[error("invalid CreateSession {field}: {reason}")]
     /// A stored positive ordinal cannot construct the domain value.
     InvalidOrdinal {
         /// The ordinal-bearing record field.
@@ -75,80 +78,30 @@ pub enum CreateSessionCorruption {
         /// Why the numeric value is outside the domain.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("CreateSession domain reconstitution failed: {field_0:?}")]
     /// Complete checked values fail domain-owned correlation.
     Domain(CreateSessionReconstitutionFailure),
 }
 
-impl fmt::Display for CreateSessionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing durable CreateSession {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported CreateSession {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent CreateSession {relationship}")
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(formatter, "invalid CreateSession {field}: {reason}")
-            }
-            Self::Domain(failure) => {
-                write!(
-                    formatter,
-                    "CreateSession domain reconstitution failed: {failure:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for CreateSessionCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure or a fail-closed durable-shape failure.
 #[derive(Debug)]
 pub enum CreateSessionRepositoryError {
+    #[error("CreateSession database failure: {field_0}")]
     /// PostgreSQL failed before any commit could have succeeded.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("CreateSession commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL obscured whether the requested commit succeeded.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("durable command {command_id:?} does not name CreateSession")]
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
+    #[error(transparent)]
     /// Committed or transaction-visible records cannot reconstruct the domain.
-    Corruption(CreateSessionCorruption),
-}
-
-impl fmt::Display for CreateSessionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "CreateSession database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "CreateSession commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::DifferentCommandKind { command_id } => {
-                write!(
-                    formatter,
-                    "durable command {command_id:?} does not name CreateSession"
-                )
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for CreateSessionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::DifferentCommandKind { .. } => None,
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] CreateSessionCorruption),
 }
 
 impl From<sqlx::Error> for CreateSessionRepositoryError {
@@ -406,22 +359,6 @@ async fn commissioned_dispatch_claims(
     .bind(durable_command_id_to_uuid(command_id))
     .fetch_one(connection)
     .await?)
-}
-
-pub(crate) async fn insert_fresh_prepared(
-    connection: &mut PgConnection,
-    prepared: PreparedCreateSession,
-    credential_pin: &crate::SessionCredentialPin,
-    principal: CommandPrincipal,
-) -> Result<(), CreateSessionRepositoryError> {
-    let command_id = prepared.command().command_id();
-    if !claim_create_session_command(connection, command_id, principal).await? {
-        return Err(CreateSessionCorruption::Inconsistent(
-            "fresh repository-watch command identity collided",
-        )
-        .into());
-    }
-    insert_prepared(connection, prepared, credential_pin).await
 }
 
 /// Claims one create-session command identity, reporting whether this
@@ -1349,10 +1286,10 @@ mod tests {
         corruption
     }
 
-    /// S01: the ordinary creation reader cannot silently discard a
+    /// the ordinary creation reader cannot silently discard a
     /// delegated spawning identity from an interactive session row.
     #[test]
-    fn s01_interactive_creation_rejects_spawning_request() {
+    fn interactive_creation_rejects_spawning_request() {
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(
                 &SessionCreationCause::Interactive,
