@@ -618,7 +618,7 @@ pub(crate) mod test_support {
     //! constructors keep the `from_uuid(Uuid::from_u128(..))` pattern in one
     //! place instead of repeating it in each module's test helpers. Snapshot
     //! tables for the expect tests described in `docs/agents/testing-style.md` come
-    //! from the `signalbox-expect-table` dev-dependency.
+    //! from the `expectable` dev-dependency.
 
     macro_rules! identity_constructors {
         ($($constructor:ident -> $identity:ty),+ $(,)?) => {

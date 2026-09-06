@@ -16,8 +16,9 @@ serde_json = { version = "1.0.140", features = ["raw_value"] }
 tracing = { version = "0.1.41", default-features = false }
 
 [dev-dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
 expect-test = "1.5.1"
-signalbox-expect-table = { path = "../expect-table" }
+expectable = { git = "https://github.com/KeenWill/expectable-rs", tag = "v0.1.0" }
 tokio = { version = "1.53.0", default-features = false, features = [
     "macros",
     "rt",

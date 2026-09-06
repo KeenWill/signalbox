@@ -320,7 +320,7 @@ impl FatalMismatchProjectionError {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::*;
     use crate::{
@@ -718,11 +718,7 @@ mod tests {
     /// to return the projection and fact unchanged and, for a state mismatch,
     /// to name the exact affected call, effect, and current state.
     fn effect_state_matrix_table(effects: &[(&str, AppliedProviderTargetMismatch)]) -> String {
-        #[derive(Debug)]
-        #[allow(
-            dead_code,
-            reason = "the table renderer reads every field through the Debug derive"
-        )]
+        #[derive(Debug, serde::Serialize)]
         struct Row {
             effect: String,
             attempt: String,
@@ -760,7 +756,7 @@ mod tests {
             }
         }
 
-        table(rows)
+        print(&rows)
     }
 
     fn effect_state_outcome(

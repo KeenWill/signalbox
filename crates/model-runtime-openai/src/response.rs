@@ -414,7 +414,7 @@ fn unintelligible_after_finish(
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
         ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderReportedModel, ProviderRequestId,
@@ -971,11 +971,7 @@ mod tests {
         );
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct FinishRow {
         token: &'static str,
         finish: String,
@@ -1003,16 +999,16 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌────────────────┬────────────────────────────────────────────────────┐
-            │ token          │ finish                                             │
-            ├────────────────┼────────────────────────────────────────────────────┤
-            │ stop           │ EndTurn                                            │
-            │ length         │ Unrecognized { provider_token: \"length\" }        │
-            │ tool_calls     │ ToolUse                                            │
-            │ content_filter │ Refusal                                            │
-            │ function_call  │ Unrecognized { provider_token: \"function_call\" } │
-            └────────────────┴────────────────────────────────────────────────────┘
+            ┌────────────────┬──────────────────────────────────────────────────┐
+            │ token          │ finish                                           │
+            ├────────────────┼──────────────────────────────────────────────────┤
+            │ stop           │ EndTurn                                          │
+            │ length         │ Unrecognized { provider_token: "length" }        │
+            │ tool_calls     │ ToolUse                                          │
+            │ content_filter │ Refusal                                          │
+            │ function_call  │ Unrecognized { provider_token: "function_call" } │
+            └────────────────┴──────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 }

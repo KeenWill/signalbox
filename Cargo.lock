@@ -1378,6 +1378,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "expectable"
+version = "0.1.0"
+source = "git+https://github.com/KeenWill/expectable-rs?tag=v0.1.0#3b62ed364f05e128555577298b4e56ce084de939"
+dependencies = [
+ "serde",
+ "unicode-width",
+]
+
+[[package]]
 name = "extended"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4393,6 +4402,7 @@ dependencies = [
  "bstr",
  "divan",
  "expect-test",
+ "expectable",
  "gix-validate",
  "gungraun",
  "hex",
@@ -4402,7 +4412,6 @@ dependencies = [
  "serde_json",
  "serde_stacker",
  "sha2 0.11.0",
- "signalbox-expect-table",
  "url",
  "uuid",
 ]
@@ -4416,13 +4425,6 @@ dependencies = [
  "reqwest",
  "rustls",
  "tokio",
-]
-
-[[package]]
-name = "signalbox-expect-table"
-version = "0.0.0"
-dependencies = [
- "expect-test",
 ]
 
 [[package]]
@@ -4578,11 +4580,12 @@ name = "signalbox-model-provider-runtime"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "expectable",
+ "serde",
  "serde_json",
  "signalbox-application",
  "signalbox-derive",
  "signalbox-domain",
- "signalbox-expect-table",
  "signalbox-model-runtime",
  "tokio",
  "tracing",
@@ -4607,6 +4610,7 @@ version = "0.0.0"
 dependencies = [
  "eventsource-stream",
  "expect-test",
+ "expectable",
  "futures-channel",
  "futures-util",
  "httpdate",
@@ -4614,7 +4618,6 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "signalbox-expect-table",
  "tokio",
 ]
 
@@ -4623,13 +4626,13 @@ name = "signalbox-model-runtime-anthropic"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "expectable",
  "futures-util",
  "reqwest",
  "rustls",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "signalbox-expect-table",
  "signalbox-model-runtime",
  "tokio",
 ]
@@ -4669,12 +4672,12 @@ name = "signalbox-model-runtime-openai"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "expectable",
  "futures-util",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
- "signalbox-expect-table",
  "signalbox-model-runtime",
  "tokio",
 ]
@@ -4713,6 +4716,7 @@ name = "signalbox-persistence"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "expectable",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -4722,7 +4726,6 @@ dependencies = [
  "signalbox-conversation-import-codex",
  "signalbox-derive",
  "signalbox-domain",
- "signalbox-expect-table",
  "signalbox-newtype",
  "signalbox-tools-plan",
  "sqlx",
@@ -6281,6 +6284,12 @@ name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "unsafe-libyaml"

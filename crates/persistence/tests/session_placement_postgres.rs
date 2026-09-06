@@ -8,6 +8,7 @@
 use std::error::Error;
 
 use expect_test::expect;
+use expectable::print;
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     RootPlacementGlobalReadIntent, SessionConfigurationDefaults, SessionCreationCause,
@@ -15,7 +16,6 @@ use signalbox_domain::{
     SessionPlacementVersion, SessionReadScopeDecision, SessionReadScopeRefusal, TranscriptAncestry,
     UpdateSessionPlacement, UpdateSessionPlacementResult,
 };
-use signalbox_expect_table::table;
 use signalbox_persistence::{
     create_session::{
         CreateSessionCorruption, CreateSessionRepository, CreateSessionRepositoryError,
@@ -120,7 +120,7 @@ const PAGED_HISTORY_UPDATE_COUNT: u64 = 65;
 const PAGED_HISTORY_EXPECTED_VERSION: u64 = 66;
 const PAGED_HISTORY_PATH_PREFIX: &str = "projects.history.revision";
 
-#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow, serde::Serialize)]
 struct PlacementHistoryRow {
     version: i64,
     event_kind: String,
@@ -664,7 +664,7 @@ async fn s36_placement_update_appends_created_and_updated_history() -> Result<()
         │       2 │ updated    │
         └─────────┴────────────┘
     "#]]
-    .assert_eq(&table(history));
+    .assert_eq(&print(&history));
 
     fixture.pool.close().await;
     drop(fixture.container);

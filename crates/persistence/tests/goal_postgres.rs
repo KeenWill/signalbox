@@ -12,7 +12,7 @@ use std::error::Error;
 use support::{blocked_backends_reached, record_empty_instruction_manifest};
 
 use expect_test::expect;
-use signalbox_expect_table::table;
+use expectable::print;
 
 use signalbox_application::{
     AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
@@ -4292,21 +4292,36 @@ async fn s18_lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), 
 /// One derived cascade edge: which relationship it dispositions, the immediate
 /// parent kind that selected its action, and the causal source that supplied
 /// that kind.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
 struct NestedCascadeEdgeFacts {
+    #[serde(serialize_with = "serialize_uuid")]
     spawning_tool_request_id: Uuid,
+    #[serde(serialize_with = "serialize_uuid")]
     parent_session_id: Uuid,
     termination_kind: String,
     source_kind: String,
+    #[serde(serialize_with = "serialize_optional_uuid")]
     source_spawning_tool_request_id: Option<Uuid>,
 }
 
 /// The recorded disposition one cascade edge published against its relationship.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
 struct NestedCascadeOutcomeFacts {
+    #[serde(serialize_with = "serialize_uuid")]
     spawning_tool_request_id: Uuid,
     outcome_kind: String,
     reason_kind: String,
+}
+
+fn serialize_uuid<S: serde::Serializer>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(id)
+}
+
+fn serialize_optional_uuid<S: serde::Serializer>(
+    id: &Option<Uuid>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&id.map(|id| id.to_string()), serializer)
 }
 
 /// Every durable record a pruned edge must not have acquired.
@@ -4465,11 +4480,11 @@ async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
         ┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────────┬────────────────────┬──────────────────────────────────────┐
         │ spawning_tool_request_id             │ parent_session_id                    │ termination_kind │ source_kind        │ source_spawning_tool_request_id      │
         ├──────────────────────────────────────┼──────────────────────────────────────┼──────────────────┼────────────────────┼──────────────────────────────────────┤
-        │ 00000000-0000-0000-0000-00000000f610 │ 00000000-0000-0000-0000-00000000f600 │ stopped          │ root               │ None                                 │
+        │ 00000000-0000-0000-0000-00000000f610 │ 00000000-0000-0000-0000-00000000f600 │ stopped          │ root               │                                      │
         │ 00000000-0000-0000-0000-00000000f620 │ 00000000-0000-0000-0000-00000000f601 │ cancelled        │ parent_disposition │ 00000000-0000-0000-0000-00000000f610 │
         └──────────────────────────────────────┴──────────────────────────────────────┴──────────────────┴────────────────────┴──────────────────────────────────────┘
     "#]]
-    .assert_eq(&table(edges));
+    .assert_eq(&print(&edges));
     expect![[r#"
         ┌──────────────────────────────────────┬─────────────────┬─────────────────────────────────────────┐
         │ spawning_tool_request_id             │ outcome_kind    │ reason_kind                             │
@@ -4478,7 +4493,7 @@ async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
         │ 00000000-0000-0000-0000-00000000f620 │ child_stopped   │ parent_cancelled_parent_and_descendants │
         └──────────────────────────────────────┴─────────────────┴─────────────────────────────────────────┘
     "#]]
-    .assert_eq(&table(outcomes));
+    .assert_eq(&print(&outcomes));
 
     pool.close().await;
     drop(container);
@@ -4641,10 +4656,10 @@ async fn s19_nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dy
         ┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────────┬─────────────┬─────────────────────────────────┐
         │ spawning_tool_request_id             │ parent_session_id                    │ termination_kind │ source_kind │ source_spawning_tool_request_id │
         ├──────────────────────────────────────┼──────────────────────────────────────┼──────────────────┼─────────────┼─────────────────────────────────┤
-        │ 00000000-0000-0000-0000-00000000f710 │ 00000000-0000-0000-0000-00000000f700 │ stopped          │ root        │ None                            │
+        │ 00000000-0000-0000-0000-00000000f710 │ 00000000-0000-0000-0000-00000000f700 │ stopped          │ root        │                                 │
         └──────────────────────────────────────┴──────────────────────────────────────┴──────────────────┴─────────────┴─────────────────────────────────┘
     "#]]
-    .assert_eq(&table(edges));
+    .assert_eq(&print(&edges));
 
     pool.close().await;
     drop(container);

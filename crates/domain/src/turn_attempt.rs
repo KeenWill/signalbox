@@ -734,7 +734,7 @@ impl CurrentTurnAttemptTransitionError {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::*;
     use crate::applied_interrupt::test_applied_interrupt_proof;
@@ -743,11 +743,7 @@ mod tests {
         turn_attempt_id as attempt_id, turn_id,
     };
 
-    #[derive(Clone, Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Clone, Debug, serde::Serialize)]
     struct AttemptEndRow {
         attempted_end: String,
         outcome: String,
@@ -1012,7 +1008,7 @@ mod tests {
             │ after fatal mismatch (with interrupt): Ambiguous    │ rejected │
             └─────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
     /// S02 / S04 / S06 / S07 / S10 / S23: Running may
@@ -1103,7 +1099,7 @@ mod tests {
             │ after fatal mismatch (with interrupt): Ambiguous    │ ends    │
             └─────────────────────────────────────────────────────┴─────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
     #[track_caller]
@@ -1362,7 +1358,7 @@ mod tests {
             │ after fatal mismatch: Ambiguous                     │ rejected │
             └─────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
     /// S04 / S06 / S21 / S23: FatalMismatch ends only as
@@ -1546,7 +1542,7 @@ mod tests {
             │ after cancellation (retained proof): Ambiguous     │ rejected │
             └────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
     /// Renders `without stop` rows for ending fresh copies of one source
@@ -1847,11 +1843,7 @@ mod tests {
     /// cause, read back from the observed values
     /// (`docs/agents/testing-style.md`, rule 12).
     fn attempt_end_family_table(ends: &[AttemptEnd]) -> String {
-        #[derive(Debug)]
-        #[allow(
-            dead_code,
-            reason = "the table renderer reads every field through the Debug derive"
-        )]
+        #[derive(Debug, serde::Serialize)]
         struct Row {
             family: &'static str,
             disposition: String,
@@ -1896,7 +1888,7 @@ mod tests {
             })
             .collect();
 
-        table(rows)
+        print(&rows)
     }
 
     /// refusal remains representable without fatal stop and after a

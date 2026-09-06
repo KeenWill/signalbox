@@ -4810,7 +4810,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 )]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
     use uuid::Uuid;
 
     use super::*;
@@ -5698,11 +5698,7 @@ mod tests {
         );
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct FindingTransitionRow {
         current: String,
         permitted_events: String,
@@ -8333,7 +8329,7 @@ mod tests {
             │ BlockedWithReason │ Superseded, Stale, Posted, Fixed                               │
             └───────────────────┴────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table(finding_transition_rows()));
+        .assert_eq(&print(&finding_transition_rows()));
     }
 
     /// a repair-blocked finding cannot cross the publication-only
