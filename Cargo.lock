@@ -4603,6 +4603,7 @@ version = "0.0.0"
 dependencies = [
  "rust_decimal",
  "serde_json",
+ "sha2 0.11.0",
  "signalbox-ownership-seam",
  "sqlx",
  "uuid",
