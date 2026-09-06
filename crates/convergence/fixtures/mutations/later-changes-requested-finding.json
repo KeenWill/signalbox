@@ -1,0 +1,14 @@
+{
+  "source": "later-body-finding.json",
+  "edge": "later authenticated CHANGES_REQUESTED body finding invalidates an earlier quiet review even after the aggregate review decision clears",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews/nodes/1/state",
+      "value": "CHANGES_REQUESTED"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/nodes/1/state",
+      "value": "CHANGES_REQUESTED"
+    }
+  ]
+}

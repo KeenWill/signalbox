@@ -596,21 +596,26 @@ fn later_authenticated_finding_invalidates_quiet_review_and_persisted_authentica
     let policy = policy()?;
     let settled = Recording::read(&root().join("fixtures/mutations/settled.json"))?;
     let prior = evaluate(&settled.snapshot(&policy)?, &policy)?.state;
-    let recording = Recording::read(&root().join("fixtures/mutations/later-body-finding.json"))?;
-    let mut snapshot = recording.snapshot(&policy)?;
-    assert!(!evaluate(&snapshot, &policy)?.converged);
-    snapshot.previous = prior;
-    assert!(
-        !evaluate(&snapshot, &policy)?.converged,
-        "a later finding also revokes retained quiet authentication"
-    );
-    for node in [&mut snapshot.initial, &mut snapshot.current] {
-        node["reviews"]["nodes"][0]["submittedAt"] = json!("2026-09-05T15:00:00Z");
+    for name in [
+        "later-body-finding.json",
+        "later-changes-requested-finding.json",
+    ] {
+        let recording = Recording::read(&root().join("fixtures/mutations").join(name))?;
+        let mut snapshot = recording.snapshot(&policy)?;
+        assert!(!evaluate(&snapshot, &policy)?.converged);
+        snapshot.previous = prior.clone();
+        assert!(
+            !evaluate(&snapshot, &policy)?.converged,
+            "a later finding also revokes retained quiet authentication"
+        );
+        for node in [&mut snapshot.initial, &mut snapshot.current] {
+            node["reviews"]["nodes"][0]["submittedAt"] = json!("2026-09-05T15:00:00Z");
+        }
+        assert!(
+            evaluate(&snapshot, &policy)?.converged,
+            "a quiet review after the finding authenticates the head again"
+        );
     }
-    assert!(
-        evaluate(&snapshot, &policy)?.converged,
-        "a quiet review after the finding authenticates the head again"
-    );
     Ok(())
 }
 

@@ -112,7 +112,7 @@ class RecordedGitHub(reference.GitHubGraphQL):
         for pr, reviews, comments in evidence:
             findings = {}
             for review in pr["_codex_reviews"]:
-                if review["state"] == "COMMENTED" and review.get("body", "").strip():
+                if review["state"] in ("COMMENTED", "CHANGES_REQUESTED") and review.get("body", "").strip():
                     oid = review["commit"]["oid"]
                     at = instant(review["submittedAt"])
                     findings[oid] = max(at, findings.get(oid, at))
