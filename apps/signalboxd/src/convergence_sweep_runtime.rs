@@ -46,7 +46,7 @@ const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const USER_AGENT_VALUE: &str = "signalbox-convergence-sweep";
 // numeric-bound: guard - prevents a provider response from exhausting process memory
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-// numeric-bound: guard - prevents credential material from exhausting process memory
+// numeric-bound: guard - prevents credential material from reaching the provider
 const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 
 /// Deployment policy for convergence census work and retry scheduling.
@@ -168,10 +168,9 @@ impl ConvergenceSweepRuntime {
                     .map(|pull_request| SweepTarget {
                         repository: repository.repository().clone(),
                         pull_request: *pull_request,
-                        credentials: FileCredentialAccess::new_bounded(
+                        credentials: FileCredentialAccess::new(
                             repository.credential_file().to_path_buf(),
                             repository.credential_reference(),
-                            MAX_CREDENTIAL_BYTES,
                         ),
                         credential_reference: repository.credential_reference(),
                     })
@@ -1142,10 +1141,9 @@ mod tests {
         SweepTarget {
             repository: fixture_repository(),
             pull_request: fixture_pull_request(),
-            credentials: FileCredentialAccess::new_bounded(
+            credentials: FileCredentialAccess::new(
                 std::path::PathBuf::from("/nonexistent/convergence-sweep-fixture-credential"),
                 reference.clone(),
-                MAX_CREDENTIAL_BYTES,
             ),
             credential_reference: reference,
         }

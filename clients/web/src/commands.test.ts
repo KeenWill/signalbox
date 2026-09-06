@@ -1,10 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import {
-  commandById,
-  commandRegistry,
-  globalHotkeySequenceBindings,
-  invokeCommand,
-} from './commands'
+import { commandById, globalHotkeySequenceBindings, invokeCommand } from './commands'
 import { productCommandRegistry } from './productCommands'
 import { actions, selectApp, store } from './state'
 
@@ -16,25 +11,9 @@ describe('command registry', () => {
       expect.arrayContaining([
         { commandId: 'navigate.attention', sequence: ['G', 'A'] },
         { commandId: 'navigate.sessions', sequence: ['G', 'S'] },
-        { commandId: 'navigate.activity', sequence: ['G', 'T'] },
         { commandId: 'navigate.settings', sequence: ['G', ','] },
       ]),
     )
-  })
-
-  it('describes Activity as bounded repository operations', () => {
-    expect(commandRegistry.find((command) => command.id === 'navigate.activity')?.description).toBe(
-      'Open bounded repository ingestion and automation reads.',
-    )
-  })
-
-  // The product palette and keyboard help read `productCommandRegistry`, which
-  // replaces every `navigate.` entry, so the corrected description above never
-  // reaches the UI on its own.
-  it('describes Activity the same way in the registry the product reads', () => {
-    expect(
-      productCommandRegistry.find((command) => command.id === 'navigate.activity')?.description,
-    ).toBe('Open bounded repository ingestion and automation reads.')
   })
 
   it('replaces scenario navigation with product navigation', () => {

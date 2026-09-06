@@ -1,14 +1,10 @@
 //! Operator-commissioned dispatch of one session under an immutable authority fence.
 //!
-//! Repository watch is not the only source of dispatched work: an operator may
-//! commission a session directly, stating up front the repository authority the
-//! session acts under. Without a recorded fence such a session reaches the
-//! approval judge as an ordinary anonymous one, and the judge — correctly —
-//! escalates its first mutable Git operation to a human who is not there. The
-//! commissioned dispatch records the same repository/head/base fence a
-//! repository-watch dispatch records, in the same transaction that creates the
-//! session, submits its first input, and commissions its goal, so the judge
-//! consumes it identically and the unattended-escalation closeout covers it.
+//! An operator commissions a session with the repository authority the session
+//! acts under. The commissioned dispatch records that repository/head/base
+//! fence in the same transaction that creates the session, submits its first
+//! input, and commissions its goal. The approval judge consumes the fence when
+//! deciding mutable Git operations for the unattended session.
 
 use signalbox_domain::{
     BranchName, CommissionedDispatchId, CommitSha, CreateSession, DeliveryRequest,
@@ -23,11 +19,9 @@ use crate::create_session::InvalidDurableCommandId;
 
 /// Immutable repository authority an operator asserts for one commissioned session.
 ///
-/// The shapes mirror the repository-watch dispatch fence exactly, because the
-/// approval judge consumes both through one authority rendering: a pull-request
-/// fence names the pull request, its exact head commit, the repository and
-/// branch holding that head, and the base branch; a branch fence names the
-/// repository and branch alone.
+/// A pull-request fence names the pull request, its exact head commit, the
+/// repository and branch holding that head, and the base branch; a branch fence
+/// names the repository and branch alone.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommissionedDispatchFence {
     /// Exact pull-request authority the session is commissioned with.
@@ -150,13 +144,12 @@ impl CommissionDispatchRequest {
 
     /// Prepares the complete composite the durable transaction commits.
     ///
-    /// The composition is the repository-watch dispatch action's, minus the
-    /// rule machinery: one created session from the resolved template, one
-    /// initial input through the start-when-idle path carrying the operator's
-    /// context, and one goal commissioned from the operator's statement that
-    /// adopts the reserved turn as its own first turn. The fence rides beside
-    /// them into the same transaction, so no commissioned session is durably
-    /// visible without the authority it was commissioned under.
+    /// The composition contains one session created from the resolved template,
+    /// one initial input through the start-when-idle path carrying the
+    /// operator's context, and one goal commissioned from the operator's
+    /// statement that adopts the reserved turn as its own first turn. The fence
+    /// rides beside them into the same transaction, so no commissioned session
+    /// is durably visible without the authority it was commissioned under.
     pub fn prepare(
         self,
         ids: &mut impl CommissionedDispatchIdGenerator,
@@ -265,10 +258,9 @@ const fn attachment_kind_digest_tag(kind: signalbox_domain::AttachmentKind) -> u
 
 /// One commissioned dispatch whose session creation has been domain-prepared.
 ///
-/// The turn reserved here is the only one the commissioned session receives.
-/// It carries the operator's context, and the goal commissioned in the same
-/// transaction adopts it as that generation's own first turn, exactly as a
-/// repository-watch dispatch action does.
+/// The turn reserved here carries the operator's context, and the goal
+/// commissioned in the same transaction adopts it as that generation's own
+/// first turn.
 #[derive(Debug)]
 pub struct PreparedCommissionedDispatch {
     dispatch_id: CommissionedDispatchId,
