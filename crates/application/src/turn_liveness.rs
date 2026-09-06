@@ -8,7 +8,7 @@
 //! transition belong to the persistence adapter, and the periodic pass that
 //! drives both belongs to the daemon runtime.
 
-use std::{error::Error, fmt, num::NonZeroU32, num::NonZeroU64, time::Duration};
+use std::{num::NonZeroU32, num::NonZeroU64, time::Duration};
 
 use signalbox_domain::{ModelCallId, SessionId, ToolAttemptId, TurnAttemptId, TurnId};
 use tokio::time::Instant;
@@ -255,29 +255,20 @@ impl TurnLivenessScanInterval {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a proposed turn-liveness bound was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnLivenessBoundError {
     /// A zero bound would terminalize a turn the moment it was first observed.
+    #[error("turn-liveness staleness bound must be nonzero")]
     Zero,
     /// The proposal carries precision finer than a whole second.
+    #[error("turn-liveness staleness bound must be a whole number of seconds")]
     Subsecond,
     /// The proposal cannot be represented by the runtime timer.
+    #[error("turn-liveness staleness bound does not fit the runtime timer range")]
     TimerRange,
 }
-
-impl fmt::Display for TurnLivenessBoundError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let reason = match self {
-            Self::Zero => "must be nonzero",
-            Self::Subsecond => "must be a whole number of seconds",
-            Self::TimerRange => "does not fit the runtime timer range",
-        };
-        write!(formatter, "turn-liveness staleness bound {reason}")
-    }
-}
-
-impl Error for TurnLivenessBoundError {}
 
 /// The durable evidence whose change proves a turn is still progressing.
 ///

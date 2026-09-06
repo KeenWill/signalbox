@@ -1,6 +1,6 @@
 //! Lazy deterministic blob derivation orchestration.
 
-use std::{error::Error, fmt, future::Future};
+use std::future::Future;
 
 use signalbox_domain::{
     BlobDerivation, BlobDerivationError, BlobDerivationId, BlobDerivationProducer, BlobDigest,
@@ -119,29 +119,16 @@ pub enum BlobDerivationServiceOutcome {
     Produced(BlobDerivation),
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Closed application-stage failure retaining adapter-specific causes.
 #[derive(Debug)]
 pub enum BlobDerivationServiceError<StoreError, ProducerError> {
+    #[error("blob derivation store failed: {field_0}")]
     Store(StoreError),
+    #[error("blob derivative producer failed: {field_0}")]
     Producer(ProducerError),
+    #[error(transparent)]
     InvalidProducerOutput(BlobDerivationError),
-}
-
-impl<StoreError: fmt::Display, ProducerError: fmt::Display> fmt::Display
-    for BlobDerivationServiceError<StoreError, ProducerError>
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Store(error) => write!(formatter, "blob derivation store failed: {error}"),
-            Self::Producer(error) => write!(formatter, "blob derivative producer failed: {error}"),
-            Self::InvalidProducerOutput(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl<StoreError: Error + 'static, ProducerError: Error + 'static> Error
-    for BlobDerivationServiceError<StoreError, ProducerError>
-{
 }
 
 /// Coordinates cache lookup, isolated production, and append-only provenance.

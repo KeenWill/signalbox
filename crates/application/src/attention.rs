@@ -1,6 +1,6 @@
 //! Bounded daemon-owned fleet attention read model.
 
-use std::{collections::BTreeSet, fmt, future::Future, time::SystemTime};
+use std::{collections::BTreeSet, future::Future, time::SystemTime};
 
 use signalbox_domain::{SessionId, TurnId};
 
@@ -237,23 +237,21 @@ impl AttentionQuery {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(signalbox_derive::OperatorError, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttentionQueryError {
+    #[error("session catalog query is malformed or outside its hard bounds")]
     TooManyTags,
+    #[error("session catalog query is malformed or outside its hard bounds")]
     InvalidTag,
+    #[error("session catalog query is malformed or outside its hard bounds")]
     DuplicateTag,
+    #[error("session catalog query is malformed or outside its hard bounds")]
     InvalidSearch,
+    #[error("session catalog query is malformed or outside its hard bounds")]
     FilterTooLarge,
+    #[error("session catalog query is malformed or outside its hard bounds")]
     ContinuationSortMismatch,
 }
-
-impl fmt::Display for AttentionQueryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("session catalog query is malformed or outside its hard bounds")
-    }
-}
-
-impl std::error::Error for AttentionQueryError {}
 
 /// Exact operator action owed by the current facts, when any.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
