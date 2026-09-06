@@ -1737,11 +1737,21 @@ impl RepoWatchStore {
             }
         } else {
             let active_revision: Option<Decimal> = sqlx::query_scalar(
-                "SELECT active_revision FROM rule
-                  WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
+                "SELECT active.active_revision
+                   FROM rule AS active
+                   JOIN rule_revision AS revision
+                     ON revision.repository = active.repository
+                    AND revision.rule_id = active.rule_id
+                    AND revision.revision = active.active_revision
+                   JOIN gh_event AS event
+                     ON event.event_id = $3
+                  WHERE active.repository = $1 AND active.rule_id = $2
+                    AND event.recorded_at >= revision.activated_at
+                  FOR UPDATE OF active",
             )
             .bind(first.repository().as_str())
             .bind(first.rule_id().as_str())
+            .bind(first.event_id().into_uuid())
             .fetch_optional(&mut *transaction)
             .await?;
             if active_revision != Some(Decimal::from(first.rule_revision().get())) {
