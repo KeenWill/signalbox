@@ -9056,65 +9056,6 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
-## application: convergence_reconciliation
-
-```rust
-pub enum PullRequestCheckState {
-    CheckRunInProgress,
-    CheckRunCompleted {
-        conclusion: Option<String>,
-    },
-    StatusContext {
-        state: String,
-    },
-}
-
-pub struct PullRequestCheck { /* private */ }
-impl PullRequestCheck {
-    pub fn new(name: String, state: PullRequestCheckState) -> Self;
-    // accessors: name(), state(), is_non_gating(), is_green(), observed_state()
-}
-
-pub enum PullRequestDraftState {
-    ReadyForReview,
-    Draft,
-}
-impl PullRequestDraftState {
-    pub const fn is_draft(self) -> bool;
-}
-
-pub struct PullRequestConvergenceFacts { /* private */ }
-impl PullRequestConvergenceFacts {
-    pub fn new(
-        head_sha: CommitSha,
-        checked_head_sha: Option<CommitSha>,
-        draft: PullRequestDraftState,
-        unresolved_review_threads: u64,
-        mergeable_state: MergeableState,
-        checks: Vec<PullRequestCheck>,
-    ) -> Self;
-    // accessors: head_sha(), checked_head_sha(), draft(),
-    // unresolved_review_threads(), mergeable_state(), checks()
-}
-
-pub enum PullRequestConvergenceBlocker {
-    UnresolvedReviewThreads(u64),
-    ChecksNotForCurrentHead,
-    CheckNotGreen { name: String, state: String },
-    BaseConflict,
-    MergeabilityUnknown,
-}
-
-pub struct PullRequestConvergence { /* private */ }
-impl PullRequestConvergence {
-    // accessors: is_converged(), blockers()
-}
-
-pub fn evaluate_pull_request_convergence(
-    facts: &PullRequestConvergenceFacts,
-) -> PullRequestConvergence;
-```
-
 ## application: repo_watch
 
 ```rust
@@ -12034,53 +11975,11 @@ pub enum RepoWatchDispatchContextShape {
     Branch,
 }
 
-pub struct PullRequestContext { /* private */ }
-// sealed: DispatchSessionParameters::try_from_event().
-// accessors: repository(), number(), head_sha(), head_repository(), head_branch(),
-//            base_branch(), event()
-
-pub struct BranchContext { /* private */ }
-// sealed: DispatchSessionParameters::try_from_event().
-// accessors: repository(), branch(), workflow(), conclusion(), event()
-
-pub enum DispatchSessionParameters {
-    PullRequest(PullRequestContext),
-    Branch(BranchContext),
-}
-impl DispatchSessionParameters {
-    pub fn try_from_event(
-        event: RepoWatchEvent,
-    ) -> Result<Self, RepoWatchDispatchContextError>;
-    // accessors: shape(), event()
-}
-
-pub enum RepoWatchDispatchContextError {
-    InvalidBranchEvent,
-}
-// implements Error.
-
 pub enum RepoWatchRuleActionV1 {
     DispatchSession { template: SessionTemplateName },
 }
 impl RepoWatchRuleActionV1 {
     pub const fn template(&self) -> &SessionTemplateName;
-}
-
-pub struct DispatchSessionAction { /* private */ }
-impl DispatchSessionAction {
-    pub const fn new(
-        template: SessionTemplateName,
-        params: DispatchSessionParameters,
-    ) -> Self;
-    pub fn synthesized_goal_statement(
-        &self,
-        rule: &RepoWatchRuleId,
-    ) -> Result<GoalStatement, GoalTextError>;
-    // accessors: template(), params()
-}
-
-pub enum RepoWatchActionV1 {
-    DispatchSession(DispatchSessionAction),
 }
 
 pub enum RepoWatchRuleValidationError {
@@ -12135,10 +12034,6 @@ impl RepoWatchRule {
     pub fn identity_field_digests(
         &self,
     ) -> Vec<(RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest)>;
-    pub fn actions_for_event(
-        &self,
-        event: &RepoWatchEvent,
-    ) -> Result<Vec<RepoWatchActionV1>, RepoWatchDispatchContextError>;
     // accessors: id(), version(), matcher(), actions(), singleton_per(), cooldown()
 }
 ```
@@ -12967,7 +12862,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: user_content                               | 15                               |
 | domain: submit_input                               | 37                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
-| domain: repo_watch                                 | 49                               |
+| domain: repo_watch                                 | 43                               |
 | domain: turn_lifecycle                             | 11                               |
 | domain: turn_eligibility                           | 39                               |
 | domain: turn_attempt                               | 13                               |
@@ -12990,7 +12885,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **891 (+12 free fn)**            |
+| **signalbox-domain total**                         | **885 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 17 (+6 free fn) (incl. 1 trait)  |
 | application: blob_derivation                       | 9 (incl. 3 traits)               |
@@ -13010,7 +12905,6 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
-| application: convergence_reconciliation            | 6 (+1 free fn)                   |
 | application: repo_watch                            | 30 (+3 free fn) (incl. 1 trait)  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
@@ -13024,4 +12918,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 16                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **427 (+29 free fn)**            |
+| **signalbox-application total**                    | **421 (+28 free fn)**            |
