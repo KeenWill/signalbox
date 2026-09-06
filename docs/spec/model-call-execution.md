@@ -315,23 +315,24 @@ successor attempt immediately.
 durable transient exclusion, its reset deadline, and preparation admission for
 every session.
 
-The same-credential retry is evaluated before the pinned pool action, and that
-action is not applied while the retry is admitted. Once the configured bound is
-exhausted or the failed credential is no longer admitted, the pinned action is
-applied once: `switch_now` starts a new attempt on another admitted credential
-and writes the failed member's durable chain exclusion, while any other action
-terminalizes this turn after recording its own durable effect when applicable.
-Provider-internal failure has no trigger action and terminalizes at the bound. A
-call whose outcome is unknown is never retried automatically; the turn parks for
-recovery. A CLI harness may retry inside one provider invocation. Those internal
-retries remain part of that recorded call; the daemon neither observes nor
-separately records them. A proven terminal failure from a CLI remains eligible
-for the successor rule above. A migration constraint enforces one call per
-attempt. Successor selection and preparation skip chain-excluded members; that
-selection, not a constraint, enforces rotation no-reuse. The one-shot send
-capability, the per-attempt dispatch gate, the authorize-send commit, and
-startup parking of an issued call enforce at-most-once sending. Only the rule
-that no code retries a call without recording the retry is unenforced.
+When the failure observation commits, the same-credential retry is evaluated
+before the pinned pool action, and that action is not applied while the retry is
+admitted. If the configured bound is exhausted or the failed credential is no
+longer admitted at that commit, the pinned action is applied once: `switch_now`
+starts a new attempt on another admitted credential and writes the failed
+member's durable chain exclusion, while any other action terminalizes this turn
+after recording its own durable effect when applicable. Provider-internal
+failure has no trigger action and terminalizes at the bound. A call whose
+outcome is unknown is never retried automatically; the turn parks for recovery.
+A CLI harness may retry inside one provider invocation. Those internal retries
+remain part of that recorded call; the daemon neither observes nor separately
+records them. A proven terminal failure from a CLI remains eligible for the
+successor rule above. A migration constraint enforces one call per attempt.
+Successor selection and preparation skip chain-excluded members; that selection,
+not a constraint, enforces rotation no-reuse. The one-shot send capability, the
+per-attempt dispatch gate, the authorize-send commit, and startup parking of an
+issued call enforce at-most-once sending. Only the rule that no code retries a
+call without recording the retry is unenforced.
 
 The terminal transition stores the input, output, cache-creation, and cache-read
 token axes independently; a null axis means the provider did not supply it, and
