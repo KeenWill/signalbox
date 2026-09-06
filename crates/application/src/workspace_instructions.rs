@@ -154,7 +154,12 @@ impl InstructionDiscoverySnapshot {
 }
 
 // numeric-bound: not-a-bound - names which fixed discovery-limit set was applied
-const DISCOVERY_LIMIT_SET_VERSION: u16 = 1;
+const DISCOVERY_LIMIT_SET_VERSION: u16 = 2;
+#[cfg(unix)]
+const VCS_METADATA_DIRECTORIES: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
+#[cfg(unix)]
+const BUILD_AND_DEPENDENCY_DIRECTORIES: [&str; 5] =
+    ["target", "node_modules", ".venv", "dist", "build"];
 // numeric-bound: guard - prevents a pathological workspace tree from walking the daemon forever
 const MAX_CLASSIFIED_ENTRIES: u64 = 100_000;
 // numeric-bound: guard - prevents an unusable workspace from exhausting memory with findings
@@ -425,6 +430,37 @@ fn walk_root(
                 continue;
             }
         };
+        let inspect_for_nested_repository = match root.kind() {
+            InstructionDiscoveryRootKind::Workspace => !is_root,
+            InstructionDiscoveryRootKind::Configured => false,
+        };
+        if inspect_for_nested_repository {
+            let metadata_deadline = state.started + state.limits.elapsed;
+            match contains_vcs_metadata_before_deadline(&directory_descriptor, metadata_deadline) {
+                Ok(Ok(true)) => continue,
+                Ok(Ok(false)) => {}
+                Ok(Err(_)) | Err(FilesystemTaskError::Unavailable) => {
+                    if !push_path_finding(
+                        &directory,
+                        root.path(),
+                        InstructionDiscoveryFindingKind::EntryUnreadable,
+                        findings,
+                        state,
+                    ) {
+                        return false;
+                    }
+                    continue;
+                }
+                Err(FilesystemTaskError::Deadline) => {
+                    return reach_limit(
+                        root.path().clone(),
+                        InstructionDiscoveryLimitKind::ElapsedTime,
+                        findings,
+                        state,
+                    );
+                }
+            }
+        }
         let remaining_entries = state
             .limits
             .classified_entries
@@ -524,7 +560,9 @@ fn walk_root(
             if !check_elapsed(root.path(), findings, state) {
                 return false;
             }
-            if classified_entry.file_type == rustix::fs::FileType::Directory {
+            if classified_entry.file_type == rustix::fs::FileType::Directory
+                && !is_excluded_directory_name(&classified_entry.name)
+            {
                 let source_prefix = match directories[current_directory].source_prefix.as_ref() {
                     Ok(prefix) => classified_entry
                         .name
@@ -549,6 +587,50 @@ fn walk_root(
         }
     }
     true
+}
+
+#[cfg(unix)]
+fn is_excluded_directory_name(name: &OsStr) -> bool {
+    VCS_METADATA_DIRECTORIES
+        .iter()
+        .chain(BUILD_AND_DEPENDENCY_DIRECTORIES.iter())
+        .any(|excluded| name == OsStr::new(excluded))
+}
+
+#[cfg(unix)]
+fn contains_vcs_metadata_before_deadline(
+    directory: &OwnedFd,
+    deadline: Instant,
+) -> Result<io::Result<bool>, FilesystemTaskError> {
+    let directory = rustix::io::dup(directory).map_err(|_| FilesystemTaskError::Unavailable)?;
+    run_bounded_filesystem_task(
+        Arc::clone(&FILESYSTEM_WORKERS),
+        MAX_FILESYSTEM_WORKERS,
+        deadline,
+        "signalbox-instruction-repository-probe",
+        move || contains_vcs_metadata(&directory),
+    )
+}
+
+#[cfg(unix)]
+fn contains_vcs_metadata(directory: &OwnedFd) -> io::Result<bool> {
+    use rustix::fs::{AtFlags, FileType, statat};
+
+    for name in VCS_METADATA_DIRECTORIES {
+        match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(status) => {
+                let file_type = FileType::from_raw_mode(status.st_mode);
+                if file_type == FileType::Directory
+                    || (name == ".git" && file_type == FileType::RegularFile)
+                {
+                    return Ok(true);
+                }
+            }
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(unix)]
@@ -1611,6 +1693,93 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn excluded_directories_do_not_consume_their_contents_or_yield_documents() {
+        const SMALL_CLASSIFIED_ENTRY_LIMIT: u64 = 8;
+
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let adjacent_document = temporary.path().join("AGENTS.md");
+        fs::write(&adjacent_document, "workspace instructions")
+            .expect("adjacent agent document is written");
+        let vcs_metadata = temporary.path().join(".git");
+        fs::create_dir(&vcs_metadata).expect("VCS metadata directory exists");
+        fill_directory_beyond_limit(&vcs_metadata, SMALL_CLASSIFIED_ENTRY_LIMIT);
+        fs::write(
+            vcs_metadata.join("AGENTS.md"),
+            "excluded metadata instructions",
+        )
+        .expect("metadata agent document is written");
+        let build_output = temporary.path().join("src/package/target");
+        fs::create_dir_all(&build_output).expect("deep build output directory exists");
+        fill_directory_beyond_limit(&build_output, SMALL_CLASSIFIED_ENTRY_LIMIT);
+        fs::write(
+            build_output.join("AGENTS.md"),
+            "excluded build instructions",
+        )
+        .expect("build agent document is written");
+        let nested_repository = temporary.path().join("nested-clone");
+        fs::create_dir_all(nested_repository.join(".git"))
+            .expect("nested repository metadata exists");
+        fill_directory_beyond_limit(&nested_repository, SMALL_CLASSIFIED_ENTRY_LIMIT);
+        fs::write(
+            nested_repository.join("AGENTS.md"),
+            "excluded nested repository instructions",
+        )
+        .expect("nested repository agent document is written");
+        let root = workspace_root(&temporary);
+
+        let snapshot = discover_with_limits(
+            vec![root],
+            test_limits(SMALL_CLASSIFIED_ENTRY_LIMIT, 4, 64, Duration::from_secs(1)),
+        );
+
+        assert!(snapshot.is_complete());
+        assert!(snapshot.findings().is_empty());
+        assert_eq!(snapshot.classified_entries(), 6);
+        assert_eq!(snapshot.bundles().len(), 1);
+        assert_eq!(
+            snapshot.bundles()[0].source_path().absolute_path(),
+            adjacent_document.to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_worktree_is_not_traversed_during_discovery() {
+        const SMALL_CLASSIFIED_ENTRY_LIMIT: u64 = 4;
+
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let adjacent_document = temporary.path().join("AGENTS.md");
+        fs::write(&adjacent_document, "workspace instructions")
+            .expect("adjacent agent document is written");
+        let nested_worktree = temporary.path().join("nested-worktree");
+        fs::create_dir(&nested_worktree).expect("nested worktree exists");
+        fs::write(nested_worktree.join(".git"), "gitdir: ../metadata/worktree")
+            .expect("nested worktree marker exists");
+        fill_directory_beyond_limit(&nested_worktree, SMALL_CLASSIFIED_ENTRY_LIMIT);
+        fs::write(
+            nested_worktree.join("AGENTS.md"),
+            "excluded worktree instructions",
+        )
+        .expect("worktree agent document is written");
+        let root = workspace_root(&temporary);
+
+        let snapshot = discover_with_limits(
+            vec![root],
+            test_limits(SMALL_CLASSIFIED_ENTRY_LIMIT, 4, 64, Duration::from_secs(1)),
+        );
+
+        assert!(snapshot.is_complete());
+        assert!(snapshot.findings().is_empty());
+        assert_eq!(snapshot.classified_entries(), 2);
+        assert_eq!(snapshot.bundles().len(), 1);
+        assert_eq!(
+            snapshot.bundles()[0].source_path().absolute_path(),
+            adjacent_document.to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn workspace_skill_location_is_relative_to_the_registered_root() {
         let temporary = tempfile::tempdir().expect("temporary root exists");
         let workspace = temporary.path().join(".agents/skills/review-rust");
@@ -2312,6 +2481,13 @@ mod tests {
             InstructionPath::try_new(canonical.to_string_lossy().into_owned())
                 .expect("path is valid"),
         )
+    }
+
+    fn fill_directory_beyond_limit(directory: &std::path::Path, limit: u64) {
+        for index in 0..limit.saturating_mul(4) {
+            fs::write(directory.join(format!("ignored-{index}")), "ignored")
+                .expect("ignored fixture entry is written");
+        }
     }
 
     const fn test_limits(

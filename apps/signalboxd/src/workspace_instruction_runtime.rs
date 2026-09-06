@@ -3,8 +3,8 @@
 use std::{error::Error, fmt, path::Path};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, InstructionDiscoveryRoot, OperatorFailureClass,
-    discover_workspace_instructions,
+    ClassifyOperatorFailure, InstructionDiscoveryFindingKind, InstructionDiscoveryRoot,
+    InstructionDiscoverySnapshot, OperatorFailureClass, discover_workspace_instructions,
 };
 use signalbox_domain::{
     InstructionBundleId, InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath,
@@ -174,7 +174,7 @@ impl WorkspaceInstructionRuntime {
             )
             .await
             .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
-        outcome_is_available(outcome)
+        outcome_is_available(session, turn, &snapshot, outcome)
     }
 
     /// Prepares complete evidence for the counted activation transaction.
@@ -225,6 +225,7 @@ impl WorkspaceInstructionRuntime {
                 .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
             return match outcome {
                 RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
+                    record_incomplete_discovery(session, turn, &snapshot);
                     Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete)
                 }
                 RecordTurnInstructionSnapshotOutcome::TurnUnavailable => Ok(None),
@@ -305,16 +306,65 @@ impl WorkspaceInstructionRuntime {
 }
 
 fn outcome_is_available(
+    session: SessionId,
+    turn: TurnId,
+    snapshot: &InstructionDiscoverySnapshot,
     outcome: RecordTurnInstructionSnapshotOutcome,
 ) -> Result<bool, WorkspaceInstructionRuntimeError> {
     match outcome {
         RecordTurnInstructionSnapshotOutcome::Recorded(_)
         | RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_) => Ok(true),
         RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
+            record_incomplete_discovery(session, turn, snapshot);
             Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete)
         }
         RecordTurnInstructionSnapshotOutcome::TurnUnavailable => Ok(false),
     }
+}
+
+/// Records the scan evidence the sanitized cause code cannot carry.
+///
+/// `DiscoveryIncomplete` reaches an operator as one cause code on the
+/// scheduler's record, which cannot say which of the fixed bounds stopped the
+/// scan, what it had already consumed, or which roots it was walking. All of
+/// that is on the snapshot this decision discards, so it is recorded here
+/// rather than left to be reconstructed from the durable evidence tables.
+fn record_incomplete_discovery(
+    session: SessionId,
+    turn: TurnId,
+    snapshot: &InstructionDiscoverySnapshot,
+) {
+    let limit = snapshot
+        .findings()
+        .iter()
+        .find_map(|finding| match finding.kind() {
+            InstructionDiscoveryFindingKind::LimitReached(limit) => Some(limit),
+            InstructionDiscoveryFindingKind::RootUnavailable
+            | InstructionDiscoveryFindingKind::EntryUnreadable
+            | InstructionDiscoveryFindingKind::NonUtf8SourcePath
+            | InstructionDiscoveryFindingKind::NonUtf8Source
+            | InstructionDiscoveryFindingKind::InvalidSkill => None,
+        });
+    let roots = snapshot
+        .roots()
+        .iter()
+        .map(|root| root.path().as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::error!(
+        session_id = %session.as_uuid(),
+        turn_id = %turn.as_uuid(),
+        cause_code = WorkspaceInstructionRuntimeError::DiscoveryIncomplete
+            .operator_failure_cause_code(),
+        limit_kind = ?limit,
+        limit_set_version = snapshot.limit_set_version(),
+        classified_entries = snapshot.classified_entries(),
+        finding_count = snapshot.findings().len(),
+        candidate_source_bytes = snapshot.candidate_source_bytes(),
+        elapsed_millis = snapshot.elapsed_millis(),
+        roots = %roots,
+        "workspace instruction discovery stopped at a fixed limit"
+    );
 }
 
 fn instruction_path(path: &Path) -> Result<InstructionPath, WorkspaceInstructionRuntimeError> {

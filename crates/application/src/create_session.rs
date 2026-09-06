@@ -9,11 +9,12 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     CreateSession as DomainCreateSession, CreateSessionAppliedResult,
-    CreateSessionPreparationFailure, DurableCommandId, PreparedCreateSession,
+    CreateSessionPreparationFailure, DurableCommandId, FinishCondition, PreparedCreateSession,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionPlacement, SessionTemplateProvenance, TranscriptAncestry,
+    SessionOwnership, SessionPlacement, SessionTemplateProvenance, StartGate, TranscriptAncestry,
 };
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a caller-supplied command identity cannot enter canonical construction.
 ///
 /// docs/spec/identity-and-commands.md reserves nil and max UUIDs as invalid
@@ -22,27 +23,18 @@ use signalbox_domain::{
 /// identity generation, or durable-command lookup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvalidDurableCommandId {
+    #[error("nil durable command identity is reserved")]
     /// The supplied UUID contains all zero bits.
     Nil,
+    #[error("max durable command identity is reserved")]
     /// The supplied UUID contains all one bits.
     Max,
 }
 
-impl fmt::Display for InvalidDurableCommandId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Nil => formatter.write_str("nil durable command identity is reserved"),
-            Self::Max => formatter.write_str("max durable command identity is reserved"),
-        }
-    }
-}
-
-impl Error for InvalidDurableCommandId {}
-
 /// The complete admitted application request for user-initiated creation.
 ///
 /// The request deliberately has no cause or ancestry input: this slice fixes
-/// them to `UserInitiated` and `None`. Its private fields ensure sentinel
+/// them to `Interactive` and `None`. Its private fields ensure sentinel
 /// command identities cannot reach the use case through this boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateSessionRequest {
@@ -50,6 +42,9 @@ pub struct CreateSessionRequest {
     initial_configuration_defaults: SessionConfigurationDefaults,
     template_provenance: Option<SessionTemplateProvenance>,
     placement: SessionPlacement,
+    start_gate: StartGate,
+    ownership: SessionOwnership,
+    finish_condition: Option<FinishCondition>,
 }
 
 impl CreateSessionRequest {
@@ -70,6 +65,9 @@ impl CreateSessionRequest {
             initial_configuration_defaults,
             template_provenance: None,
             placement: SessionPlacement::pathless(),
+            start_gate: StartGate::Open,
+            ownership: SessionOwnership::Unmonitored,
+            finish_condition: None,
         })
     }
 
@@ -92,6 +90,9 @@ impl CreateSessionRequest {
             initial_configuration_defaults: resolved_configuration_defaults,
             template_provenance: Some(template_provenance),
             placement: SessionPlacement::pathless(),
+            start_gate: StartGate::Open,
+            ownership: SessionOwnership::Unmonitored,
+            finish_condition: None,
         })
     }
 
@@ -114,6 +115,34 @@ impl CreateSessionRequest {
     pub fn with_placement(mut self, placement: SessionPlacement) -> Self {
         self.placement = placement;
         self
+    }
+
+    /// Installs the lifecycle start gate, ownership, and finish condition.
+    pub fn with_lifecycle(
+        mut self,
+        start_gate: StartGate,
+        ownership: SessionOwnership,
+        finish_condition: Option<FinishCondition>,
+    ) -> Self {
+        self.start_gate = start_gate;
+        self.ownership = ownership;
+        self.finish_condition = finish_condition;
+        self
+    }
+
+    /// Returns whether the creation holds its start gate.
+    pub const fn start_gate(&self) -> StartGate {
+        self.start_gate
+    }
+
+    /// Returns the ownership the creation establishes.
+    pub const fn ownership(&self) -> SessionOwnership {
+        self.ownership
+    }
+
+    /// Borrows the finish condition the creation declares.
+    pub const fn finish_condition(&self) -> Option<&FinishCondition> {
+        self.finish_condition.as_ref()
     }
 
     /// Borrows the creation-time placement decision.
@@ -255,9 +284,12 @@ where
             initial_configuration_defaults,
             template_provenance,
             placement,
+            start_gate,
+            ownership,
+            finish_condition,
         } = request;
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
+            SessionCreationCause::Interactive,
             TranscriptAncestry::None,
         );
         let command = match template_provenance {
@@ -274,7 +306,8 @@ where
                 initial_configuration_defaults,
                 placement,
             ),
-        };
+        }
+        .with_lifecycle(start_gate, ownership, finish_condition);
         let prepared = command
             .prepare(candidate_session)
             .map_err(|error| CreateSessionError::Preparation(error.failure()))?;
@@ -339,7 +372,7 @@ mod tests {
         DomainCreateSession::new(
             request.command_id(),
             SessionCreationProvenance::new(
-                SessionCreationCause::UserInitiated,
+                SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
             ),
             request.initial_configuration_defaults().clone(),
@@ -442,10 +475,10 @@ mod tests {
         }
     }
 
-    /// S01 / INV-001 / INV-012: sentinel command identities fail before
+    /// S01: sentinel command identities fail before
     /// canonical command construction and claim nothing.
     #[test]
-    fn s01_inv001_inv012_request_rejects_reserved_command_identifiers() {
+    fn s01_request_rejects_reserved_command_identifiers() {
         assert_eq!(
             CreateSessionRequest::try_new(
                 signalbox_domain::DurableCommandId::from_uuid(Uuid::nil()),
@@ -469,10 +502,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-001 / INV-002: production session identities are fresh
+    /// S01: production session identities are fresh
     /// RFC-9562 UUIDv7 values, while their timestamp has no domain role.
     #[test]
-    fn s01_inv001_inv002_production_generator_supplies_fresh_uuid_v7_sessions() {
+    fn s01_production_generator_supplies_fresh_uuid_v7_sessions() {
         let mut generator = UuidV7SessionIdGenerator;
         let first = generator.next_session_id();
         let second = generator.next_session_id();
@@ -490,11 +523,11 @@ mod tests {
         assert!(!session.as_uuid().is_max());
     }
 
-    /// S01 / INV-003 / INV-008 / INV-012: orchestration fixes the admitted
+    /// S01: orchestration fixes the admitted
     /// provenance, establishes defaults version one, and calls the atomic port
     /// exactly once with the sealed candidate.
     #[test]
-    fn s01_inv003_inv008_inv012_orchestrates_one_atomic_creation() {
+    fn s01_orchestrates_one_atomic_creation() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let candidate = session_id(3);
@@ -519,7 +552,7 @@ mod tests {
         assert_eq!(prepared.command().command_id(), request.command_id());
         assert_eq!(
             prepared.command().provenance().cause(),
-            SessionCreationCause::UserInitiated
+            SessionCreationCause::Interactive
         );
         assert_eq!(
             prepared.command().provenance().ancestry(),
@@ -539,10 +572,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-012: equal replay returns the recorded receipt unchanged
+    /// S01: equal replay returns the recorded receipt unchanged
     /// rather than the freshly generated candidate or a loaded Session.
     #[test]
-    fn s01_inv012_equal_replay_returns_original_receipt() {
+    fn s01_equal_replay_returns_original_receipt() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let winner = session_id(3);
@@ -573,10 +606,10 @@ mod tests {
         assert_eq!(transaction.observed[1].session().id(), replay_candidate);
     }
 
-    /// S01 / INV-012: reusing one command ID for different canonical defaults
+    /// S01: reusing one command ID for different canonical defaults
     /// returns a typed conflict and never substitutes the second candidate.
     #[test]
-    fn s01_inv012_conflicting_reuse_is_typed() {
+    fn s01_conflicting_reuse_is_typed() {
         let command = command_id(1);
         let first = CreateSessionRequest::try_new(command, defaults(2))
             .expect("ordinary command identity is admitted");
@@ -623,10 +656,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-012: application orchestration neither retries transaction
+    /// S01: application orchestration neither retries transaction
     /// failure nor fabricates a terminal command result.
     #[test]
-    fn s01_inv012_transaction_failure_is_returned_without_retry() {
+    fn s01_transaction_failure_is_returned_without_retry() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let mut service = CreateSessionService::new(

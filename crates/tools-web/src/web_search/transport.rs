@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{future::Future, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, redirect::Policy};
@@ -47,17 +47,11 @@ impl ReqwestWebSearchTransport {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("web search client construction failed")]
 /// The fixed production web-search client could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReqwestWebSearchConstructionError;
-
-impl fmt::Display for ReqwestWebSearchConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("web search client construction failed")
-    }
-}
-
-impl Error for ReqwestWebSearchConstructionError {}
 
 impl WebSearchTransport for ReqwestWebSearchTransport {
     async fn search(

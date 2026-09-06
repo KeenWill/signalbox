@@ -719,6 +719,24 @@ class WorkflowAgreementTests(unittest.TestCase):
             [],
         )
 
+    def test_diverging_shard_selections_are_reported(self) -> None:
+        dynamic = (
+            "runs-on: ${{ github.event_name == 'pull_request' && "
+            "(github.event.pull_request.head.repo.full_name != github.repository "
+            "|| contains(fromJSON('[\"dependabot[bot]\",\"renovate[bot]\"]'), "
+            "github.event.pull_request.user.login)) && 'ubuntu-latest' || "
+            "'signalbox-docker' }}"
+        )
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                "  postgres-integration-run:\n    runs-on: signalbox-docker\n",
+                "  postgres-integration-run:\n    " + dynamic + "\n",
+            )
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("share one complete runner selection", failures[0])
+
     def test_run_job_leaving_signalbox_docker_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
@@ -810,7 +828,7 @@ class WorkflowAgreementTests(unittest.TestCase):
             [
                 command
                 for command, _, _ in workflow_shell_commands(
-                    "jobs:\n  a:\n    steps:\n      - run: echo 'a # b'\n"
+                    "jobs:\n  a:\n    steps:\n      - run: |\n          echo 'a # b'\n"
                 )
             ],
             ["echo 'a # b'"],
@@ -949,8 +967,10 @@ class WorkflowAgreementTests(unittest.TestCase):
         # satisfy the archived-run requirement while no step ran anything.
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
-                "        run: >-\n          cargo nextest run",
-                "        env:\n          command: >-\n            cargo nextest run",
+                ARCHIVE_RUN_STEP,
+                "      - env:\n"
+                "          command: cargo nextest run --run-ignored only\n"
+                "        run: echo no archived run\n",
             )
         )
 
@@ -1038,7 +1058,8 @@ class WorkflowAgreementTests(unittest.TestCase):
         commented = AGREEING_WORKFLOW.replace(
             "      - uses: actions/upload-artifact@v7\n"
             "        with:\n"
-            "          name: postgres-integration-archive-alpha\n",
+            "          name: postgres-integration-archive-alpha\n"
+            "          path: ${{ runner.temp }}/alpha.tar.zst\n",
             "      # dropped: postgres-integration-archive-alpha\n",
         )
 
@@ -1051,7 +1072,8 @@ class WorkflowAgreementTests(unittest.TestCase):
         renamed = AGREEING_WORKFLOW.replace(
             "      - uses: actions/upload-artifact@v7\n"
             "        with:\n"
-            "          name: postgres-integration-archive-alpha\n",
+            "          name: postgres-integration-archive-alpha\n"
+            "          path: ${{ runner.temp }}/alpha.tar.zst\n",
             "      - name: postgres-integration-archive-alpha\n"
             "        run: echo not an upload\n",
         )

@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, DirectModelSelection, FrozenAliasDefinition, FrozenModelSelection,
     GoalGeneration, GoalTurnSource, ModelAlias, ModelSelectionRequest, OriginConfiguration,
-    SessionId, SessionInputPosition, TurnId,
+    SessionId, SessionInputPosition, TurnId, TurnTerminalCause,
 };
 use sqlx::{FromRow, PgConnection, types::Uuid};
 
@@ -13,10 +13,10 @@ use crate::{
     mapping::{
         accepted_input_id_to_uuid, dangerous_tool_auto_approval_to_str,
         defaults_version_to_numeric, input_position_from_numeric, input_position_to_numeric,
-        session_id_to_uuid, turn_id_to_uuid,
+        session_id_to_uuid, turn_id_to_uuid, turn_terminal_cause_to_str,
     },
     model_settings_resolution,
-    outbox::{self, OutboxEvent},
+    outbox::{self, OutboxEvent, TurnTerminalOutboxDisposition},
 };
 
 /// Fresh identities for one goal-owned accepted-input origin and turn.
@@ -38,9 +38,13 @@ impl GoalTurnInsertion {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(signalbox_derive::Accessors, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GoalTurnCandidates {
+    /// Returns the accepted-input candidate.
+    #[get(copy)]
     accepted_input: AcceptedInputId,
+    /// Returns the turn candidate.
+    #[get(copy)]
     turn: TurnId,
 }
 
@@ -49,6 +53,7 @@ pub(crate) enum GoalTurnTerminalState {
     NotTerminal,
     Completed,
     Unsuccessful,
+    Retired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,16 +118,6 @@ impl GoalTurnCandidates {
             accepted_input,
             turn,
         }
-    }
-
-    /// Returns the accepted-input candidate.
-    pub const fn accepted_input(self) -> AcceptedInputId {
-        self.accepted_input
-    }
-
-    /// Returns the turn candidate.
-    pub const fn turn(self) -> TurnId {
-        self.turn
     }
 }
 
@@ -294,12 +289,12 @@ pub(crate) async fn insert_goal_turn(
 
 /// Records an existing queued turn as the goal turn of one generation.
 ///
-/// A repository-watch dispatch submits its tagged context through its own
-/// command before the goal it commissions exists, so the generation cannot mint
-/// the turn that carries it. Binding writes the `goal_turn` row alone: the
-/// accepted input, queued origin, lifecycle, and model-settings resolution the
-/// turn already owns are exactly the ones the generation adopts, and writing
-/// them again would fabricate a second history for a turn that has one.
+/// A commissioned dispatch submits its context through its input command before
+/// the commissioned goal exists, so the generation cannot mint the turn that
+/// carries it. Binding writes the `goal_turn` row alone: the accepted input,
+/// queued origin, lifecycle, and model-settings resolution the turn already owns
+/// are exactly the ones the generation adopts, and writing them again would
+/// fabricate a second history for a turn that has one.
 ///
 /// No `InputAccepted` outbox event is appended here. The command that accepted
 /// this turn already published one naming the same accepted input and turn, and
@@ -454,6 +449,7 @@ pub(crate) async fn goal_turn_terminal_state(
         ("terminal", Some("refused" | "failed" | "cancelled" | "reconciliation_required")) => {
             Ok(GoalTurnTerminalState::Unsuccessful)
         }
+        ("terminal", Some("retired")) => Ok(GoalTurnTerminalState::Retired),
         ("queued" | "active" | "terminal", _) => {
             Err(GoalCorruption::Inconsistent("goal turn terminal shape").into())
         }
@@ -482,37 +478,70 @@ pub(crate) async fn continuation_exists(
     .await?)
 }
 
-pub(crate) async fn retired_queued_goal_turn_without_outbox(
+/// Retires the queued goal turn that is no longer eligible to run.
+///
+/// The turn reaches `terminal{retired}` and its `turn_terminal` event appends
+/// in the caller's transaction; a session with no such turn changes nothing.
+pub(crate) async fn retire_ineligible_queued_goal_turn(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<Option<TurnId>, GoalRepositoryError> {
     let turn = sqlx::query_scalar::<_, Uuid>(
-        "SELECT goal.turn_id
-           FROM goal_turn AS goal
-           JOIN accepted_input AS accepted
-             ON accepted.accepted_input_id = goal.accepted_input_id
-            AND accepted.session_id = goal.session_id
-            AND accepted.origin_turn_id = goal.turn_id
-           JOIN turn_lifecycle AS lifecycle
-             ON lifecycle.session_id = goal.session_id
-            AND lifecycle.turn_id = goal.turn_id
+        "UPDATE turn_lifecycle AS lifecycle
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'retired',
+                terminal_cause_kind = $2
+          WHERE lifecycle.session_id = $1
             AND lifecycle.state_kind = 'queued'
-           LEFT JOIN goal_turn_retired_outbox_event AS retired
-             ON retired.session_id = goal.session_id
-            AND retired.turn_id = goal.turn_id
-          WHERE goal.session_id = $1
-            AND retired.turn_id IS NULL
-            AND NOT goal_turn_is_runtime_relevant(
-                goal.session_id,
-                goal.turn_id
+            AND lifecycle.turn_id = (
+                SELECT goal.turn_id
+                  FROM goal_turn AS goal
+                  JOIN accepted_input AS accepted
+                    ON accepted.accepted_input_id = goal.accepted_input_id
+                   AND accepted.session_id = goal.session_id
+                   AND accepted.origin_turn_id = goal.turn_id
+                  JOIN turn_lifecycle AS queued
+                    ON queued.session_id = goal.session_id
+                   AND queued.turn_id = goal.turn_id
+                   AND queued.state_kind = 'queued'
+                 WHERE goal.session_id = $1
+                   AND (
+                       NOT goal_turn_is_runtime_relevant(
+                           goal.session_id,
+                           goal.turn_id
+                       )
+                       OR NOT EXISTS (
+                           SELECT 1
+                             FROM session_lifecycle AS session
+                            WHERE session.session_id = goal.session_id
+                              AND session.owned
+                       )
+                   )
+                 ORDER BY accepted.acceptance_position DESC
+                 LIMIT 1
             )
-          ORDER BY accepted.acceptance_position DESC
-          LIMIT 1",
+        RETURNING lifecycle.turn_id",
     )
     .bind(session_id_to_uuid(session))
+    .bind(turn_terminal_cause_to_str(
+        TurnTerminalCause::GoalTurnIneligible,
+    ))
     .fetch_optional(&mut *connection)
     .await?;
-    Ok(turn.map(crate::mapping::turn_id_from_uuid))
+    let Some(turn) = turn else {
+        return Ok(None);
+    };
+    let turn = crate::mapping::turn_id_from_uuid(turn);
+    outbox::append(
+        connection,
+        OutboxEvent::TurnTerminal {
+            session,
+            turn,
+            disposition: TurnTerminalOutboxDisposition::Retired,
+        },
+    )
+    .await?;
+    Ok(Some(turn))
 }
 
 struct EncodedSelection {

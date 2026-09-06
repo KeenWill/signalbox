@@ -7,7 +7,6 @@ mod approval_judge;
 mod attention;
 mod blob_derivation;
 mod commissioned_dispatch;
-mod convergence_reconciliation;
 mod conversation_import;
 mod create_session;
 mod create_session_from_imported_frontier;
@@ -17,13 +16,12 @@ mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
 mod repo_watch;
-mod repo_watch_operations;
-mod repo_watch_webhook;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
 mod search;
 mod session_delegation;
+mod session_live;
 mod session_metadata;
 mod session_timeline;
 mod start_eligible_turn;
@@ -48,9 +46,9 @@ pub use approval_judge::{
 pub use attention::{
     AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
     AttentionChanges, AttentionContinuation, AttentionCursor, AttentionGoalBlock,
-    AttentionJudgeFacts, AttentionQuery, AttentionQueryError, AttentionReader, AttentionSnapshot,
-    AttentionSort, AttentionState, AttentionSummary, max_attention_change_items,
-    max_attention_filter_tags, max_attention_filter_utf8_bytes,
+    AttentionJudgeFacts, AttentionLifecycleState, AttentionQuery, AttentionQueryError,
+    AttentionReader, AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary,
+    max_attention_change_items, max_attention_filter_tags, max_attention_filter_utf8_bytes,
     max_attention_goal_summary_characters, max_attention_snapshot_items,
     max_attention_title_characters,
 };
@@ -63,10 +61,6 @@ pub use commissioned_dispatch::{
     CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,
     CommissionedDispatchIdGenerator, PreparedCommissionedDispatch,
     UuidV7CommissionedDispatchIdGenerator,
-};
-pub use convergence_reconciliation::{
-    PullRequestCheck, PullRequestCheckState, PullRequestConvergence, PullRequestConvergenceBlocker,
-    PullRequestConvergenceFacts, PullRequestDraftState, evaluate_pull_request_convergence,
 };
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
@@ -117,49 +111,19 @@ pub use replace_session_defaults::{
 pub use repo_watch::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration,
     RepoWatchCheckCompletionGenerationError, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
-    RepoWatchConvergenceAssessmentError, RepoWatchConvergenceAssessmentInput,
-    RepoWatchConvergenceVerdict, RepoWatchDifferError, RepoWatchDifferFailureKind,
-    RepoWatchDispatchIdGenerator, RepoWatchDispatchPreparationError, RepoWatchDispatchService,
-    RepoWatchDispatchServiceError, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
-    RepoWatchEventIdGenerator, RepoWatchEventIdentityFrontierEntryV1,
-    RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventOccurrenceV1, RepoWatchMergedCheckRunBaselineV1,
-    RepoWatchMergedCheckSuiteBaselineV1, RepoWatchMergedPullRequestBaselineInputV1,
-    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
-    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
-    RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey, RepoWatchStaleReviewClearanceCandidate,
-    RepoWatchStaleReviewClearanceCandidateError, RepoWatchTemplateResolver,
+    RepoWatchCheckSuiteObservation, RepoWatchDifferError, RepoWatchDifferFailureKind,
+    RepoWatchEventContentIdentityV1, RepoWatchEventIdGenerator,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierError,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
+    RepoWatchMergedCheckRunBaselineV1, RepoWatchMergedCheckSuiteBaselineV1,
+    RepoWatchMergedPullRequestBaselineInputV1, RepoWatchMergedPullRequestBaselineV1,
+    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
     RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
-    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
     derive_repo_watch_events_with_merged_baselines,
     repo_watch_events_have_equal_identified_content,
-};
-pub use repo_watch_operations::{
-    RepoWatchActivityPage, RepoWatchAutomationStatus, RepoWatchChecksStatus, RepoWatchDraftStatus,
-    RepoWatchEventCursor, RepoWatchEventKindCount, RepoWatchHeldCursor, RepoWatchHeldSlot,
-    RepoWatchHeldSlotBlocker, RepoWatchLatestWebhook, RepoWatchObligationCursor,
-    RepoWatchObligationId, RepoWatchObligationReadiness, RepoWatchOperationsReader,
-    RepoWatchOperatorDispatch, RepoWatchOperatorEvent, RepoWatchOperatorSettlement,
-    RepoWatchPagePosition, RepoWatchPullRequestOperations, RepoWatchPullRequestOperationsFacts,
-    RepoWatchPullRequestPage, RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage,
-    RepoWatchQueuedObligation, RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage,
-    RepoWatchReviewStatus, RepoWatchSessionCursor, RepoWatchSessionPurpose,
-    RepoWatchWebhookActivity, RepoWatchWebhookDisposition, RepoWatchWebhookWindow,
-    RepoWatchWorkPage, max_repo_watch_activity_page_items, max_repo_watch_operations_page_items,
-};
-pub use repo_watch_webhook::{
-    RepoWatchBranchHeadPreviousV1, RepoWatchObservationApplyV1, RepoWatchObservationChangeV1,
-    RepoWatchObservationPatchV1, RepoWatchPullRequestHeadGuardV1,
-    RepoWatchPullRequestMissingPolicyV1, RepoWatchTargetedRefreshCoalescerV1,
-    RepoWatchTargetedRefreshV1, RepoWatchWebhookApplyError, RepoWatchWebhookBodyReferenceV1,
-    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
-    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
-    RepoWatchWebhookPullRequestContextV1, RepoWatchWebhookPullRequestContextV1Input,
-    apply_repo_watch_observation_patch_v1, map_repo_watch_webhook_delivery_v1,
 };
 pub use review_orchestration::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
@@ -187,7 +151,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
-    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_ordinary_pass_limit,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound,
 };
 pub use search::{
     MAX_SEARCH_HIGHLIGHTS_PER_RESULT, SearchArtifactId, SearchArtifactProjection,
@@ -199,6 +163,11 @@ pub use search::{
     max_search_query_bytes, max_search_snippet_bytes,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
+pub use session_live::{
+    ReadSessionLiveService, SessionLiveActiveState, SessionLiveActiveTurn, SessionLiveReader,
+    SessionLiveReconciliation, SessionLiveRunner, SessionLiveRunnerConnectionHealth,
+    SessionLiveRunnerState, SessionLiveSnapshot, max_session_live_queued_turns,
+};
 pub use session_metadata::{
     ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
     ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
@@ -208,10 +177,16 @@ pub use session_metadata::{
 };
 pub use session_timeline::{
     ReadSessionTimelineService, SessionTimelineBounds, SessionTimelineDescriptor,
+    SessionTimelineDetail, SessionTimelineDetailBody, SessionTimelineDetailPage,
     SessionTimelineEventKind, SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts,
-    SessionTimelineWindow, SessionWorkFacts, TimelineAddress, TimelineContinuation,
-    TimelineWindowAnchor, TimelineWindowLimitError, TimelineWindowLimits,
-    max_timeline_window_bytes, max_timeline_window_items, min_timeline_window_bytes,
+    SessionTimelineWindow, SessionWorkFacts, TimelineAddress, TimelineBlobReference,
+    TimelineBodyContinuation, TimelineBodyField, TimelineContinuation, TimelineDetailContinuation,
+    TimelineDetailCursor, TimelineDetailLimitError, TimelineDetailLimits,
+    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage, TimelineTextExcerpt,
+    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimitError,
+    TimelineWindowLimits, max_timeline_detail_bytes, max_timeline_detail_items,
+    max_timeline_window_bytes, max_timeline_window_items, min_timeline_detail_bytes,
+    min_timeline_window_bytes, timeline_detail_envelope_bytes,
 };
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
@@ -252,9 +227,10 @@ pub use tool_loop_ports::{
 pub use turn_liveness::{
     AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
     AutomaticReconciliationFailureKind, AutomaticReconciliationOperation,
-    AutomaticReconciliationOutcome, ClaimedAutomaticReconciliation,
+    AutomaticReconciliationOutcome, ClaimedAutomaticReconciliation, DurableTurnLivenessObservation,
     ExhaustedAutomaticReconciliation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
-    TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
+    TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessGuardKind, TurnLivenessLedger,
+    TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,

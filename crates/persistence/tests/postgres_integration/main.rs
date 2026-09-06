@@ -19,13 +19,20 @@ mod delegation_schema;
 mod delegation_transactions;
 mod frontier_validation;
 mod hub_fence;
+mod lifecycle_measurement;
+mod lifecycle_metrics;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;
 mod outbox_dispatch_and_process_read;
+mod ownership_seam_grants;
 mod restart_recovery_and_submit;
 mod search;
 mod session_creation_and_submit;
+mod session_deadline;
+mod session_lifecycle;
+mod session_lifecycle_commands;
+mod session_live;
 mod session_plan;
 mod session_timeline;
 mod tool_round_lifecycle;
@@ -58,11 +65,12 @@ use signalbox_application::{
     InProcessAttemptDispatchGate, LoadSessionService, ModelCallAuthorizationReread,
     ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
     ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallObservationCommitOutcome,
-    ModelConversationMessage, OperatorFailureClass, PromptMemberStatement,
-    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
-    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallProvider,
-    ScriptedModelCallStep, SessionIdGenerator, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
+    ModelConversationMessage, OperatorFailureClass, PreparedModelCallFailureCause,
+    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
+    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputService, ToolAttemptAuthorizationOutcome, ToolAttemptAuthorizationStatus,
     ToolCatalog, ToolDefinition, ToolInputSchema, ToolPreauthorization,
@@ -89,27 +97,28 @@ use signalbox_domain::{
     ModelTargetDefinition, NormalizedToolArguments, OverrideDeniedToolRequest,
     OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
     PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
-    PreparedCreateSession, PreparedModelCallRequest, ProviderModelCallFailureCause,
-    ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel, RecordedUserOverride,
-    RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionPlacement, SessionPlacementPath, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, SettingOverlay,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
-    ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDecisionSource,
-    ToolDenialReason, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault,
-    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent, UserContentPart,
+    PreparedCreateSession, PreparedModelCallRequest, ProviderCompactionBlock,
+    ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
+    ReasoningLevel, RecordedUserOverride, RefusedModelCallTurnIdentities, ReplaceSessionDefaults,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionInputPosition, SessionOwnership, SessionPlacement, SessionPlacementPath,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, SettingOverlay, StoppedToolResponsePartIdentity,
+    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptCrashOutcome,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure,
+    ToolCallProposal, ToolDecisionRationale, ToolDecisionSource, ToolDenialReason,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
+    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, TurnTerminalCause, UserContent, UserContentPart,
 };
 use signalbox_persistence::{
-    MIGRATOR, ModelCredentialFamilyCatalog,
+    ModelCredentialFamilyCatalog,
     approval_judge::{
         AuthorizeApprovalJudgeOutcome, AuthorizedApprovalJudge, CompleteApprovalJudgeOutcome,
         FailedApprovalJudgeDisposition, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
@@ -143,10 +152,11 @@ use signalbox_persistence::{
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationPolicy, DispatchedDelegationProvenance,
         DispatchedDelegationReason, DispatchedDelegationUpdate, DispatchedDelegationWaitMode,
-        DispatchedDelegationWake, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
-        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
-        OutboxDispatcher,
+        DispatchedDelegationWake, DispatchedInjectionOutcome, DispatchedModelCallState,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
+        DispatchedSessionCreation, DispatchedToolBatchState, DispatchedTurnTerminalDisposition,
+        OutboxConsumer, OutboxConsumerReader, OutboxCorruption, OutboxDeliveryDecision,
+        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
@@ -174,9 +184,9 @@ use signalbox_persistence::{
         SessionDelegationCorruption, SessionDelegationRepository, SessionDelegationRepositoryError,
     },
     start_eligible_turn::{
-        CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
-        StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,
-        StartEligibleTurnRepositoryError,
+        CommitActivationPreviewOutcome, CommitCountedAttachmentFailurePreviewOutcome,
+        StartEligibleTurnCorruption, StartEligibleTurnIdentityCollision,
+        StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
     },
     startup::PostgresStartupScanRepository,
     submit_input::{
@@ -191,13 +201,13 @@ use signalbox_tools_plan::{
     PlanEvent, PlanEventDraft, PlanEventKind, PlanEventProvenance, PlanPageCompleteness,
     PlanReadRequest, PlanReadiness, PlanStatus, PlanText,
 };
-use sqlx::{PgConnection, PgPool, Row, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 
-use support::blocked_backends_reached;
+use support::{blocked_backends_reached, blocked_backends_reached_on};
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_integration";
@@ -486,6 +496,8 @@ async fn insert_raw_delegation(
     .bind(fixture.child.into_uuid())
     .execute(&mut *connection)
     .await?;
+    // Delegated creation is owned in production.
+    insert_raw_session_lifecycle(&mut *connection, fixture.child.into_uuid(), true).await?;
     sqlx::query("INSERT INTO session_scheduler(session_id) VALUES ($1)")
         .bind(fixture.child.into_uuid())
         .execute(&mut *connection)
@@ -745,8 +757,8 @@ async fn append_raw_parent_lifecycle_update(
     .await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command_id)
     .execute(&mut *connection)
@@ -814,8 +826,8 @@ async fn insert_raw_parent_lifecycle_without_update(
     .await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'goal', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'goal', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command_id)
     .execute(&mut *connection)
@@ -1644,14 +1656,6 @@ struct AutomaticApprovalEventState {
 }
 
 #[derive(Debug, PartialEq, sqlx::FromRow)]
-struct ApprovalDecisionEventBackfillState {
-    request_id: Uuid,
-    turn_id: Uuid,
-    session_id: Uuid,
-    event_kind: String,
-}
-
-#[derive(Debug, PartialEq, sqlx::FromRow)]
 struct AppliedApprovalJudgeProjection {
     judge_state: String,
     recommendation: String,
@@ -1737,10 +1741,12 @@ async fn dispatched_tool_reconciliation(
     drain_outbox(pool, |event| {
         if matches!(
             event.kind(),
-            DispatchedOutboxEventKind::TurnReconciliationRequired {
+            DispatchedOutboxEventKind::TurnTerminal {
                 turn,
-                operation: DispatchedReconciliationOperation::ToolAttempt(attempt),
-                ..
+                disposition: DispatchedTurnTerminalDisposition::ReconciliationRequired {
+                    operation: DispatchedReconciliationOperation::ToolAttempt(attempt),
+                    ..
+                },
             } if *turn == expected_turn && *attempt == expected_attempt
         ) {
             dispatched = true;
@@ -1892,163 +1898,6 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, Stri
     Ok((container, pool, database_url))
 }
 
-async fn apply_migrations_before(pool: &PgPool, exclusive_version: i64) -> Result<(), sqlx::Error> {
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR
-        .iter()
-        .take_while(|migration| migration.version < exclusive_version)
-    {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    Ok(())
-}
-
-async fn postgres_before_approval_migration()
--> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let (container, pool, database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR
-        .iter()
-        .take_while(|migration| migration.version < 202608020015)
-    {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
-    Ok((container, pool, database_url))
-}
-
-async fn postgres_before_approval_event_migration()
--> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let (container, pool, database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR
-        .iter()
-        .take_while(|migration| migration.version < 202608030001)
-    {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
-    Ok((container, pool, database_url))
-}
-
-/// The attention journal migration, whose backfill the fixture below stages.
-const OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION: i64 = 202608250800;
-/// The catalog activity substrate depends on the attention journal and is also
-/// withheld while staging the journal's historical backfill fixture.
-const SESSION_CATALOG_ACTIVITY_MIGRATION_VERSION: i64 = 202608260003;
-
-/// Stages the database an existing installation carries when the attention
-/// journal ships: every independent migration applied, the journal and its
-/// later catalog substrate not.
-///
-/// The staged database is written through current repository code, which
-/// requires the current schema, so the fixture withholds exactly the migration
-/// under test and its one dependent migration rather than every migration
-/// recorded after it.
-async fn postgres_before_attention_migration()
--> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let (container, pool, database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR.iter().filter(|migration| {
-        migration.version != OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION
-            && migration.version != SESSION_CATALOG_ACTIVITY_MIGRATION_VERSION
-    }) {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
-    Ok((container, pool, database_url))
-}
-
-/// `command_registry`'s inspection query names every registered durable
-/// command's typed table regardless of the database's migration state (see
-/// `crates/persistence/src/command_registry.rs`), so a "before" fixture used
-/// by any path that inspects a durable command must still carry every such
-/// table even though it otherwise predates the migration under test.
-/// `override_denied_tool_request_command` (added by `202608170006`, after
-/// this fixture's boundary) is the only registry table introduced between
-/// this boundary and that migration — no other `COMMAND_KIND_DEFINITIONS`
-/// table is created in `202608140001..202608170006` — so admitting that one
-/// migration alone satisfies the registry while every workspace-instruction
-/// table (created by `202608140001` itself) stays absent, preserving this
-/// fixture's "historical DB" premise.
-const OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION: i64 = 202608170006;
-
-async fn postgres_before_workspace_instruction_migration()
--> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let (container, pool, database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR.iter().filter(|migration| {
-        migration.version < 202608140001
-            || migration.version == OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION
-    }) {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
-    Ok((container, pool, database_url))
-}
-
-async fn apply_workspace_instruction_migration(pool: &PgPool) -> Result<(), Box<dyn Error>> {
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR.iter().filter(|migration| {
-        migration.version >= 202608140001
-            && migration.version != OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION
-    }) {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    Ok(())
-}
-
-async fn insert_pre_approval_tool_request(
-    pool: &PgPool,
-    request_seed: u128,
-) -> Result<Uuid, Box<dyn Error>> {
-    const SESSION_OFFSET: u128 = 1;
-    const TURN_OFFSET: u128 = 2;
-    const PRODUCING_CALL_OFFSET: u128 = 3;
-    let request = Uuid::from_u128(request_seed);
-    let mut connection = pool.acquire().await?;
-    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
-        .execute(&mut *connection)
-        .await?;
-    sqlx::query(
-        "INSERT INTO tool_request
-            (request_id, session_id, turn_id, producing_model_call_id,
-             request_ordinal, tool_name, arguments_kind, arguments_text)
-         VALUES ($1, $2, $3, $4, 0, $5, 'json', $6)",
-    )
-    .bind(request)
-    .bind(Uuid::from_u128(request_seed + SESSION_OFFSET))
-    .bind(Uuid::from_u128(request_seed + TURN_OFFSET))
-    .bind(Uuid::from_u128(request_seed + PRODUCING_CALL_OFFSET))
-    .bind(APPROVAL_TOOL_NAME)
-    .bind(APPROVAL_ARGUMENTS)
-    .execute(&mut *connection)
-    .await?;
-    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
-        .execute(&mut *connection)
-        .await?;
-
-    Ok(request)
-}
-
 async fn insert_pending_compact_command(
     pool: &PgPool,
     command: Uuid,
@@ -2082,8 +1931,8 @@ async fn insert_pending_compact_command(
     .await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'compact_session', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'compact_session', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)
@@ -2159,7 +2008,7 @@ async fn insert_completed_context_compaction_call(
     .await?;
     sqlx::query(
         "UPDATE context_compaction_model_call
-         SET state_kind = 'in_flight'
+         SET state_kind = 'in_flight', in_flight_at = clock_timestamp()
          WHERE model_call_id = $1",
     )
     .bind(call)
@@ -2167,7 +2016,8 @@ async fn insert_completed_context_compaction_call(
     .await?;
     sqlx::query(
         "UPDATE context_compaction_model_call
-         SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+         SET state_kind = 'terminal', terminal_at = clock_timestamp(),
+             terminal_disposition_kind = 'completed',
              input_tokens = 17, output_tokens = 5
          WHERE model_call_id = $1",
     )
@@ -2363,10 +2213,7 @@ fn prepared(
 ) -> PreparedCreateSession {
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(selection),
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
@@ -2404,10 +2251,7 @@ fn prepared_with_low_reasoning(
     .expect("the fixture settings belong to the direct selection");
     CreateSession::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         defaults,
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
@@ -2492,7 +2336,7 @@ async fn append_session_created_test_event(
     let sequence = sqlx::query_scalar(
         "INSERT INTO outbox_event
             (event_kind, storage_version, session_id)
-         VALUES ('session_created', 1, $1)
+         VALUES ('session_created', 2, $1)
          RETURNING event_sequence",
     )
     .bind(session)
@@ -2501,8 +2345,9 @@ async fn append_session_created_test_event(
 
     sqlx::query(
         "INSERT INTO session_created_outbox_event
-            (event_sequence, event_kind, storage_version, session_id)
-         VALUES ($1, 'session_created', 1, $2)",
+            (event_sequence, event_kind, storage_version, session_id,
+             creation_cause, owned)
+         VALUES ($1, 'session_created', 2, $2, 'interactive', false)",
     )
     .bind(sequence)
     .bind(session)
@@ -2572,20 +2417,21 @@ async fn drain_cancellation_dispatches(
 ) -> Result<Vec<CancellationDispatch>, OutboxDispatchError> {
     let mut cancellations = Vec::new();
     drain_outbox(pool, |event| {
-        let DispatchedOutboxEventKind::TurnCancelled {
-            turn,
-            cancellation_entry,
-            terminal_frontier,
-        } = event.kind()
+        let (
+            Some(session),
+            DispatchedOutboxEventKind::TurnTerminal {
+                turn,
+                disposition:
+                    DispatchedTurnTerminalDisposition::Cancelled {
+                        cancellation_entry,
+                        terminal_frontier,
+                    },
+            },
+        ) = (event.session(), event.kind())
         else {
             return;
         };
-        cancellations.push((
-            event.session(),
-            *turn,
-            *cancellation_entry,
-            *terminal_frontier,
-        ));
+        cancellations.push((session, *turn, *cancellation_entry, *terminal_frontier));
     })
     .await?;
     Ok(cancellations)
@@ -2603,15 +2449,21 @@ async fn drain_reconciliation_dispatches(
 ) -> Result<Vec<ReconciliationDispatch>, OutboxDispatchError> {
     let mut reconciliations = Vec::new();
     drain_outbox(pool, |event| {
-        let DispatchedOutboxEventKind::TurnReconciliationRequired {
-            turn,
-            operation,
-            terminal_frontier,
-        } = event.kind()
+        let (
+            Some(session),
+            DispatchedOutboxEventKind::TurnTerminal {
+                turn,
+                disposition:
+                    DispatchedTurnTerminalDisposition::ReconciliationRequired {
+                        operation,
+                        terminal_frontier,
+                    },
+            },
+        ) = (event.session(), event.kind())
         else {
             return;
         };
-        reconciliations.push((event.session(), *turn, *operation, *terminal_frontier));
+        reconciliations.push((session, *turn, *operation, *terminal_frontier));
     })
     .await?;
     Ok(reconciliations)
@@ -2661,23 +2513,23 @@ async fn rewind_outbox_delivery_before(
     sequence: Decimal,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(pool)
     .await?;
@@ -2687,11 +2539,49 @@ async fn rewind_outbox_delivery_before(
 /// Inserts the complete pre-outbox session record family for allocator tests.
 ///
 /// The command and model identities derive from the one session seed.
+/// Gives one raw-SQL session fixture the lifecycle row every session owns.
+///
+/// `session` carries a deferred foreign key to its satellite, so a fixture
+/// that inserts a session row by statement owes the same row a creation path
+/// writes — including the ownership its creation cause establishes, since an
+/// owned fixture that recorded itself unmonitored would run with a posture
+/// production never produces.
+async fn insert_raw_session_lifecycle(
+    connection: &mut sqlx::PgConnection,
+    session: Uuid,
+    owned: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO session_lifecycle
+            (session_id, state_kind, owned, start_gate_held, actor_kind)
+         VALUES ($1, 'created', $2, false, 'operator')",
+    )
+    .bind(session)
+    .bind(owned)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_ownership_event
+            (session_id, event_ordinal, transition_kind, owned_after, actor_kind)
+         VALUES ($1, 1, $2, $3, 'operator')",
+    )
+    .bind(session)
+    .bind(if owned {
+        "created_owned"
+    } else {
+        "created_unmonitored"
+    })
+    .bind(owned)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 async fn insert_outbox_session_fixture(
     pool: &PgPool,
     session_seed: u128,
 ) -> Result<Uuid, sqlx::Error> {
-    insert_outbox_session_fixture_with_creation_cause(pool, session_seed, "user_initiated").await
+    insert_outbox_session_fixture_with_creation_cause(pool, session_seed, "interactive").await
 }
 
 /// Seeds the outbox session fixture with an explicit `creation_cause`.
@@ -2712,8 +2602,8 @@ async fn insert_outbox_session_fixture_with_creation_cause(
 
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'create_session', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'create_session', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *transaction)
@@ -2726,6 +2616,7 @@ async fn insert_outbox_session_fixture_with_creation_cause(
     .bind(creation_cause)
     .execute(&mut *transaction)
     .await?;
+    insert_raw_session_lifecycle(&mut transaction, session, false).await?;
     sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
         .bind(session)
         .execute(&mut *transaction)
@@ -2752,12 +2643,12 @@ async fn insert_outbox_session_fixture_with_creation_cause(
             (command_id, command_kind, storage_version,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             result_kind, created_session_id)
+             result_kind, created_session_id, start_gate, ownership)
          VALUES (
             $1, 'create_session', 1,
             $4, 'none', 1,
             'direct', $2, NULL,
-            'applied', $3
+            'applied', $3, 'open', 'unmonitored'
          )",
     )
     .bind(command)
@@ -2911,8 +2802,8 @@ async fn insert_malformed_submit_rejection(
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         SELECT $1, command_kind, storage_version, transaction_timestamp()
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         SELECT $1, command_kind, storage_version, transaction_timestamp(), 'operator'
            FROM durable_command
           WHERE command_id = $2",
     )
@@ -2981,8 +2872,8 @@ async fn insert_cross_wired_occupied_rejection(
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         SELECT $1, command_kind, storage_version, transaction_timestamp()
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         SELECT $1, command_kind, storage_version, transaction_timestamp(), 'operator'
            FROM durable_command
           WHERE command_id = $2",
     )
@@ -3054,8 +2945,8 @@ async fn insert_parked_approval_interrupt_rejection(
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         SELECT $1, command_kind, storage_version, transaction_timestamp()
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         SELECT $1, command_kind, storage_version, transaction_timestamp(), 'operator'
            FROM durable_command
           WHERE command_id = $2",
     )
@@ -3181,6 +3072,14 @@ impl SubmitInputIdGenerator for FixedSubmitInputIds {
 
     fn next_context_frontier_id(&mut self) -> ContextFrontierId {
         ContextFrontierId::from_uuid(next_test_submit_uuid())
+    }
+
+    fn next_closure_decision_command_id(&mut self) -> DurableCommandId {
+        DurableCommandId::from_uuid(next_test_submit_uuid())
+    }
+
+    fn next_closure_turn_attempt_id(&mut self) -> TurnAttemptId {
+        TurnAttemptId::from_uuid(next_test_submit_uuid())
     }
 }
 
@@ -3734,7 +3633,11 @@ async fn checkpoint_suppressed_tool_round(
         .expect("the suppressed proposal forms one inert tool response");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     let outcome = model_repository
         .apply_terminal_observation(
             fixture.session,
@@ -3783,6 +3686,7 @@ async fn checkpoint_tool_batch_with_approval_and_attachment(
         initial_approval,
         ProviderReportedTokenUsage::unreported(),
         attachment,
+        None,
     )
     .await
 }
@@ -3809,6 +3713,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage(
         initial_approval,
         usage,
         None,
+        None,
     )
     .await
 }
@@ -3820,6 +3725,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
     initial_approval: InitialToolApproval,
     usage: ProviderReportedTokenUsage,
     attachment: Option<BlobDigest>,
+    provider_compaction: Option<ProviderCompactionBlock>,
 ) -> Result<
     (
         RestartModelCallFixture,
@@ -3841,28 +3747,38 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
         })
         .collect::<Vec<_>>();
     let response = ToolUsingAssistantResponse::try_from_parts(
-        proposals
+        provider_compaction
             .iter()
-            .map(|(tool_name, arguments)| {
+            .cloned()
+            .map(AssistantResponsePart::ProviderCompaction)
+            .chain(proposals.iter().map(|(tool_name, arguments)| {
                 AssistantResponsePart::ToolCall(ToolCallProposal::new(
                     ToolName::try_new(String::from(*tool_name)).expect("valid fixture tool name"),
                     NormalizedToolArguments::try_from_provider_text(String::from(*arguments))
                         .expect("bounded fixture arguments"),
                 ))
-            })
+            }))
             .collect(),
     )
     .expect("the proposals form a tool-using response");
     let observation = authorized
         .observation_correlation()
         .bind_terminal_observation_with_usage(
-            ModelCallTerminalObservation::CompletedWithTools { response },
+            ModelCallTerminalObservation::CompletedWithTools {
+                response,
+                retained_input_tokens: provider_compaction.as_ref().map(|_| 10),
+                retained_output_tokens: provider_compaction.as_ref().map(|_| 5),
+            },
             usage,
         );
-    let identities = requests
+    let identities = provider_compaction
         .iter()
-        .enumerate()
-        .map(|(index, request)| {
+        .map(|_| {
+            ToolResponsePartIdentity::provider_compaction(SemanticTranscriptEntryId::from_uuid(
+                Uuid::from_u128(seed + 0x7f),
+            ))
+        })
+        .chain(requests.iter().enumerate().map(|(index, request)| {
             ToolResponsePartIdentity::tool_call(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
                     seed + 0x80 + u128::try_from(index).expect("the bounded batch index fits u128"),
@@ -3870,7 +3786,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
                 *request,
                 initial_approval,
             )
-        })
+        }))
         .collect();
     let outcome = model_repository
         .apply_terminal_observation(
@@ -4022,6 +3938,9 @@ fn assert_goal_transition_applied(outcome: &GoalTransitionOutcome) {
         }
         GoalTransitionOutcome::NotCurrentGoalTurn => {
             panic!("the goal transition named a turn outside the current goal generation")
+        }
+        GoalTransitionOutcome::SessionClosing => {
+            panic!("the goal transition found a pending session closure")
         }
     }
 }
@@ -4249,8 +4168,8 @@ async fn insert_user_approval_decision_event(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command)
     .execute(&mut *connection)
@@ -4396,29 +4315,30 @@ fn announcement_for(
         // reported resolved one way or another; an effect that may or may not
         // have happened admits none of those. `TurnReconciliationRequired` is
         // the honest terminal announcement for ambiguity and is not definitive.
-        DispatchedOutboxEventKind::TurnCompleted { turn, .. }
-        | DispatchedOutboxEventKind::TurnFailed { turn, .. }
-        | DispatchedOutboxEventKind::TurnRefused { turn, .. }
-        | DispatchedOutboxEventKind::TurnCancelled { turn, .. }
-            if *turn == fixture_turn =>
-        {
-            AmbiguityAnnouncement::DefinitiveTurnOutcome
-        }
+        DispatchedOutboxEventKind::TurnTerminal {
+            turn,
+            disposition:
+                DispatchedTurnTerminalDisposition::Completed { .. }
+                | DispatchedTurnTerminalDisposition::Failed { .. }
+                | DispatchedTurnTerminalDisposition::Refused { .. }
+                | DispatchedTurnTerminalDisposition::Cancelled { .. },
+        } if *turn == fixture_turn => AmbiguityAnnouncement::DefinitiveTurnOutcome,
         DispatchedOutboxEventKind::ToolBatchTransition { .. }
-        | DispatchedOutboxEventKind::TurnCompleted { .. }
-        | DispatchedOutboxEventKind::TurnFailed { .. }
-        | DispatchedOutboxEventKind::TurnRefused { .. }
-        | DispatchedOutboxEventKind::TurnCancelled { .. }
-        | DispatchedOutboxEventKind::SessionCreated
+        | DispatchedOutboxEventKind::TurnTerminal { .. }
+        | DispatchedOutboxEventKind::SessionCreated(_)
+        | DispatchedOutboxEventKind::SessionStateChanged(_)
+        | DispatchedOutboxEventKind::SessionTerminal(_)
+        | DispatchedOutboxEventKind::GoalChanged(_)
+        | DispatchedOutboxEventKind::CommandSettled { .. }
+        | DispatchedOutboxEventKind::InjectionSettled { .. }
+        | DispatchedOutboxEventKind::SessionOwnershipChanged(_)
         | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
         | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
         | DispatchedOutboxEventKind::InputAccepted { .. }
-        | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::TurnActivated { .. }
         | DispatchedOutboxEventKind::ModelCallTransition { .. }
         | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
         | DispatchedOutboxEventKind::ContextCompacted { .. }
-        | DispatchedOutboxEventKind::TurnReconciliationRequired { .. }
         | DispatchedOutboxEventKind::DelegationUpdate(_)
         | DispatchedOutboxEventKind::DelegationWake(_)
         | DispatchedOutboxEventKind::RunnerStateTransition { .. } => {
@@ -4489,7 +4409,10 @@ fn announced_failed_turns(dispatched: &[DispatchedOutboxEventKind]) -> Vec<TurnI
     dispatched
         .iter()
         .filter_map(|kind| match kind {
-            DispatchedOutboxEventKind::TurnFailed { turn, .. } => Some(*turn),
+            DispatchedOutboxEventKind::TurnTerminal {
+                turn,
+                disposition: DispatchedTurnTerminalDisposition::Failed { .. },
+            } => Some(*turn),
             _ => None,
         })
         .collect()
@@ -5088,7 +5011,11 @@ async fn prepare_delegated_tool_crash_fixture(
     let observation = fixture
         .authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     let outcome = fixture
         .repository
         .apply_terminal_observation(
@@ -5184,6 +5111,7 @@ async fn delegated_capability_failure_fixture(
         .fail_prepared_call(
             child,
             call,
+            PreparedModelCallFailureCause::CapabilityKnownFailure,
             None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27)),
@@ -5475,6 +5403,8 @@ async fn assert_delegated_nonterminal_reread_rejects_result(
                     .observation_correlation()
                     .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
                         response,
+                        retained_input_tokens: None,
+                        retained_output_tokens: None,
                     }),
                 ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
                     vec![ToolResponsePartIdentity::tool_call(

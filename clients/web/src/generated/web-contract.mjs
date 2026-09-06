@@ -101,7 +101,8 @@ const schemas = {
           "user_input_required",
           "external_change_required",
           "authorization_required",
-          "execution_failure"
+          "execution_failure",
+          "finish_check_failed"
         ],
         "type": "string"
       },
@@ -156,6 +157,20 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebAttentionLifecycleState": {
+        "description": "The durable session state one attention summary projects.",
+        "enum": [
+          "created",
+          "dispatched",
+          "active",
+          "waiting",
+          "recovering",
+          "blocked",
+          "parked",
+          "terminal"
+        ],
+        "type": "string"
+      },
       "WebAttentionState": {
         "enum": [
           "active",
@@ -166,6 +181,7 @@ const schemas = {
           "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
+          "parked",
           "idle"
         ],
         "type": "string"
@@ -206,6 +222,9 @@ const schemas = {
           "last_activity": {
             "$ref": "#/$defs/WebAttentionActivity"
           },
+          "lifecycle_state": {
+            "$ref": "#/$defs/WebAttentionLifecycleState"
+          },
           "session_id": {
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
@@ -217,6 +236,7 @@ const schemas = {
         "required": [
           "session_id",
           "state",
+          "lifecycle_state",
           "judge",
           "last_activity"
         ],
@@ -294,7 +314,8 @@ const schemas = {
           "user_input_required",
           "external_change_required",
           "authorization_required",
-          "execution_failure"
+          "execution_failure",
+          "finish_check_failed"
         ],
         "type": "string"
       },
@@ -349,6 +370,20 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebAttentionLifecycleState": {
+        "description": "The durable session state one attention summary projects.",
+        "enum": [
+          "created",
+          "dispatched",
+          "active",
+          "waiting",
+          "recovering",
+          "blocked",
+          "parked",
+          "terminal"
+        ],
+        "type": "string"
+      },
       "WebAttentionSnapshot": {
         "additionalProperties": false,
         "properties": {
@@ -387,6 +422,7 @@ const schemas = {
           "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
+          "parked",
           "idle"
         ],
         "type": "string"
@@ -427,6 +463,9 @@ const schemas = {
           "last_activity": {
             "$ref": "#/$defs/WebAttentionActivity"
           },
+          "lifecycle_state": {
+            "$ref": "#/$defs/WebAttentionLifecycleState"
+          },
           "session_id": {
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
@@ -438,6 +477,7 @@ const schemas = {
         "required": [
           "session_id",
           "state",
+          "lifecycle_state",
           "judge",
           "last_activity"
         ],
@@ -730,8 +770,16 @@ const schemas = {
             "description": "Bounded lexical search with stable history reveal addresses is available.",
             "type": "boolean"
           },
+          "bounded_session_live": {
+            "description": "Bounded current snapshots and snapshot-first live follow are available.",
+            "type": "boolean"
+          },
           "bounded_session_timeline": {
             "description": "Stable bounded session descriptors and historical windows are available.",
+            "type": "boolean"
+          },
+          "bounded_session_timeline_detail": {
+            "description": "Typed item, turn, and contiguous-region detail reads are available.",
             "type": "boolean"
           },
           "bounded_usage_cost": {
@@ -773,6 +821,8 @@ const schemas = {
           "import_discovery",
           "imported_continuations",
           "bounded_session_timeline",
+          "bounded_session_timeline_detail",
+          "bounded_session_live",
           "bounded_lexical_search",
           "bounded_usage_cost"
         ],
@@ -831,6 +881,24 @@ const schemas = {
             "minimum": 0,
             "type": "integer"
           },
+          "max_session_live_queued_turns": {
+            "description": "Maximum queued turn identities retained in one live snapshot.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeline_detail_bytes": {
+            "description": "Maximum projected typed-body bytes in one detail response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeline_detail_items": {
+            "description": "Maximum detailed timeline records in one response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_timeline_window_bytes": {
             "description": "Maximum projected structured item bytes in one timeline window.",
             "format": "uint32",
@@ -861,6 +929,9 @@ const schemas = {
           "max_ndjson_item_bytes",
           "max_timeline_window_items",
           "max_timeline_window_bytes",
+          "max_timeline_detail_items",
+          "max_timeline_detail_bytes",
+          "max_session_live_queued_turns",
           "max_search_query_bytes",
           "max_search_page_items",
           "max_search_snippet_bytes",
@@ -1882,1528 +1953,6 @@ const schemas = {
     "title": "WebImportListRequest",
     "type": "object"
   },
-  "WebRepoWatchActivityPage": {
-    "$defs": {
-      "WebRepoWatchEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "cursor_generation": {
-            "type": "string"
-          },
-          "event_ordinal": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "id": {
-            "type": "string"
-          },
-          "kind": {
-            "$ref": "#/$defs/WebRepoWatchEventKind"
-          },
-          "observed_at_unix_milliseconds": {
-            "type": "string"
-          },
-          "pull_request": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "cursor_generation",
-          "event_ordinal",
-          "kind",
-          "observed_at_unix_milliseconds"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchEventCursor": {
-        "additionalProperties": false,
-        "properties": {
-          "cursor_generation": {
-            "type": "string"
-          },
-          "event_ordinal": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "cursor_generation",
-          "event_ordinal"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchEventKind": {
-        "enum": [
-          "pull_request_opened",
-          "pull_request_closed",
-          "pull_request_merged",
-          "head_changed",
-          "mergeable_state_changed",
-          "checks_completed",
-          "check_run_completed",
-          "branch_workflow_run_completed",
-          "review_submitted",
-          "thread_opened",
-          "thread_resolved",
-          "labeled",
-          "unlabeled",
-          "base_advanced",
-          "reaction_changed"
-        ],
-        "type": "string"
-      },
-      "WebRepoWatchWebhookActivity": {
-        "additionalProperties": false,
-        "properties": {
-          "action_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "disposition": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchWebhookDisposition"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "event_name": {
-            "type": "string"
-          },
-          "latest_projected_at_unix_milliseconds": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "projection_count": {
-            "type": "string"
-          },
-          "receipt_sequence": {
-            "type": "string"
-          },
-          "received_at_unix_milliseconds": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "receipt_sequence",
-          "event_name",
-          "received_at_unix_milliseconds",
-          "projection_count"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchWebhookDisposition": {
-        "enum": [
-          "projected",
-          "committed",
-          "duplicate_state",
-          "superseded",
-          "ignored",
-          "quarantined"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "event_continuation_before": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/WebRepoWatchEventCursor"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "events": {
-        "items": {
-          "$ref": "#/$defs/WebRepoWatchEvent"
-        },
-        "maxItems": 100,
-        "type": "array"
-      },
-      "webhook_continuation_before_receipt_sequence": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "webhooks": {
-        "items": {
-          "$ref": "#/$defs/WebRepoWatchWebhookActivity"
-        },
-        "maxItems": 100,
-        "type": "array"
-      }
-    },
-    "required": [
-      "events",
-      "webhooks"
-    ],
-    "title": "WebRepoWatchActivityPage",
-    "type": "object"
-  },
-  "WebRepoWatchPullRequestPage": {
-    "$defs": {
-      "WebRepoWatchAutomationStatus": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "unattempted",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "dispatch_id": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "held",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "dispatch_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "queued",
-                "type": "string"
-              },
-              "latest_event_id": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "latest_event_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "dispatch_id": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "non_converged",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "dispatch_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "dispatch_id": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "stale_seal",
-                "type": "string"
-              },
-              "sealed_event_id": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "dispatch_id",
-              "sealed_event_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "dispatch_id": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "current_head_sealed",
-                "type": "string"
-              },
-              "sealed_event_id": {
-                "type": "string"
-              },
-              "settled_at_unix_milliseconds": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "dispatch_id",
-              "sealed_event_id",
-              "settled_at_unix_milliseconds"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "WebRepoWatchChecksStatus": {
-        "enum": [
-          "no_completed_suites",
-          "passing",
-          "failing"
-        ],
-        "type": "string"
-      },
-      "WebRepoWatchDispatch": {
-        "additionalProperties": false,
-        "properties": {
-          "attempted_at_unix_milliseconds": {
-            "type": "string"
-          },
-          "event_id": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string"
-          },
-          "rule": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "event_id",
-          "rule",
-          "attempted_at_unix_milliseconds"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchDraftStatus": {
-        "enum": [
-          "draft",
-          "ready_for_review"
-        ],
-        "type": "string"
-      },
-      "WebRepoWatchEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "cursor_generation": {
-            "type": "string"
-          },
-          "event_ordinal": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "id": {
-            "type": "string"
-          },
-          "kind": {
-            "$ref": "#/$defs/WebRepoWatchEventKind"
-          },
-          "observed_at_unix_milliseconds": {
-            "type": "string"
-          },
-          "pull_request": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "cursor_generation",
-          "event_ordinal",
-          "kind",
-          "observed_at_unix_milliseconds"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchEventKind": {
-        "enum": [
-          "pull_request_opened",
-          "pull_request_closed",
-          "pull_request_merged",
-          "head_changed",
-          "mergeable_state_changed",
-          "checks_completed",
-          "check_run_completed",
-          "branch_workflow_run_completed",
-          "review_submitted",
-          "thread_opened",
-          "thread_resolved",
-          "labeled",
-          "unlabeled",
-          "base_advanced",
-          "reaction_changed"
-        ],
-        "type": "string"
-      },
-      "WebRepoWatchLifecycle": {
-        "enum": [
-          "open",
-          "closed",
-          "merged"
-        ],
-        "type": "string"
-      },
-      "WebRepoWatchMergeable": {
-        "enum": [
-          "mergeable",
-          "conflicting",
-          "unknown"
-        ],
-        "type": "string"
-      },
-      "WebRepoWatchPullRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "automation": {
-            "$ref": "#/$defs/WebRepoWatchAutomationStatus"
-          },
-          "base_branch": {
-            "type": "string"
-          },
-          "checks": {
-            "$ref": "#/$defs/WebRepoWatchChecksStatus"
-          },
-          "commissioned_session_count": {
-            "type": "string"
-          },
-          "draft": {
-            "$ref": "#/$defs/WebRepoWatchDraftStatus"
-          },
-          "head": {
-            "type": "string"
-          },
-          "head_branch": {
-            "type": "string"
-          },
-          "head_repository": {
-            "type": "string"
-          },
-          "held_slot_count": {
-            "type": "string"
-          },
-          "last_actionable_event": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchEvent"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "last_automation_settlement": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchSettlement"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "last_dispatch_attempt": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchDispatch"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "last_observed_event": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchEvent"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "lifecycle": {
-            "$ref": "#/$defs/WebRepoWatchLifecycle"
-          },
-          "mergeable": {
-            "$ref": "#/$defs/WebRepoWatchMergeable"
-          },
-          "number": {
-            "type": "string"
-          },
-          "open_child_count": {
-            "type": "string"
-          },
-          "open_parent": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "queued_obligation_count": {
-            "type": "string"
-          },
-          "review_decision": {
-            "$ref": "#/$defs/WebRepoWatchReviewDecision"
-          },
-          "stale_review_count": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "unresolved_thread_count": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "number",
-          "title",
-          "head",
-          "head_repository",
-          "head_branch",
-          "base_branch",
-          "lifecycle",
-          "mergeable",
-          "draft",
-          "checks",
-          "review_decision",
-          "stale_review_count",
-          "unresolved_thread_count",
-          "open_child_count",
-          "automation",
-          "held_slot_count",
-          "queued_obligation_count",
-          "commissioned_session_count"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchReviewDecision": {
-        "enum": [
-          "none",
-          "commented",
-          "approved",
-          "changes_requested"
-        ],
-        "type": "string"
-      },
-      "WebRepoWatchSettlement": {
-        "additionalProperties": false,
-        "properties": {
-          "dispatch_id": {
-            "type": "string"
-          },
-          "event_id": {
-            "type": "string"
-          },
-          "settled_at_unix_milliseconds": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "dispatch_id",
-          "event_id",
-          "settled_at_unix_milliseconds"
-        ],
-        "type": "object"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "continuation_after_pull_request": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "pull_requests": {
-        "items": {
-          "$ref": "#/$defs/WebRepoWatchPullRequest"
-        },
-        "maxItems": 64,
-        "type": "array"
-      },
-      "repository": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "repository",
-      "pull_requests"
-    ],
-    "title": "WebRepoWatchPullRequestPage",
-    "type": "object"
-  },
-  "WebRepoWatchPullRequestSessionPage": {
-    "$defs": {
-      "WebAttentionAction": {
-        "enum": [
-          "provide_goal_need",
-          "decide_approval",
-          "reconcile_turn"
-        ],
-        "type": "string"
-      },
-      "WebAttentionActivity": {
-        "additionalProperties": false,
-        "properties": {
-          "kind": {
-            "$ref": "#/$defs/WebAttentionActivityKind"
-          },
-          "unix_milliseconds": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "unix_milliseconds",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "WebAttentionActivityKind": {
-        "enum": [
-          "session",
-          "turn",
-          "goal",
-          "approval_judge",
-          "runner"
-        ],
-        "type": "string"
-      },
-      "WebAttentionBlockedReason": {
-        "enum": [
-          "user_input_required",
-          "external_change_required",
-          "authorization_required",
-          "execution_failure"
-        ],
-        "type": "string"
-      },
-      "WebAttentionGoalBlock": {
-        "additionalProperties": false,
-        "properties": {
-          "generation": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "need_summary": {
-            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
-            "maxLength": 128,
-            "type": "string"
-          },
-          "reason": {
-            "$ref": "#/$defs/WebAttentionBlockedReason"
-          }
-        },
-        "required": [
-          "generation",
-          "reason",
-          "need_summary"
-        ],
-        "type": "object"
-      },
-      "WebAttentionJudgeFacts": {
-        "additionalProperties": false,
-        "properties": {
-          "actionable": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "completed": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "escalated": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          },
-          "failed": {
-            "pattern": "^(0|[1-9][0-9]*)$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "actionable",
-          "completed",
-          "escalated",
-          "failed"
-        ],
-        "type": "object"
-      },
-      "WebAttentionState": {
-        "enum": [
-          "active",
-          "queued",
-          "blocked",
-          "awaiting_approval",
-          "ambiguous",
-          "awaiting_tool_recovery",
-          "awaiting_reconciliation",
-          "runner_lost",
-          "idle"
-        ],
-        "type": "string"
-      },
-      "WebAttentionSummary": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebAttentionAction"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "current_turn_id": {
-            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "goal_block": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebAttentionGoalBlock"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "judge": {
-            "$ref": "#/$defs/WebAttentionJudgeFacts"
-          },
-          "last_activity": {
-            "$ref": "#/$defs/WebAttentionActivity"
-          },
-          "session_id": {
-            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-            "type": "string"
-          },
-          "state": {
-            "$ref": "#/$defs/WebAttentionState"
-          }
-        },
-        "required": [
-          "session_id",
-          "state",
-          "judge",
-          "last_activity"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchPullRequestSession": {
-        "additionalProperties": false,
-        "properties": {
-          "attention": {
-            "$ref": "#/$defs/WebAttentionSummary"
-          },
-          "commissioned_at_unix_microseconds": {
-            "type": "string"
-          },
-          "purpose": {
-            "$ref": "#/$defs/WebRepoWatchSessionPurpose"
-          }
-        },
-        "required": [
-          "commissioned_at_unix_microseconds",
-          "purpose",
-          "attention"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchSessionCursor": {
-        "additionalProperties": false,
-        "properties": {
-          "commissioned_at_unix_microseconds": {
-            "type": "string"
-          },
-          "session_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "commissioned_at_unix_microseconds",
-          "session_id"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchSessionPurpose": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "dispatch_id": {
-                "type": "string"
-              },
-              "event_id": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "rule_dispatch",
-                "type": "string"
-              },
-              "rule": {
-                "type": "string"
-              },
-              "template": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "dispatch_id",
-              "event_id",
-              "rule",
-              "template"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "dispatch_id": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "operator_commission",
-                "type": "string"
-              },
-              "template": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "dispatch_id",
-              "template"
-            ],
-            "type": "object"
-          }
-        ]
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "continuation_before": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/WebRepoWatchSessionCursor"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "sessions": {
-        "items": {
-          "$ref": "#/$defs/WebRepoWatchPullRequestSession"
-        },
-        "maxItems": 64,
-        "type": "array"
-      }
-    },
-    "required": [
-      "sessions"
-    ],
-    "title": "WebRepoWatchPullRequestSessionPage",
-    "type": "object"
-  },
-  "WebRepoWatchRepositoryStatusPage": {
-    "$defs": {
-      "WebRepoWatchDispatch": {
-        "additionalProperties": false,
-        "properties": {
-          "attempted_at_unix_milliseconds": {
-            "type": "string"
-          },
-          "event_id": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string"
-          },
-          "rule": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "event_id",
-          "rule",
-          "attempted_at_unix_milliseconds"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "cursor_generation": {
-            "type": "string"
-          },
-          "event_ordinal": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "id": {
-            "type": "string"
-          },
-          "kind": {
-            "$ref": "#/$defs/WebRepoWatchEventKind"
-          },
-          "observed_at_unix_milliseconds": {
-            "type": "string"
-          },
-          "pull_request": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "cursor_generation",
-          "event_ordinal",
-          "kind",
-          "observed_at_unix_milliseconds"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchEventKind": {
-        "enum": [
-          "pull_request_opened",
-          "pull_request_closed",
-          "pull_request_merged",
-          "head_changed",
-          "mergeable_state_changed",
-          "checks_completed",
-          "check_run_completed",
-          "branch_workflow_run_completed",
-          "review_submitted",
-          "thread_opened",
-          "thread_resolved",
-          "labeled",
-          "unlabeled",
-          "base_advanced",
-          "reaction_changed"
-        ],
-        "type": "string"
-      },
-      "WebRepoWatchEventKindCount": {
-        "additionalProperties": false,
-        "properties": {
-          "count": {
-            "type": "string"
-          },
-          "kind": {
-            "$ref": "#/$defs/WebRepoWatchEventKind"
-          }
-        },
-        "required": [
-          "kind",
-          "count"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchLatestWebhook": {
-        "additionalProperties": false,
-        "properties": {
-          "action_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "event_name": {
-            "type": "string"
-          },
-          "receipt_sequence": {
-            "type": "string"
-          },
-          "received_at_unix_milliseconds": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "receipt_sequence",
-          "event_name",
-          "received_at_unix_milliseconds"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchRepositoryStatus": {
-        "additionalProperties": false,
-        "properties": {
-          "cursor_generation": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "event_kind_counts_previous_hour": {
-            "items": {
-              "$ref": "#/$defs/WebRepoWatchEventKindCount"
-            },
-            "type": "array"
-          },
-          "held_slot_count": {
-            "type": "string"
-          },
-          "last_actionable_event": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchEvent"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "last_automation_settlement": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchSettlement"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "last_dispatch_attempt": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchDispatch"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "last_observed_event": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchEvent"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "latest_projection_latency_milliseconds": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "latest_webhook": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebRepoWatchLatestWebhook"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "maximum_projection_latency_milliseconds_previous_hour": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "observed_at_unix_milliseconds": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "previous_five_minutes": {
-            "$ref": "#/$defs/WebRepoWatchWebhookWindow"
-          },
-          "previous_hour": {
-            "$ref": "#/$defs/WebRepoWatchWebhookWindow"
-          },
-          "queued_obligation_count": {
-            "type": "string"
-          },
-          "repository": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "previous_five_minutes",
-          "previous_hour",
-          "event_kind_counts_previous_hour",
-          "held_slot_count",
-          "queued_obligation_count"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchSettlement": {
-        "additionalProperties": false,
-        "properties": {
-          "dispatch_id": {
-            "type": "string"
-          },
-          "event_id": {
-            "type": "string"
-          },
-          "settled_at_unix_milliseconds": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "dispatch_id",
-          "event_id",
-          "settled_at_unix_milliseconds"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchWebhookWindow": {
-        "additionalProperties": false,
-        "properties": {
-          "projected": {
-            "type": "string"
-          },
-          "quarantined": {
-            "type": "string"
-          },
-          "received": {
-            "type": "string"
-          },
-          "seconds": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "terminal": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "seconds",
-          "received",
-          "projected",
-          "terminal",
-          "quarantined"
-        ],
-        "type": "object"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "continuation_after_repository": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "repositories": {
-        "items": {
-          "$ref": "#/$defs/WebRepoWatchRepositoryStatus"
-        },
-        "maxItems": 64,
-        "type": "array"
-      }
-    },
-    "required": [
-      "repositories"
-    ],
-    "title": "WebRepoWatchRepositoryStatusPage",
-    "type": "object"
-  },
-  "WebRepoWatchWorkPage": {
-    "$defs": {
-      "WebRepoWatchHeldCursor": {
-        "additionalProperties": false,
-        "properties": {
-          "dispatch_id": {
-            "type": "string"
-          },
-          "held_since_unix_microseconds": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "held_since_unix_microseconds",
-          "dispatch_id"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchHeldSlot": {
-        "additionalProperties": false,
-        "properties": {
-          "blockers": {
-            "items": {
-              "$ref": "#/$defs/WebRepoWatchHeldSlotBlocker"
-            },
-            "type": "array"
-          },
-          "dispatch_id": {
-            "type": "string"
-          },
-          "held_since_unix_microseconds": {
-            "type": "string"
-          },
-          "rule": {
-            "type": "string"
-          },
-          "scope": {
-            "$ref": "#/$defs/WebRepoWatchSingletonScope"
-          },
-          "session_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "dispatch_id",
-          "scope",
-          "rule",
-          "held_since_unix_microseconds",
-          "session_ids",
-          "blockers"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchHeldSlotBlocker": {
-        "enum": [
-          "undelivered_action",
-          "delivery_turn_runtime_relevant",
-          "live_runtime_turn",
-          "pursuing_goal"
-        ],
-        "type": "string"
-      },
-      "WebRepoWatchObligationCursor": {
-        "additionalProperties": false,
-        "properties": {
-          "obligation_id": {
-            "type": "string"
-          },
-          "owed_since_unix_microseconds": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "owed_since_unix_microseconds",
-          "obligation_id"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchObligationReadiness": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "ready",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "dispatch_id": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "occupied",
-                "type": "string"
-              },
-              "session_ids": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "kind",
-              "dispatch_id",
-              "session_ids"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "description": "Held by a live independently commissioned session, which owns no\nrepository-watch dispatch identity to report alongside it.",
-            "properties": {
-              "kind": {
-                "const": "externally_blocked",
-                "type": "string"
-              },
-              "session_ids": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "kind",
-              "session_ids"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "eligible_at_unix_milliseconds": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "kind": {
-                "const": "cooldown",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "parked",
-                "type": "string"
-              },
-              "parked_at_unix_milliseconds": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "parked_at_unix_milliseconds"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "WebRepoWatchQueuedObligation": {
-        "additionalProperties": false,
-        "properties": {
-          "failed_attempts": {
-            "type": "string"
-          },
-          "first_event_id": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string"
-          },
-          "latest_event_id": {
-            "type": "string"
-          },
-          "latest_match_at_unix_milliseconds": {
-            "type": "string"
-          },
-          "matched_event_count": {
-            "type": "string"
-          },
-          "owed_since_unix_microseconds": {
-            "type": "string"
-          },
-          "readiness": {
-            "$ref": "#/$defs/WebRepoWatchObligationReadiness"
-          },
-          "rule": {
-            "type": "string"
-          },
-          "scope": {
-            "$ref": "#/$defs/WebRepoWatchSingletonScope"
-          }
-        },
-        "required": [
-          "id",
-          "scope",
-          "rule",
-          "first_event_id",
-          "latest_event_id",
-          "matched_event_count",
-          "owed_since_unix_microseconds",
-          "latest_match_at_unix_milliseconds",
-          "failed_attempts",
-          "readiness"
-        ],
-        "type": "object"
-      },
-      "WebRepoWatchSingletonScope": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "pull_request",
-                "type": "string"
-              },
-              "number": {
-                "type": "string"
-              },
-              "repository": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "repository",
-              "number"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "stack",
-                "type": "string"
-              },
-              "repository": {
-                "type": "string"
-              },
-              "root_pull_request": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "repository",
-              "root_pull_request"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "rule",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "repository",
-                "type": "string"
-              },
-              "repository": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "repository"
-            ],
-            "type": "object"
-          }
-        ]
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "held_continuation_after": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/WebRepoWatchHeldCursor"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "held_slots": {
-        "items": {
-          "$ref": "#/$defs/WebRepoWatchHeldSlot"
-        },
-        "maxItems": 64,
-        "type": "array"
-      },
-      "obligation_continuation_after": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/WebRepoWatchObligationCursor"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "queued_obligations": {
-        "items": {
-          "$ref": "#/$defs/WebRepoWatchQueuedObligation"
-        },
-        "maxItems": 64,
-        "type": "array"
-      }
-    },
-    "required": [
-      "held_slots",
-      "queued_obligations"
-    ],
-    "title": "WebRepoWatchWorkPage",
-    "type": "object"
-  },
   "WebSearchPage": {
     "$defs": {
       "WebSearchContentClass": {
@@ -3764,7 +2313,8 @@ const schemas = {
           "user_input_required",
           "external_change_required",
           "authorization_required",
-          "execution_failure"
+          "execution_failure",
+          "finish_check_failed"
         ],
         "type": "string"
       },
@@ -3829,6 +2379,7 @@ const schemas = {
           "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
+          "parked",
           "idle"
         ],
         "type": "string"
@@ -4028,6 +2579,923 @@ const schemas = {
     "title": "WebSessionCatalogSnapshot",
     "type": "object"
   },
+  "WebSessionLiveSnapshot": {
+    "$defs": {
+      "WebLiveResourceId": {
+        "description": "Checked canonical UUID used for browser-visible live resource identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebSessionLiveActiveState": {
+        "description": "Current durable state of one active turn.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "running",
+                "type": "string"
+              },
+              "model_call_id": {
+                "anyOf": [
+                  {
+                    "description": "Checked canonical UUID used for browser-visible live resource identities.",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_model_call_recovery",
+                "type": "string"
+              },
+              "model_call_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_approval",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "kind": {
+                "const": "awaiting_child",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id",
+              "child_session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_recovery",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_attempt_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_runner_recovery",
+                "type": "string"
+              },
+              "placement_revision": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "runner_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "runner_id",
+              "placement_revision"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionLiveRunnerConnectionHealth": {
+        "enum": [
+          "connected",
+          "suspect",
+          "shutdown",
+          "lost"
+        ],
+        "type": "string"
+      },
+      "WebTurnId": {
+        "description": "Checked canonical UUID used for browser-visible turn identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded repeatable-read current projection for one open workspace.",
+    "properties": {
+      "active": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "$ref": "#/$defs/WebSessionLiveActiveState"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebTurnId"
+              }
+            },
+            "required": [
+              "turn_id",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "observed_through": {
+        "$ref": "#/$defs/WebPositiveU64"
+      },
+      "queued_turn_count": {
+        "$ref": "#/$defs/WebU64"
+      },
+      "queued_turn_ids": {
+        "items": {
+          "$ref": "#/$defs/WebTurnId"
+        },
+        "maxItems": 32,
+        "type": "array"
+      },
+      "reconciliation": {
+        "anyOf": [
+          {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "model_call",
+                    "type": "string"
+                  },
+                  "model_call_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "turn_id": {
+                    "$ref": "#/$defs/WebTurnId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "turn_id",
+                  "model_call_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "tool_attempt",
+                    "type": "string"
+                  },
+                  "tool_attempt_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "turn_id": {
+                    "$ref": "#/$defs/WebTurnId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "turn_id",
+                  "tool_attempt_id"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "runner": {
+        "anyOf": [
+          {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "state": {
+                    "const": "unpinned",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "placement_revision"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "connection_health": {
+                    "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
+                  },
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "runner_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "state": {
+                    "const": "pinned",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "runner_id",
+                  "placement_revision",
+                  "connection_health"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "runner_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "state": {
+                    "const": "runner_lost_before_pin",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "runner_id",
+                  "placement_revision"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "runner_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "state": {
+                    "const": "runner_lost",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "runner_id",
+                  "placement_revision"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "placement_revision": {
+                    "$ref": "#/$defs/WebPositiveU64"
+                  },
+                  "runner_id": {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  "state": {
+                    "const": "runner_abandoned",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "runner_id",
+                  "placement_revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "session_id": {
+        "$ref": "#/$defs/WebSessionId"
+      }
+    },
+    "required": [
+      "session_id",
+      "observed_through",
+      "active",
+      "queued_turn_count",
+      "queued_turn_ids",
+      "reconciliation",
+      "runner"
+    ],
+    "title": "WebSessionLiveSnapshot",
+    "type": "object"
+  },
+  "WebSessionLiveStreamEvent": {
+    "$defs": {
+      "WebLiveResourceId": {
+        "description": "Checked canonical UUID used for browser-visible live resource identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebSessionLiveActiveState": {
+        "description": "Current durable state of one active turn.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "running",
+                "type": "string"
+              },
+              "model_call_id": {
+                "anyOf": [
+                  {
+                    "description": "Checked canonical UUID used for browser-visible live resource identities.",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_model_call_recovery",
+                "type": "string"
+              },
+              "model_call_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_approval",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "kind": {
+                "const": "awaiting_child",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id",
+              "child_session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_recovery",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_attempt_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "awaiting_runner_recovery",
+                "type": "string"
+              },
+              "placement_revision": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "runner_id": {
+                "$ref": "#/$defs/WebLiveResourceId"
+              }
+            },
+            "required": [
+              "kind",
+              "runner_id",
+              "placement_revision"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionLiveRunnerConnectionHealth": {
+        "enum": [
+          "connected",
+          "suspect",
+          "shutdown",
+          "lost"
+        ],
+        "type": "string"
+      },
+      "WebSessionLiveSnapshot": {
+        "additionalProperties": false,
+        "description": "Bounded repeatable-read current projection for one open workspace.",
+        "properties": {
+          "active": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "state": {
+                    "$ref": "#/$defs/WebSessionLiveActiveState"
+                  },
+                  "turn_id": {
+                    "$ref": "#/$defs/WebTurnId"
+                  }
+                },
+                "required": [
+                  "turn_id",
+                  "state"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_through": {
+            "$ref": "#/$defs/WebPositiveU64"
+          },
+          "queued_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "queued_turn_ids": {
+            "items": {
+              "$ref": "#/$defs/WebTurnId"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "reconciliation": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "model_call",
+                        "type": "string"
+                      },
+                      "model_call_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "turn_id": {
+                        "$ref": "#/$defs/WebTurnId"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "turn_id",
+                      "model_call_id"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "tool_attempt",
+                        "type": "string"
+                      },
+                      "tool_attempt_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "turn_id": {
+                        "$ref": "#/$defs/WebTurnId"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "turn_id",
+                      "tool_attempt_id"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runner": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "state": {
+                        "const": "unpinned",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "connection_health": {
+                        "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
+                      },
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "pinned",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision",
+                      "connection_health"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "runner_lost_before_pin",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "runner_lost",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "runner_abandoned",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "observed_through",
+          "active",
+          "queued_turn_count",
+          "queued_turn_ids",
+          "reconciliation",
+          "runner"
+        ],
+        "type": "object"
+      },
+      "WebSessionTimelineEventKind": {
+        "description": "Closed durable event categories in the browser timeline foundation.",
+        "enum": [
+          "session_created",
+          "session_state_changed",
+          "session_terminal",
+          "goal_changed",
+          "command_settled",
+          "injection_settled",
+          "session_ownership_changed",
+          "session_model_settings_changed",
+          "turn_model_settings_resolved",
+          "input_accepted",
+          "goal_turn_retired",
+          "turn_activated",
+          "turn_failed",
+          "model_call_transition",
+          "tool_batch_transition",
+          "tool_approval_decided",
+          "context_compacted",
+          "turn_completed",
+          "turn_refused",
+          "turn_cancelled",
+          "turn_reconciliation_required",
+          "runner_state_transition",
+          "delegation_update",
+          "delegation_wake"
+        ],
+        "type": "string"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTurnId": {
+        "description": "Checked canonical UUID used for browser-visible turn identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Snapshot-first event stream for one open workspace.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "snapshot",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/$defs/WebSessionLiveSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "cursor": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "event_kind": {
+            "$ref": "#/$defs/WebSessionTimelineEventKind"
+          },
+          "kind": {
+            "const": "durable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor",
+          "address",
+          "event_kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "provider_text_delta",
+            "type": "string"
+          },
+          "model_call_id": {
+            "$ref": "#/$defs/WebLiveResourceId"
+          },
+          "part_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_id": {
+            "$ref": "#/$defs/WebTurnId"
+          }
+        },
+        "required": [
+          "kind",
+          "turn_id",
+          "model_call_id",
+          "part_index",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Positive because production starts from a positive snapshot cursor."
+          },
+          "kind": {
+            "const": "resync_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WebSessionLiveStreamEvent"
+  },
   "WebSessionTimelineDescriptor": {
     "$defs": {
       "WebSessionId": {
@@ -4140,6 +3608,547 @@ const schemas = {
     "title": "WebSessionTimelineDescriptor",
     "type": "object"
   },
+  "WebSessionTimelineDetailPage": {
+    "$defs": {
+      "WebBlobId": {
+        "description": "Checked canonical SHA-256 identity used for browser-visible blob references.",
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "WebProviderModelCallFailureCause": {
+        "description": "Closed provider-neutral failure cause exposed at the browser boundary.",
+        "enum": [
+          "credential_rejected",
+          "permission_denied",
+          "invalid_request",
+          "target_not_found",
+          "request_too_large",
+          "rate_limited",
+          "quota_exhausted",
+          "overloaded",
+          "provider_internal",
+          "unrecognized"
+        ],
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebSessionTimelineDetail": {
+        "additionalProperties": false,
+        "description": "One typed body at a stable timeline address.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "body": {
+            "$ref": "#/$defs/WebSessionTimelineDetailBody"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebSessionTimelineEventKind"
+          },
+          "projected_body_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "kind",
+          "body",
+          "projected_body_bytes"
+        ],
+        "type": "object"
+      },
+      "WebSessionTimelineDetailBody": {
+        "description": "Typed browser body, distinct from application and persistence projections.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attachments": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineBlobReference"
+                },
+                "maxItems": 256,
+                "type": "array"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "user_input",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "text",
+              "attachments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "model_call_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "model_identity_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "provider_failure_cause": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebProviderModelCallFailureCause"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "request_context_items": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "response": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/WebTimelineModelCallState"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "model_call",
+                "type": "string"
+              },
+              "usage": {
+                "$ref": "#/$defs/WebTimelineModelUsage"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "model_call_id",
+              "state",
+              "model_identity_id",
+              "request_context_items",
+              "usage"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause_code": {
+                "type": "string"
+              },
+              "lifecycle": {
+                "$ref": "#/$defs/WebTimelineTurnLifecycleKind"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "turn_lifecycle",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "lifecycle",
+              "cause_code"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/WebSessionTimelineEventKind"
+              },
+              "type": {
+                "const": "event_fact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionTimelineEventKind": {
+        "description": "Closed durable event categories in the browser timeline foundation.",
+        "enum": [
+          "session_created",
+          "session_state_changed",
+          "session_terminal",
+          "goal_changed",
+          "command_settled",
+          "injection_settled",
+          "session_ownership_changed",
+          "session_model_settings_changed",
+          "turn_model_settings_resolved",
+          "input_accepted",
+          "goal_turn_retired",
+          "turn_activated",
+          "turn_failed",
+          "model_call_transition",
+          "tool_batch_transition",
+          "tool_approval_decided",
+          "context_compacted",
+          "turn_completed",
+          "turn_refused",
+          "turn_cancelled",
+          "turn_reconciliation_required",
+          "runner_state_transition",
+          "delegation_update",
+          "delegation_wake"
+        ],
+        "type": "string"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineBlobReference": {
+        "additionalProperties": false,
+        "description": "Reference-only blob fact carried without blob bytes.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/WebBlobId"
+          },
+          "length_bytes": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "media_type": {
+            "description": "Visible-ASCII pattern plus the 255 bound express the multipart\ncontract's \"at most 255 visible ASCII bytes\"; for visible ASCII,\nUTF-16 length equals byte length, so maxLength is a byte bound.",
+            "maxLength": 255,
+            "pattern": "^[!-~]+$",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "blob_id",
+          "length_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineBodyContinuation": {
+        "additionalProperties": false,
+        "description": "Exact continuation within an oversized typed body.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "field": {
+            "$ref": "#/$defs/WebTimelineBodyField"
+          },
+          "member_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset_bytes": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "address",
+          "field",
+          "member_index",
+          "offset_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineBodyField": {
+        "description": "Text-bearing field within one typed timeline body.",
+        "enum": [
+          "input_text",
+          "model_response"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDetailContinuation": {
+        "description": "Explicit next position after a bounded detail response.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/WebTimelineAddress"
+              },
+              "type": {
+                "const": "more_at",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "address"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "$ref": "#/$defs/WebTimelineBodyContinuation"
+              },
+              "type": {
+                "const": "more_body",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "body"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTimelineModelCallDisposition": {
+        "description": "Closed terminal model-call disposition.",
+        "enum": [
+          "completed",
+          "known_failed",
+          "refused",
+          "cancelled",
+          "ambiguous"
+        ],
+        "type": "string"
+      },
+      "WebTimelineModelCallState": {
+        "description": "Closed model-call lifecycle checkpoint with terminal disposition in-band.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "prepared",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "in_flight",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "cancellation_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "disposition": {
+                "$ref": "#/$defs/WebTimelineModelCallDisposition"
+              },
+              "type": {
+                "const": "terminal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "disposition"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelUsage": {
+        "additionalProperties": false,
+        "description": "Independently optional provider-reported usage counts.",
+        "properties": {
+          "cache_creation_input_tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cache_read_input_tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WebTimelineTextExcerpt": {
+        "additionalProperties": false,
+        "description": "Bounded UTF-8 excerpt with explicit completeness evidence.",
+        "properties": {
+          "continuation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineBodyContinuation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "offset_bytes": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "text": {
+            "description": "The generator stamps `max_timeline_detail_bytes()` onto this field as\n`maxLength`: UTF-16 length never exceeds UTF-8 length, so every valid\nexcerpt within the detail byte budget passes that pre-encoding bound.",
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "total_bytes": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "text",
+          "offset_bytes",
+          "total_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineTurnLifecycleKind": {
+        "description": "Closed turn lifecycle boundary.",
+        "enum": [
+          "activated",
+          "terminalized"
+        ],
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded item, turn, or contiguous-region detail response.",
+    "properties": {
+      "continuation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebTimelineDetailContinuation"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "items": {
+        "items": {
+          "$ref": "#/$defs/WebSessionTimelineDetail"
+        },
+        "maxItems": 128,
+        "type": "array"
+      },
+      "projected_body_bytes": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "$ref": "#/$defs/WebSessionId"
+      }
+    },
+    "required": [
+      "session_id",
+      "items",
+      "projected_body_bytes"
+    ],
+    "title": "WebSessionTimelineDetailPage",
+    "type": "object"
+  },
   "WebSessionTimelineWindow": {
     "$defs": {
       "WebSessionId": {
@@ -4151,6 +4160,12 @@ const schemas = {
         "description": "Closed durable event categories in the browser timeline foundation.",
         "enum": [
           "session_created",
+          "session_state_changed",
+          "session_terminal",
+          "goal_changed",
+          "command_settled",
+          "injection_settled",
+          "session_ownership_changed",
           "session_model_settings_changed",
           "turn_model_settings_resolved",
           "input_accepted",
@@ -5014,6 +5029,266 @@ function assertSchema(root, schema, value, path) {
   }
 }
 
+function sameTimelineAddress(left, right) {
+  return left.event_sequence === right.event_sequence;
+}
+
+function sameBodyContinuation(left, right) {
+  return (
+    sameTimelineAddress(left.address, right.address) &&
+    left.field === right.field &&
+    left.member_index === right.member_index &&
+    left.offset_bytes === right.offset_bytes
+  );
+}
+
+function assertTimelineExcerpt(excerpt, address, field, path) {
+  const offset = BigInt(excerpt.offset_bytes);
+  const total = BigInt(excerpt.total_bytes);
+  const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
+  if (offset > total || end > total) {
+    fail(path, "an excerpt within its declared byte range");
+  }
+  if (excerpt.continuation === undefined || excerpt.continuation === null) {
+    if (end !== total) {
+      fail(path, "complete when no continuation is present");
+    }
+    return null;
+  }
+  const continuation = excerpt.continuation;
+  if (continuation.member_index !== 0) {
+    fail(`${path}.continuation.member_index`, "zero for a singular body field");
+  }
+  if (end >= total) {
+    fail(`${path}.continuation`, "present only before the declared body end");
+  }
+  if (!sameTimelineAddress(continuation.address, address) || continuation.field !== field) {
+    fail(`${path}.continuation`, "the same body field at the same address");
+  }
+  if (BigInt(continuation.offset_bytes) !== end) {
+    fail(`${path}.continuation.offset_bytes`, "the byte immediately after the excerpt");
+  }
+  return continuation;
+}
+
+function assertTimelineDetailPage(value) {
+  const maxProjectedBodyBytes = 65536;
+  const detailEnvelopeBytes = 128;
+  const terminalKinds = new Set([
+    "turn_failed",
+    "turn_completed",
+    "turn_refused",
+    "turn_cancelled",
+    "turn_reconciliation_required",
+  ]);
+  const bodyOwnedKinds = new Set([
+    "input_accepted",
+    "model_call_transition",
+    "turn_activated",
+    ...terminalKinds,
+  ]);
+  let expectedBodyContinuation = null;
+  let computedProjectedBodyBytes = 0;
+  let previousAddress = null;
+  value.items.forEach((item, index) => {
+    const path = `timeline_detail_page.items[${index}]`;
+    if (expectedBodyContinuation !== null) {
+      fail(path, "absent after a continued body");
+    }
+    const address = BigInt(item.address.event_sequence);
+    if (previousAddress !== null && address <= previousAddress) {
+      fail(`${path}.address`, "strictly increasing after the previous item");
+    }
+    previousAddress = address;
+    let continuation = null;
+    let textBytes = 0;
+    switch (item.body.type) {
+      case "user_input":
+        if (item.kind !== "input_accepted") {
+          fail(`${path}.kind`, "input_accepted for a user_input body");
+        }
+        continuation = assertTimelineExcerpt(
+          item.body.text,
+          item.address,
+          "input_text",
+          `${path}.body.text`,
+        );
+        textBytes = new TextEncoder().encode(item.body.text.text).byteLength;
+        break;
+      case "model_call":
+        if (item.kind !== "model_call_transition") {
+          fail(`${path}.kind`, "model_call_transition for a model_call body");
+        }
+        if (item.body.response !== undefined && item.body.response !== null) {
+          continuation = assertTimelineExcerpt(
+            item.body.response,
+            item.address,
+            "model_response",
+            `${path}.body.response`,
+          );
+          textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+        }
+        if (item.body.state.type !== "terminal") {
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (
+            (item.body.response !== undefined && item.body.response !== null) ||
+            hasUsage ||
+            (item.body.provider_failure_cause !== undefined &&
+              item.body.provider_failure_cause !== null)
+          ) {
+            fail(
+              `${path}.body`,
+              "terminal evidence only at a terminal model-call state",
+            );
+          }
+        } else {
+          const hasFailureCause =
+            item.body.provider_failure_cause !== undefined &&
+            item.body.provider_failure_cause !== null;
+          if (hasFailureCause && item.body.state.disposition !== "known_failed") {
+            fail(
+              `${path}.body.provider_failure_cause`,
+              "present only for a known_failed terminal model call",
+            );
+          }
+          if (
+            item.body.response !== undefined &&
+            item.body.response !== null &&
+            item.body.state.disposition !== "completed"
+          ) {
+            fail(
+              `${path}.body.response`,
+              "present only for a completed terminal model call",
+            );
+          }
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (hasUsage && item.body.state.disposition === "cancelled") {
+            fail(
+              `${path}.body.usage`,
+              "unreported for a cancelled terminal model call",
+            );
+          }
+        }
+        break;
+      case "turn_lifecycle":
+        if (item.body.lifecycle === "activated" && item.kind !== "turn_activated") {
+          fail(`${path}.kind`, "turn_activated for an activated lifecycle");
+        }
+        if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {
+          fail(`${path}.kind`, "a terminal turn event for a terminalized lifecycle");
+        }
+        const lifecycleCauseByKind = {
+          turn_activated: "activated",
+          turn_failed: "failed",
+          turn_completed: "completed",
+          turn_refused: "refused",
+          turn_cancelled: "cancelled",
+          turn_reconciliation_required: "reconciliation_required",
+        };
+        if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {
+          fail(`${path}.body.cause_code`, `the cause for ${item.kind}`);
+        }
+        break;
+      case "event_fact":
+        if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {
+          fail(`${path}.body.kind`, "the matching header-only event kind");
+        }
+        break;
+      default:
+        fail(`${path}.body.type`, "a detail body variant this decoder classifies");
+    }
+    const computedItemBytes = detailEnvelopeBytes + textBytes;
+    if (item.projected_body_bytes !== computedItemBytes) {
+      fail(`${path}.projected_body_bytes`, `the computed ${computedItemBytes} bytes`);
+    }
+    computedProjectedBodyBytes += computedItemBytes;
+    if (computedProjectedBodyBytes > maxProjectedBodyBytes) {
+      fail("timeline_detail_page.projected_body_bytes", `at most ${maxProjectedBodyBytes} bytes`);
+    }
+    if (continuation !== null) {
+      expectedBodyContinuation = continuation;
+    }
+  });
+  if (value.projected_body_bytes !== computedProjectedBodyBytes) {
+    fail(
+      "timeline_detail_page.projected_body_bytes",
+      `the computed ${computedProjectedBodyBytes} bytes`,
+    );
+  }
+
+  if (value.continuation === undefined || value.continuation === null) {
+    if (expectedBodyContinuation !== null) {
+      fail("timeline_detail_page.continuation", "the excerpt body continuation");
+    }
+    return;
+  }
+  if (value.continuation.type === "more_body") {
+    if (
+      expectedBodyContinuation === null ||
+      !sameBodyContinuation(value.continuation.body, expectedBodyContinuation)
+    ) {
+      fail("timeline_detail_page.continuation.body", "the excerpt body continuation");
+    }
+  } else {
+    if (expectedBodyContinuation !== null) {
+      fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
+    }
+    if (previousAddress === null) {
+      fail("timeline_detail_page.continuation", "absent on an empty page");
+    }
+    if (BigInt(value.continuation.address.event_sequence) <= previousAddress) {
+      fail("timeline_detail_page.continuation.address", "after the final returned item");
+    }
+  }
+}
+
+export function decodeWebSessionTimelineDetailPage(value) {
+  assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
+  assertTimelineDetailPage(value);
+  return value;
+}
+
+function assertLiveSnapshot(snapshot, path) {
+  const queuedTurnCount = BigInt(snapshot.queued_turn_count);
+  const previewLimit = BigInt(32);
+  const expectedPreviewLength = queuedTurnCount > previewLimit ? previewLimit : queuedTurnCount;
+  if (BigInt(snapshot.queued_turn_ids.length) !== expectedPreviewLength) {
+    fail(`${path}.queued_turn_ids`, `exactly ${expectedPreviewLength} IDs for queued_turn_count`);
+  }
+  if (new Set(snapshot.queued_turn_ids).size !== snapshot.queued_turn_ids.length) {
+    fail(`${path}.queued_turn_ids`, "unique turn IDs");
+  }
+  const occupiedTurnId = snapshot.active?.turn_id ?? snapshot.reconciliation?.turn_id;
+  if (occupiedTurnId !== undefined && snapshot.queued_turn_ids.includes(occupiedTurnId)) {
+    fail(`${path}.queued_turn_ids`, "disjoint from active and reconciliation turn IDs");
+  }
+  if (snapshot.active != null && snapshot.reconciliation != null) {
+    fail(`${path}.reconciliation`, "absent while an active turn is present");
+  }
+  if (
+    snapshot.active?.state.kind === "awaiting_child" &&
+    snapshot.active.state.child_session_id === snapshot.session_id
+  ) {
+    fail(`${path}.active.state.child_session_id`, "different from the parent session ID");
+  }
+  if (snapshot.active?.state.kind === "awaiting_runner_recovery") {
+    const recovery = snapshot.active.state;
+    const runner = snapshot.runner;
+    const compatibleRunner =
+      runner != null &&
+      (runner.state === "runner_lost" || runner.state === "runner_lost_before_pin") &&
+      runner.runner_id === recovery.runner_id &&
+      runner.placement_revision === recovery.placement_revision;
+    if (!compatibleRunner) {
+      fail(`${path}.runner`, "the runner placement required by awaiting_runner_recovery");
+    }
+  }
+}
+
 function assertAttentionSummary(summary, path) {
   const action = summary.action ?? null;
   const goalBlock = summary.goal_block ?? null;
@@ -5030,6 +5305,7 @@ function assertAttentionSummary(summary, path) {
       "awaiting_tool_recovery",
       "awaiting_reconciliation",
       "runner_lost",
+      "parked",
       "idle",
     ].includes(summary.state) && action === null);
   if (!valid) {
@@ -5814,8 +6090,10 @@ export function decodeWebContractBootstrap(value) {
       value.capabilities.ndjson_streaming !== true ||
       value.capabilities.import_discovery !== true ||
       value.capabilities.imported_continuations !== true ||
+      value.capabilities.bounded_session_live !== true ||
       value.limits.max_json_body_bytes !== 65536 ||
-      value.limits.max_ndjson_item_bytes !== 65536) {
+      value.limits.max_ndjson_item_bytes !== 65536 ||
+      value.limits.max_session_live_queued_turns !== 32) {
     throw new TypeError("bootstrap carries an incompatible web contract");
   }
   return value;
@@ -5838,6 +6116,26 @@ export function decodeWebSessionTimelineDescriptor(value) {
 
 export function decodeWebSessionTimelineWindow(value) {
   assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "websessiontimelinewindow");
+  return value;
+}
+
+export function decodeWebSessionLiveSnapshot(value) {
+  assertSchema(schemas.WebSessionLiveSnapshot, schemas.WebSessionLiveSnapshot, value, "websessionlivesnapshot");
+  assertLiveSnapshot(value, "session_live_snapshot");
+  return value;
+}
+
+export function decodeWebSessionLiveStreamEvent(value) {
+  assertSchema(schemas.WebSessionLiveStreamEvent, schemas.WebSessionLiveStreamEvent, value, "websessionlivestreamevent");
+  if (value.kind === "snapshot") {
+    assertLiveSnapshot(value.snapshot, "session_live_event.snapshot");
+  }
+  if (value.kind === "durable" && value.cursor !== value.address.event_sequence) {
+    fail("session_live_event.address.event_sequence", "equal to cursor");
+  }
+  if (value.kind === "provider_text_delta" && new TextEncoder().encode(value.content).length > 8192) {
+    fail("session_live_event.content", "at most 8192 UTF-8 bytes");
+  }
   return value;
 }
 
@@ -5873,30 +6171,5 @@ export function decodeWebImportContinuationRequest(value) {
 
 export function decodeWebImportContinuationResponse(value) {
   assertSchema(schemas.WebImportContinuationResponse, schemas.WebImportContinuationResponse, value, "webimportcontinuationresponse");
-  return value;
-}
-
-export function decodeWebRepoWatchRepositoryStatusPage(value) {
-  assertSchema(schemas.WebRepoWatchRepositoryStatusPage, schemas.WebRepoWatchRepositoryStatusPage, value, "webrepowatchrepositorystatuspage");
-  return value;
-}
-
-export function decodeWebRepoWatchPullRequestPage(value) {
-  assertSchema(schemas.WebRepoWatchPullRequestPage, schemas.WebRepoWatchPullRequestPage, value, "webrepowatchpullrequestpage");
-  return value;
-}
-
-export function decodeWebRepoWatchWorkPage(value) {
-  assertSchema(schemas.WebRepoWatchWorkPage, schemas.WebRepoWatchWorkPage, value, "webrepowatchworkpage");
-  return value;
-}
-
-export function decodeWebRepoWatchPullRequestSessionPage(value) {
-  assertSchema(schemas.WebRepoWatchPullRequestSessionPage, schemas.WebRepoWatchPullRequestSessionPage, value, "webrepowatchpullrequestsessionpage");
-  return value;
-}
-
-export function decodeWebRepoWatchActivityPage(value) {
-  assertSchema(schemas.WebRepoWatchActivityPage, schemas.WebRepoWatchActivityPage, value, "webrepowatchactivitypage");
   return value;
 }

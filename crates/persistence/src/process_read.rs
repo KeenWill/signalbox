@@ -4,7 +4,7 @@
 //! domain aggregates. Reads use one read-only repeatable-read transaction so
 //! the hub can map a complete, stable projection explicitly.
 
-use std::{collections::VecDeque, error::Error, fmt};
+use std::collections::VecDeque;
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -81,9 +81,12 @@ pub enum ProcessRunnerConnectionHealth {
     Lost,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Complete current runner placement from one repeatable-read snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessRunnerProjection {
+    /// Borrows the immutable requested selector.
+    #[get]
     selector: RunnerSelector,
     runner: Option<RunnerId>,
     placement_revision: RunnerGeneration,
@@ -96,11 +99,6 @@ pub struct ProcessRunnerProjection {
 }
 
 impl ProcessRunnerProjection {
-    /// Borrows the immutable requested selector.
-    pub const fn selector(&self) -> &RunnerSelector {
-        &self.selector
-    }
-
     /// Returns the current or lost exact runner when the state names one.
     pub const fn runner(&self) -> Option<RunnerId> {
         self.runner
@@ -142,12 +140,15 @@ impl ProcessRunnerProjection {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One current session summary read from a shared transaction snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessSessionSummary {
     session: SessionId,
     defaults_version: u64,
     model_selection: ProcessModelSelection,
+    /// Borrows the current immutable placement epoch.
+    #[get]
     placement: signalbox_domain::VersionedSessionPlacement,
     runner: Option<ProcessRunnerProjection>,
 }
@@ -168,23 +169,21 @@ impl ProcessSessionSummary {
         self.model_selection
     }
 
-    /// Borrows the current immutable placement epoch.
-    pub const fn placement(&self) -> &signalbox_domain::VersionedSessionPlacement {
-        &self.placement
-    }
-
     /// Borrows the complete current runner projection when runner placement was requested.
     pub const fn runner(&self) -> Option<&ProcessRunnerProjection> {
         self.runner.as_ref()
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One complete immutable session-defaults epoch read for the process
 /// boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessSessionDefaults {
     session: SessionId,
     version: signalbox_domain::SessionConfigurationDefaultsVersion,
+    /// Borrows the complete defaults value on that epoch.
+    #[get]
     defaults: signalbox_domain::SessionConfigurationDefaults,
 }
 
@@ -197,11 +196,6 @@ impl ProcessSessionDefaults {
     /// Returns the read immutable epoch's version.
     pub const fn version(&self) -> signalbox_domain::SessionConfigurationDefaultsVersion {
         self.version
-    }
-
-    /// Borrows the complete defaults value on that epoch.
-    pub const fn defaults(&self) -> &signalbox_domain::SessionConfigurationDefaults {
-        &self.defaults
     }
 }
 
@@ -706,21 +700,33 @@ pub enum ProcessReconciliationOperation {
     ToolAttempt(ToolAttemptId),
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One turn in acceptance order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessTranscriptTurn {
     turn: TurnId,
     acceptance_position: u64,
+    /// Returns the authoritative lifecycle state.
+    #[get]
     state: ProcessTurnState,
     model_settings: Option<TurnModelSettingsResolved>,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact token fields for one terminal model call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessModelCallTokenUsage {
+    /// Returns the input-token count when present.
+    #[get(copy)]
     input_tokens: Option<u64>,
+    /// Returns the output-token count when present.
+    #[get(copy)]
     output_tokens: Option<u64>,
+    /// Returns the cache-creation input-token count when present.
+    #[get(copy)]
     cache_creation_input_tokens: Option<u64>,
+    /// Returns the cache-read input-token count when present.
+    #[get(copy)]
     cache_read_input_tokens: Option<u64>,
 }
 
@@ -762,34 +768,15 @@ impl ProcessModelCallInputTokenSemantics {
     }
 }
 
-impl ProcessModelCallTokenUsage {
-    /// Returns the input-token count when present.
-    pub const fn input_tokens(self) -> Option<u64> {
-        self.input_tokens
-    }
-
-    /// Returns the output-token count when present.
-    pub const fn output_tokens(self) -> Option<u64> {
-        self.output_tokens
-    }
-
-    /// Returns the cache-creation input-token count when present.
-    pub const fn cache_creation_input_tokens(self) -> Option<u64> {
-        self.cache_creation_input_tokens
-    }
-
-    /// Returns the cache-read input-token count when present.
-    pub const fn cache_read_input_tokens(self) -> Option<u64> {
-        self.cache_read_input_tokens
-    }
-}
-
+#[derive(signalbox_derive::Accessors)]
 /// One terminal model call's typed token evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessTranscriptModelCallUsage {
     turn: TurnId,
     call: ModelCallId,
     target: ResolvedProviderTarget,
+    /// Returns the event-sourced credential profile pinned into this call.
+    #[get(str)]
     credential_profile: String,
     input_token_semantics: Option<ProcessModelCallInputTokenSemantics>,
     provenance: ProcessModelCallUsageProvenance,
@@ -810,11 +797,6 @@ impl ProcessTranscriptModelCallUsage {
     /// Returns the immutable provider target whose configured rates apply.
     pub const fn target(&self) -> ResolvedProviderTarget {
         self.target
-    }
-
-    /// Returns the event-sourced credential profile pinned into this call.
-    pub fn credential_profile(&self) -> &str {
-        &self.credential_profile
     }
 
     /// Returns the pinned meaning of this call's reported input-token count.
@@ -844,11 +826,6 @@ impl ProcessTranscriptTurn {
     /// Returns the immutable positive acceptance position.
     pub const fn acceptance_position(&self) -> u64 {
         self.acceptance_position
-    }
-
-    /// Returns the authoritative lifecycle state.
-    pub const fn state(&self) -> &ProcessTurnState {
-        &self.state
     }
 
     /// Returns complete frozen settings evidence when the turn was committed
@@ -1044,6 +1021,19 @@ pub enum ProcessTranscriptEntry {
         /// Exact committed assistant text.
         content: String,
     },
+    /// Opaque provider compaction retained without exposing replay bytes.
+    ProviderCompaction {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Owning turn.
+        turn: TurnId,
+        /// Producing model call.
+        model_call: ModelCallId,
+    },
     /// Assistant tool proposal.
     AssistantToolUse {
         /// Zero-based position in the projected frontier.
@@ -1177,20 +1167,18 @@ pub enum ProcessTranscriptEntry {
     },
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One explicit approval decision projected with an assistant tool proposal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessToolApproval {
+    /// Borrows the exact recorded decision.
+    #[get]
     decision: ToolApprovalDecision,
     decider: ToolApprovalDecider,
     rationale: Option<ToolDecisionRationale>,
 }
 
 impl ProcessToolApproval {
-    /// Borrows the exact recorded decision.
-    pub const fn decision(&self) -> &ToolApprovalDecision {
-        &self.decision
-    }
-
     /// Returns the exact user or delegate provenance.
     pub const fn decider(&self) -> ToolApprovalDecider {
         self.decider
@@ -1202,14 +1190,21 @@ impl ProcessToolApproval {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One complete transcript and cursor observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessTranscriptSnapshot {
     session: SessionId,
     cursor: u64,
     runner: Option<ProcessRunnerProjection>,
+    /// Borrows turns in immutable acceptance order.
+    #[get(slice)]
     turns: Vec<ProcessTranscriptTurn>,
+    /// Borrows terminal model-call usage in turn and call identity order.
+    #[get(slice)]
     model_call_usage: Vec<ProcessTranscriptModelCallUsage>,
+    /// Borrows the latest semantic frontier in member order.
+    #[get(slice)]
     entries: Vec<ProcessTranscriptEntry>,
 }
 
@@ -1227,21 +1222,6 @@ impl ProcessTranscriptSnapshot {
     /// Borrows the current runner placement, absent for a daemon-only session.
     pub const fn runner(&self) -> Option<&ProcessRunnerProjection> {
         self.runner.as_ref()
-    }
-
-    /// Borrows turns in immutable acceptance order.
-    pub fn turns(&self) -> &[ProcessTranscriptTurn] {
-        &self.turns
-    }
-
-    /// Borrows terminal model-call usage in turn and call identity order.
-    pub fn model_call_usage(&self) -> &[ProcessTranscriptModelCallUsage] {
-        &self.model_call_usage
-    }
-
-    /// Borrows the latest semantic frontier in member order.
-    pub fn entries(&self) -> &[ProcessTranscriptEntry] {
-        &self.entries
     }
 }
 
@@ -1549,11 +1529,14 @@ async fn advance_through_latest_compaction(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A committed read shape that cannot form the closed process projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessReadCorruption {
+    #[error("process read is missing {field_0}")]
     /// One required row or field was absent.
     Missing(&'static str),
+    #[error("process read has unsupported {field}: {value}")]
     /// A closed storage discriminator had no admitted mapping.
     Unsupported {
         /// Storage field containing the discriminator.
@@ -1561,56 +1544,24 @@ pub enum ProcessReadCorruption {
         /// Unsupported durable spelling.
         value: String,
     },
+    #[error("process read has inconsistent {field_0}")]
     /// Related durable fields disagreed.
     Inconsistent(&'static str),
+    #[error("process read has invalid {field_0}")]
     /// A stored ordinal was not an admitted unsigned integer.
     InvalidOrdinal(&'static str),
 }
 
-impl fmt::Display for ProcessReadCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "process read is missing {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "process read has unsupported {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "process read has inconsistent {relationship}")
-            }
-            Self::InvalidOrdinal(field) => {
-                write!(formatter, "process read has invalid {field}")
-            }
-        }
-    }
-}
-
-impl Error for ProcessReadCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL failure or fail-closed projection corruption.
 #[derive(Debug)]
 pub enum ProcessReadError {
+    #[error("process read database operation failed")]
     /// PostgreSQL could not complete the repeatable-read transaction.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Committed rows could not form the closed projection.
-    Corruption(ProcessReadCorruption),
-}
-
-impl fmt::Display for ProcessReadError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(_) => formatter.write_str("process read database operation failed"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ProcessReadError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] ProcessReadCorruption),
 }
 
 impl From<sqlx::Error> for ProcessReadError {
@@ -1698,7 +1649,7 @@ impl ProcessReadRepository {
         // An existing session must carry a current pointer that resolves to
         // an installed epoch even when a named historical epoch is selected:
         // a missing pointer or a dangling pointer is corruption, not a
-        // servable read (INV-008).
+        // servable read.
         let current_version: Option<Decimal> = row.try_get("current_version")?;
         if current_version.is_none() {
             return Err(ProcessReadCorruption::Missing("current defaults pointer").into());
@@ -2233,8 +2184,9 @@ async fn open_transcript_in_transaction(
     )?;
     let runner = load_process_runner_projection(&mut transaction, requested_session).await?;
     let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
-    // INV-039 remains fail-closed on every transcript open: native lineage
-    // supersedes the seed as the rendered frontier, not as an integrity fact.
+    // Imported seed integrity remains fail-closed on every transcript open:
+    // native lineage supersedes the seed as the rendered frontier, not as an
+    // integrity fact.
     let imported_seed =
         load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
     let expected_turn_count =
@@ -2267,7 +2219,7 @@ async fn open_transcript_in_transaction(
     })
 }
 
-async fn load_process_runner_projection(
+pub(crate) async fn load_process_runner_projection(
     transaction: &mut Transaction<'static, Postgres>,
     session: SessionId,
 ) -> Result<Option<ProcessRunnerProjection>, ProcessReadError> {
@@ -2577,6 +2529,7 @@ async fn load_execution_lineage_tip(
                   FROM turn_lifecycle
                  WHERE session_id = $1
                    AND state_kind IN ('active', 'terminal')
+                   AND start_lineage_kind IS NOT NULL
             ),
             chain(turn_id) AS (
                 SELECT turn_id
@@ -4378,6 +4331,7 @@ fn decode_logical_delegation_terminal(
                 provenance,
                 DispatchedDelegationProvenance::ParentTurnCommand { .. }
                     | DispatchedDelegationProvenance::ParentGoalCommand { .. }
+                    | DispatchedDelegationProvenance::ParentLifecycleCommand { .. }
             ) {
                 return Err(ProcessReadCorruption::Inconsistent(
                     "logical delegation terminal shape",
@@ -5306,6 +5260,28 @@ fn decode_transcript_entry(
             model_call: ModelCallId::from_uuid(call),
             content,
         },
+        (
+            "provider_compaction",
+            None,
+            None,
+            None,
+            Some(block_json),
+            Some(call),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(turn),
+        ) if signalbox_domain::ProviderCompactionBlock::try_new(block_json.clone()).is_ok() => {
+            ProcessTranscriptEntry::ProviderCompaction {
+                entry_index,
+                source_session,
+                entry,
+                turn: TurnId::from_uuid(turn),
+                model_call: ModelCallId::from_uuid(call),
+            }
+        }
         ("turn_failed", None, None, Some(turn), None, None, None, None, None, None, None, None) => {
             ProcessTranscriptEntry::TurnFailed {
                 entry_index,
@@ -5356,6 +5332,7 @@ fn decode_transcript_entry(
             "origin_accepted_input"
             | "steering_accepted_input"
             | "assistant_text"
+            | "provider_compaction"
             | "assistant_tool_use"
             | "tool_execution_result"
             | "tool_denied"
@@ -5476,6 +5453,11 @@ fn decode_process_tool_approval(
         {
             Ok(None)
         }
+        (ToolApprovalDecisionSourceStorageKind::LifecycleClosure, Some(_), None, None, None)
+            if decision == (ToolApprovalDecision::Deny { reason: None }) =>
+        {
+            Ok(None)
+        }
         (ToolApprovalDecisionSourceStorageKind::UserCommand, Some(command), None, None, None) => {
             Ok(Some(ProcessToolApproval {
                 decision,
@@ -5539,6 +5521,7 @@ fn decode_process_tool_approval(
             | ToolApprovalDecisionSourceStorageKind::UserCommand
             | ToolApprovalDecisionSourceStorageKind::Delegate
             | ToolApprovalDecisionSourceStorageKind::RuntimeSafety
+            | ToolApprovalDecisionSourceStorageKind::LifecycleClosure
             | ToolApprovalDecisionSourceStorageKind::UserOverride,
             ..,
         ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),
@@ -5662,10 +5645,10 @@ mod tests {
         TurnId::from_uuid(Uuid::from_u128(value))
     }
 
-    /// S24 / INV-032: acceptance order A, B, C may execute as A, C, B; the
+    /// S24: acceptance order A, B, C may execute as A, C, B; the
     /// database lineage diagnostic selects B as the one complete-chain tip.
     #[test]
-    fn s24_inv032_latest_tip_follows_execution_lineage() {
+    fn s24_latest_tip_follows_execution_lineage() {
         let second = turn(2);
 
         assert_eq!(
@@ -5675,10 +5658,10 @@ mod tests {
         );
     }
 
-    /// INV-032: a branched persisted execution lineage cannot choose one
+    /// a branched persisted execution lineage cannot choose one
     /// authoritative snapshot frontier and therefore fails closed.
     #[test]
-    fn inv032_latest_frontier_rejects_branched_execution_lineage() {
+    fn latest_frontier_rejects_branched_execution_lineage() {
         assert!(decode_execution_lineage_tip(3, 1, 3, 2, true, false, Some(turn(2))).is_err());
     }
 

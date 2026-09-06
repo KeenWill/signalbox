@@ -22,7 +22,6 @@ import {
   useRef,
   useState,
 } from 'react'
-import { ActivitySurface } from './ActivitySurface'
 import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
@@ -34,12 +33,15 @@ import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
   ProductContractError,
   type ProductRouteId,
+  type ProductRouteState,
   type ProductSearchState,
+  type ProductSessionState,
   ProductTransportError,
   productRoutes,
   productSurfaceCacheLabel,
   productSurfaceStates,
   productTransport,
+  readProductSessionState,
 } from './product'
 import {
   invokeProductCommand,
@@ -50,6 +52,7 @@ import {
   productHotkeySequenceBindings,
 } from './productCommands'
 import { SearchSurface } from './SearchSurface'
+import { SessionCatalogSurface } from './SessionCatalogSurface'
 import { type SessionSelectionEvidence, SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
@@ -70,11 +73,6 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
     eyebrow: 'Corpus navigation',
     title: 'Search',
     question: 'Where does this fact occur?',
-  },
-  activity: {
-    eyebrow: 'Repository operations',
-    title: 'Activity',
-    question: 'What entered the system and how was it handled?',
   },
   runners: {
     eyebrow: 'Execution fleet',
@@ -118,7 +116,6 @@ const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
   attention: 'navigate.attention',
   sessions: 'navigate.sessions',
   search: 'navigate.search',
-  activity: 'navigate.activity',
   runners: 'navigate.runners',
   reviews: 'navigate.reviews',
   imports: 'navigate.imports',
@@ -219,6 +216,7 @@ function CommandPalette({
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
+          onEscapeKeyDown={(event) => event.stopPropagation()}
           onCloseAutoFocus={(event) => {
             if (focusTimelineAfterClose.current) {
               event.preventDefault()
@@ -547,7 +545,7 @@ export function ProductApp({
   search,
 }: {
   surface: ProductRouteId
-  search: ProductSearchState
+  search: ProductRouteState
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
@@ -559,6 +557,9 @@ export function ProductApp({
   const artifactButtonRef = useRef<HTMLButtonElement>(null)
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const bootstrapStatusRef = useRef<HTMLSpanElement>(null)
+  const sessionState = useMemo(() => readProductSessionState({ ...search }), [search])
+  const catalogSessionOpenedHere = useRef(false)
+  const currentCatalogSession = useRef(sessionState.session)
   const artifactSideWasOpen = useRef(false)
   const inspectorWasInSheet = useRef(false)
   const surfaceEscapeRef = useRef<(() => boolean) | null>(null)
@@ -588,6 +589,34 @@ export function ProductApp({
     [],
   )
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
+  const updateSessionSearch = useCallback(
+    (next: ProductSessionState, mode: 'push' | 'close' = 'push') => {
+      if (mode === 'close') {
+        currentCatalogSession.current = next.session
+        if (catalogSessionOpenedHere.current) {
+          catalogSessionOpenedHere.current = false
+          window.history.back()
+          return
+        }
+        void navigate({ to: '/$surface', params: { surface }, search: next, replace: true })
+        return
+      }
+      const previousSession = currentCatalogSession.current
+      if (!previousSession && next.session) catalogSessionOpenedHere.current = true
+      const switchesSelectedSession =
+        previousSession !== undefined &&
+        next.session !== undefined &&
+        next.session !== previousSession
+      currentCatalogSession.current = next.session
+      void navigate({
+        to: '/$surface',
+        params: { surface },
+        search: next,
+        replace: switchesSelectedSession,
+      })
+    },
+    [navigate, surface],
+  )
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -633,7 +662,17 @@ export function ProductApp({
           // Escape with nothing to unwind must leave focus exactly where it is.
           if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
         }),
-      unwindSurface: () => surfaceEscapeRef.current?.() ?? false,
+      unwindSurface: () => {
+        if (surface === 'sessions' && sessionState.workspace) {
+          updateSessionSearch({ ...sessionState, workspace: undefined }, 'close')
+          return true
+        }
+        if (surface === 'sessions' && sessionState.session) {
+          updateSessionSearch({ ...sessionState, session: undefined }, 'close')
+          return true
+        }
+        return surfaceEscapeRef.current?.() ?? false
+      },
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
@@ -666,9 +705,11 @@ export function ProductApp({
     importsCommandContext,
     navigate,
     navigationDisabled,
+    sessionState,
     surface,
     timelineIds,
     timelineWindowAvailable,
+    updateSessionSearch,
   ])
   const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
@@ -827,37 +868,9 @@ export function ProductApp({
           </div>
         </section>
       </div>
-    ) : surface === 'activity' && bootstrap.isSuccess ? (
-      <ActivitySurface />
-    ) : surface === 'activity' ? (
-      <div className="surface-body">
-        <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
-          <div>
-            <h2>
-              {bootstrap.isError ? 'Activity contract unavailable' : 'Checking Activity contract'}
-            </h2>
-            <p>
-              {bootstrap.isError
-                ? 'Repository activity reads remain disabled until the generated bootstrap contract validates.'
-                : 'Repository activity reads will begin after the generated bootstrap contract validates.'}
-            </p>
-            {bootstrap.isError && (
-              <button
-                type="button"
-                className="bootstrap-retry"
-                onClick={() => {
-                  setFocusAfterBootstrapRecovery(true)
-                  void bootstrap.refetch()
-                }}
-              >
-                Retry contract check
-              </button>
-            )}
-          </div>
-        </section>
-      </div>
-    ) : surface === 'sessions' ? (
+    ) : surface === 'sessions' && bootstrap.isSuccess && sessionState.workspace ? (
       <SessionWorkspaceSurface
+        initialSessionId={sessionState.session}
         onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
@@ -866,6 +879,25 @@ export function ProductApp({
         timelineRef={timelineRef}
         windowRequest={windowRequest}
       />
+    ) : surface === 'sessions' && bootstrap.isSuccess ? (
+      <SessionCatalogSurface state={sessionState} onStateChange={updateSessionSearch} />
+    ) : surface === 'sessions' ? (
+      <div className="catalog-notice">
+        <p>Sessions are unavailable until the browser contract handshake succeeds.</p>
+        {bootstrap.isError && (
+          <button
+            type="button"
+            onClick={() => {
+              setFocusAfterBootstrapRecovery(true)
+              void bootstrap.refetch().then((result) => {
+                if (result.isSuccess) requestAnimationFrame(() => mainRef.current?.focus())
+              })
+            }}
+          >
+            Retry contract handshake
+          </button>
+        )}
+      </div>
     ) : surface === 'search' && bootstrap.isError ? (
       <div className="surface-body">
         <section className="surface-empty" role="alert">
@@ -1078,6 +1110,7 @@ export function ProductApp({
           <Dialog.Content
             className="artifact-sheet"
             aria-describedby="artifact-sheet-description"
+            onEscapeKeyDown={(event) => event.stopPropagation()}
             onOpenAutoFocus={(event) => {
               event.preventDefault()
               artifactDigestRef.current?.focus()

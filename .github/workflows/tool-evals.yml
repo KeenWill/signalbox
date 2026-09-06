@@ -44,7 +44,7 @@ on:
       - "crates/tools-exec/**"
       - "apps/signalboxd/src/daemon_tools.rs"
       - "apps/signalboxd/src/lib.rs"
-      - "apps/signalboxd/src/process_runtime.rs"
+      - "apps/signalboxd/src/process_runtime/**"
       - "apps/signalboxd/tests/live_tool_evals.rs"
       - "apps/signalboxd/tests/tool-eval-cargo"
       - "crates/application/src/**"
@@ -89,7 +89,7 @@ on:
       - "crates/tools-exec/**"
       - "apps/signalboxd/src/daemon_tools.rs"
       - "apps/signalboxd/src/lib.rs"
-      - "apps/signalboxd/src/process_runtime.rs"
+      - "apps/signalboxd/src/process_runtime/**"
       - "apps/signalboxd/tests/live_tool_evals.rs"
       - "apps/signalboxd/tests/tool-eval-cargo"
       - "crates/application/src/**"
@@ -122,9 +122,10 @@ on:
 
 concurrency:
   group: >-
-    daemon-tool-evals-${{ github.event_name == 'pull_request'
-    && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    daemon-tool-evals-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref)
+    || github.ref == 'refs/heads/main' && github.run_id
+    || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions: {}
 
@@ -138,7 +139,7 @@ env:
 jobs:
   eligibility:
     name: Tool eval eligibility
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 5
     outputs:
       allowed: ${{ steps.eligibility.outputs.allowed }}

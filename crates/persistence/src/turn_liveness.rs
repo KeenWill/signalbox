@@ -5,19 +5,18 @@
 //! Terminalization then re-runs that same query for the one session under the
 //! scheduler lock and commits the shared failed-turn transition
 //! ([`crate::startup`]) rather than editing lifecycle rows here, so a stale
-//! turn ends exactly as a recovered one does and every trigger that watches
-//! for a terminal turn — repository-watch dispatch release included — fires
-//! without this module naming any of them.
+//! turn ends exactly as a recovered one does.
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{future::Future, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StaleTurnOutcome,
-    StartupScanSessionOutcome, TurnLivenessEvidence,
+    ClassifyOperatorFailure, DurableTurnLivenessObservation, OperatorFailureClass,
+    StaleTurnCandidate, StaleTurnOutcome, StartupScanSessionOutcome, TurnLivenessEvidence,
+    TurnLivenessGuardKind, TurnLivenessScanInterval,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId, SessionId,
-    TurnAttemptId,
+    TurnAttemptId, TurnTerminalCause,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Decimal, types::Uuid};
 use tokio::time::timeout;
@@ -28,7 +27,7 @@ use crate::mapping::{
 use crate::session::{SessionRepositoryError, load_session_from_connection};
 use crate::startup::{
     StartupScanCorruption, StartupScanIdentityCollision, StartupScanRepositoryError,
-    TransactionDecision, insert_prepared_failure, map_scheduling_error,
+    TransactionDecision, insert_prepared_failure, lost_failure_identities, map_scheduling_error,
     recover_observed_slot_held_in_transaction,
 };
 use crate::submit_input::load_scheduling_projection;
@@ -64,31 +63,71 @@ impl TurnLivenessPersistenceBounds {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Infrastructure or integrity failure while supervising turn liveness.
 ///
-/// The two database arms are separate because they mean different things to an
-/// operator: a failed inventory read is a pass that made no decision at all,
-/// while a failed terminalization is a decision that could not be carried out
-/// on a turn already judged stale. No blanket `From<sqlx::Error>` exists, so
-/// neither path can silently borrow the other's cause code.
+/// The database arms are separate because they mean different things to an
+/// operator: a failed inventory read is a pass that made no decision at all, a
+/// malformed observation is durable corruption, and a failed terminalization
+/// is a decision that could not be carried out on a turn already judged stale.
+/// No blanket `From<sqlx::Error>` exists, so no path can silently borrow
+/// another's cause code.
 #[derive(Debug)]
 pub enum TurnLivenessRepositoryError {
+    #[error("quiescent active-turn inventory failed: {field_0}")]
     /// Reading the quiescent active-turn inventory failed.
-    Inventory(sqlx::Error),
+    Inventory(#[source] sqlx::Error),
+    #[error("durable turn-liveness observation failed: {source}")]
+    /// Recording a complete durable observation population failed.
+    Observation {
+        /// Whether the failure leaves the commit's outcome unknown.
+        commit_ambiguous: bool,
+        #[source]
+        /// The originating driver failure.
+        source: sqlx::Error,
+    },
+    #[error("durable turn-liveness observation is corrupt: {field_0}")]
+    /// A stored durable observation could not be decoded into its domain shape.
+    ObservationCorruption(#[source] sqlx::Error),
+    #[error("stale-turn terminalization could not acquire a required row lock: {field_0}")]
     /// A required terminalization row stayed locked past the attempt's wait.
-    TerminalizationLockUnavailable(sqlx::Error),
+    TerminalizationLockUnavailable(#[source] sqlx::Error),
+    #[error("stale-turn terminalization failed: {source}")]
     /// A database operation on the terminalization path failed.
     TerminalizationDatabase {
         /// Whether the failure leaves the commit's outcome unknown.
         commit_ambiguous: bool,
+        #[source]
         /// The originating driver failure.
         source: sqlx::Error,
     },
+    #[error(transparent)]
     /// The shared failed-turn transition could not be committed.
-    Terminalization(StartupScanRepositoryError),
+    Terminalization(#[source] StartupScanRepositoryError),
 }
 
 impl TurnLivenessRepositoryError {
+    /// Classifies an unambiguous driver failure while recording observations.
+    fn observation(error: sqlx::Error) -> Self {
+        Self::Observation {
+            commit_ambiguous: false,
+            source: error,
+        }
+    }
+
+    /// Classifies the commit of an observation transaction.
+    fn observation_commit(error: sqlx::Error) -> Self {
+        Self::Observation {
+            commit_ambiguous: crate::commit_failure_is_ambiguous(&error),
+            source: error,
+        }
+    }
+
+    /// Classifies malformed durable observation state.
+    fn observation_corruption(error: sqlx::Error) -> Self {
+        Self::ObservationCorruption(error)
+    }
+
     /// Classifies an unambiguous driver failure on the terminalization path.
     fn terminalization(error: sqlx::Error) -> Self {
         Self::TerminalizationDatabase {
@@ -110,46 +149,18 @@ impl TurnLivenessRepositoryError {
     }
 }
 
-impl fmt::Display for TurnLivenessRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Inventory(source) => {
-                write!(
-                    formatter,
-                    "quiescent active-turn inventory failed: {source}"
-                )
-            }
-            Self::TerminalizationLockUnavailable(source) => {
-                write!(
-                    formatter,
-                    "stale-turn terminalization could not acquire a required row lock: {source}"
-                )
-            }
-            Self::TerminalizationDatabase { source, .. } => {
-                write!(formatter, "stale-turn terminalization failed: {source}")
-            }
-            Self::Terminalization(source) => source.fmt(formatter),
-        }
-    }
-}
-
-impl Error for TurnLivenessRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Inventory(source)
-            | Self::TerminalizationLockUnavailable(source)
-            | Self::TerminalizationDatabase { source, .. } => Some(source),
-            Self::Terminalization(source) => Some(source),
-        }
-    }
-}
-
 impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
             Self::Inventory(_) => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
+            Self::Observation {
+                commit_ambiguous, ..
+            } => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: *commit_ambiguous,
+            },
+            Self::ObservationCorruption(_) => OperatorFailureClass::FailClosedCorruption,
             Self::TerminalizationLockUnavailable(_) => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
@@ -165,6 +176,8 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
             Self::Inventory(_) => "turn_liveness_inventory_failed",
+            Self::Observation { .. } => "turn_liveness_observation_failed",
+            Self::ObservationCorruption(_) => "turn_liveness_observation_corrupt",
             Self::TerminalizationLockUnavailable(_) => {
                 "turn_liveness_terminalization_lock_unavailable"
             }
@@ -184,6 +197,15 @@ impl From<StartupScanRepositoryError> for TurnLivenessRepositoryError {
             error => Self::Terminalization(error),
         }
     }
+}
+
+/// How a complete guard observation treats matching durable evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnLivenessObservationMode {
+    /// Establishes a restart baseline without advancing a retained ordinal.
+    RestartBaseline,
+    /// Advances a retained ordinal by one completed scan interval.
+    Advance,
 }
 
 /// PostgreSQL inventory and terminalization adapter for turn liveness.
@@ -236,6 +258,118 @@ impl PostgresTurnLivenessRepository {
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
         Ok(QuiescentActiveTurnPage::new(fetched))
+    }
+
+    /// Records one guard's durable repeated-observation ledger atomically.
+    ///
+    /// `candidates` is the complete population for the guard. Rows absent from
+    /// it are removed in the same transaction, so a turn that leaves and later
+    /// re-enters the predicate starts again at ordinal one.
+    pub async fn record_complete_observation(
+        &self,
+        guard: TurnLivenessGuardKind,
+        scan_interval: TurnLivenessScanInterval,
+        candidates: &[StaleTurnCandidate],
+        mode: TurnLivenessObservationMode,
+    ) -> Result<Box<[DurableTurnLivenessObservation]>, TurnLivenessRepositoryError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(TurnLivenessRepositoryError::observation)?;
+        let turns = candidates
+            .iter()
+            .map(|candidate| turn_id_to_uuid(candidate.turn()))
+            .collect::<Vec<_>>();
+        let sessions = candidates
+            .iter()
+            .map(|candidate| session_id_to_uuid(candidate.session()))
+            .collect::<Vec<_>>();
+        let attempts = candidates
+            .iter()
+            .map(|candidate| candidate.evidence().current_attempt().into_uuid())
+            .collect::<Vec<_>>();
+        let frontiers = candidates
+            .iter()
+            .map(|candidate| candidate.evidence().outbox_frontier().map(Decimal::from))
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            "WITH incoming AS (
+                SELECT *
+                  FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::numeric[])
+                       AS item(turn_id, session_id, current_attempt_id, outbox_frontier)
+             )
+             INSERT INTO turn_liveness_observation AS observation
+                (guard_kind, turn_id, session_id, current_attempt_id,
+                 outbox_frontier, scan_interval_seconds, observation_ordinal)
+             SELECT $1, turn_id, session_id, current_attempt_id,
+                    outbox_frontier, $6, 1
+               FROM incoming
+             ON CONFLICT (guard_kind, turn_id) DO UPDATE
+                SET session_id = EXCLUDED.session_id,
+                    current_attempt_id = EXCLUDED.current_attempt_id,
+                    outbox_frontier = EXCLUDED.outbox_frontier,
+                    scan_interval_seconds = EXCLUDED.scan_interval_seconds,
+                    observation_ordinal = CASE
+                        WHEN ROW(
+                            observation.current_attempt_id,
+                            observation.outbox_frontier
+                        ) IS DISTINCT FROM ROW(
+                            EXCLUDED.current_attempt_id,
+                            EXCLUDED.outbox_frontier
+                        )
+                        THEN 1
+                        WHEN observation.scan_interval_seconds IS DISTINCT FROM $6::numeric
+                        THEN 1
+                        WHEN NOT $7::boolean
+                        THEN observation.observation_ordinal
+                        ELSE LEAST(
+                            observation.observation_ordinal + 1,
+                            18446744073709551615
+                        )
+                    END
+             RETURNING turn_id, session_id, current_attempt_id,
+                       outbox_frontier, observation_ordinal",
+        )
+        .bind(guard.as_str())
+        .bind(&turns)
+        .bind(&sessions)
+        .bind(&attempts)
+        .bind(&frontiers)
+        .bind(Decimal::from(scan_interval.get().as_secs()))
+        .bind(mode == TurnLivenessObservationMode::Advance)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(TurnLivenessRepositoryError::observation)?;
+        sqlx::query(
+            "DELETE FROM turn_liveness_observation
+              WHERE guard_kind = $1
+                AND NOT (turn_id = ANY($2::uuid[]))",
+        )
+        .bind(guard.as_str())
+        .bind(&turns)
+        .execute(&mut *transaction)
+        .await
+        .map_err(TurnLivenessRepositoryError::observation)?;
+        transaction
+            .commit()
+            .await
+            .map_err(TurnLivenessRepositoryError::observation_commit)?;
+        let mut observations = rows
+            .into_iter()
+            .map(decode_durable_observation)
+            .collect::<Result<Vec<_>, _>>()?;
+        observations.sort_unstable_by_key(|observation| observation.candidate().session());
+        Ok(observations.into_boxed_slice())
+    }
+
+    /// Clears observation continuity while stale-turn supervision is disabled.
+    pub async fn clear_guard_observations(&self) -> Result<(), TurnLivenessRepositoryError> {
+        sqlx::query("DELETE FROM turn_liveness_observation")
+            .execute(&self.pool)
+            .await
+            .map_err(TurnLivenessRepositoryError::observation)?;
+        Ok(())
     }
 
     /// Reads the current slot-held observation for one exact session.
@@ -376,11 +510,15 @@ impl PostgresTurnLivenessRepository {
     /// The observation is revalidated inside the transaction, so a turn that
     /// resumed between the scan and this call is left untouched and reported
     /// [`StaleTurnOutcome::Superseded`].
-    pub async fn terminalize_stale_turn(
+    pub async fn terminalize_stale_turn<Generator>(
         &self,
         candidate: StaleTurnCandidate,
         identities: AcceptedInputTurnFailureIdentities,
-    ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
+        ids: &mut Generator,
+    ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError>
+    where
+        Generator: signalbox_application::StartupScanIdGenerator + Send,
+    {
         let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
@@ -400,6 +538,7 @@ impl PostgresTurnLivenessRepository {
             candidate,
             identities,
             self.bounds.write_lock_wait,
+            ids,
         )
         .await;
         match outcome {
@@ -412,11 +551,8 @@ impl PostgresTurnLivenessRepository {
                 })?;
                 Ok(StaleTurnOutcome::Terminalized)
             }
-            // Neither decided outcome wrote anything, so both roll back.
-            Ok(
-                outcome @ (StaleTurnOutcome::Superseded
-                | StaleTurnOutcome::BlockedByPendingSteering),
-            ) => {
+            // A superseded candidate wrote nothing, so it rolls back.
+            Ok(outcome @ StaleTurnOutcome::Superseded) => {
                 transaction
                     .rollback()
                     .await
@@ -434,9 +570,61 @@ impl PostgresTurnLivenessRepository {
     }
 }
 
+fn decode_durable_observation(
+    row: sqlx::postgres::PgRow,
+) -> Result<DurableTurnLivenessObservation, TurnLivenessRepositoryError> {
+    let frontier = row
+        .try_get::<Option<Decimal>, _>("outbox_frontier")
+        .map_err(TurnLivenessRepositoryError::observation_corruption)?
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|source| {
+            TurnLivenessRepositoryError::observation_corruption(sqlx::Error::Decode(Box::new(
+                source,
+            )))
+        })?;
+    let ordinal: Decimal = row
+        .try_get("observation_ordinal")
+        .map_err(TurnLivenessRepositoryError::observation_corruption)?;
+    let ordinal = u64::try_from(ordinal)
+        .ok()
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| {
+            TurnLivenessRepositoryError::observation_corruption(sqlx::Error::Decode(Box::new(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid durable turn-liveness ordinal",
+                ),
+            )))
+        })?;
+    Ok(DurableTurnLivenessObservation::new(
+        StaleTurnCandidate::new(
+            session_id_from_uuid(
+                row.try_get("session_id")
+                    .map_err(TurnLivenessRepositoryError::observation_corruption)?,
+            ),
+            turn_id_from_uuid(
+                row.try_get("turn_id")
+                    .map_err(TurnLivenessRepositoryError::observation_corruption)?,
+            ),
+            TurnLivenessEvidence::new(
+                TurnAttemptId::from_uuid(
+                    row.try_get("current_attempt_id")
+                        .map_err(TurnLivenessRepositoryError::observation_corruption)?,
+                ),
+                frontier,
+            ),
+        ),
+        ordinal,
+    ))
+}
+
+#[derive(signalbox_derive::Accessors)]
 /// One page of the quiescent inventory, and where the rotation continues.
 #[derive(Clone, Debug)]
 pub struct QuiescentActiveTurnPage {
+    /// Returns the quiescent turns this page observed.
+    #[get(unbox)]
     candidates: Box<[StaleTurnCandidate]>,
     rows: usize,
     resume_after: Option<SessionId>,
@@ -466,11 +654,6 @@ impl QuiescentActiveTurnPage {
             rows: fetched.rows,
             resume_after,
         }
-    }
-
-    /// Returns the quiescent turns this page observed.
-    pub fn candidates(&self) -> &[StaleTurnCandidate] {
-        &self.candidates
     }
 
     /// Returns how many rows the statement returned, dropped ones included.
@@ -564,6 +747,17 @@ impl QuiescentActiveTurnPage {
 /// index lookup whatever a session's history weighs. Every observation this
 /// statement reports is bounded that way: the `LIMIT` caps returned rows, and
 /// nothing per row scans a history.
+///
+/// A parked session is not a candidate. Parking suspends its turn in place —
+/// the turn keeps its phase and nothing about it proceeds — so a watchdog that
+/// still saw it would read a deliberately held turn as a stalled one and reap
+/// exactly the work an operator is holding.
+///
+/// Ownership is deliberately not a second conjunct. Turn-liveness recovery
+/// applies to every turn whoever owns the session; ownership governs lifecycle
+/// driving — retry, park, escalation, auto-resume — not liveness. A dead turn
+/// left active in a conversation would block its next input, and injection is
+/// available in every non-terminal state.
 const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
@@ -575,8 +769,17 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
                     'session_model_settings_changed',
                     'turn_model_settings_resolved',
                     'input_accepted',
-                    'goal_turn_retired',
-                    'runner_state_transition'
+                    'runner_state_transition',
+                    'session_state_changed',
+                    'session_terminal',
+                    'goal_changed',
+                    'command_settled',
+                    'injection_settled',
+                    'session_ownership_changed'
+                )
+                AND NOT (
+                    newest.event_kind = 'turn_terminal'
+                    AND newest.turn_disposition = 'retired'
                 )
               ORDER BY newest.event_sequence DESC
               LIMIT 1) AS outbox_frontier
@@ -597,6 +800,12 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
         AND tenure.end_disposition IS NULL
         AND ($1::uuid IS NULL OR active.session_id = $1)
         AND ($2::uuid IS NULL OR active.session_id > $2)
+        AND NOT EXISTS (
+            SELECT 1
+              FROM session_lifecycle AS parked
+             WHERE parked.session_id = active.session_id
+               AND parked.state_kind = 'parked'
+        )
         AND NOT EXISTS (
             SELECT 1
               FROM model_call AS live
@@ -623,6 +832,17 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
 /// durable waits are excluded by the phase predicate; live calls and tools are
 /// intentionally retained because their containing pass has its own tighter
 /// occupancy ceiling.
+///
+/// A parked session is not a candidate. Parking suspends its turn in place —
+/// the turn keeps its phase and nothing about it proceeds — so a watchdog that
+/// still saw it would read a deliberately held turn as a stalled one and reap
+/// exactly the work an operator is holding.
+///
+/// Ownership is deliberately not a second conjunct. Turn-liveness recovery
+/// applies to every turn whoever owns the session; ownership governs lifecycle
+/// driving — retry, park, escalation, auto-resume — not liveness. A dead turn
+/// left active in a conversation would block its next input, and injection is
+/// available in every non-terminal state.
 const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
@@ -634,8 +854,17 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
                     'session_model_settings_changed',
                     'turn_model_settings_resolved',
                     'input_accepted',
-                    'goal_turn_retired',
-                    'runner_state_transition'
+                    'runner_state_transition',
+                    'session_state_changed',
+                    'session_terminal',
+                    'goal_changed',
+                    'command_settled',
+                    'injection_settled',
+                    'session_ownership_changed'
+                )
+                AND NOT (
+                    newest.event_kind = 'turn_terminal'
+                    AND newest.turn_disposition = 'retired'
                 )
               ORDER BY newest.event_sequence DESC
               LIMIT 1) AS outbox_frontier
@@ -673,6 +902,12 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
         )
         AND ($1::uuid IS NULL OR active.session_id = $1)
         AND ($2::uuid IS NULL OR active.session_id > $2)
+        AND NOT EXISTS (
+            SELECT 1
+              FROM session_lifecycle AS parked
+             WHERE parked.session_id = active.session_id
+               AND parked.state_kind = 'parked'
+        )
       ORDER BY active.session_id
       LIMIT $3";
 
@@ -793,12 +1028,16 @@ fn decode_outbox_frontier(sequence: Decimal) -> Option<u64> {
     }
 }
 
-async fn terminalize_in_transaction(
+async fn terminalize_in_transaction<Generator>(
     connection: &mut PgConnection,
     candidate: StaleTurnCandidate,
     identities: AcceptedInputTurnFailureIdentities,
     write_lock_wait: Option<Duration>,
-) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
+    ids: &mut Generator,
+) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError>
+where
+    Generator: signalbox_application::StartupScanIdGenerator + Send,
+{
     let locks = sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
         .bind(session_id_to_uuid(candidate.session()))
         .fetch_one(&mut *connection)
@@ -866,6 +1105,7 @@ async fn terminalize_in_transaction(
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
+    let identities = lost_failure_identities(identities, &scheduling, ids);
     let prepared =
         match scheduling.prepare_active_turn_lost_failure(identities) {
             Ok(prepared) => prepared,
@@ -882,16 +1122,8 @@ async fn terminalize_in_transaction(
                 AcceptedInputTurnFailureFailure::NoActiveTurn => {
                     return Ok(StaleTurnOutcome::Superseded);
                 }
-                // The candidate query no longer proves steering absent, so this
-                // refusal is an expected shape rather than an impossible one:
-                // the schema requires every steering row pending on a turn to
-                // be closed before it terminalizes, and this transition closes
-                // none. Reporting it as its own outcome keeps the wedge visible
-                // without claiming inconsistent durable state.
-                AcceptedInputTurnFailureFailure::PendingSteering { .. } => {
-                    return Ok(StaleTurnOutcome::BlockedByPendingSteering);
-                }
-                AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
+                AcceptedInputTurnFailureFailure::PendingSteeringReclassificationMismatch
+                | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
                 | AcceptedInputTurnFailureFailure::ActiveStartMissing
                 | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
                 | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {
@@ -914,7 +1146,7 @@ async fn terminalize_in_transaction(
                 }
             },
         };
-    insert_prepared_failure(connection, prepared).await?;
+    insert_prepared_failure(connection, prepared, TurnTerminalCause::WatchdogStaleTurn).await?;
     Ok(StaleTurnOutcome::Terminalized)
 }
 
@@ -944,7 +1176,7 @@ mod tests {
         ClassifyOperatorFailure, FetchedPage, QUIESCENT_INVENTORY_PAGE_SIZE,
         QuiescentActiveTurnPage, TurnLivenessRepositoryError, postgres_lock_timeout,
     };
-    use signalbox_application::{StaleTurnCandidate, TurnLivenessEvidence};
+    use signalbox_application::{OperatorFailureClass, StaleTurnCandidate, TurnLivenessEvidence};
     use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
     use sqlx::types::Uuid;
 
@@ -1011,6 +1243,27 @@ mod tests {
         assert_eq!(
             failure.operator_failure_cause_code(),
             "turn_liveness_terminalization_failed"
+        );
+    }
+
+    /// Losing the commit response preserves its ambiguity for operator policy.
+    #[test]
+    fn an_observation_commit_without_a_response_is_ambiguous() {
+        let failure =
+            TurnLivenessRepositoryError::observation_commit(sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "observation commit response was lost",
+            )));
+
+        assert_eq!(
+            failure.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            }
+        );
+        assert_eq!(
+            failure.operator_failure_cause_code(),
+            "turn_liveness_observation_failed"
         );
     }
 

@@ -15,9 +15,10 @@ use crate::tool::ToolName;
 /// A structured-output contract: the caller's demand that the response carry
 /// one value satisfying a JSON Schema.
 ///
-/// Adapters realize the contract with provider mechanics (the smoke-critical
-/// provider realizes it as a forced tool call); the decode side is provider
-/// independent.
+/// Adapters realize the contract with provider mechanics — a forced tool call
+/// where the provider offers one, otherwise a declared tool asked for by
+/// instruction — so the request constrains the response without guaranteeing
+/// it. The decode side is provider independent.
 #[derive(Debug, Clone)]
 pub struct StructuredOutputContract {
     /// The name the value is proposed under on the wire.
@@ -44,7 +45,7 @@ impl StructuredOutputContract {
         // `generated_contract_schema_serializes_as_raw_json` test exercises
         // this exact conversion boundary.
         let mut schema = schemars::schema_for!(T).to_value();
-        crate::json::sort_object_keys(&mut schema);
+        schema.sort_all_objects();
         #[expect(
             clippy::expect_used,
             reason = "serde_json::Value serialization is total; generated_contract_schema_serializes_as_raw_json enforces the boundary"

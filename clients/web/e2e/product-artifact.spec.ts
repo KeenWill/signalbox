@@ -117,7 +117,7 @@ test('resolves a typed artifact in the desktop side inspector without a mouse', 
   const problems = watchBrowser(page)
   await useArtifactScenario(page)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await resolveArtifactWithoutMouse(page)
   await page.keyboard.press('Escape')
@@ -130,7 +130,7 @@ test('uses a focus-managed artifact sheet on a phone viewport', async ({ page })
   const problems = watchBrowser(page)
   await useArtifactScenario(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await resolveArtifactWithoutMouse(page)
   await expect(page.getByRole('dialog', { name: 'Artifact inspector' })).toBeVisible()
@@ -145,7 +145,7 @@ test('preserves an active artifact when the inspector changes composition', asyn
   const displayName = admittedOriginalArtifact.display_filename[0]
   await useArtifactScenario(page, admittedOriginalArtifact)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await resolveArtifactWithoutMouse(page, admittedOriginalArtifact)
   await page.getByRole('button', { name: 'Load original' }).click()
@@ -164,7 +164,7 @@ test('preserves the side inspector beneath the command palette', async ({ page }
   const problems = watchBrowser(page)
   await useArtifactScenario(page)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await resolveArtifactWithoutMouse(page)
   await page.getByRole('button', { name: 'Open command palette' }).click()
@@ -182,7 +182,7 @@ test('does not restore stale side-inspector focus after closing a narrow sheet',
   const problems = watchBrowser(page)
   await useArtifactScenario(page)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await page.getByRole('button', { name: 'Open artifact inspector' }).click()
   await page.setViewportSize({ width: 1024, height: 900 })
@@ -200,7 +200,7 @@ test('restores inspector focus when a sheet returns to the side pane', async ({ 
   const problems = watchBrowser(page)
   await useArtifactScenario(page)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await page.getByRole('button', { name: 'Open artifact inspector' }).click()
   await page.setViewportSize({ width: 1024, height: 900 })
@@ -214,7 +214,7 @@ test('preserves editing context when Escape is pressed in an inspector input', a
   const problems = watchBrowser(page)
   await useArtifactScenario(page)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await page.getByRole('button', { name: 'Open artifact inspector' }).click()
   const digest = page.getByRole('textbox', { name: 'Digest' })
@@ -228,7 +228,7 @@ test('keeps an oversized browser-native original download-only', async ({ page }
   const problems = watchBrowser(page)
   const displayName = oversizedOriginalArtifact.display_filename[0]
   await useArtifactScenario(page, oversizedOriginalArtifact)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await resolveArtifactWithoutMouse(page, oversizedOriginalArtifact)
   const artifact = page.getByRole('article', { name: `Artifact ${displayName}` })
@@ -243,7 +243,7 @@ test('keeps an oversized browser-native original download-only', async ({ page }
 test('discovers the artifact inspector through the command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await useArtifactScenario(page)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
@@ -257,7 +257,7 @@ test('discovers the artifact inspector through the command palette', async ({ pa
 test('recovers after a descriptor response violates the generated contract', async ({ page }) => {
   const problems = watchBrowser(page)
   const scenario = await useRecoveringArtifactScenario(page)
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
 
   await submitArtifactWithoutMouse(page)
   await expect(page.getByRole('alert')).toContainText(incompatibleDescriptorMessage)
@@ -276,7 +276,7 @@ test('captures desktop and responsive artifact evidence', async ({ page }, testI
   const problems = watchBrowser(page)
   await useArtifactScenario(page)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/sessions')
+  await page.goto('/sessions?workspace=true')
   await resolveArtifactWithoutMouse(page)
 
   await expect(page).toHaveScreenshot('artifact-inspector-desktop-dark.png', {

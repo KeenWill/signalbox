@@ -1,5 +1,3 @@
-use std::{error::Error, fmt};
-
 use git2::Signature;
 
 use crate::limits::MAX_IDENTITY_BYTES;
@@ -50,14 +48,8 @@ pub(super) fn invalid_identity_part(value: &str) -> bool {
         || value.contains('>')
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("invalid injected Git identity")]
 /// An injected Git identity was not safe for a commit signature.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidGitIdentity;
-
-impl fmt::Display for InvalidGitIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid injected Git identity")
-    }
-}
-
-impl Error for InvalidGitIdentity {}

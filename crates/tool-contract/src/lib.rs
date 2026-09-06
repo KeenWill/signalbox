@@ -85,28 +85,8 @@ pub fn rendered_contract_schema<Contract: ToolContract + ?Sized>() -> serde_json
         object.remove("description");
     }
     let mut value = object_rooted_schema(value);
-    sort_json_object_keys(&mut value);
+    value.sort_all_objects();
     value
-}
-
-fn sort_json_object_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            object.sort_keys();
-            for nested in object.values_mut() {
-                sort_json_object_keys(nested);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for nested in values {
-                sort_json_object_keys(nested);
-            }
-        }
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => {}
-    }
 }
 
 /// JSON Schema keyword holding a schema root's reusable definitions.
@@ -766,7 +746,7 @@ pub mod __private {
                 insert_definition(definitions, String::from(name), definition);
             }
         }
-        super::sort_json_object_keys(&mut schema);
+        schema.sort_all_objects();
         schema
     }
 
@@ -909,7 +889,7 @@ pub mod __private {
         }
     }
 
-    /// Converts an owned schema object into the legacy schemars bridge.
+    /// Converts an owned schema object into the schemars bridge the derive macro emits.
     #[expect(
         clippy::expect_used,
         reason = "ToolSchema implementations produce object-valued JSON Schema fragments"

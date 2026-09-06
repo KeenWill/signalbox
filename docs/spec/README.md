@@ -1,153 +1,128 @@
 # Living specification
 
-These pages, together with INV-tagged tests indexed in
-[invariants.md](../invariants.md) and public API shapes in
-[domain-spine.md](../domain-spine.md), are the normative specification of
-Signalbox's implemented cross-component and wire behavior; `AGENTS.md` defines
-the authority model. Each page names the code ref it was last verified against
-and is updated in the same pull request as any behavior change it describes. A
-verification reference names that pull request as `` PR #N (`branch-ref`) `` and
-may narrow the claim to the surface the pull request settled, either as a
-semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) `` — or
-as prose following the parenthetical; a scope tail is free-form prose that must
-render as more than whitespace and block-quote markers, may name code in
-backticks without the span's own parentheses closing the reference, and must
-stay inside the reference's own block, and a page may carry one reference per
-verified surface. One tail form is semantically special: a pull request that
-landed inside another pull request's merge (a stack merged from its top leaves
-inner pull requests with no first-parent merge commits) cites its carrier with
-the exact tail `` PR #N (`branch-ref`; via PR #M `carrier-branch`) ``, and the
-reference is accepted only when `#N` itself has no first-parent merge commit and
-the carrier's number and branch either match one or name the single in-flight
-pull request (the event identity, or the checked-out branch locally, and never
-the reference's own pull request) — a carrying merge cannot precede the
-carrier's own pull request. Inheritance preserves a carried reference's tail
-exactly, so a base page's carrier cannot be dropped by a child that merely
-repeats it; a matching inherited carrier that has not yet entered integration
-history stays accepted on that basis alone, deferring judgment to the
-integration branch's own run once the stack lands, while a primary with its own
-merge commit or a reference naming itself as carrier rejects even when
-inherited. `scripts/check_docs_consistency.py` enforces this form. The
-historical ADR corpus these pages distilled is retired: the
-[ADR mapping](#adr-mapping) below resolves every record number to its
-destination, and git history is the archive.
+The pages under `docs/spec/` are the specification of the behavior Signalbox
+has: the contracts between crates and across the wire that an implementing agent
+honors. Each page opens with a map for a reader who knows Signalbox as a whole
+but not that subsystem, then states the decisions and contracts the code keeps.
+`AGENTS.md` is the guidance for agents working on the repository; this file owns
+the conventions the pages follow.
 
-Conventions: pages state implemented behavior, plus the committed unimplemented
-functionality that constrains it, per the three prose categories
-[AGENTS.md](../../AGENTS.md) defines and normatively owns; load-bearing design
-choices carry one-sentence "Why:" rationales; invariant references use INV tags
-resolved through the generated [invariants.md](../invariants.md) index; deferred
-or undecided items are recorded in [open-questions.md](../open-questions.md) and
-surfaced as pointers in each page's "Open edges" section; a topic normatively
-owned by a sibling page is linked, never restated.
+## Homes
+
+A normative claim about a subsystem lives in exactly one of three places;
+[architecture.md](../architecture.md) and [target-model.md](../target-model.md)
+are orientation documents outside that rule. `docs/spec/` states built behavior
+only, except for the lines under Planned. `docs/design/` holds one document per
+subsystem with committed but unbuilt design, written for the agent that will
+build it; landed material is removed as it lands, and the document is deleted
+when no planned capability remains. [open-questions.md](../open-questions.md)
+holds undecided items. Two normative surfaces sit outside those homes: the
+generated [domain API](../api/signalbox-domain/README.md) and
+[application API](../api/signalbox-application/README.md) declare public API
+shapes.
+
+A design document is titled `<Subsystem> design`, opens with a preamble saying
+it is not built and naming the spec page it extends, and has the sections Goal,
+Design, Compatibility constraints, and Acceptance criteria. It keeps decisions,
+shapes, transitions, and acceptance criteria, and links the spec page for built
+behavior instead of restating it, except that a compatibility constraint states
+the current behavior the design preserves. A foundation-weight change proposes
+its semantics in that document at the bottom of the implementing stack; the spec
+page changes with the code that builds them.
+
+## Page shape
+
+Every subsystem specification page, but not this conventions page, has one
+title, one sentence saying what the subsystem is for, and exactly four sections
+in this order: Overview, Design decisions, Boundary contracts, Planned.
+
+Overview says what the subsystem is, its boundary, the shape of its data, its
+major parts, and how they relate. It may name the core type, table, or function
+a reader will look for, and a bounded inventory when that inventory is the
+subsystem's data shape; it never otherwise enumerates types, fields, variants,
+columns, or CLI flags, which live in the code, the migration, and the example
+TOML. It is paragraphs, not lists, unless the content is a real sequence.
+
+Design decisions states each rule in one sentence, with its reason in the same
+sentence or in one "Why:" sentence after it. The failure a rule prevents is
+stated only when a reader could not infer it. Owner rulings are decisions, and
+so are fences, phrased as what is deliberately not done. No decision restates a
+contract or a not-built line.
+
+Boundary contracts holds the rules an implementing agent must honor, one
+paragraph each, and names the enforcer when one exists. Each repo-wide contract
+has one home page; every other page links to that page by name and never
+restates the contract.
+
+Planned has one line per committed unbuilt capability, naming it and linking its
+design document, and reads `None.` when the subsystem has no committed unbuilt
+capability. Nothing else about unbuilt design appears on the page.
+
+## Prose standard
+
+Sentences are plain and declarative, about twenty words, one idea each. Pages
+carry no rationale narrative, no metaphor, no hedges, no editorial or
+decision-source provenance, no history, and no pull-request or branch names.
+Provenance a subsystem records is behavior and stays on the page. A version
+number stays when it defines a wire or storage contract, and goes when it only
+records when behavior changed. A page says what the system does, not what a
+reader should do. Code identifiers appear only where the map names a core
+mechanism, a decision names the thing it decides, or a contract names its
+enforcer or an identifier that is itself contract data, such as a field name, a
+discriminator, or a preimage. A contract names its enforcer by source path,
+crate, type, or function. Pages have no Open edges section and no paragraph
+labelled as committed but unimplemented. Every link targets a page, never an
+anchor, unless the anchor is a heading on the linking page.
 
 ## Pages
 
-- [Conversation import](conversation-import.md)
 - [Sessions and the transcript](sessions-and-transcript.md)
+- [Session lifecycle](session-lifecycle.md)
 - [Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md)
 - [Goal mode](goal-mode.md)
 - [Model-call execution](model-call-execution.md)
-- [Usage evidence](usage-evidence.md)
 - [Tool loop](tool-loop.md)
-- [Git authority threat model](git-authority-threat-model.md)
-- [Web egress threat model](web-egress-threat-model.md)
-- [Runner protocol and placement](runner-protocol.md)
-- [Review workflows](review-workflows.md)
-- [Persistence protocol](persistence-protocol.md)
-- [Blob storage](blob-storage.md)
-- [File and media interpretation](file-and-media.md)
-- [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Model-runtime substrate](runtime-substrate.md)
 - [Model and session settings](model-session-settings.md)
 - [Configuration and credentials](configuration-and-credentials.md)
 - [Credential availability](credential-availability.md)
+- [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Process protocol](process-protocol.md)
+- [Ownership seam](ownership-seam.md)
+- [Persistence protocol](persistence-protocol.md)
+- [Blob storage](blob-storage.md)
+- [File and media interpretation](file-and-media.md)
+- [Conversation import](conversation-import.md)
+- [Runner protocol and placement](runner-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
-- [Pull-request convergence reconciliation](convergence-reconciliation.md)
+- [Review workflows](review-workflows.md)
+- [Git authority threat model](git-authority-threat-model.md)
+- [Web egress threat model](web-egress-threat-model.md)
 - [Workspace instructions and skills](workspace-instructions.md)
 - [Program substrate](program-substrate.md)
 - [Evaluation system](eval-system.md)
 
-## ADR mapping
+## Design documents
 
-Where each ADR's content went. Dispositions written by the distillers; an ADR
-consumed by several pages appears once per page.
-
-| ADR      | Page                          | Disposition                                                                                                                                                                                                                                                                                                                                                                                                         |
-| -------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ADR-0001 | identity-and-commands         | split: UUID-backed identity opacity and distinctness distilled here; terminology remains in glossary and invariants                                                                                                                                                                                                                                                                                                 |
-| ADR-0001 | sessions-and-transcript       | split: session/accepted-input/semantic-entry identity boundaries and the accepted-input-vs-transcript-entry distinction distilled here; durable-command identity, claim, replay, and proof rules in identity-and-commands; turn/attempt/model-call/tool terms and cardinalities in turn-lifecycle-and-scheduling and model-call-execution                                                                           |
-| ADR-0003 | sessions-and-transcript       | distilled here (user-initiated/no-ancestry creation implemented; SingleSource ancestry typed but unimplemented, reported as open edge; defaults/provenance separation distilled here; ancestry-deletion retention and multi-source/merge open questions carried from the ADR)                                                                                                                                       |
-| ADR-0004 | model-call-execution          | linked: turn/attempt lifecycle normative home is turn-lifecycle-and-scheduling; only the call-adjacent attempt transitions are described here                                                                                                                                                                                                                                                                       |
-| ADR-0004 | turn-lifecycle-and-scheduling | distilled here: implemented turn/attempt state algebra, slot rule, eligibility predicate, proof-bearing cancellation, approval and tool-recovery waits, startup recovery (including unstopped ambiguity parking and stopped ambiguity reconciliation), interrupt-based tool-wait terminalization, and model-call outcome precedence; resolving-evidence and accepted-risk tool-recovery decisions remain open edges |
-| ADR-0005 | configuration-and-credentials | referenced only: pinned-target and no-retry semantics cited for validation and failure edges; normative home model-call-execution                                                                                                                                                                                                                                                                                   |
-| ADR-0005 | model-call-execution          | split: implemented call lifecycle, pinned target, frozen-selection resolution, and no-retry semantics distilled here; provider-target mismatch evidence, outcome-authority transfer, ambiguity replacement, and invalidation are unimplemented-design (no spec prose; open edges)                                                                                                                                   |
-| ADR-0005 | runtime-substrate             | split: transport one-send discipline (redirects/retries/idle-reuse disabled), pre-send preparation retry boundary, three-target-facts newtypes, and streamed identity precedence (conflicting completion-id/model chunks are protocol violations, never completion under the first identity) here; durable retry/continuation/mismatch lifecycle semantics in model-call-execution                                  |
-| ADR-0005 | turn-lifecycle-and-scheduling | referenced only (version-one no-automatic-retry shapes startup Failed outcome); distilled in model-call-execution                                                                                                                                                                                                                                                                                                   |
-| ADR-0007 | identity-and-commands         | not distilled; only its open ProviderModelIdentity normalization question is noted as an open edge                                                                                                                                                                                                                                                                                                                  |
-| ADR-0009 | turn-lifecycle-and-scheduling | implemented and described here: `model_call` and tool-attempt storage, the model/tool dispatch gates, and the signalboxd scheduler paths exist; configurable/concurrent tool execution and remote runner dispatch remain open edges                                                                                                                                                                                 |
-| ADR-0010 | turn-lifecycle-and-scheduling | distilled here: durable-rows queue, scheduler-lock-before-lifecycle-writes ordering plus session-row lock-mode contract, nudge+sweep work source, scan-before-scheduling, no-lease single-daemon baseline; process-protocol now specifies the enforcing advisory guard while scan gating remains an open edge                                                                                                       |
-| ADR-0017 | configuration-and-credentials | distilled here (daemon-side credential contract: reference/value split, file supply, per-preparation reread, no startup preflight, fail-known-no-retry, redaction); deployment channel policy restated as the page's Credential operations policy section — deployment-side operational rules code cannot enforce, retained because the daemon-side mechanics depend on them                                        |
-| ADR-0017 | model-call-execution          | linked: credential lifecycle owned by configuration-and-credentials; the Prepared-before-credential-read ordering and capability opacity distilled here                                                                                                                                                                                                                                                             |
-| ADR-0017 | runtime-substrate             | split: in-process access boundary (reference/value types, per-request CredentialAccess resolution, sensitive headers, redaction, reference-only errors) here; channel ownership, Kubernetes delivery path, rotation discipline, and startup/failure behavior in configuration-and-credentials; call-lifecycle edges for credential failure in model-call-execution                                                  |
-| ADR-0019 | process-protocol              | retired without authority: version one was designed fresh; none of the retired envelope, negotiation, transport, or compatibility design was carried forward as a default                                                                                                                                                                                                                                           |
-| ADR-0021 | process-protocol              | retired without authority: version one's exact-version failure and closed message shapes were designed fresh and do not recommission the retired compatibility baseline                                                                                                                                                                                                                                             |
-| ADR-0022 | identity-and-commands         | split: native uuid column encoding and typed-record convention here; broader relational representation in persistence-protocol                                                                                                                                                                                                                                                                                      |
-| ADR-0022 | persistence-protocol          | split: implemented relational representation (including model-call and tool-attempt fences, approval decisions, interrupt proofs, cancellation intent, and typed terminal outbox rows), append-only/guard triggers, INV-009/INV-012 enforcement, and migration discipline distilled here; provider-evidence tables remain open; uuid identity encoding remains owned by identity-and-commands                       |
-| ADR-0022 | sessions-and-transcript       | split: append-only session/entry/content storage facts cited here as enforcement, including the deliberate session_current_defaults pointer exception; persistence representation doctrine in persistence-protocol                                                                                                                                                                                                  |
-| ADR-0027 | configuration-and-credentials | split: catalog validation, alias-definition lookup, unknown-alias rejection, and model-selection freeze here; input delivery in turn-lifecycle-and-scheduling; defaults versioning in sessions-and-transcript                                                                                                                                                                                                       |
-| ADR-0027 | identity-and-commands         | split: durable-command idempotency framing for SubmitInput here; delivery lifecycle in turn-lifecycle-and-scheduling                                                                                                                                                                                                                                                                                                |
-| ADR-0027 | model-call-execution          | linked: input delivery and steering owned by turn-lifecycle-and-scheduling; safe-point consumption and terminal reclassification noted here                                                                                                                                                                                                                                                                         |
-| ADR-0027 | persistence-protocol          | consulted partially: pending-steering representation, source-turn guards, safe-point consumption, and terminal/startup reclassification are distilled here where persistence implements them; delivery-lifecycle semantics remain with turn-lifecycle-and-scheduling                                                                                                                                                |
-| ADR-0027 | sessions-and-transcript       | split: defaults versioning/replacement semantics and accepted-input content ownership here; delivery treatments, dispositions, steering, and queue lifecycle in turn-lifecycle-and-scheduling                                                                                                                                                                                                                       |
-| ADR-0027 | turn-lifecycle-and-scheduling | split: eligibility-time lineage/frontier fixing, interrupt-aware queue order, occupied-slot delivery outcomes, safe-point steering consumption, and terminal pending-steering reclassification here; command construction, deduplication, and acceptance atomicity in identity-and-commands, model-selection freeze in configuration-and-credentials, and defaults-epoch binding in sessions-and-transcript         |
-| ADR-0030 | model-call-execution          | linked: context-frontier snapshots owned by sessions-and-transcript; per-call exact-frontier recording distilled here                                                                                                                                                                                                                                                                                               |
-| ADR-0030 | sessions-and-transcript       | split: semantic-entry identity and source-qualified reference summarized here; context-frontier snapshot mechanics in turn-lifecycle-and-scheduling and model-call-execution                                                                                                                                                                                                                                        |
-| ADR-0030 | turn-lifecycle-and-scheduling | split: snapshot identity/equality/prefix semantics, sealed construction authority, and commit-time complete-membership trigger distilled here; physical layout and migration discipline to persistence-protocol; ancestry resolution unimplemented (open edge)                                                                                                                                                      |
-| ADR-0031 | model-call-execution          | unimplemented-design for this slice (direct fatal terminalization paths absent from M3 code); normative home turn-lifecycle-and-scheduling                                                                                                                                                                                                                                                                          |
-| ADR-0031 | turn-lifecycle-and-scheduling | split: implemented type-level stop-cause union and fatal disposition restrictions distilled here; direct-closure aggregate transition unimplemented-design (open edge, no behavioral prose)                                                                                                                                                                                                                         |
-| ADR-0032 | configuration-and-credentials | referenced only: database-credential channel reservation noted; normative home persistence-protocol                                                                                                                                                                                                                                                                                                                 |
-| ADR-0032 | persistence-protocol          | distilled here (SQLx/Tokio stack, embedded forward-only migrations, TLS connection options, postgres-integration harness); scheduler/runtime coordination left to runtime-substrate                                                                                                                                                                                                                                 |
-| ADR-0033 | identity-and-commands         | distilled here                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ADR-0033 | persistence-protocol          | consulted partially: sentinel-UUID rejection and native-uuid column facts cited where the mapping code implements them; normative home identity-and-commands                                                                                                                                                                                                                                                        |
-| ADR-0033 | sessions-and-transcript       | split: UUIDv7 session-identity supply and sentinel rejection summarized here; identity generation/encoding doctrine in identity-and-commands                                                                                                                                                                                                                                                                        |
-| ADR-0034 | identity-and-commands         | distilled here; transaction/locking mechanics and reconstitution seam left to persistence-protocol                                                                                                                                                                                                                                                                                                                  |
-| ADR-0034 | persistence-protocol          | distilled here (user-global registry, typed subordinate records, structural replay equality, versioning, corruption-vs-unclaimed rule)                                                                                                                                                                                                                                                                              |
-| ADR-0034 | sessions-and-transcript       | split: comparison-payload participation of content and actor, plus fail-closed replay reconstitution and cross-kind ConflictingReuse for both session command families, cited here; durable-command storage and structural replay equality in identity-and-commands                                                                                                                                                 |
-| ADR-0035 | identity-and-commands         | split: replay-equality consumption of reconstitution here; the domain-owned reconstitution seam itself in persistence-protocol                                                                                                                                                                                                                                                                                      |
-| ADR-0035 | persistence-protocol          | distilled here (fail-closed domain-owned reconstitution pattern, corruption/staleness/infrastructure taxonomy); aggregate-specific projection semantics left to sessions-and-transcript and turn-lifecycle-and-scheduling                                                                                                                                                                                           |
-| ADR-0035 | sessions-and-transcript       | split: session and creation reconstitution seams described here; domain-owned fail-closed reconstitution doctrine in persistence-protocol                                                                                                                                                                                                                                                                           |
-| ADR-0035 | turn-lifecycle-and-scheduling | referenced only (general reconstitution boundary); distilled in persistence-protocol                                                                                                                                                                                                                                                                                                                                |
-| ADR-0036 | model-call-execution          | linked: baseline semantic-entry set owned by sessions-and-transcript                                                                                                                                                                                                                                                                                                                                                |
-| ADR-0036 | sessions-and-transcript       | distilled here (ADR-0036's initial origin/failure payloads, now part of the wider closed payload set that ADR-0042 grew; reference-not-copy, commit-at-eligibility, bidirectional entry/turn-state schema triggers); activation/recovery transaction mechanics in turn-lifecycle-and-scheduling; static eligible-failure path unimplemented, reported as open edge                                                  |
-| ADR-0036 | turn-lifecycle-and-scheduling | referenced only (TurnFailed marker and origin-entry payloads consumed by activation and recovery); distilled in sessions-and-transcript                                                                                                                                                                                                                                                                             |
-| ADR-0037 | sessions-and-transcript       | distilled here, together with the maintainer-approved 1 MiB UTF-8 admission bound the ADR left open                                                                                                                                                                                                                                                                                                                 |
-| ADR-0038 | sessions-and-transcript       | distilled here (three-fact aggregate, receipt/candidate/session distinction, pointer-authoritative load, fail-closed reconstitution)                                                                                                                                                                                                                                                                                |
-| ADR-0039 | identity-and-commands         | distilled here; transition-record adoption and non-user admission remain open edges                                                                                                                                                                                                                                                                                                                                 |
-| ADR-0039 | sessions-and-transcript       | distilled here (SubmitInput-only adoption in code; ReplaceSessionDefaults missing-actor divergence and unexercised CreateSession amendment reported as open edges)                                                                                                                                                                                                                                                  |
-| ADR-0040 | model-call-execution          | linked: transactional outbox owned by persistence-protocol; same-transaction outbox appends at every durable physical transition (Prepared, InFlight, terminal) noted here                                                                                                                                                                                                                                          |
-| ADR-0040 | persistence-protocol          | split: in-transaction append, singleton sequence allocation, delivery-prefix schema, and event-payload discipline distilled here; ordered publisher/drain and snapshot-first subscription consumption implemented in process-protocol; retention and pruning remain open in persistence-protocol                                                                                                                    |
-| ADR-0041 | persistence-protocol          | consulted partially: self-proving completeness (scheduling inventory count, acceptance tail) referenced as reconstitution pattern; active-phase validation semantics left to turn-lifecycle-and-scheduling                                                                                                                                                                                                          |
-| ADR-0041 | turn-lifecycle-and-scheduling | distilled here: active-phase evidence validation (including proof-correlated stop requests, approval and recovery waits), session acceptance-tail validation, and fail-closed reconstitution as implemented in turn_eligibility.rs                                                                                                                                                                                  |
-| ADR-0042 | model-call-execution          | split: response commit boundary, assistant-text algebra, intra-turn tool yields, and TurnCompleted marker distilled here; semantic-entry and frontier representation in sessions-and-transcript; request/result behavior in tool-loop                                                                                                                                                                               |
-| ADR-0042 | runtime-substrate             | referenced only: deltas-are-transient constraint cited via INV-032; normative content commit in sessions-and-transcript                                                                                                                                                                                                                                                                                             |
-| ADR-0042 | sessions-and-transcript       | distilled here: assistant-text, tool-use/result-reference, and completed-turn semantic entries implemented with their commit-boundary triggers; refusal-content entries remain open                                                                                                                                                                                                                                 |
-| ADR-0043 | configuration-and-credentials | referenced only: provider-side credential rejection is outcome evidence; normative home model-call-execution                                                                                                                                                                                                                                                                                                        |
-| ADR-0043 | model-call-execution          | split: evidence-to-disposition classification distilled here; full-send boundary, evidence derivation, and provider timeout budget in runtime-substrate                                                                                                                                                                                                                                                             |
-| ADR-0043 | runtime-substrate             | split: typed terminal-evidence vocabulary, adapter-exhaustive native error mappings, boundary-crossed vs proven-unsent distinction, and stream-integrity evidence here; disposition classification and ambiguity handling in model-call-execution                                                                                                                                                                   |
-| ADR-0044 | configuration-and-credentials | split: deployment configuration surface (env vars, fail-fast configuration phase, provisional DATABASE_URL, verify-full) here; socket and guard configuration in process-protocol; startup ordering and concurrency in turn-lifecycle-and-scheduling                                                                                                                                                                |
-| ADR-0044 | identity-and-commands         | split: durable-command/aggregate correlation-key rules here; process subscriber and local command boundary in process-protocol; failure taxonomy in runtime-substrate                                                                                                                                                                                                                                               |
-| ADR-0044 | model-call-execution          | linked: operator taxonomy owned by runtime-substrate, startup and shutdown composition by turn-lifecycle-and-scheduling, and the process serving boundary by process-protocol; fatal-escalation behavior for execution failures described here                                                                                                                                                                      |
-| ADR-0044 | persistence-protocol          | consulted partially: signalboxd migrate-scan-schedule phase ordering and complete startup classification/reclassification cited to ground INV-034; startup and recovery composition owned by turn-lifecycle-and-scheduling, with durable dispatch and fencing split between persistence-protocol and process-protocol                                                                                               |
-| ADR-0044 | process-protocol              | split: local socket trust boundary, singleton guard and generation fencing, framed request serving, subscriber fan-out, admission bounds, and transport shutdown here; lifecycle startup, recovery, scheduler, and execution shutdown ordering in turn-lifecycle-and-scheduling; operator failure taxonomy in runtime-substrate                                                                                     |
-| ADR-0044 | runtime-substrate             | split: the shared operator failure taxonomy (four classes plus the commit-ambiguity flag) and library discipline (no subscriber, no runtime selection, no credential logging) distilled here; other daemon-runtime foundations in turn-lifecycle-and-scheduling, identity-and-commands, and configuration-and-credentials                                                                                           |
-| ADR-0044 | turn-lifecycle-and-scheduling | split: startup ordering, graceful shutdown/grace window, scheduler wiring, and concurrency contract here; tracing facade and operator taxonomy to runtime-substrate; database-credential channel to configuration-and-credentials                                                                                                                                                                                   |
-| ADR-0045 | configuration-and-credentials | referenced only: send-preparation staging that hosts credential resolution; normative home model-call-execution                                                                                                                                                                                                                                                                                                     |
-| ADR-0045 | model-call-execution          | distilled here: staged prepare/authorize-send/commit-observation orchestration, gate, identity-collision-only retry, commit-ambiguity and retained-observation policy; outbox scope in persistence-protocol; operator taxonomy in runtime-substrate                                                                                                                                                                 |
-| ADR-0045 | runtime-substrate             | split: two-stage prepare/execute interface shape and one-shot capability discipline here; transaction boundaries, dispatch gate, and observation-commit orchestration in model-call-execution                                                                                                                                                                                                                       |
-| ADR-0046 | identity-and-commands         | unimplemented-design (no spec prose); current telemetry omits command correlation entirely, noted as open edge                                                                                                                                                                                                                                                                                                      |
-| ADR-0047 | configuration-and-credentials | split: runtime model catalog and credential-access port composition here; substrate isolation, operations, and evidence in runtime-substrate                                                                                                                                                                                                                                                                        |
-| ADR-0047 | model-call-execution          | linked: model-runtime layering and evidence types owned by runtime-substrate; the bridge's evidence-to-disposition mapping and the provider-types-stay-out-of-application boundary described here                                                                                                                                                                                                                   |
-| ADR-0047 | runtime-substrate             | distilled here: three-layer boundary, crate/manifest rules, correlation and no-retry integration rules, evidence posture; substrate-candidacy/audit posture superseded by landed hand-rolled crates (open edge); port ownership left to model-call-execution                                                                                                                                                        |
-| ADR-0047 | turn-lifecycle-and-scheduling | referenced only (signalboxd now wires the model-runtime crates through the model-provider-runtime bridge; this page describes only the scheduler's dispatch handoff); distilled in model-call-execution                                                                                                                                                                                                             |
+- [Sessions and the transcript design](../design/sessions-and-transcript.md)
+- [Session lifecycle design](../design/session-lifecycle.md)
+- [Turn lifecycle and scheduling design](../design/turn-lifecycle-and-scheduling.md)
+- [Model-call execution design](../design/model-call-execution.md)
+- [Tool loop design](../design/tool-loop.md)
+- [Model-runtime substrate design](../design/runtime-substrate.md)
+- [Model and session settings design](../design/model-session-settings.md)
+- [Configuration and credentials design](../design/configuration-and-credentials.md)
+- [Credential availability design](../design/credential-availability.md)
+- [Identity and commands design](../design/identity-and-commands.md)
+- [Process protocol design](../design/process-protocol.md)
+- [Persistence protocol design](../design/persistence-protocol.md)
+- [Blob storage design](../design/blob-storage.md)
+- [File and media interpretation design](../design/file-and-media.md)
+- [Conversation import design](../design/conversation-import.md)
+- [Runner protocol design](../design/runner-protocol.md)
+- [Repository watch design](../design/repo-watch.md)
+- [Review workflows design](../design/review-workflows.md)
+- [Git authority threat model design](../design/git-authority-threat-model.md)
+- [Workspace instructions design](../design/workspace-instructions.md)
+- [Program substrate design](../design/program-substrate.md)
+- [Evaluation system design](../design/eval-system.md)

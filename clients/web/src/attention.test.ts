@@ -14,6 +14,7 @@ const summary = {
   goal_block: null,
   judge: { actionable: '2', completed: '7', escalated: '1', failed: '0' },
   last_activity: { kind: 'approval_judge', unix_milliseconds: '1724200000000' },
+  lifecycle_state: 'waiting',
   session_id: sessionId,
   state: 'awaiting_approval',
 } as const
@@ -38,6 +39,9 @@ const streamTransport = (
     },
     readBlobDescriptor: async () => {
       throw new Error('unused blob descriptor read')
+    },
+    readSessions: async () => {
+      throw new Error('unused session catalog read')
     },
     readAttention: async () => {
       throw new Error('unused attention read')

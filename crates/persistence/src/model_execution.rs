@@ -7,9 +7,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    error::Error,
-    fmt,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -21,14 +19,15 @@ use signalbox_application::{
     CredentialPoolExhaustedOutcome, FailPreparedModelCallTransaction, ModelCallAuthorizationReread,
     ModelCallCredentialReference, ModelCallObservationCommitOutcome,
     ModelCallTerminalIdentityCandidates, OperatorFailureClass, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus,
+    PrepareModelCallTransaction, PrepareToolContinuationOutcome, PreparedModelCallFailureCause,
+    ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
     ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
-    AssistantText, AttachmentBlobFact, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn,
-    BlobDigest, CancelledModelCallTurn, CancelledToolRoundModelCallTurn, CompletedModelCallTurn,
+    AttachmentBlobFact, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, BlobDigest,
+    CancelledModelCallTurn, CancelledToolRoundModelCallTurn, CompletedModelCallTurn,
     ConsumedSteeringReconstitutionInput, ContextFrontierId, ContextHeadroomExhaustedModelCallTurn,
     CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
     DelegatedModelCallRecoveryReconstitutionInput, DelegatedTurnActivationInput,
@@ -52,7 +51,7 @@ use signalbox_domain::{
     SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, ToolApprovalDecision,
     ToolApprovalResolution, ToolDecisionSource, ToolRequest, ToolResultAttemptCorrelation,
     ToolRoundModelCallTurn, TurnAttemptId, TurnId, TurnInstructionManifest,
-    TurnInstructionManifestId, UserContent,
+    TurnInstructionManifestId, TurnTerminalCause, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -67,9 +66,12 @@ use crate::{
         durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
         positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
         tool_approval_decision_source_to_str, tool_approval_posture_to_str,
-        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid, turn_terminal_cause_to_str,
     },
-    outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
+    outbox::{
+        self, InjectionOutcomeOutbox, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState,
+        TurnTerminalOutboxDisposition,
+    },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
         SubmitInputCorruption, SubmitInputRepositoryError, decode_goal_origin_configuration,
@@ -84,6 +86,7 @@ pub struct ToolContinuationUsageLimit {
     fast_mode: FastMode,
     max_output_tokens: u64,
     context_window_tokens: u64,
+    replays_provider_compaction: bool,
 }
 
 impl ToolContinuationUsageLimit {
@@ -99,7 +102,15 @@ impl ToolContinuationUsageLimit {
             fast_mode,
             max_output_tokens,
             context_window_tokens,
+            replays_provider_compaction: false,
         }
+    }
+
+    /// Marks that this resolved target replays durable provider compaction.
+    #[must_use]
+    pub const fn with_provider_compaction_replay(mut self) -> Self {
+        self.replays_provider_compaction = true;
+        self
     }
 
     pub(crate) const fn max_output_tokens(self) -> u64 {
@@ -108,6 +119,10 @@ impl ToolContinuationUsageLimit {
 
     pub(crate) const fn context_window_tokens(self) -> u64 {
         self.context_window_tokens
+    }
+
+    const fn replays_provider_compaction(self) -> bool {
+        self.replays_provider_compaction
     }
 }
 
@@ -156,27 +171,16 @@ impl From<ContextFrontierId> for ProspectiveModelInput<'_> {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Latest terminal-call usage usable as a conservative next-call lower bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReportedModelCallUsage {
-    usage: ProviderReportedTokenUsage,
-    input_includes_cache_tokens: bool,
-    input_is_retained: bool,
-    output_is_retained: bool,
-    projected_unreported_content_bytes: u64,
-}
-
-impl ReportedModelCallUsage {
     /// Returns the exact provider-reported fields retained for the call.
-    pub const fn usage(self) -> ProviderReportedTokenUsage {
-        self.usage
-    }
-
+    #[get(copy)]
+    usage: ProviderReportedTokenUsage,
     /// Whether the stored input field already includes the cache axes.
-    pub const fn input_includes_cache_tokens(self) -> bool {
-        self.input_includes_cache_tokens
-    }
-
+    #[get(copy)]
+    input_includes_cache_tokens: bool,
     /// Whether the reported input is still model-visible for the next call.
     ///
     /// An ordinary call's input is the transcript prefix its successor resends.
@@ -184,20 +188,23 @@ impl ReportedModelCallUsage {
     /// replaced, so none of it survives into the next request; that call's
     /// retained material is its summary output plus the content the compaction
     /// did not summarize, which the projected-content allowance counts.
-    pub const fn input_is_retained(self) -> bool {
-        self.input_is_retained
-    }
-
+    #[get(copy)]
+    input_is_retained: bool,
+    /// Provider-reported final-iteration input retained after in-response
+    /// compaction, including cache axes and separate from billed usage.
+    #[get(copy)]
+    retained_input_tokens: Option<u64>,
+    /// Provider-reported final-iteration output retained after in-response
+    /// compaction, separate from billed usage.
+    #[get(copy)]
+    retained_output_tokens: Option<u64>,
     /// Whether reported output became assistant transcript for the next call.
-    pub const fn output_is_retained(self) -> bool {
-        self.output_is_retained
-    }
-
+    #[get(copy)]
+    output_is_retained: bool,
     /// Returns a conservative byte allowance for model-visible transcript
     /// material appended after the reported call's input.
-    pub const fn projected_unreported_content_bytes(self) -> u64 {
-        self.projected_unreported_content_bytes
-    }
+    #[get(copy)]
+    projected_unreported_content_bytes: u64,
 }
 
 impl ProspectiveModelCall {
@@ -236,39 +243,33 @@ impl ProspectiveModelCall {
 }
 
 /// Which fresh execution identity collided with an existing durable record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum ModelCallIdentityCollision {
     /// The proposed model-call identity already exists.
+    #[error("model-call identity already exists")]
     ModelCall,
     /// A proposed semantic-entry identity already exists.
+    #[error("semantic-entry identity already exists")]
     SemanticEntry,
     /// The proposed terminal-frontier identity already exists.
+    #[error("context-frontier identity already exists")]
     TerminalFrontier,
     /// A proposed reclassified successor-turn identity already exists.
+    #[error("reclassified successor-turn identity already exists")]
     ReclassifiedTurn,
 }
 
-impl fmt::Display for ModelCallIdentityCollision {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let identity = match self {
-            Self::ModelCall => "model-call",
-            Self::SemanticEntry => "semantic-entry",
-            Self::TerminalFrontier => "context-frontier",
-            Self::ReclassifiedTurn => "reclassified successor-turn",
-        };
-        write!(formatter, "{identity} identity already exists")
-    }
-}
-
-impl Error for ModelCallIdentityCollision {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct the execution aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCallCorruption {
+    #[error("missing model-call execution {field_0}")]
     /// One required durable record or field is absent.
     Missing(&'static str),
+    #[error("inconsistent model-call execution {field_0}")]
     /// Stored records disagree about an exact relationship.
     Inconsistent(&'static str),
+    #[error("unsupported model-call execution {field}: {value}")]
     /// A closed durable discriminator is unsupported.
     Unsupported {
         /// The field whose spelling is unsupported.
@@ -276,96 +277,42 @@ pub enum ModelCallCorruption {
         /// The exact durable spelling.
         value: String,
     },
+    #[error("model-call current Session is invalid: {field_0}")]
     /// The current session projection is invalid.
     CurrentSession(SessionCorruption),
+    #[error("model-call scheduling projection is invalid: {field_0}")]
     /// Complete scheduling records are invalid.
     Scheduling(SubmitInputCorruption),
+    #[error("model-call execution reconstitution failed: {field_0:?}")]
     /// Complete live facts fail domain reconstitution.
     Execution(ModelCallExecutionReconstitutionFailure),
 }
 
-impl fmt::Display for ModelCallCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(record) => write!(formatter, "missing model-call execution {record}"),
-            Self::Inconsistent(relationship) => {
-                write!(
-                    formatter,
-                    "inconsistent model-call execution {relationship}"
-                )
-            }
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "unsupported model-call execution {field}: {value}"
-                )
-            }
-            Self::CurrentSession(error) => {
-                write!(formatter, "model-call current Session is invalid: {error}")
-            }
-            Self::Scheduling(error) => {
-                write!(
-                    formatter,
-                    "model-call scheduling projection is invalid: {error}"
-                )
-            }
-            Self::Execution(failure) => {
-                write!(
-                    formatter,
-                    "model-call execution reconstitution failed: {failure:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ModelCallCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, integrity, identity, or caller failure at the execution boundary.
 #[derive(Debug)]
 pub enum ModelCallRepositoryError {
+    #[error("model-call database failure: {source}")]
     /// PostgreSQL could not complete the operation.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Committed rows cannot form the accepted aggregate.
-    Corruption(ModelCallCorruption),
+    Corruption(#[source] ModelCallCorruption),
+    #[error(transparent)]
     /// A fresh identity collided durably.
-    IdentityCollision(ModelCallIdentityCollision),
+    IdentityCollision(#[source] ModelCallIdentityCollision),
+    #[error("no live model-call execution exists")]
     /// The application invoked an execution transition without a live turn.
     NoLiveExecution,
+    #[error("model-call transition rejected: {field_0}")]
     /// A checked transition rejected an application-supplied operation.
     InvalidTransition(&'static str),
-}
-
-impl fmt::Display for ModelCallRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "model-call database failure: {source}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::IdentityCollision(error) => error.fmt(formatter),
-            Self::NoLiveExecution => formatter.write_str("no live model-call execution exists"),
-            Self::InvalidTransition(operation) => {
-                write!(formatter, "model-call transition rejected: {operation}")
-            }
-        }
-    }
-}
-
-impl Error for ModelCallRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision(error) => Some(error),
-            Self::NoLiveExecution | Self::InvalidTransition(_) => None,
-        }
-    }
 }
 
 impl ClassifyOperatorFailure for ModelCallRepositoryError {
@@ -485,9 +432,12 @@ impl CredentialPoolRuntimeAction {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Runtime pool member in immutable policy order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialPoolRuntimeMember {
+    /// Borrows the deployment-owned profile reference.
+    #[get(str)]
     credential_reference: Arc<str>,
     priority: NonZeroU32,
 }
@@ -505,20 +455,18 @@ impl CredentialPoolRuntimeMember {
         }
     }
 
-    /// Borrows the deployment-owned profile reference.
-    pub fn credential_reference(&self) -> &str {
-        &self.credential_reference
-    }
-
     /// Returns the membership priority.
     pub const fn priority(&self) -> NonZeroU32 {
         self.priority
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Immutable credential-pool policy supplied by admitted daemon configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialPoolRuntimePolicy {
+    /// Borrows the exact pool name.
+    #[get(str)]
     name: Arc<str>,
     members: Arc<[CredentialPoolRuntimeMember]>,
     on_pool_exhausted: CredentialPoolRuntimeExhaustion,
@@ -550,11 +498,6 @@ impl CredentialPoolRuntimePolicy {
         }
     }
 
-    /// Borrows the exact pool name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     /// Borrows members in deterministic selection order.
     pub fn members(&self) -> &[CredentialPoolRuntimeMember] {
         &self.members
@@ -580,14 +523,18 @@ impl CredentialPoolRuntimePolicy {
 pub type CredentialPoolRuntimeCatalog =
     HashMap<ResolvedProviderTarget, CredentialPoolRuntimePolicy>;
 
+#[derive(signalbox_derive::Accessors)]
 /// PostgreSQL adapter for the initial model-call execution transactions.
 #[derive(Clone, Debug)]
 pub struct PostgresModelCallRepository {
+    /// Borrows the shared pool for composition-owned adjacent transactions.
+    #[get]
     pool: PgPool,
     targets: ModelTargetCatalog,
     credential_reference: ModelCallCredentialReference,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: CredentialPoolRuntimeCatalog,
+    same_credential_attempt_bound: NonZeroUsize,
     cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
     continuation_usage_limits: ToolContinuationUsageLimitCatalog,
 }
@@ -595,6 +542,11 @@ pub struct PostgresModelCallRepository {
 /// Proof that one model-call transaction serialized before either shared lock class.
 pub(crate) struct ModelCallOutboxOrderGuard {
     _private: (),
+}
+
+pub(crate) enum CountedActivationCheckpointOutcome {
+    Prepared,
+    PoolExhausted(CredentialPoolRuntimePolicy),
 }
 
 const MODEL_CALL_OUTBOX_ORDER_GUARD: &str = "model_call_outbox_order_guard:v1";
@@ -613,6 +565,7 @@ impl PostgresModelCallRepository {
             credential_reference,
             credential_families: None,
             credential_pools: HashMap::new(),
+            same_credential_attempt_bound: NonZeroUsize::MIN,
             cache_inclusive_input_targets: HashSet::new(),
             continuation_usage_limits: HashMap::new(),
         }
@@ -630,6 +583,12 @@ impl PostgresModelCallRepository {
     /// Enables per-call credential-pool selection and trigger observation.
     pub fn with_credential_pools(mut self, credential_pools: CredentialPoolRuntimeCatalog) -> Self {
         self.credential_pools = credential_pools;
+        self
+    }
+
+    /// Bounds recorded attempts on one credential within a turn.
+    pub fn with_same_credential_attempt_bound(mut self, bound: NonZeroUsize) -> Self {
+        self.same_credential_attempt_bound = bound;
         self
     }
 
@@ -654,13 +613,8 @@ impl PostgresModelCallRepository {
         self
     }
 
-    /// Borrows the shared pool for composition-owned adjacent transactions.
-    pub const fn pool(&self) -> &PgPool {
-        &self.pool
-    }
-
     /// Reads the newest ordinary or dedicated-compaction call with reported input
-    /// usage for one exact target.
+    /// usage for one exact target and effective fast mode.
     ///
     /// A later failed call with no usage does not erase the last provider-confirmed
     /// context size. Callers may use this only as a lower bound: later transcript
@@ -669,11 +623,16 @@ impl PostgresModelCallRepository {
     /// The prospective input names the model-visible entries the next request
     /// would carry. Membership is compared against the reported call's own
     /// frontier, so the allowance covers exactly the content appended after the
-    /// provider counted its input.
+    /// provider counted its input. `replays_provider_compaction` states whether
+    /// the effective target includes opaque provider-compaction members in that
+    /// request projection and therefore whether final-iteration retained counts
+    /// describe the next request.
     pub async fn latest_reported_usage<'a>(
         &self,
         session: SessionId,
         target: ResolvedProviderTarget,
+        fast_mode: FastMode,
+        replays_provider_compaction: bool,
         prospective: impl Into<ProspectiveModelInput<'a>>,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         let (projected_members, uncommitted_content_bytes) = match prospective.into() {
@@ -736,15 +695,27 @@ impl PostgresModelCallRepository {
                        model_call.context_frontier_id,
                        model_call.usage_input_includes_cache_tokens,
                        true AS input_is_retained,
-                       model_call.terminal_disposition_kind = 'completed' AS output_is_retained,
+                       model_call.retained_input_tokens,
+                       model_call.retained_output_tokens,
+                       (model_call.terminal_disposition_kind = 'completed') AS output_is_retained,
                        model_call.usage_input_tokens,
                        model_call.usage_output_tokens,
                        model_call.usage_cache_creation_input_tokens,
                        model_call.usage_cache_read_input_tokens,
                        NULL::uuid AS reported_summary_entry_id,
+                       EXISTS (
+                           SELECT 1
+                             FROM semantic_transcript_entry AS compacted
+                            WHERE compacted.source_session_id = model_call.session_id
+                              AND compacted.producing_model_call_id = model_call.model_call_id
+                              AND compacted.payload_kind = 'provider_compaction'
+                       ) AS has_provider_compaction,
                        headroom.projected_result_content_bytes AS
                            proven_unreported_content_bytes
                   FROM model_call
+                  JOIN turn_model_settings_resolved AS settings
+                    ON settings.session_id = model_call.session_id
+                   AND settings.turn_id = model_call.turn_id
                   LEFT JOIN tool_continuation_context_headroom AS headroom
                     ON headroom.session_id = model_call.session_id
                    AND headroom.producing_model_call_id = model_call.model_call_id
@@ -752,6 +723,7 @@ impl PostgresModelCallRepository {
                    AND model_call.resolved_provider_model_identity_id = $2
                    AND model_call.state_kind = 'terminal'
                    AND model_call.usage_input_tokens IS NOT NULL
+                   AND settings.resolved_model_settings #>> '{effective,fast_mode}' = $6
                    AND NOT EXISTS (
                        SELECT 1
                          FROM latest_compaction AS latest
@@ -782,12 +754,15 @@ impl PostgresModelCallRepository {
                        latest.source_frontier_id AS context_frontier_id,
                        latest.usage_input_includes_cache_tokens,
                        false AS input_is_retained,
+                       NULL::numeric AS retained_input_tokens,
+                       NULL::numeric AS retained_output_tokens,
                        true AS output_is_retained,
                        latest.usage_input_tokens,
                        latest.usage_output_tokens,
                        latest.usage_cache_creation_input_tokens,
                        latest.usage_cache_read_input_tokens,
                        latest.summary_entry_id AS reported_summary_entry_id,
+                       false AS has_provider_compaction,
                        NULL::numeric AS proven_unreported_content_bytes
                   FROM latest_compaction AS latest
                  WHERE latest.resolved_provider_model_identity_id = $2
@@ -822,6 +797,8 @@ impl PostgresModelCallRepository {
                  WHERE latest_call.call_kind = 'ordinary'
              )
              SELECT usage_input_includes_cache_tokens, input_is_retained,
+                    retained_input_tokens, retained_output_tokens,
+                    has_provider_compaction,
                     output_is_retained,
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
@@ -833,6 +810,18 @@ impl PostgresModelCallRepository {
                     + (
                         SELECT COALESCE(SUM(
                             CASE
+                                -- Aggregated provider output usage already
+                                -- includes every response part from the call
+                                -- that performed server-side compaction.
+                                WHEN latest_call.has_provider_compaction
+                                     AND entry.producing_model_call_id =
+                                         latest_call.model_call_id
+                                     AND entry.payload_kind IN (
+                                         'assistant_text',
+                                         'provider_compaction',
+                                         'assistant_tool_use'
+                                     )
+                                THEN 0
                                 -- The durable proof already measured every
                                 -- result the producing call's round projected,
                                 -- including a returning foreground delegation's
@@ -884,6 +873,10 @@ impl PostgresModelCallRepository {
                                         COALESCE(octet_length(entry.context_summary_value), 0)
                                     WHEN 'assistant_text' THEN
                                         COALESCE(octet_length(entry.assistant_text_value), 0)
+                                    WHEN 'provider_compaction' THEN
+                                        CASE WHEN $7::boolean THEN
+                                            COALESCE(octet_length(entry.assistant_text_value), 0)
+                                        ELSE 0 END
                                     WHEN 'assistant_tool_use' THEN
                                         COALESCE(octet_length(request.tool_name), 0)
                                         + COALESCE(octet_length(request.arguments_text), 0)
@@ -967,6 +960,11 @@ impl PostgresModelCallRepository {
         .bind(&member_sessions)
         .bind(&member_entries)
         .bind(Decimal::from(uncommitted_content_bytes))
+        .bind(match fast_mode {
+            FastMode::Disabled => "disabled",
+            FastMode::Enabled => "enabled",
+        })
+        .bind(replays_provider_compaction)
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -987,6 +985,25 @@ impl PostgresModelCallRepository {
                 })
                 .transpose()
         };
+        let mut retained_input_tokens = decode("retained_input_tokens")?;
+        let mut retained_output_tokens = decode("retained_output_tokens")?;
+        let has_provider_compaction = row.try_get::<bool, _>("has_provider_compaction")?;
+        if has_provider_compaction
+            && (retained_input_tokens.is_none() || retained_output_tokens.is_none())
+        {
+            return Err(ModelCallCorruption::Missing(
+                "provider-compaction retained iteration token counts",
+            )
+            .into());
+        }
+        if has_provider_compaction && !replays_provider_compaction {
+            // Without the durable block, the next request replays the preserved
+            // pre-compaction history. Final-iteration retained counts describe
+            // a projection that request will not carry; fall back to the
+            // conservative aggregate usage evidence instead.
+            retained_input_tokens = None;
+            retained_output_tokens = None;
+        }
         Ok(Some(ReportedModelCallUsage {
             usage: ProviderReportedTokenUsage::unreported()
                 .with_input_tokens(decode("usage_input_tokens")?)
@@ -995,6 +1012,8 @@ impl PostgresModelCallRepository {
                 .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?),
             input_includes_cache_tokens: row.try_get("usage_input_includes_cache_tokens")?,
             input_is_retained: row.try_get("input_is_retained")?,
+            retained_input_tokens,
+            retained_output_tokens,
             output_is_retained: row.try_get("output_is_retained")?,
             projected_unreported_content_bytes: decode("projected_unreported_content_bytes")?
                 .ok_or(ModelCallCorruption::Missing(
@@ -1288,7 +1307,7 @@ impl PostgresModelCallRepository {
         activated: &signalbox_domain::ActivatedTurn,
         prospective: &ProspectiveModelCall,
         _outbox_order_guard: ModelCallOutboxOrderGuard,
-    ) -> Result<(), ModelCallRepositoryError> {
+    ) -> Result<CountedActivationCheckpointOutcome, ModelCallRepositoryError> {
         let prepared = prospective.prepared();
         let signalbox_domain::ActiveTurnPhase::Running { current_attempt } = activated.phase()
         else {
@@ -1338,9 +1357,15 @@ impl PostgresModelCallRepository {
         .await?;
         outbox::lock_sequence_allocator(connection).await?;
         let Some(credential_reference) = selected.reference.as_ref() else {
-            // The activated turn remains call-free; the ordinary preparation
-            // pass owns the typed pool-exhaustion closure and its identities.
-            return Ok(());
+            // The activated turn remains call-free. The ordinary counted path
+            // hands it to preparation; a definitive attachment path already
+            // has identities and closes the typed exhaustion in this transaction.
+            let policy = selected
+                .policy
+                .ok_or(ModelCallRepositoryError::InvalidTransition(
+                    "credential-pool exhaustion is missing its frozen policy",
+                ))?;
+            return Ok(CountedActivationCheckpointOutcome::PoolExhausted(policy));
         };
         insert_prepared_call(
             connection,
@@ -1356,7 +1381,62 @@ impl PostgresModelCallRepository {
             prepared.turn(),
             &selected.pending_consumed_actions,
         )
-        .await
+        .await?;
+        Ok(CountedActivationCheckpointOutcome::Prepared)
+    }
+
+    /// Checkpoints and closes the exact prospective call after attachment
+    /// verification found a definitive failure during provider-native counting.
+    pub(crate) async fn fail_counted_attachment_in_transaction(
+        &self,
+        connection: &mut PgConnection,
+        activated: &signalbox_domain::ActivatedTurn,
+        prospective: &ProspectiveModelCall,
+        failure: AttachmentPreparationFailure,
+        identities: FailedModelCallTurnIdentities,
+        outbox_order_guard: ModelCallOutboxOrderGuard,
+    ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
+        let checkpoint = self
+            .checkpoint_counted_activation_in_transaction(
+                connection,
+                activated,
+                prospective,
+                outbox_order_guard,
+            )
+            .await?;
+        if let CountedActivationCheckpointOutcome::PoolExhausted(policy) = checkpoint {
+            let execution =
+                require_live_execution(connection, activated.session(), &self.targets).await?;
+            let exhausted = execution
+                .fail_credential_pool_exhausted(policy.name().to_owned(), identities)
+                .map_err(|_| {
+                    ModelCallRepositoryError::InvalidTransition(
+                        "credential-pool exhaustion could not close counted activation",
+                    )
+                })?;
+            persist_credential_pool_exhaustion(connection, &exhausted).await?;
+            return Ok(exhausted.into_failed());
+        }
+        let call = prospective.prepared().call().id();
+        let execution = require_exact_call(
+            require_live_execution(connection, activated.session(), &self.targets).await?,
+            call,
+        )?;
+        let failed = execution.fail_prepared_call(identities).map_err(|_| {
+            ModelCallRepositoryError::InvalidTransition(
+                "counted attachment failure requires the exact Prepared call",
+            )
+        })?;
+        persist_failed_with_delegated_child_result(
+            connection,
+            &failed,
+            TurnTerminalCause::AttachmentPreparationFailed,
+            ProviderReportedTokenUsage::unreported(),
+            None,
+            Some(failure),
+        )
+        .await?;
+        Ok(failed)
     }
 
     /// Commits Prepared while consuming the complete locked steering inventory.
@@ -1376,14 +1456,6 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
-            let dispatch_start_lease_expired: bool =
-                sqlx::query_scalar(crate::lock_inventory::EXPIRED_DISPATCH_START_LEASE)
-                    .bind(session_id_to_uuid(session))
-                    .fetch_one(&mut *transaction)
-                    .await?;
-            if dispatch_start_lease_expired {
-                return Ok((false, PrepareInitialModelCallOutcome::NoWork));
-            }
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
             if execution.current_call().is_none()
@@ -1598,6 +1670,7 @@ impl PostgresModelCallRepository {
                     persist_failed_with_delegated_child_result(
                         &mut transaction,
                         &failed,
+                        TurnTerminalCause::ModelTargetUnavailable,
                         ProviderReportedTokenUsage::unreported(),
                         None,
                         None,
@@ -1764,6 +1837,8 @@ impl PostgresModelCallRepository {
                 &mut next_reclassified_turn,
             )?;
             let usage = observation.usage();
+            let retained_input_tokens = observation.observation().retained_input_tokens();
+            let retained_output_tokens = observation.observation().retained_output_tokens();
             let provider_failure_cause = observation.provider_failure_cause();
             let retry_after = observation.retry_after();
             if let ModelCallTerminalIdentityCandidates::Availability {
@@ -1795,8 +1870,11 @@ impl PostgresModelCallRepository {
                     persist_terminal_outcome_with_usage(
                         &mut transaction,
                         &outcome,
+                        Some(TurnTerminalCause::ModelCallFailed),
                         usage,
                         provider_failure_cause,
+                        retained_input_tokens,
+                        retained_output_tokens,
                     )
                     .await?;
                     return Ok(Some(ModelCallObservationCommitOutcome::Terminal(Box::new(
@@ -1808,24 +1886,19 @@ impl PostgresModelCallRepository {
                 outbox::lock_sequence_allocator(&mut transaction).await?;
                 let action = policy.action(cause);
                 let mut pool_exhausted_name = None;
-                let current_reference = if action == CredentialPoolRuntimeAction::Stay {
-                    None
-                } else {
-                    Some(
-                        sqlx::query_scalar::<_, String>(
-                            "SELECT credential_reference
-                           FROM model_call
-                          WHERE model_call_id = $1",
-                        )
-                        .bind(observation.call().into_uuid())
-                        .fetch_one(&mut *transaction)
-                        .await?,
-                    )
-                };
-                // A successor reissues the request, so it needs the
-                // adapter's proof that the failed request was never accepted.
-                // Without it the call closes terminally rather than
-                // substituting a member behind an effect that may have landed.
+                let current_reference = sqlx::query_scalar::<_, String>(
+                    "SELECT credential_reference
+                       FROM model_call
+                      WHERE model_call_id = $1",
+                )
+                .bind(observation.call().into_uuid())
+                .fetch_one(&mut *transaction)
+                .await?;
+                // A successor reissues the request, so availability failures
+                // need the adapter's proof that the failed request was never
+                // accepted. Credential rejection is the one exception: the
+                // authentication refusal itself authorizes rotation, but never
+                // a retry on the rejected credential.
                 // A stop already requested on this attempt forbids the reissue
                 // outright: the successor would reload an attempt the domain
                 // admits only while running.
@@ -1833,51 +1906,81 @@ impl PostgresModelCallRepository {
                     execution.current_attempt().state(),
                     signalbox_domain::CurrentTurnAttemptState::StopRequested { .. }
                 );
-                let substituting = action == CredentialPoolRuntimeAction::SwitchNow
+                let same_credential_attempts = count_turn_credential_attempts(
+                    &mut transaction,
+                    session,
+                    observation.correlation().turn(),
+                    &current_reference,
+                )
+                .await?;
+                let retry_candidate = is_same_credential_retry_cause(cause)
+                    && same_credential_attempts < self.same_credential_attempt_bound.get()
                     && observation.non_acceptance_proven()
                     && !stop_requested;
-                if substituting {
-                    let current_reference = current_reference.as_deref().ok_or(
-                        ModelCallRepositoryError::InvalidTransition(
-                            "switch_now omitted the current credential reference",
-                        ),
-                    )?;
-                    sqlx::query(
-                        "INSERT INTO credential_pool_chain_exclusion
+                let rotation_candidate = action == CredentialPoolRuntimeAction::SwitchNow
+                    && (observation.non_acceptance_proven()
+                        || cause == ProviderModelCallFailureCause::CredentialRejected)
+                    && !stop_requested;
+                let mut durable_exclusions = if retry_candidate || rotation_candidate {
+                    Some(
+                        load_durable_pool_exclusions(
+                            &mut transaction,
+                            session,
+                            observation.correlation().turn(),
+                            &policy,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let retrying_same_credential = retry_candidate
+                    && durable_exclusions.as_ref().is_some_and(|exclusions| {
+                        !exclusions.excluded.contains(&current_reference)
+                    });
+                // The failed credential itself must still be admitted for a
+                // retry. Otherwise only the pinned action may authorize a
+                // rotation; every other action follows the terminal path.
+                let rotating = !retrying_same_credential && rotation_candidate;
+                if retrying_same_credential || rotating {
+                    let Some(DurablePoolExclusions { mut excluded, .. }) =
+                        durable_exclusions.take()
+                    else {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "availability successor omitted pool exclusions",
+                        ));
+                    };
+                    if rotating {
+                        sqlx::query(
+                            "INSERT INTO credential_pool_chain_exclusion
                             (session_id, turn_id, credential_reference,
                              predecessor_model_call_id, cause_kind)
                          VALUES ($1, $2, $3, $4, $5)
                          ON CONFLICT (session_id, turn_id, credential_reference) DO NOTHING",
-                    )
-                    .bind(session_id_to_uuid(session))
-                    .bind(turn_id_to_uuid(observation.correlation().turn()))
-                    .bind(current_reference)
-                    .bind(observation.call().into_uuid())
-                    .bind(encode_provider_failure_cause(cause))
-                    .execute(&mut *transaction)
-                    .await?;
+                        )
+                        .bind(session_id_to_uuid(session))
+                        .bind(turn_id_to_uuid(observation.correlation().turn()))
+                        .bind(&current_reference)
+                        .bind(observation.call().into_uuid())
+                        .bind(encode_provider_failure_cause(cause))
+                        .execute(&mut *transaction)
+                        .await?;
+                        excluded.insert(current_reference.clone());
+                    }
                     pool_exhausted_name = Some(Arc::<str>::from(policy.name()));
-                    let DurablePoolExclusions { excluded, .. } = load_durable_pool_exclusions(
-                        &mut transaction,
-                        session,
-                        observation.correlation().turn(),
-                        &policy,
-                    )
-                    .await?;
                     if policy
                         .members()
                         .iter()
                         .any(|member| !excluded.contains(member.credential_reference()))
                     {
-                        let failed_members = policy
-                            .members()
-                            .iter()
-                            .filter(|member| excluded.contains(member.credential_reference()))
-                            .count();
                         let backoff = availability_retry_backoff(
                             cause,
                             retry_after,
-                            failed_members,
+                            if retrying_same_credential {
+                                same_credential_attempts
+                            } else {
+                                1
+                            },
                             observation.call(),
                         );
                         let successor = execution
@@ -1911,8 +2014,8 @@ impl PostgresModelCallRepository {
                         Some(cause),
                     )
                     .await?;
-                } else if action != CredentialPoolRuntimeAction::SwitchNow
-                    && let Some(current_reference) = current_reference
+                } else if action != CredentialPoolRuntimeAction::Stay
+                    && action != CredentialPoolRuntimeAction::SwitchNow
                 {
                     persist_credential_pool_member_action(
                         &mut transaction,
@@ -1934,11 +2037,20 @@ impl PostgresModelCallRepository {
                             "terminal observation does not match fresh issued state",
                         )
                     })?;
+                // Exhausting the pool's last member is why this turn ended,
+                // so the durable exhaustion record and the cause agree.
+                let terminal_cause = match pool_exhausted_name {
+                    Some(_) => TurnTerminalCause::CredentialPoolExhausted,
+                    None => TurnTerminalCause::ModelCallFailed,
+                };
                 persist_terminal_outcome_with_usage(
                     &mut transaction,
                     &outcome,
+                    Some(terminal_cause),
                     usage,
                     provider_failure_cause,
+                    retained_input_tokens,
+                    retained_output_tokens,
                 )
                 .await?;
                 if let Some(pool_name) = pool_exhausted_name {
@@ -1968,8 +2080,11 @@ impl PostgresModelCallRepository {
             persist_terminal_outcome_with_usage(
                 &mut transaction,
                 &outcome,
+                Some(TurnTerminalCause::ModelCallFailed),
                 usage,
                 provider_failure_cause,
+                retained_input_tokens,
+                retained_output_tokens,
             )
             .await?;
             Ok(Some(ModelCallObservationCommitOutcome::Terminal(Box::new(
@@ -1985,6 +2100,7 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
+        cause: PreparedModelCallFailureCause,
         attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         mut next_reclassified_turn: NextTurn,
@@ -2013,6 +2129,7 @@ impl PostgresModelCallRepository {
             persist_failed_with_delegated_child_result(
                 &mut transaction,
                 &failed,
+                prepared_failure_cause(cause, attachment_failure),
                 ProviderReportedTokenUsage::unreported(),
                 None,
                 attachment_failure,
@@ -2032,6 +2149,7 @@ impl PostgresModelCallRepository {
         session: SessionId,
         turn: TurnId,
         identities: FailedModelCallTurnIdentities,
+        terminal_cause: TurnTerminalCause,
         recovery_cause: Option<crate::goal::GoalExecutionFailureRecoveryCause>,
     ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
         let execution = require_live_execution(connection, session, &self.targets).await?;
@@ -2050,6 +2168,7 @@ impl PostgresModelCallRepository {
         persist_failed_with_delegated_child_result(
             connection,
             &failed,
+            terminal_cause,
             ProviderReportedTokenUsage::unreported(),
             None,
             None,
@@ -2404,7 +2523,8 @@ impl PostgresModelCallRepository {
                         terminal_provider_failure_cause,
                         usage_input_tokens, usage_output_tokens,
                         usage_cache_creation_input_tokens,
-                        usage_cache_read_input_tokens
+                        usage_cache_read_input_tokens,
+                        retained_input_tokens, retained_output_tokens
                    FROM model_call
                   WHERE model_call_id = $1",
             )
@@ -2489,7 +2609,17 @@ impl PostgresModelCallRepository {
                             == observation
                                 .provider_failure_cause()
                                 .map(encode_provider_failure_cause)
-                        && stored.usage == encode_token_usage(observation.usage()) =>
+                        && stored.usage == encode_token_usage(observation.usage())
+                        && stored.retained_input_tokens
+                            == observation
+                                .observation()
+                                .retained_input_tokens()
+                                .map(Decimal::from)
+                        && stored.retained_output_tokens
+                            == observation
+                                .observation()
+                                .retained_output_tokens()
+                                .map(Decimal::from) =>
                 {
                     // A commit-ambiguous driver error can hide a commit that
                     // durably created an availability successor. The
@@ -2553,7 +2683,12 @@ impl PostgresModelCallRepository {
                     "startup recovery requires a live Prepared or issued call",
                 )
             })?;
-            persist_terminal_outcome(&mut transaction, &outcome).await?;
+            persist_terminal_outcome(
+                &mut transaction,
+                &outcome,
+                Some(TurnTerminalCause::AbandonedAtRestart),
+            )
+            .await?;
             Ok(outcome)
         }
         .await;
@@ -2613,7 +2748,23 @@ async fn delegated_observation_result_matches(
                 Err(_) => ExpectedDelegatedChildResult::ResultUnavailable,
             }
         }
-        ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Refused => {
+        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
+            let assistant_text = response
+                .iter()
+                .filter_map(|part| match part {
+                    AssistantResponsePart::Text(text) => Some(text.clone()),
+                    AssistantResponsePart::ProviderCompaction(_) => None,
+                    AssistantResponsePart::ToolCall(_) => None,
+                })
+                .collect::<Vec<_>>();
+            match signalbox_domain::DelegationContent::from_assistant_text(&assistant_text) {
+                Ok(content) => ExpectedDelegatedChildResult::Returned(content.as_str().to_owned()),
+                Err(_) => ExpectedDelegatedChildResult::ResultUnavailable,
+            }
+        }
+        ModelCallTerminalObservation::KnownFailed
+        | ModelCallTerminalObservation::Refused
+        | ModelCallTerminalObservation::RefusedWithProviderCompaction { .. } => {
             ExpectedDelegatedChildResult::Failed
         }
         ModelCallTerminalObservation::Cancelled => {
@@ -3029,6 +3180,7 @@ where
         persist_failed_with_delegated_child_result(
             connection,
             required.failed(),
+            TurnTerminalCause::ContextHeadroomExhausted,
             ProviderReportedTokenUsage::unreported(),
             None,
             None,
@@ -3142,6 +3294,7 @@ where
             persist_failed_with_delegated_child_result(
                 connection,
                 &failed,
+                TurnTerminalCause::ModelTargetUnavailable,
                 ProviderReportedTokenUsage::unreported(),
                 None,
                 None,
@@ -3203,6 +3356,23 @@ async fn load_tool_continuation_headroom_evidence(
                 usage_input_tokens, usage_output_tokens,
                 usage_cache_creation_input_tokens,
                 usage_cache_read_input_tokens,
+                retained_input_tokens,
+                retained_output_tokens,
+                EXISTS (
+                    SELECT 1
+                      FROM semantic_transcript_entry AS compacted
+                     WHERE compacted.source_session_id = model_call.session_id
+                       AND compacted.producing_model_call_id = model_call.model_call_id
+                       AND compacted.payload_kind = 'provider_compaction'
+                ) AS has_provider_compaction,
+                NOT EXISTS (
+                    SELECT 1
+                      FROM semantic_transcript_entry AS compacted
+                     WHERE compacted.source_session_id = model_call.session_id
+                       AND compacted.producing_model_call_id = model_call.model_call_id
+                       AND compacted.payload_kind = 'provider_compaction'
+                       AND compacted.assistant_text_value::jsonb ->> 'content' IS NOT NULL
+                ) AS input_is_retained,
                 (
                     SELECT COALESCE(SUM(projected.content_bytes), 0)::numeric
                       FROM (
@@ -3301,7 +3471,30 @@ async fn load_tool_continuation_headroom_evidence(
     let Some(input_tokens) = usage.input_tokens() else {
         return Ok(None);
     };
-    let input_tokens = if input_includes_cache_tokens {
+    let mut retained_input_tokens = decode("retained_input_tokens")?;
+    let mut retained_output_tokens = decode("retained_output_tokens")?;
+    let has_provider_compaction = row.try_get::<bool, _>("has_provider_compaction")?;
+    let mut input_is_retained: bool = row.try_get("input_is_retained")?;
+    if has_provider_compaction
+        && (retained_input_tokens.is_none() || retained_output_tokens.is_none())
+    {
+        return Err(ModelCallCorruption::Missing(
+            "provider-compaction retained iteration token counts",
+        )
+        .into());
+    }
+    if has_provider_compaction && !limit.replays_provider_compaction() {
+        // The disabled projection omits the opaque block and replays the
+        // preserved history that the aggregate usage measured.
+        retained_input_tokens = None;
+        retained_output_tokens = None;
+        input_is_retained = true;
+    }
+    let input_tokens = if let Some(retained_input_tokens) = retained_input_tokens {
+        retained_input_tokens
+    } else if !input_is_retained {
+        0
+    } else if input_includes_cache_tokens {
         input_tokens
     } else {
         input_tokens
@@ -3309,7 +3502,11 @@ async fn load_tool_continuation_headroom_evidence(
             .saturating_add(usage.cache_read_input_tokens().unwrap_or(0))
     };
     let exhausted = input_tokens
-        .saturating_add(usage.output_tokens().unwrap_or(0))
+        .saturating_add(
+            retained_output_tokens
+                .or(usage.output_tokens())
+                .unwrap_or(0),
+        )
         // Provider-neutral CLI adapters expose no tokenizer-only operation.
         // UTF-8 payload bytes therefore reserve a deliberately conservative
         // allowance for result material appended after the reported input.
@@ -3413,6 +3610,7 @@ where
     persist_failed_with_delegated_child_result(
         connection,
         &failed,
+        TurnTerminalCause::ToolAttemptLost,
         ProviderReportedTokenUsage::unreported(),
         None,
         None,
@@ -3459,7 +3657,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
-        _cause: signalbox_application::PreparedModelCallFailureCause,
+        cause: PreparedModelCallFailureCause,
         attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
@@ -3471,6 +3669,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
             self,
             session,
             call,
+            cause,
             attachment_failure,
             identities,
             next_reclassified_turn,
@@ -3775,10 +3974,17 @@ async fn terminal_observation_closure_matches(
     }
     match observation.observation() {
         ModelCallTerminalObservation::Completed { assistant_text } => {
-            completed_terminal_closure_matches(connection, session, observation, assistant_text)
-                .await
+            let response = assistant_text
+                .iter()
+                .cloned()
+                .map(AssistantResponsePart::Text)
+                .collect::<Vec<_>>();
+            completed_terminal_closure_matches(connection, session, observation, &response).await
         }
-        ModelCallTerminalObservation::CompletedWithTools { response } => {
+        ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
+            completed_terminal_closure_matches(connection, session, observation, response).await
+        }
+        ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
             tool_round_terminal_closure_matches(connection, session, observation, response).await
         }
         ModelCallTerminalObservation::KnownFailed => {
@@ -3792,7 +3998,14 @@ async fn terminal_observation_closure_matches(
             }
         }
         ModelCallTerminalObservation::Refused => {
-            refused_terminal_closure_matches(connection, session, observation).await
+            refused_terminal_closure_matches(connection, session, observation, &[]).await
+        }
+        ModelCallTerminalObservation::RefusedWithProviderCompaction {
+            provider_compaction,
+            ..
+        } => {
+            refused_terminal_closure_matches(connection, session, observation, provider_compaction)
+                .await
         }
         ModelCallTerminalObservation::Ambiguous => {
             ambiguous_terminal_closure_matches(connection, session, observation).await
@@ -3910,6 +4123,15 @@ async fn tool_round_terminal_closure_matches(
                         && arguments_kind.is_none()
                         && arguments_text.is_none()
                 }
+                AssistantResponsePart::ProviderCompaction(expected) => {
+                    payload_kind.as_deref() == Some("provider_compaction")
+                        && assistant_text.as_deref() == Some(expected.as_json())
+                        && producing_call == Some(call)
+                        && request.is_none()
+                        && tool_name.is_none()
+                        && arguments_kind.is_none()
+                        && arguments_text.is_none()
+                }
                 AssistantResponsePart::ToolCall(expected) => {
                     let expected_kind = match expected.arguments().kind() {
                         signalbox_domain::ToolArgumentsKind::Json => "json",
@@ -3966,7 +4188,7 @@ async fn completed_terminal_closure_matches(
     connection: &mut PgConnection,
     session: SessionId,
     observation: &CorrelatedModelCallTerminalObservation,
-    assistant_text: &[AssistantText],
+    response: &[AssistantResponsePart],
 ) -> Result<bool, ModelCallRepositoryError> {
     let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
         "SELECT terminal_frontier_id
@@ -3998,7 +4220,7 @@ async fn completed_terminal_closure_matches(
         session_id_to_uuid(session),
         turn_id_to_uuid(observation.correlation().turn()),
         observation.call().into_uuid(),
-        assistant_text,
+        response,
     ) {
         return Ok(false);
     }
@@ -4008,8 +4230,9 @@ async fn completed_terminal_closure_matches(
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
-              FROM turn_completed_outbox_event
-             WHERE session_id = $1
+              FROM turn_terminal_outbox_event
+             WHERE disposition_kind = 'completed'
+             AND session_id = $1
                AND turn_id = $2
                AND model_call_id = $3
                AND completion_entry_id = $4
@@ -4113,8 +4336,9 @@ async fn cancelled_terminal_closure_matches(
             )
             AND EXISTS (
                 SELECT 1
-                  FROM turn_cancelled_outbox_event
-                 WHERE session_id = $1
+                  FROM turn_terminal_outbox_event
+                 WHERE disposition_kind = 'cancelled'
+                 AND session_id = $1
                    AND turn_id = $2
                    AND cancellation_entry_id = $4
                    AND terminal_frontier_id = $5
@@ -4217,8 +4441,9 @@ async fn prepared_cancellation_closure_matches(
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
-              FROM turn_cancelled_outbox_event
-             WHERE session_id = $1
+              FROM turn_terminal_outbox_event
+             WHERE disposition_kind = 'cancelled'
+             AND session_id = $1
                AND turn_id = $2
                AND cancellation_entry_id = $3
                AND terminal_frontier_id = $4
@@ -4295,8 +4520,9 @@ async fn failed_turn_closure_matches(
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
-              FROM turn_failed_outbox_event
-             WHERE session_id = $1
+              FROM turn_terminal_outbox_event
+             WHERE disposition_kind = 'failed'
+             AND session_id = $1
                AND turn_id = $2
                AND failure_entry_id = $3
                AND terminal_frontier_id = $4
@@ -4314,6 +4540,7 @@ async fn refused_terminal_closure_matches(
     connection: &mut PgConnection,
     session: SessionId,
     observation: &CorrelatedModelCallTerminalObservation,
+    provider_compaction: &[signalbox_domain::ProviderCompactionBlock],
 ) -> Result<bool, ModelCallRepositoryError> {
     let correlation = observation.correlation();
     let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
@@ -4358,7 +4585,7 @@ async fn refused_terminal_closure_matches(
     let source_frontier =
         load_frontier_members(connection, session, correlation.frontier().into_uuid()).await?;
     let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
-    if terminal_members.len() != source_frontier.len()
+    if terminal_members.len() != source_frontier.len() + provider_compaction.len()
         || terminal_members
             .iter()
             .zip(&source_frontier)
@@ -4366,11 +4593,29 @@ async fn refused_terminal_closure_matches(
     {
         return Ok(false);
     }
+    let session_uuid = session_id_to_uuid(session);
+    let call = observation.call().into_uuid();
+    if terminal_members[source_frontier.len()..]
+        .iter()
+        .zip(provider_compaction)
+        .any(|(stored, expected)| {
+            stored.source_session != session_uuid
+                || stored.payload_kind != "provider_compaction"
+                || stored.assistant_text.as_deref() != Some(expected.as_json())
+                || stored.producing_call != Some(call)
+                || stored.completed_turn.is_some()
+                || stored.failed_turn.is_some()
+                || stored.cancelled_turn.is_some()
+        })
+    {
+        return Ok(false);
+    }
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
-              FROM turn_refused_outbox_event
-             WHERE session_id = $1
+              FROM turn_terminal_outbox_event
+             WHERE disposition_kind = 'refused'
+             AND session_id = $1
                AND turn_id = $2
                AND model_call_id = $3
                AND terminal_frontier_id = $4
@@ -4489,8 +4734,9 @@ async fn ambiguous_terminal_closure_matches(
                    )
                    AND EXISTS (
                         SELECT 1
-                          FROM turn_reconciliation_required_outbox_event
-                         WHERE session_id = $1
+                          FROM turn_terminal_outbox_event
+                         WHERE disposition_kind = 'reconciliation_required'
+                         AND session_id = $1
                            AND turn_id = $2
                            AND model_call_id = $4
                            AND terminal_frontier_id =
@@ -4576,9 +4822,9 @@ fn completed_terminal_frontier_matches(
     session: Uuid,
     turn: Uuid,
     call: Uuid,
-    assistant_text: &[AssistantText],
+    response: &[AssistantResponsePart],
 ) -> bool {
-    if terminal_frontier.len() != source_frontier.len() + assistant_text.len() + 1 {
+    if terminal_frontier.len() != source_frontier.len() + response.len() + 1 {
         return false;
     }
     if terminal_frontier
@@ -4589,13 +4835,23 @@ fn completed_terminal_frontier_matches(
         return false;
     }
     let assistant_start = source_frontier.len();
-    if terminal_frontier[assistant_start..assistant_start + assistant_text.len()]
+    if terminal_frontier[assistant_start..assistant_start + response.len()]
         .iter()
-        .zip(assistant_text)
+        .zip(response)
         .any(|(stored, expected)| {
+            let content_matches = match expected {
+                AssistantResponsePart::Text(text) => {
+                    stored.payload_kind == "assistant_text"
+                        && stored.assistant_text.as_deref() == Some(text.as_str())
+                }
+                AssistantResponsePart::ProviderCompaction(block) => {
+                    stored.payload_kind == "provider_compaction"
+                        && stored.assistant_text.as_deref() == Some(block.as_json())
+                }
+                AssistantResponsePart::ToolCall(_) => false,
+            };
             stored.source_session != session
-                || stored.payload_kind != "assistant_text"
-                || stored.assistant_text.as_deref() != Some(expected.as_str())
+                || !content_matches
                 || stored.producing_call != Some(call)
                 || stored.completed_turn.is_some()
                 || stored.failed_turn.is_some()
@@ -4604,7 +4860,7 @@ fn completed_terminal_frontier_matches(
     {
         return false;
     }
-    let completion = &terminal_frontier[assistant_start + assistant_text.len()];
+    let completion = &terminal_frontier[assistant_start + response.len()];
     completion.source_session == session
         && completion.payload_kind == "turn_completed"
         && completion.assistant_text.is_none()
@@ -6038,6 +6294,7 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -6098,10 +6355,10 @@ async fn load_origin_contents(
         let command: Option<Uuid> = row.try_get("accepting_command_id")?;
         let goal_turn: Option<Uuid> = row.try_get("goal_turn_id")?;
         // An accepting command decides provenance whether or not a generation
-        // owns the turn. A goal turn bound to a turn a command already accepted
-        // — the shape repository-watch dispatch commits — has both, and its
-        // text was authored by that command; the `goal_turn` row records which
-        // generation the turn runs under, not where its input came from.
+        // owns the turn. A commissioned dispatch binds its goal to a turn its
+        // input command already accepted, so both rows exist and the text was
+        // authored by that command; the `goal_turn` row records which generation
+        // the turn runs under, not where its input came from.
         let provenance = match (command, goal_turn) {
             (Some(command), _) => {
                 let command = durable_command_id_from_uuid(command)
@@ -6580,7 +6837,7 @@ async fn lock_credential_pool_action_head(
     connection: &mut PgConnection,
     credential_reference: &str,
 ) -> Result<(), ModelCallRepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+    sqlx::query(crate::lock_inventory::HASHED_TRANSACTION_ADVISORY_LOCK)
         .bind(format!(
             "credential_pool_action_head:{credential_reference}"
         ))
@@ -6593,7 +6850,7 @@ async fn lock_credential_pool_action_head(
 pub(crate) async fn acquire_model_call_outbox_order_guard(
     connection: &mut PgConnection,
 ) -> Result<ModelCallOutboxOrderGuard, ModelCallRepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+    sqlx::query(crate::lock_inventory::HASHED_TRANSACTION_ADVISORY_LOCK)
         .bind(MODEL_CALL_OUTBOX_ORDER_GUARD)
         .execute(&mut *connection)
         .await?;
@@ -6649,6 +6906,22 @@ async fn load_durable_pool_exclusions(
     .await?
     .into_iter()
     .collect::<HashSet<_>>();
+    let member_references = policy
+        .members()
+        .iter()
+        .map(|member| member.credential_reference().to_owned())
+        .collect::<Vec<_>>();
+    excluded.extend(
+        sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT credential_reference
+              FROM credential_pool_transient_exclusion
+              WHERE credential_reference = ANY($1)
+                AND reset_at > clock_timestamp()",
+        )
+        .bind(&member_references)
+        .fetch_all(&mut *connection)
+        .await?,
+    );
     let completed_references = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT call.credential_reference
            FROM model_call AS call
@@ -6754,16 +7027,22 @@ async fn select_runtime_pool_credential(
     default_reference: ModelCallCredentialReference,
     policies: &CredentialPoolRuntimeCatalog,
 ) -> Result<SelectedRuntimePoolCredential, ModelCallRepositoryError> {
-    let predecessor: Option<Uuid> = sqlx::query_scalar(
-        "SELECT predecessor_model_call_id
-           FROM credential_pool_availability_successor
-          WHERE successor_turn_attempt_id = $1",
+    let predecessor: Option<(Uuid, bool)> = sqlx::query_as(
+        "SELECT successor.predecessor_model_call_id,
+                EXISTS (
+                    SELECT 1
+                      FROM credential_pool_chain_exclusion AS exclusion
+                     WHERE exclusion.predecessor_model_call_id =
+                           successor.predecessor_model_call_id
+                ) AS rotated
+           FROM credential_pool_availability_successor AS successor
+          WHERE successor.successor_turn_attempt_id = $1",
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)
     .await?;
-    let (policy, predecessor_reference) = match predecessor {
-        Some(predecessor) => {
+    let (policy, predecessor_reference, predecessor_rotated) = match predecessor {
+        Some((predecessor, rotated)) => {
             let policy = load_call_pool_policy(connection, predecessor)
                 .await?
                 .ok_or(ModelCallCorruption::Missing(
@@ -6777,9 +7056,9 @@ async fn select_runtime_pool_credential(
             .bind(predecessor)
             .fetch_one(&mut *connection)
             .await?;
-            (Some(policy), Some(reference))
+            (Some(policy), Some(reference), rotated)
         }
-        None => (policies.get(&target).cloned(), None),
+        None => (policies.get(&target).cloned(), None, false),
     };
     let Some(policy) = policy else {
         return Ok(SelectedRuntimePoolCredential {
@@ -6807,20 +7086,34 @@ async fn select_runtime_pool_credential(
                 .position(|member| member.credential_reference() == reference)
         })
         .map_or(0, |position| position.saturating_add(1));
-    let selected = policy
-        .members()
-        .iter()
-        .find(|member| {
-            sticky_reference.as_deref() == Some(member.credential_reference())
-                && !excluded.contains(member.credential_reference())
-        })
-        .or_else(|| {
+    let selected = predecessor_reference
+        .as_deref()
+        .filter(|reference| !excluded.contains(*reference))
+        .and_then(|reference| {
             policy
                 .members()
                 .iter()
-                .skip(start)
-                .chain(policy.members().iter().take(start))
-                .find(|member| !excluded.contains(member.credential_reference()))
+                .find(|member| member.credential_reference() == reference)
+        })
+        .or_else(|| {
+            if predecessor_reference.is_some() && !predecessor_rotated {
+                return None;
+            }
+            policy
+                .members()
+                .iter()
+                .find(|member| {
+                    sticky_reference.as_deref() == Some(member.credential_reference())
+                        && !excluded.contains(member.credential_reference())
+                })
+                .or_else(|| {
+                    policy
+                        .members()
+                        .iter()
+                        .skip(start)
+                        .chain(policy.members().iter().take(start))
+                        .find(|member| !excluded.contains(member.credential_reference()))
+                })
         })
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
     let pending_consumed_actions = if selected.is_some() {
@@ -6970,7 +7263,6 @@ pub(crate) async fn insert_prepared_call(
     credential_pool_policy: Option<&CredentialPoolRuntimePolicy>,
     input_includes_cache_tokens: bool,
 ) -> Result<(), ModelCallRepositoryError> {
-    crate::convergence_sweep::lock_model_activity_fence(connection, prepared.session()).await?;
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
     for steering in prepared.consumed_steering() {
@@ -7013,7 +7305,7 @@ pub(crate) async fn insert_prepared_call(
         insert_snapshot(connection, snapshot).await?;
     }
     for steering in prepared.consumed_steering() {
-        let rows = sqlx::query(
+        let command: Option<Option<Uuid>> = sqlx::query_scalar(
             "UPDATE accepted_input
                 SET disposition_kind = 'consumed_as_steering',
                     consuming_model_call_id = $1
@@ -7023,16 +7315,27 @@ pub(crate) async fn insert_prepared_call(
                 AND origin_turn_id IS NULL
                 AND consuming_model_call_id IS NULL
                 AND delivery_kind = 'next_safe_point'
-                AND expected_active_turn_id = $4",
+                AND expected_active_turn_id = $4
+            RETURNING accepting_command_id",
         )
         .bind(call.id().into_uuid())
         .bind(steering.accepted_input().id().into_uuid())
         .bind(session_id_to_uuid(prepared.session()))
         .bind(turn_id_to_uuid(prepared.turn()))
-        .execute(&mut *connection)
-        .await?
-        .rows_affected();
-        require_single(rows, "consumed steering accepted input")?;
+        .fetch_optional(&mut *connection)
+        .await?;
+        let command = command.ok_or(ModelCallCorruption::Inconsistent(
+            "consumed steering accepted input",
+        ))?;
+        settle_injection(
+            connection,
+            prepared.session(),
+            command,
+            InjectionOutcomeOutbox::Delivered {
+                turn: Some(prepared.turn()),
+            },
+        )
+        .await?;
     }
     let pinned_rows = sqlx::query(
         "UPDATE turn_lifecycle
@@ -7182,6 +7485,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
@@ -7282,6 +7586,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
@@ -7634,14 +7939,24 @@ pub(crate) async fn persist_stop_requested(
     Ok(())
 }
 
+/// Persists one terminal outcome, recording `failure_cause` when the outcome
+/// is `Failed`.
+///
+/// The cause is optional because two callers construct only non-failing
+/// outcomes; a `Failed` outcome that names none is a typed corruption rather
+/// than a silently unclassified terminalization.
 pub(crate) async fn persist_terminal_outcome(
     connection: &mut PgConnection,
     outcome: &ModelCallTerminalOutcome,
+    failure_cause: Option<TurnTerminalCause>,
 ) -> Result<(), ModelCallRepositoryError> {
     persist_terminal_outcome_with_usage(
         connection,
         outcome,
+        failure_cause,
         ProviderReportedTokenUsage::unreported(),
+        None,
+        None,
         None,
     )
     .await
@@ -7650,14 +7965,24 @@ pub(crate) async fn persist_terminal_outcome(
 async fn persist_terminal_outcome_with_usage(
     connection: &mut PgConnection,
     outcome: &ModelCallTerminalOutcome,
+    failure_cause: Option<TurnTerminalCause>,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
     match outcome {
         ModelCallTerminalOutcome::Completed(completed) => {
             lock_delegated_child_result_frontier(connection, completed.session(), completed.turn())
                 .await?;
-            persist_completed(connection, completed, usage).await?;
+            persist_completed(
+                connection,
+                completed,
+                usage,
+                retained_input_tokens,
+                retained_output_tokens,
+            )
+            .await?;
             persist_delegated_child_result(
                 connection,
                 &DelegationOutcome::from_completed_child(completed),
@@ -7665,12 +7990,26 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::ToolRound(round) => {
-            persist_tool_round(connection, round, usage).await
+            persist_tool_round(
+                connection,
+                round,
+                usage,
+                retained_input_tokens,
+                retained_output_tokens,
+            )
+            .await
         }
         ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) => {
             lock_delegated_child_result_frontier(connection, cancelled.session(), cancelled.turn())
                 .await?;
-            persist_cancelled_tool_round(connection, cancelled, usage).await?;
+            persist_cancelled_tool_round(
+                connection,
+                cancelled,
+                usage,
+                retained_input_tokens,
+                retained_output_tokens,
+            )
+            .await?;
             persist_delegated_child_result(
                 connection,
                 &DelegationOutcome::from_cancelled_tool_round_child(cancelled),
@@ -7678,9 +8017,13 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::Failed(failed) => {
+            let cause = failure_cause.ok_or(ModelCallCorruption::Inconsistent(
+                "failed terminal outcome without a terminal cause",
+            ))?;
             persist_failed_with_delegated_child_result(
                 connection,
                 failed,
+                cause,
                 usage,
                 provider_failure_cause,
                 None,
@@ -7700,7 +8043,14 @@ async fn persist_terminal_outcome_with_usage(
         ModelCallTerminalOutcome::Refused(refused) => {
             lock_delegated_child_result_frontier(connection, refused.session(), refused.turn())
                 .await?;
-            persist_refused(connection, refused, usage).await?;
+            persist_refused(
+                connection,
+                refused,
+                usage,
+                retained_input_tokens,
+                retained_output_tokens,
+            )
+            .await?;
             persist_delegated_child_result(
                 connection,
                 &DelegationOutcome::from_refused_child(refused),
@@ -7719,6 +8069,7 @@ async fn persist_terminal_outcome_with_usage(
 async fn persist_failed_with_delegated_child_result(
     connection: &mut PgConnection,
     failed: &FailedModelCallTurn,
+    cause: TurnTerminalCause,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
     attachment_failure: Option<AttachmentPreparationFailure>,
@@ -7727,6 +8078,7 @@ async fn persist_failed_with_delegated_child_result(
     persist_failed(
         connection,
         failed,
+        cause,
         usage,
         provider_failure_cause,
         attachment_failure,
@@ -8116,6 +8468,7 @@ pub(crate) async fn persist_reconciliation_required(
         reconciliation.session(),
         reconciliation.turn(),
         "reconciliation_required",
+        TurnTerminalCause::ModelCallAmbiguous,
         reconciliation.terminal_snapshot().frontier().snapshot(),
         Some(reconciliation.attempt().id()),
         Some(reconciliation.call().id()),
@@ -8132,11 +8485,13 @@ pub(crate) async fn persist_reconciliation_required(
     }
     outbox::append(
         connection,
-        OutboxEvent::TurnReconciliationRequired {
+        OutboxEvent::TurnTerminal {
             session: reconciliation.session(),
             turn: reconciliation.turn(),
-            call: reconciliation.call().id(),
-            terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::ModelCallReconciliationRequired {
+                call: reconciliation.call().id(),
+                terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -8174,7 +8529,8 @@ pub(crate) async fn persist_tool_reconciliation_required(
                 terminal_attempt_id = $2,
                 terminal_model_call_id = NULL,
                 terminal_tool_attempt_id = $3,
-                terminal_disposition_kind = 'reconciliation_required'
+                terminal_disposition_kind = 'reconciliation_required',
+                terminal_cause_kind = $6
           WHERE turn_id = $4
             AND session_id = $5
             AND state_kind = 'active'
@@ -8219,17 +8575,22 @@ pub(crate) async fn persist_tool_reconciliation_required(
     .bind(reconciliation.tool_attempt().attempt().into_uuid())
     .bind(turn_id_to_uuid(reconciliation.turn()))
     .bind(session_id_to_uuid(reconciliation.session()))
+    .bind(turn_terminal_cause_to_str(
+        TurnTerminalCause::ToolAttemptAmbiguous,
+    ))
     .execute(&mut *connection)
     .await?
     .rows_affected();
     require_single(rows, "terminal tool-reconciliation lifecycle")?;
     outbox::append(
         connection,
-        OutboxEvent::TurnToolReconciliationRequired {
+        OutboxEvent::TurnTerminal {
             session: reconciliation.session(),
             turn: reconciliation.turn(),
-            attempt: reconciliation.tool_attempt().attempt(),
-            terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::ToolAttemptReconciliationRequired {
+                attempt: reconciliation.tool_attempt().attempt(),
+                terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -8240,13 +8601,17 @@ async fn persist_tool_round(
     connection: &mut PgConnection,
     round: &ToolRoundModelCallTurn,
     usage: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call(
+    persist_ended_call_with_retained_usage(
         connection,
         round.session(),
         round.turn(),
         round.call(),
         usage,
+        retained_input_tokens,
+        retained_output_tokens,
     )
     .await?;
     persist_ended_attempt(connection, round.session(), round.turn(), round.attempt()).await?;
@@ -8408,14 +8773,21 @@ async fn persist_availability_successor(
     cause: ProviderModelCallFailureCause,
     backoff: Duration,
 ) -> Result<(), ModelCallRepositoryError> {
+    let backoff_milliseconds = i64::try_from(backoff.as_millis()).map_err(|_| {
+        ModelCallRepositoryError::InvalidTransition("availability backoff overflow")
+    })?;
     persist_ended_call_with_provider_failure_cause(
         connection,
         successor.session(),
         successor.turn(),
         successor.predecessor_call(),
-        usage,
-        Some(cause),
-        None,
+        EndedCallEvidence {
+            usage,
+            provider_failure_cause: Some(cause),
+            attachment_failure: None,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        },
     )
     .await?;
     persist_ended_attempt(
@@ -8443,6 +8815,24 @@ async fn persist_availability_successor(
     .bind(successor.predecessor_attempt().id().into_uuid())
     .execute(&mut *connection)
     .await?;
+    if is_same_credential_retry_cause(cause) {
+        let rows = sqlx::query(
+            "INSERT INTO credential_pool_transient_exclusion
+                (observation_model_call_id, credential_reference,
+                 cause_kind, reset_at)
+             SELECT model_call_id, credential_reference, $2,
+                    transaction_timestamp() + ($3 * interval '1 millisecond')
+               FROM model_call
+              WHERE model_call_id = $1",
+        )
+        .bind(successor.predecessor_call().id().into_uuid())
+        .bind(encode_provider_failure_cause(cause))
+        .bind(backoff_milliseconds)
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        require_single(rows, "credential transient exclusion")?;
+    }
     sqlx::query(
         "INSERT INTO credential_pool_availability_successor
             (predecessor_model_call_id, successor_turn_attempt_id, cause_kind,
@@ -8453,9 +8843,7 @@ async fn persist_availability_successor(
     .bind(successor.predecessor_call().id().into_uuid())
     .bind(successor.successor_attempt().id().into_uuid())
     .bind(encode_provider_failure_cause(cause))
-    .bind(i64::try_from(backoff.as_millis()).map_err(|_| {
-        ModelCallRepositoryError::InvalidTransition("availability backoff overflow")
-    })?)
+    .bind(backoff_milliseconds)
     .execute(&mut *connection)
     .await?;
     let rows = sqlx::query(
@@ -8521,6 +8909,7 @@ async fn persist_credential_pool_exhaustion(
     persist_failed_with_delegated_child_result(
         connection,
         exhausted.failed(),
+        TurnTerminalCause::CredentialPoolExhausted,
         ProviderReportedTokenUsage::unreported(),
         None,
         None,
@@ -8573,19 +8962,47 @@ async fn persist_tool_continuation_headroom_exhaustion(
 const MAX_AVAILABILITY_BACKOFF: Duration = Duration::from_secs(300);
 const MAX_EXPONENTIAL_BACKOFF: Duration = Duration::from_secs(60);
 
+const fn is_same_credential_retry_cause(cause: ProviderModelCallFailureCause) -> bool {
+    matches!(
+        cause,
+        ProviderModelCallFailureCause::RateLimited
+            | ProviderModelCallFailureCause::Overloaded
+            | ProviderModelCallFailureCause::ProviderInternal
+    )
+}
+
+async fn count_turn_credential_attempts(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    credential_reference: &str,
+) -> Result<usize, ModelCallRepositoryError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM model_call
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND credential_reference = $3",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(credential_reference)
+    .fetch_one(&mut *connection)
+    .await?;
+    usize::try_from(count)
+        .map_err(|_| ModelCallCorruption::Inconsistent("same-credential attempt count").into())
+}
+
 fn availability_retry_backoff(
     cause: ProviderModelCallFailureCause,
     retry_after: Option<Duration>,
-    failed_members: usize,
+    failed_attempts: usize,
     call: ModelCallId,
 ) -> Duration {
-    if !matches!(
-        cause,
-        ProviderModelCallFailureCause::RateLimited | ProviderModelCallFailureCause::Overloaded
-    ) {
+    if !is_same_credential_retry_cause(cause) {
         return Duration::ZERO;
     }
-    let exponent = u32::try_from(failed_members.saturating_sub(1).min(6)).unwrap_or(6);
+    let exponent = u32::try_from(failed_attempts.saturating_sub(1).min(6)).unwrap_or(6);
     let ceiling = Duration::from_secs(1_u64 << exponent).min(MAX_EXPONENTIAL_BACKOFF);
     let sample = u64::try_from(call.as_uuid().as_u128() & 1023).unwrap_or(0);
     let ceiling_millis = u64::try_from(ceiling.as_millis()).unwrap_or(u64::MAX);
@@ -8600,13 +9017,17 @@ async fn persist_cancelled_tool_round(
     connection: &mut PgConnection,
     cancelled: &CancelledToolRoundModelCallTurn,
     usage: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call(
+    persist_ended_call_with_retained_usage(
         connection,
         cancelled.session(),
         cancelled.turn(),
         cancelled.call(),
         usage,
+        retained_input_tokens,
+        retained_output_tokens,
     )
     .await?;
     persist_ended_attempt(
@@ -8675,6 +9096,7 @@ async fn persist_cancelled_tool_round(
         cancelled.session(),
         cancelled.turn(),
         "cancelled",
+        TurnTerminalCause::InterruptApplied,
         cancelled.terminal_snapshot().frontier().snapshot(),
         Some(cancelled.attempt().id()),
         Some(cancelled.call().id()),
@@ -8689,11 +9111,13 @@ async fn persist_cancelled_tool_round(
     .await?;
     outbox::append(
         connection,
-        OutboxEvent::TurnCancelled {
+        OutboxEvent::TurnTerminal {
             session: cancelled.session(),
             turn: cancelled.turn(),
-            cancellation_entry: cancellation.identity(),
-            terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Cancelled {
+                cancellation_entry: cancellation.identity(),
+                terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -8754,6 +9178,7 @@ async fn persist_tool_round_authority(
         .execute(&mut *connection)
         .await?;
     }
+    let mut response_text_start_bytes = 0_u64;
     for (response_part_ordinal, entry) in assistant_entries.iter().enumerate() {
         let response_part_ordinal = u64::try_from(response_part_ordinal)
             .map_err(|_| ModelCallCorruption::Inconsistent("tool response part ordinal"))?;
@@ -8766,12 +9191,40 @@ async fn persist_tool_round_authority(
                     "INSERT INTO semantic_transcript_entry
                         (source_session_id, semantic_entry_id, payload_kind,
                          assistant_text_value, producing_model_call_id,
-                         assistant_response_part_ordinal)
-                     VALUES ($1, $2, 'assistant_text', $3, $4, $5)",
+                         assistant_response_part_ordinal,
+                         assistant_response_text_start_bytes)
+                     VALUES ($1, $2, 'assistant_text', $3, $4, $5, $6)",
                 )
                 .bind(session_id_to_uuid(entry.source_session()))
                 .bind(entry.identity().into_uuid())
                 .bind(value.as_str())
+                .bind(producing_call.into_uuid())
+                .bind(Decimal::from(response_part_ordinal))
+                .bind(Decimal::from(response_text_start_bytes))
+                .execute(&mut *connection)
+                .await?;
+                response_text_start_bytes = response_text_start_bytes
+                    .checked_add(u64::try_from(value.as_str().len()).map_err(|_| {
+                        ModelCallCorruption::Inconsistent("tool response text byte length")
+                    })?)
+                    .ok_or(ModelCallCorruption::Inconsistent(
+                        "tool response text byte position",
+                    ))?;
+            }
+            SemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call,
+                block,
+            } => {
+                sqlx::query(
+                    "INSERT INTO semantic_transcript_entry
+                        (source_session_id, semantic_entry_id, payload_kind,
+                         assistant_text_value, producing_model_call_id,
+                         assistant_response_part_ordinal)
+                     VALUES ($1, $2, 'provider_compaction', $3, $4, $5)",
+                )
+                .bind(session_id_to_uuid(entry.source_session()))
+                .bind(entry.identity().into_uuid())
+                .bind(block.as_json())
                 .bind(producing_call.into_uuid())
                 .bind(Decimal::from(response_part_ordinal))
                 .execute(&mut *connection)
@@ -8826,6 +9279,9 @@ fn encode_tool_decision_source(
         ToolDecisionSource::PolicyAuto => ToolApprovalDecisionSourceStorageKind::PolicyAuto,
         ToolDecisionSource::SessionBlanket => ToolApprovalDecisionSourceStorageKind::SessionBlanket,
         ToolDecisionSource::RuntimeSafety => ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
+        ToolDecisionSource::LifecycleClosure => {
+            ToolApprovalDecisionSourceStorageKind::LifecycleClosure
+        }
         ToolDecisionSource::UserOverride => ToolApprovalDecisionSourceStorageKind::UserOverride,
         ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
             return Err(ModelCallRepositoryError::InvalidTransition(
@@ -8889,6 +9345,7 @@ async fn persist_cancelled(
         cancelled.session(),
         cancelled.turn(),
         "cancelled",
+        TurnTerminalCause::InterruptApplied,
         cancelled.terminal_snapshot().frontier().snapshot(),
         cancelled
             .attempt()
@@ -8901,11 +9358,13 @@ async fn persist_cancelled(
     }
     outbox::append(
         connection,
-        OutboxEvent::TurnCancelled {
+        OutboxEvent::TurnTerminal {
             session: cancelled.session(),
             turn: cancelled.turn(),
-            cancellation_entry: entry.identity(),
-            terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Cancelled {
+                cancellation_entry: entry.identity(),
+                terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -8916,13 +9375,17 @@ async fn persist_completed(
     connection: &mut PgConnection,
     completed: &CompletedModelCallTurn,
     usage: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call(
+    persist_ended_call_with_retained_usage(
         connection,
         completed.session(),
         completed.turn(),
         completed.call(),
         usage,
+        retained_input_tokens,
+        retained_output_tokens,
     )
     .await?;
     persist_ended_attempt(
@@ -8932,26 +9395,66 @@ async fn persist_completed(
         completed.attempt(),
     )
     .await?;
-    for entry in completed.assistant_entries() {
-        let SemanticTranscriptEntryPayload::AssistantText {
-            producing_call,
-            value,
-        } = entry.payload()
-        else {
-            return Err(ModelCallCorruption::Inconsistent("completed assistant payload").into());
-        };
-        sqlx::query(
-            "INSERT INTO semantic_transcript_entry
-                (source_session_id, semantic_entry_id, payload_kind,
-                 assistant_text_value, producing_model_call_id)
-             VALUES ($1, $2, 'assistant_text', $3, $4)",
-        )
-        .bind(session_id_to_uuid(entry.source_session()))
-        .bind(entry.identity().into_uuid())
-        .bind(value.as_str())
-        .bind(producing_call.into_uuid())
-        .execute(&mut *connection)
-        .await?;
+    let mut response_text_start_bytes = 0_u64;
+    for (response_part_ordinal, entry) in completed.assistant_entries().iter().enumerate() {
+        let ordinal =
+            Decimal::from(u64::try_from(response_part_ordinal).map_err(|_| {
+                ModelCallCorruption::Inconsistent("completed response part ordinal")
+            })?);
+        match entry.payload() {
+            SemanticTranscriptEntryPayload::AssistantText {
+                producing_call,
+                value,
+            } => {
+                sqlx::query(
+                    "INSERT INTO semantic_transcript_entry
+                        (source_session_id, semantic_entry_id, payload_kind,
+                         assistant_text_value, producing_model_call_id,
+                         assistant_response_part_ordinal,
+                         assistant_response_text_start_bytes)
+                     VALUES ($1, $2, 'assistant_text', $3, $4, $5, $6)",
+                )
+                .bind(session_id_to_uuid(entry.source_session()))
+                .bind(entry.identity().into_uuid())
+                .bind(value.as_str())
+                .bind(producing_call.into_uuid())
+                .bind(ordinal)
+                .bind(Decimal::from(response_text_start_bytes))
+                .execute(&mut *connection)
+                .await?;
+                response_text_start_bytes = response_text_start_bytes
+                    .checked_add(u64::try_from(value.as_str().len()).map_err(|_| {
+                        ModelCallCorruption::Inconsistent("completed response text byte length")
+                    })?)
+                    .ok_or(ModelCallCorruption::Inconsistent(
+                        "completed response text byte position",
+                    ))?;
+            }
+            SemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call,
+                block,
+            } => {
+                sqlx::query(
+                    "INSERT INTO semantic_transcript_entry
+                        (source_session_id, semantic_entry_id, payload_kind,
+                         assistant_text_value, producing_model_call_id,
+                         assistant_response_part_ordinal)
+                     VALUES ($1, $2, 'provider_compaction', $3, $4, $5)",
+                )
+                .bind(session_id_to_uuid(entry.source_session()))
+                .bind(entry.identity().into_uuid())
+                .bind(block.as_json())
+                .bind(producing_call.into_uuid())
+                .bind(ordinal)
+                .execute(&mut *connection)
+                .await?;
+            }
+            _ => {
+                return Err(
+                    ModelCallCorruption::Inconsistent("completed assistant payload").into(),
+                );
+            }
+        }
     }
     let completion = completed.completion_entry();
     if !matches!(
@@ -8983,6 +9486,7 @@ async fn persist_completed(
         completed.session(),
         completed.turn(),
         "completed",
+        TurnTerminalCause::Completed,
         completed.terminal_snapshot().frontier().snapshot(),
         Some(completed.attempt().id()),
         Some(completed.call().id()),
@@ -8997,12 +9501,14 @@ async fn persist_completed(
     .await?;
     outbox::append(
         connection,
-        OutboxEvent::TurnCompleted {
+        OutboxEvent::TurnTerminal {
             session: completed.session(),
             turn: completed.turn(),
-            call: completed.call().id(),
-            completion_entry: completion.identity(),
-            terminal_frontier: completed.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Completed {
+                call: completed.call().id(),
+                completion_entry: completion.identity(),
+                terminal_frontier: completed.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -9012,6 +9518,7 @@ async fn persist_completed(
 async fn persist_failed(
     connection: &mut PgConnection,
     failed: &FailedModelCallTurn,
+    cause: TurnTerminalCause,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
     attachment_failure: Option<AttachmentPreparationFailure>,
@@ -9022,9 +9529,13 @@ async fn persist_failed(
             failed.session(),
             failed.turn(),
             call,
-            usage,
-            provider_failure_cause,
-            attachment_failure,
+            EndedCallEvidence {
+                usage,
+                provider_failure_cause,
+                attachment_failure,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
+            },
         )
         .await?;
     } else if attachment_failure.is_some() {
@@ -9070,6 +9581,7 @@ async fn persist_failed(
         failed.session(),
         failed.turn(),
         "failed",
+        cause,
         failed.terminal_snapshot().frontier().snapshot(),
         Some(failed.attempt().id()),
         failed.call().map(signalbox_domain::EndedModelCall::id),
@@ -9080,11 +9592,13 @@ async fn persist_failed(
     }
     outbox::append(
         connection,
-        OutboxEvent::TurnFailed {
+        OutboxEvent::TurnTerminal {
             session: failed.session(),
             turn: failed.turn(),
-            failure_entry: entry.identity(),
-            terminal_frontier: failed.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Failed {
+                failure_entry: entry.identity(),
+                terminal_frontier: failed.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
@@ -9095,13 +9609,17 @@ async fn persist_refused(
     connection: &mut PgConnection,
     refused: &RefusedModelCallTurn,
     usage: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call(
+    persist_ended_call_with_retained_usage(
         connection,
         refused.session(),
         refused.turn(),
         refused.call(),
         usage,
+        retained_input_tokens,
+        retained_output_tokens,
     )
     .await?;
     persist_ended_attempt(
@@ -9111,6 +9629,35 @@ async fn persist_refused(
         refused.attempt(),
     )
     .await?;
+    for (response_part_ordinal, entry) in refused.provider_compaction_entries().iter().enumerate() {
+        let SemanticTranscriptEntryPayload::ProviderCompaction {
+            producing_call,
+            block,
+        } = entry.payload()
+        else {
+            return Err(
+                ModelCallCorruption::Inconsistent("refused provider compaction payload").into(),
+            );
+        };
+        let ordinal = Decimal::from(
+            u64::try_from(response_part_ordinal)
+                .map_err(|_| ModelCallCorruption::Inconsistent("refused response part ordinal"))?,
+        );
+        sqlx::query(
+            "INSERT INTO semantic_transcript_entry
+                (source_session_id, semantic_entry_id, payload_kind,
+                 assistant_text_value, producing_model_call_id,
+                 assistant_response_part_ordinal)
+             VALUES ($1, $2, 'provider_compaction', $3, $4, $5)",
+        )
+        .bind(session_id_to_uuid(entry.source_session()))
+        .bind(entry.identity().into_uuid())
+        .bind(block.as_json())
+        .bind(producing_call.into_uuid())
+        .bind(ordinal)
+        .execute(&mut *connection)
+        .await?;
+    }
     insert_snapshot(connection, refused.terminal_snapshot()).await?;
     persist_reclassified_pending_steering(
         connection,
@@ -9124,6 +9671,7 @@ async fn persist_refused(
         refused.session(),
         refused.turn(),
         "refused",
+        TurnTerminalCause::ModelRefusal,
         refused.terminal_snapshot().frontier().snapshot(),
         Some(refused.attempt().id()),
         Some(refused.call().id()),
@@ -9138,18 +9686,42 @@ async fn persist_refused(
     .await?;
     outbox::append(
         connection,
-        OutboxEvent::TurnRefused {
+        OutboxEvent::TurnTerminal {
             session: refused.session(),
             turn: refused.turn(),
-            call: refused.call().id(),
-            terminal_frontier: refused.terminal_snapshot().frontier().snapshot(),
+            disposition: TurnTerminalOutboxDisposition::Refused {
+                call: refused.call().id(),
+                terminal_frontier: refused.terminal_snapshot().frontier().snapshot(),
+            },
         },
     )
     .await?;
     Ok(())
 }
 
-async fn persist_reclassified_pending_steering(
+/// Settles the injection receipt of one accepted input's command, when the
+/// input was accepted by a command.
+pub(crate) async fn settle_injection(
+    connection: &mut PgConnection,
+    session: SessionId,
+    command: Option<Uuid>,
+    outcome: InjectionOutcomeOutbox,
+) -> Result<(), sqlx::Error> {
+    let Some(command) = command else {
+        return Ok(());
+    };
+    outbox::append(
+        connection,
+        OutboxEvent::InjectionSettled {
+            session,
+            command: DurableCommandId::from_uuid(command),
+            outcome,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn persist_reclassified_pending_steering(
     connection: &mut PgConnection,
     session: SessionId,
     source_turn: TurnId,
@@ -9215,7 +9787,7 @@ async fn persist_reclassified_pending_steering(
             );
         }
 
-        let accepted_rows = sqlx::query(
+        let command: Option<Option<Uuid>> = sqlx::query_scalar(
             "UPDATE accepted_input
                 SET disposition_kind = 'reclassified_as_turn_origin',
                     origin_turn_id = $1
@@ -9225,7 +9797,8 @@ async fn persist_reclassified_pending_steering(
                 AND delivery_kind = 'next_safe_point'
                 AND expected_active_turn_id = $5
                 AND disposition_kind = 'pending_steering'
-                AND origin_turn_id IS NULL",
+                AND origin_turn_id IS NULL
+            RETURNING accepting_command_id",
         )
         .bind(turn_id_to_uuid(successor.turn()))
         .bind(successor.accepted_input().id().into_uuid())
@@ -9234,10 +9807,20 @@ async fn persist_reclassified_pending_steering(
             successor.order().acceptance_position(),
         ))
         .bind(turn_id_to_uuid(source_turn))
-        .execute(&mut *connection)
-        .await?
-        .rows_affected();
-        require_single(accepted_rows, "pending-steering reclassification")?;
+        .fetch_optional(&mut *connection)
+        .await?;
+        let command = command.ok_or(ModelCallCorruption::Inconsistent(
+            "pending-steering reclassification",
+        ))?;
+        settle_injection(
+            connection,
+            session,
+            command,
+            InjectionOutcomeOutbox::Delivered {
+                turn: Some(successor.turn()),
+            },
+        )
+        .await?;
 
         let (frozen_kind, frozen_direct, frozen_alias, frozen_alias_selected) =
             match successor.effective_configuration().model() {
@@ -9464,6 +10047,8 @@ struct StoredModelCallObservation {
     disposition: Option<String>,
     provider_failure_cause: Option<String>,
     usage: EncodedTokenUsage,
+    retained_input_tokens: Option<Decimal>,
+    retained_output_tokens: Option<Decimal>,
 }
 
 fn decode_stored_model_call_observation(
@@ -9484,6 +10069,8 @@ fn decode_stored_model_call_observation(
             cache_creation_input_tokens: row.try_get("usage_cache_creation_input_tokens")?,
             cache_read_input_tokens: row.try_get("usage_cache_read_input_tokens")?,
         },
+        retained_input_tokens: row.try_get("retained_input_tokens")?,
+        retained_output_tokens: row.try_get("retained_output_tokens")?,
     })
 }
 
@@ -9494,10 +10081,41 @@ async fn persist_ended_call(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
+    persist_ended_call_with_retained_usage(connection, session, turn, call, usage, None, None).await
+}
+
+async fn persist_ended_call_with_retained_usage(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    call: &signalbox_domain::EndedModelCall,
+    usage: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
+) -> Result<(), ModelCallRepositoryError> {
     persist_ended_call_with_provider_failure_cause(
-        connection, session, turn, call, usage, None, None,
+        connection,
+        session,
+        turn,
+        call,
+        EndedCallEvidence {
+            usage,
+            provider_failure_cause: None,
+            attachment_failure: None,
+            retained_input_tokens,
+            retained_output_tokens,
+        },
     )
     .await
+}
+
+#[derive(Clone, Copy)]
+struct EndedCallEvidence {
+    usage: ProviderReportedTokenUsage,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 }
 
 async fn persist_ended_call_with_provider_failure_cause(
@@ -9505,10 +10123,15 @@ async fn persist_ended_call_with_provider_failure_cause(
     session: SessionId,
     turn: TurnId,
     call: &signalbox_domain::EndedModelCall,
-    usage: ProviderReportedTokenUsage,
-    provider_failure_cause: Option<ProviderModelCallFailureCause>,
-    attachment_failure: Option<AttachmentPreparationFailure>,
+    evidence: EndedCallEvidence,
 ) -> Result<(), ModelCallRepositoryError> {
+    let EndedCallEvidence {
+        usage,
+        provider_failure_cause,
+        attachment_failure,
+        retained_input_tokens,
+        retained_output_tokens,
+    } = evidence;
     let usage = encode_token_usage(usage);
     let attachment_failure = attachment_failure
         .map(encode_attachment_preparation_failure)
@@ -9521,13 +10144,15 @@ async fn persist_ended_call_with_provider_failure_cause(
                 usage_output_tokens = $3,
                 usage_cache_creation_input_tokens = $4,
                 usage_cache_read_input_tokens = $5,
-                terminal_provider_failure_cause = $6,
-                terminal_attachment_preparation_failure_cause = $7,
-                terminal_attachment_preparation_failure_maximum_bytes = $8
-          WHERE model_call_id = $9
-            AND turn_id = $10
-            AND session_id = $11
-            AND turn_attempt_id = $12
+                retained_input_tokens = $6,
+                retained_output_tokens = $7,
+                terminal_provider_failure_cause = $8,
+                terminal_attachment_preparation_failure_cause = $9,
+                terminal_attachment_preparation_failure_maximum_bytes = $10
+          WHERE model_call_id = $11
+            AND turn_id = $12
+            AND session_id = $13
+            AND turn_attempt_id = $14
             AND state_kind <> 'terminal'
             AND terminal_disposition_kind IS NULL",
     )
@@ -9536,6 +10161,8 @@ async fn persist_ended_call_with_provider_failure_cause(
     .bind(usage.output_tokens)
     .bind(usage.cache_creation_input_tokens)
     .bind(usage.cache_read_input_tokens)
+    .bind(retained_input_tokens.map(Decimal::from))
+    .bind(retained_output_tokens.map(Decimal::from))
     .bind(provider_failure_cause.map(encode_provider_failure_cause))
     .bind(attachment_failure.map(|(cause, _)| cause))
     .bind(attachment_failure.and_then(|(_, maximum_bytes)| maximum_bytes))
@@ -9762,11 +10389,35 @@ pub(crate) async fn insert_snapshot(
     })
 }
 
+/// Classifies one pre-send prepared-call failure as a turn-terminal cause.
+///
+/// Attachment preparation is the more specific evidence: when it produced the
+/// failure it names the cause, and the application's pre-send vocabulary names
+/// it otherwise. Taking that vocabulary rather than a bare terminal cause is
+/// what keeps a caller from pairing a `failed` disposition with a cause that
+/// contradicts it.
+const fn prepared_failure_cause(
+    cause: PreparedModelCallFailureCause,
+    attachment_failure: Option<AttachmentPreparationFailure>,
+) -> TurnTerminalCause {
+    match (attachment_failure, cause) {
+        (Some(_), _) => TurnTerminalCause::AttachmentPreparationFailed,
+        (None, PreparedModelCallFailureCause::CapabilityKnownFailure) => {
+            TurnTerminalCause::CapabilityPreparationFailed
+        }
+        (None, PreparedModelCallFailureCause::ToolRoundLimitReached) => {
+            TurnTerminalCause::ToolRoundLimitReached
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn terminalize_lifecycle(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
     disposition: &'static str,
+    cause: TurnTerminalCause,
     terminal_frontier: signalbox_domain::ContextFrontierId,
     terminal_attempt: Option<signalbox_domain::TurnAttemptId>,
     terminal_call: Option<ModelCallId>,
@@ -9800,7 +10451,8 @@ async fn terminalize_lifecycle(
                 terminal_attempt_id = $2,
                 terminal_model_call_id = $3,
                 terminal_tool_attempt_id = NULL,
-                terminal_disposition_kind = $4
+                terminal_disposition_kind = $4,
+                terminal_cause_kind = $7
           WHERE turn_id = $5
             AND session_id = $6
             AND state_kind = 'active'
@@ -9843,6 +10495,7 @@ async fn terminalize_lifecycle(
     .bind(disposition)
     .bind(turn_id_to_uuid(turn))
     .bind(session_id_to_uuid(session))
+    .bind(turn_terminal_cause_to_str(cause))
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -9989,6 +10642,7 @@ fn preview_entry_content_bytes(
         | SemanticTranscriptEntryPayload::ContextSummary { .. }
         | SemanticTranscriptEntryPayload::TurnFailed { .. }
         | SemanticTranscriptEntryPayload::AssistantText { .. }
+        | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
         | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | SemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -10090,7 +10744,7 @@ mod tests {
     use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io, time::Duration};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::{AssistantText, ModelCallId, ProviderModelCallFailureCause, TurnId};
+    use signalbox_domain::{ModelCallId, ProviderModelCallFailureCause, TurnId};
     use sqlx::{
         error::{DatabaseError, ErrorKind},
         types::Uuid,
@@ -10101,8 +10755,31 @@ mod tests {
         ModelCallRepositoryError, StoredTerminalFrontierMember, availability_retry_backoff,
         cancellation_poll_interval, commit_failure_is_ambiguous,
         completed_terminal_frontier_matches, delegation_terminal_relation_decode_error,
-        failed_terminal_frontier_matches, record_reclassified_turn_candidate,
+        failed_terminal_frontier_matches, is_same_credential_retry_cause,
+        record_reclassified_turn_candidate,
     };
+
+    #[test]
+    fn same_credential_retry_causes_are_closed() {
+        for cause in [
+            ProviderModelCallFailureCause::RateLimited,
+            ProviderModelCallFailureCause::Overloaded,
+            ProviderModelCallFailureCause::ProviderInternal,
+        ] {
+            assert!(is_same_credential_retry_cause(cause));
+        }
+        for cause in [
+            ProviderModelCallFailureCause::CredentialRejected,
+            ProviderModelCallFailureCause::PermissionDenied,
+            ProviderModelCallFailureCause::InvalidRequest,
+            ProviderModelCallFailureCause::TargetNotFound,
+            ProviderModelCallFailureCause::RequestTooLarge,
+            ProviderModelCallFailureCause::QuotaExhausted,
+            ProviderModelCallFailureCause::Unrecognized,
+        ] {
+            assert!(!is_same_credential_retry_cause(cause));
+        }
+    }
 
     #[test]
     fn rate_limit_backoff_is_jittered_inside_the_exponential_window() {
@@ -10295,9 +10972,10 @@ mod tests {
         let turn = Uuid::from_u128(2);
         let call = Uuid::from_u128(3);
         let source = vec![(Uuid::from_u128(4), Uuid::from_u128(5))];
-        let assistant = vec![
-            AssistantText::try_new(String::from("exact reply")).expect("fixture text is admitted"),
-        ];
+        let assistant = vec![signalbox_domain::AssistantResponsePart::Text(
+            signalbox_domain::AssistantText::try_new(String::from("exact reply"))
+                .expect("fixture text is admitted"),
+        )];
         let prefix = StoredTerminalFrontierMember {
             source_session: source[0].0,
             entry: source[0].1,

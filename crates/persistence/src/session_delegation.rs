@@ -1,6 +1,6 @@
 //! Atomic delegated-session await and peer-message persistence.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::num::NonZeroU64;
 
 use rust_decimal::Decimal;
 use signalbox_application::DelegationMessageDeliveryProjection;
@@ -46,16 +46,12 @@ use crate::{
 
 const STORAGE_VERSION: i16 = 1;
 
+#[derive(signalbox_derive::Accessors)]
 /// One successful await registration, equal replay included.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecordedDelegationWait {
+    #[get(copy)]
     wait: DelegationWait,
-}
-
-impl RecordedDelegationWait {
-    pub const fn wait(self) -> DelegationWait {
-        self.wait
-    }
 }
 
 /// One successful peer-message receipt, equal replay included.
@@ -68,16 +64,12 @@ pub struct RecordedDelegationMessage {
     delivery_sequence: NonZeroU64,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One exact foreground delivery selected from durable relationship state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordedDelegationDelivery {
+    #[get]
     outcome: DelegationOutcome,
-}
-
-impl RecordedDelegationDelivery {
-    pub const fn outcome(&self) -> &DelegationOutcome {
-        &self.outcome
-    }
 }
 
 impl RecordedDelegationMessage {
@@ -235,42 +227,20 @@ pub enum SessionDelegationCorruption {
     Reconstitution(SessionDelegationReconstitutionFailure),
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Database or fail-closed delegated-session persistence failure.
 #[derive(Debug)]
 pub enum SessionDelegationRepositoryError {
-    Database(sqlx::Error),
-    CommitAmbiguous(sqlx::Error),
-    ToolLoop(ToolLoopRepositoryError),
+    #[error("delegation database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("delegation commit is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("delegation tool-loop failure: {field_0}")]
+    ToolLoop(#[source] ToolLoopRepositoryError),
+    #[error("delegation transition is invalid: {field_0}")]
     InvalidTransition(&'static str),
+    #[error("delegation storage is corrupt: {field_0:?}")]
     Corruption(SessionDelegationCorruption),
-}
-
-impl fmt::Display for SessionDelegationRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "delegation database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(formatter, "delegation commit is ambiguous: {error}")
-            }
-            Self::ToolLoop(error) => write!(formatter, "delegation tool-loop failure: {error}"),
-            Self::InvalidTransition(reason) => {
-                write!(formatter, "delegation transition is invalid: {reason}")
-            }
-            Self::Corruption(reason) => {
-                write!(formatter, "delegation storage is corrupt: {reason:?}")
-            }
-        }
-    }
-}
-
-impl Error for SessionDelegationRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::ToolLoop(error) => Some(error),
-            Self::InvalidTransition(_) | Self::Corruption(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for SessionDelegationRepositoryError {
@@ -1825,7 +1795,19 @@ fn decode_outcome(row: &PgRow) -> Result<DelegationOutcome, SessionDelegationRep
                 )?)?,
             }
         }
-        "child_turn" | "parent_turn_command" => {
+        "parent_lifecycle_command"
+            if provenance_turn.is_none()
+                && provenance_goal.is_none()
+                && provenance_request.is_none() =>
+        {
+            DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+                session: source,
+                command: decode_command(provenance_command.ok_or(
+                    SessionDelegationCorruption::Inconsistent("outcome provenance shape"),
+                )?)?,
+            }
+        }
+        "child_turn" | "parent_turn_command" | "parent_lifecycle_command" => {
             return Err(
                 SessionDelegationCorruption::Inconsistent("outcome provenance shape").into(),
             );
@@ -2887,9 +2869,9 @@ fn require_single(
 mod tests {
     use super::*;
 
-    /// S18 / INV-010: either message direction locks the same endpoint order.
+    /// S18: either message direction locks the same endpoint order.
     #[test]
-    fn s18_inv010_opposite_message_directions_share_canonical_lock_order() {
+    fn s18_opposite_message_directions_share_canonical_lock_order() {
         let lower = SessionId::from_uuid(Uuid::from_u128(1));
         let higher = SessionId::from_uuid(Uuid::from_u128(2));
 

@@ -3,17 +3,29 @@
 use crate::*;
 
 use signalbox_application::{
-    ClassifyOperatorFailure, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
+    ClassifyOperatorFailure, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
+    TurnLivenessEvidence, TurnLivenessGuardKind, TurnLivenessLedger, TurnLivenessScanInterval,
     UuidV7StartupScanIdGenerator,
 };
-use signalbox_persistence::turn_liveness::{
-    PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds,
+use signalbox_persistence::{
+    mapping::turn_terminal_cause_to_str,
+    turn_liveness::{
+        PostgresTurnLivenessRepository, TurnLivenessObservationMode, TurnLivenessPersistenceBounds,
+    },
 };
 
+/// Starvation allowance for an uncontended pool checkout: generous, not a
+/// behavior under test. On a saturated CI node a checkout can take tens of
+/// milliseconds; a starved checkout must not preempt the lock refusal these
+/// tests assert on.
+const POOL_ACQUIRE_ALLOWANCE: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn terminalization_bounds() -> TurnLivenessPersistenceBounds {
+    // The lock budgets stay tiny: a lock_timeout only trips while genuinely
+    // blocked, so they are insensitive to how loaded the host is.
     TurnLivenessPersistenceBounds::new(
         Some(std::time::Duration::from_millis(7)),
-        Some(std::time::Duration::from_millis(11)),
+        Some(POOL_ACQUIRE_ALLOWANCE),
         Some(std::time::Duration::from_millis(13)),
     )
 }
@@ -69,6 +81,265 @@ async fn activated_watchdog_session(
         turn,
         selection,
     })
+}
+
+/// A daemon replacement retains the durable ordinal until one interval elapses.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn restart_mid_observation_retains_staleness_evidence() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x10_000).await?;
+    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
+    let first_repository =
+        PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidates = first_repository
+        .quiescent_active_turns(None)
+        .await?
+        .into_candidates();
+    let first = first_repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    drop(first_repository);
+    let restarted_repository =
+        PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+
+    let second = restarted_repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    let third = restarted_repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
+        .await?;
+    let changed_interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(61))?;
+    let changed_cadence = restarted_repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            changed_interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
+        .await?;
+    let bound = StaleActiveTurnBound::try_new(std::time::Duration::from_secs(60))?;
+    let due = TurnLivenessLedger::new(bound, interval).reconcile(&third);
+
+    assert_eq!(first[0].ordinal().get(), 1);
+    assert_eq!(second[0].ordinal().get(), 1);
+    assert_eq!(third[0].ordinal().get(), 2);
+    assert_eq!(changed_cadence[0].ordinal().get(), 1);
+    assert_eq!(due.as_ref(), &[third[0].candidate()]);
+    assert_eq!(third[0].candidate().turn(), fixture.turn);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A durable observation ordinal uses the persistence contract's whole `u64`
+/// range instead of stopping at PostgreSQL's signed-bigint ceiling.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn observation_ordinal_advances_through_the_u64_range() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let _fixture = activated_watchdog_session(&pool, 0x10_100).await?;
+    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidates = repository
+        .quiescent_active_turns(None)
+        .await?
+        .into_candidates();
+    repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE turn_liveness_observation
+            SET observation_ordinal = $1
+          WHERE guard_kind = $2",
+    )
+    .bind(Decimal::from(u64::MAX - 1))
+    .bind(TurnLivenessGuardKind::Quiescent.as_str())
+    .execute(&pool)
+    .await?;
+
+    let advanced = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
+        .await?;
+    let saturated = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
+        .await?;
+
+    assert_eq!(advanced[0].ordinal().get(), u64::MAX);
+    assert_eq!(saturated[0].ordinal().get(), u64::MAX);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// An observation that cannot be decoded into its durable domain shape is
+/// fail-closed corruption rather than a transient infrastructure failure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn malformed_observation_is_classified_as_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let _fixture = activated_watchdog_session(&pool, 0x10_200).await?;
+    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidates = repository
+        .quiescent_active_turns(None)
+        .await?
+        .into_candidates();
+    repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE turn_liveness_observation
+         DROP CONSTRAINT turn_liveness_observation_ordinal",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_liveness_observation
+            SET observation_ordinal = $1
+          WHERE guard_kind = $2",
+    )
+    .bind(Decimal::from(u64::MAX) + Decimal::ONE)
+    .bind(TurnLivenessGuardKind::Quiescent.as_str())
+    .execute(&pool)
+    .await?;
+
+    let error = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await
+        .expect_err("the malformed stored ordinal fails closed");
+
+    assert_eq!(
+        error.operator_failure_class(),
+        OperatorFailureClass::FailClosedCorruption
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Disabling either stale-turn supervision input breaks observation continuity
+/// for both guards, so a later deployment starts both ledgers from their first
+/// observation rather than inheriting credit earned before the disabled run.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn disabled_supervision_clears_guard_observation_history() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let _fixture = activated_watchdog_session(&pool, 0x11_000).await?;
+    let interval = TurnLivenessScanInterval::try_new(std::time::Duration::from_secs(60))?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidates = repository
+        .quiescent_active_turns(None)
+        .await?
+        .into_candidates();
+    let first_quiescent = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    let first_slot_held = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::SlotHeld,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    let advanced_quiescent = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
+        .await?;
+    let advanced_slot_held = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::SlotHeld,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::Advance,
+        )
+        .await?;
+
+    repository.clear_guard_observations().await?;
+
+    let reset_quiescent = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::Quiescent,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    let reset_slot_held = repository
+        .record_complete_observation(
+            TurnLivenessGuardKind::SlotHeld,
+            interval,
+            &candidates,
+            TurnLivenessObservationMode::RestartBaseline,
+        )
+        .await?;
+    assert_ne!(
+        advanced_quiescent[0].ordinal(),
+        first_quiescent[0].ordinal()
+    );
+    assert_ne!(
+        advanced_slot_held[0].ordinal(),
+        first_slot_held[0].ordinal()
+    );
+    assert_eq!(reset_quiescent[0].ordinal(), first_quiescent[0].ordinal());
+    assert_eq!(reset_slot_held[0].ordinal(), first_slot_held[0].ordinal());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// Leaves the session's active turn holding a checkpointed, not yet observed
@@ -139,7 +410,8 @@ async fn checkpoint_model_call(
 }
 
 /// An active turn with no operation outstanding reaches the inventory, and the
-/// shared failed-turn transition ends it without any new terminal machinery.
+/// shared failed-turn transition ends it without any new terminal machinery,
+/// recording the watchdog's own cause rather than the startup scan's.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn Error>> {
@@ -168,13 +440,15 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x11_100)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x11_101)),
             ),
+            &mut UuidV7StartupScanIdGenerator,
         )
         .await?;
     assert_eq!(outcome, StaleTurnOutcome::Terminalized);
 
-    let terminal: (String, Option<String>, i64) = sqlx::query_as(
+    let terminal: (String, Option<String>, Option<String>, i64) = sqlx::query_as(
         "SELECT lifecycle.state_kind,
                 lifecycle.terminal_disposition_kind,
+                lifecycle.terminal_cause_kind,
                 (SELECT count(*)
                    FROM semantic_transcript_entry AS entry
                   WHERE entry.failed_turn_id = lifecycle.turn_id)
@@ -186,7 +460,14 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
     .await?;
     assert_eq!(
         terminal,
-        (String::from("terminal"), Some(String::from("failed")), 1)
+        (
+            String::from("terminal"),
+            Some(String::from("failed")),
+            Some(String::from(turn_terminal_cause_to_str(
+                TurnTerminalCause::WatchdogStaleTurn
+            ))),
+            1
+        )
     );
     assert_eq!(
         repository.quiescent_active_turns(None).await?.candidates(),
@@ -369,6 +650,7 @@ async fn a_changed_observation_is_superseded() -> Result<(), Box<dyn Error>> {
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x13_100)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x13_101)),
             ),
+            &mut UuidV7StartupScanIdGenerator,
         )
         .await?;
     assert_eq!(outcome, StaleTurnOutcome::Superseded);
@@ -455,18 +737,18 @@ async fn repository_page(pool: &PgPool) -> Result<Box<[StaleTurnCandidate]>, Box
     Ok(page.candidates().to_vec().into_boxed_slice())
 }
 
-/// Steering a wedged turn must not hide it. Nothing consumes a steering input
-/// without a model call to consume it at a safe point, so a steered turn that
-/// is otherwise quiescent stays wedged; it reaches the inventory, and
-/// terminalization reports by identity that no present transition can end it.
+/// Steering a wedged turn must not hide it, and it must not keep the turn
+/// wedged: the watchdog's failed-turn transition reclassifies the pending
+/// steering into a queued successor, which settles the injection `delivered`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn pending_steering_leaves_a_wedged_turn_visible_and_unreachable()
+async fn pending_steering_is_reclassified_when_the_watchdog_ends_its_turn()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x15_000).await?;
+    let steering_command = DurableCommandId::from_uuid(Uuid::from_u128(0x15_301));
     let steering = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x15_301)),
+        steering_command,
         fixture.session,
         UserContent::try_text(String::from("steer the wedged turn"))
             .expect("fixture steering content is admitted"),
@@ -504,17 +786,40 @@ async fn pending_steering_leaves_a_wedged_turn_visible_and_unreachable()
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x15_400)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x15_401)),
             ),
+            &mut UuidV7StartupScanIdGenerator,
         )
         .await?;
 
     assert_eq!(candidate.turn(), fixture.turn);
-    assert_eq!(outcome, StaleTurnOutcome::BlockedByPendingSteering);
+    assert_eq!(outcome, StaleTurnOutcome::Terminalized);
     let state: (String,) =
         sqlx::query_as("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
             .bind(fixture.turn.into_uuid())
             .fetch_one(&pool)
             .await?;
-    assert_eq!(state, (String::from("active"),));
+    assert_eq!(state, (String::from("terminal"),));
+    let (disposition, successor, successor_state): (String, Option<Uuid>, Option<String>) =
+        sqlx::query_as(
+            "SELECT accepted.disposition_kind, accepted.origin_turn_id, successor.state_kind
+               FROM accepted_input AS accepted
+               LEFT JOIN turn_lifecycle AS successor
+                 ON successor.turn_id = accepted.origin_turn_id
+              WHERE accepted.accepting_command_id = $1",
+        )
+        .bind(steering_command.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(disposition, "reclassified_as_turn_origin");
+    assert_eq!(successor_state.as_deref(), Some("queued"));
+    let receipt: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT outcome_kind, delivered_turn_id
+           FROM injection_settled_outbox_event
+          WHERE command_id = $1",
+    )
+    .bind(steering_command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(receipt, (String::from("delivered"), successor));
 
     pool.close().await;
     drop(container);

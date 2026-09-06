@@ -123,9 +123,9 @@ impl LocalProcessListener {
         if !self.identity.matches(&metadata, geteuid().as_raw()) {
             return Err(LocalSocketError::CleanupIdentityMismatch);
         }
+        drop(self.identity_pin);
         fs::remove_file(&self.path).map_err(LocalSocketError::RemoveSocket)?;
         drop(self.listener);
-        drop(self.identity_pin);
         drop(self.path_lock);
         Ok(())
     }
@@ -211,15 +211,14 @@ fn clear_stale_identity_pin(
     let Some(identity) = SocketIdentity::capture(&metadata, effective_user) else {
         return Err(LocalSocketError::PinnedIdentityMismatch);
     };
-    let public_metadata = match fs::symlink_metadata(socket_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(LocalSocketError::PinnedIdentityMismatch);
+    match fs::symlink_metadata(socket_path) {
+        Ok(public_metadata) => {
+            if !identity.matches(&public_metadata, effective_user) {
+                return Err(LocalSocketError::PinnedIdentityMismatch);
+            }
         }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(LocalSocketError::ReadExistingEntry(error)),
-    };
-    if !identity.matches(&public_metadata, effective_user) {
-        return Err(LocalSocketError::PinnedIdentityMismatch);
     }
     let revalidated_pin =
         fs::symlink_metadata(&pin_path).map_err(LocalSocketError::ReadPinnedIdentity)?;
@@ -792,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_identity_pin_never_touches_the_socket_path() -> Result<(), Box<dyn Error>> {
+    async fn orphan_identity_pin_with_invalid_shape_is_refused() -> Result<(), Box<dyn Error>> {
         let directory = TestDirectory::create()?;
         let path = directory.socket_path();
         let pin = File::create(directory.identity_path())?;
@@ -810,24 +809,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unpaired_live_socket_at_identity_path_is_preserved() -> Result<(), Box<dyn Error>> {
+    async fn owned_orphan_identity_pin_is_removed_before_binding() -> Result<(), Box<dyn Error>> {
         let directory = TestDirectory::create()?;
         let path = directory.socket_path();
         let identity_path = directory.identity_path();
-        let live = std::os::unix::net::UnixListener::bind(&identity_path)?;
-        let inode = fs::symlink_metadata(&identity_path)?.ino();
+        let stale = std::os::unix::net::UnixListener::bind(&path)?;
+        fs::hard_link(&path, &identity_path)?;
+        fs::remove_file(&path)?;
+        drop(stale);
 
-        let result = LocalProcessListener::bind(&path);
+        let listener = LocalProcessListener::bind(&path)?;
+        let public = fs::symlink_metadata(&path)?;
+        let pin = fs::symlink_metadata(&identity_path)?;
 
-        assert!(matches!(
-            result,
-            Err(LocalSocketError::PinnedIdentityMismatch)
-        ));
-        assert!(!path.exists());
-        assert_eq!(fs::symlink_metadata(&identity_path)?.ino(), inode);
-        let client = std::os::unix::net::UnixStream::connect(&identity_path)?;
+        assert_eq!(pin.dev(), public.dev());
+        assert_eq!(pin.ino(), public.ino());
+        let client = UnixStream::connect(&path).await?;
+        let (server, _) = listener.accept().await?;
         drop(client);
-        drop(live);
+        drop(server);
+        listener.cleanup()?;
         Ok(())
     }
 

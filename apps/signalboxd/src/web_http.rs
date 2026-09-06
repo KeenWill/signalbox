@@ -5,7 +5,7 @@
 //! authentication.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     env,
     error::Error,
     ffi::OsString,
@@ -26,7 +26,7 @@ use axum::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{
             ACCEPT_RANGES, ALLOW, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH,
-            CONTENT_RANGE, CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, IF_RANGE, ORIGIN, RANGE,
+            CONTENT_RANGE, CONTENT_TYPE, ETAG, HOST, IF_RANGE, ORIGIN, RANGE,
             X_CONTENT_TYPE_OPTIONS,
         },
     },
@@ -35,54 +35,73 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{Stream, StreamExt, stream};
+use headers::{
+    ETag as TypedEtag, HeaderMapExt as _, IfNoneMatch as TypedIfNoneMatch, IfRange as TypedIfRange,
+    Range as TypedRange,
+};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     AttentionAction, AttentionActivityKind, AttentionBlockedReason, AttentionChanges,
-    AttentionContinuation, AttentionGoalBlock, AttentionQuery, AttentionSnapshot, AttentionSort,
-    AttentionState, AttentionSummary, SearchContentClass, SearchCursor, SearchPageLimit,
-    SearchQuery, SearchResultSource, SearchScope, SearchStrategy, SearchText,
-    SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
-    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits, UsageAggregateCompleteness,
-    UsageAggregateGroup, UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallCursor,
-    UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPageLimit, UsageCallQuery,
-    UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageSelection, UsageTimeFromInclusive,
-    UsageTimeRange, UsageTimeToExclusive, UsageTimestampMicros, UsageTokenAxes, UsageTokenPresence,
-    max_attention_filter_tags, max_attention_filter_utf8_bytes,
-    max_attention_goal_summary_characters, max_attention_title_characters,
+    AttentionContinuation, AttentionGoalBlock, AttentionLifecycleState, AttentionQuery,
+    AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary, SearchContentClass,
+    SearchCursor, SearchPageLimit, SearchQuery, SearchResultSource, SearchScope, SearchStrategy,
+    SearchText, SessionLiveActiveState, SessionLiveReconciliation,
+    SessionLiveRunnerConnectionHealth, SessionLiveRunnerState, SessionLiveSnapshot,
+    SessionTimelineDescriptor, SessionTimelineDetailBody, SessionTimelineDetailPage,
+    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineBodyContinuation,
+    TimelineBodyField, TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor,
+    TimelineDetailLimits, TimelineModelCallDisposition, TimelineModelCallState,
+    TimelineTextExcerpt, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateTokenAxes,
+    UsageCacheNormalization, UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder,
+    UsageCallPageLimit, UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery,
+    UsageSelection, UsageTimeFromInclusive, UsageTimeRange, UsageTimeToExclusive,
+    UsageTimestampMicros, UsageTokenAxes, UsageTokenPresence, max_attention_filter_tags,
+    max_attention_filter_utf8_bytes, max_attention_goal_summary_characters,
+    max_attention_title_characters,
 };
 use signalbox_blob_store::MAX_BLOB_RANGE_BYTES;
 use signalbox_domain::{
-    BlobDerivation, BlobDerivationProducer, BlobDigest, ModelCallId, ProviderModelIdentity,
-    ResolvedProviderTarget, SessionId, TurnId,
+    BlobDerivation, BlobDerivationProducer, BlobDigest, ModelCallId, ProviderModelCallFailureCause,
+    ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
 };
 use signalbox_persistence::attention::{
     AttentionPage, AttentionRepository, AttentionRepositoryError, AutomaticResumeAttemptBounds,
 };
+use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
 use signalbox_persistence::search::{SearchRepository, SearchRepositoryError};
+use signalbox_persistence::session_live::{SessionLiveRepository, SessionLiveRepositoryError};
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
-use signalbox_persistence::usage::{
-    UsageRepository, UsageRepositoryError, usage_timestamp_is_representable,
-};
+use signalbox_persistence::usage::{UsageRepository, UsageRepositoryError};
 use signalbox_web_contract::{
-    MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
-    WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot, WebAttentionState,
+    MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES, WebApiError,
+    WebApiErrorKind, WebApiErrorResponse, WebAttentionAction, WebAttentionActivity,
+    WebAttentionActivityKind, WebAttentionBlockedReason, WebAttentionGoalBlock,
+    WebAttentionJudgeFacts, WebAttentionLifecycleState, WebAttentionSnapshot, WebAttentionState,
     WebAttentionStreamEvent, WebAttentionSummary, WebBlobAvailableView, WebBlobDerivation,
-    WebBlobDerivationProducer, WebBlobDescriptor, WebBlobViewKind, WebContractBootstrap,
-    WebContractExample, WebDollarAmount, WebNullableU64, WebNullableU128, WebSearchContentClass,
-    WebSearchCursor, WebSearchHighlight, WebSearchPage, WebSearchProjectionId, WebSearchResult,
+    WebBlobDerivationProducer, WebBlobDescriptor, WebBlobId, WebBlobViewKind, WebContractBootstrap,
+    WebContractExample, WebDollarAmount, WebLiveResourceId, WebNullableU64, WebNullableU128,
+    WebPositiveU64, WebProviderModelCallFailureCause, WebSearchContentClass, WebSearchCursor,
+    WebSearchHighlight, WebSearchPage, WebSearchProjectionId, WebSearchResult,
     WebSearchResultSource, WebSessionCatalogActivity, WebSessionCatalogContinuation,
     WebSessionCatalogSnapshot, WebSessionCatalogSort, WebSessionCatalogSummary, WebSessionId,
-    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
-    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
-    WebTimelineEventSequence, WebU64, WebUsageAggregateGroup, WebUsageAggregateTokenAxes,
-    WebUsageCall, WebUsageCallCount, WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage,
-    WebUsageCost, WebUsageCostLabel, WebUsageCostUnavailableReason, WebUsageInputSemantics,
-    WebUsageProvenance, WebUsageRateVersion, WebUsageSummary, WebUsageTimestampMicros,
-    WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
+    WebSessionLiveActiveState, WebSessionLiveActiveTurn, WebSessionLiveReconciliation,
+    WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot,
+    WebSessionLiveStreamEvent, WebSessionTimelineDescriptor, WebSessionTimelineDetail,
+    WebSessionTimelineDetailBody, WebSessionTimelineDetailPage, WebSessionTimelineEventKind,
+    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
+    WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference, WebTimelineBodyContinuation,
+    WebTimelineBodyField, WebTimelineDetailContinuation, WebTimelineEventSequence,
+    WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
+    WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebTurnId, WebU64,
+    WebUsageAggregateGroup, WebUsageAggregateTokenAxes, WebUsageCall, WebUsageCallCount,
+    WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage, WebUsageCost, WebUsageCostLabel,
+    WebUsageCostUnavailableReason, WebUsageInputSemantics, WebUsageProvenance, WebUsageRateVersion,
+    WebUsageSummary, WebUsageTimestampMicros, WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
 };
 use sqlx::{PgPool, types::Uuid};
 use tokio::{
@@ -95,7 +114,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 
 use crate::{
-    BillingKind, BlobStoreRegistry, HubModelConfiguration, WebBlobRuntime, WebImageDerivativeKind,
+    BillingKind, BlobStoreRegistry, HubModelConfiguration, ProcessMonitor,
+    ProcessMonitorReceiveError, ProcessMonitorUpdate, WebBlobRuntime, WebImageDerivativeKind,
     blob_read_runtime::{open_recorded_blob_range, open_recorded_blob_verified},
     configuration::ModelCallInputUsage,
     web_blob_runtime::WebBlobRuntimeError,
@@ -127,6 +147,377 @@ const BLOB_RESPONSE_TIMEOUT_SECONDS: u64 = 120;
 struct WebHttpState {
     blobs: Option<WebBlobRuntime>,
     blob_read_budget: Arc<Semaphore>,
+}
+
+#[cfg(test)]
+mod live_follow_tests {
+    use std::{num::NonZeroU64, sync::Arc, time::Duration};
+
+    use signalbox_domain::{ModelCallId, SessionId, TurnId};
+    use signalbox_web_contract::{
+        MAX_NDJSON_ITEM_BYTES, WebLiveResourceId, WebPositiveU64, WebSessionLiveStreamEvent,
+        WebSessionTimelineEventKind, WebTimelineAddress, WebTimelineEventSequence, WebTurnId,
+        WebU64,
+    };
+    use sqlx::types::Uuid;
+    use tokio::sync::watch;
+
+    use super::{LiveFollowState, live_follow_next};
+    use crate::{ProcessMonitor, ProcessMonitorUpdate};
+
+    fn live_session() -> SessionId {
+        SessionId::from_uuid(Uuid::from_u128(0x991))
+    }
+
+    fn live_turn() -> TurnId {
+        TurnId::from_uuid(Uuid::from_u128(0x992))
+    }
+
+    fn live_call() -> ModelCallId {
+        ModelCallId::from_uuid(Uuid::from_u128(0x993))
+    }
+
+    fn live_follow_state(
+        monitor: &ProcessMonitor,
+        observed_through: u64,
+        queued_at_snapshot: usize,
+    ) -> LiveFollowState {
+        LiveFollowState {
+            subscription: monitor.subscribe(),
+            session: live_session(),
+            observed_through: NonZeroU64::new(observed_through)
+                .expect("test snapshot cursors are positive"),
+            covered_at_snapshot: queued_at_snapshot,
+            queued_at_snapshot,
+            pending: std::collections::VecDeque::new(),
+            provider_fragment: None,
+            shutdown: None,
+            ended: false,
+        }
+    }
+
+    fn provider_text_content_length(event: WebSessionLiveStreamEvent) -> usize {
+        let WebSessionLiveStreamEvent::ProviderTextDelta { content, .. } = event else {
+            panic!("expected provider text delta");
+        };
+        content.len()
+    }
+
+    #[tokio::test]
+    async fn live_follow_orders_provider_draft_before_later_durable_header() {
+        let monitor = ProcessMonitor::test_channel();
+        let state = live_follow_state(&monitor, 7, 0);
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 2,
+            text: Arc::from("draft"),
+        });
+        let (draft, state) = live_follow_next(state)
+            .await
+            .expect("the provider draft is delivered");
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::ModelCallTransition,
+        });
+        let (durable, _) = live_follow_next(state)
+            .await
+            .expect("the durable header follows the draft");
+
+        assert_eq!(
+            draft,
+            WebSessionLiveStreamEvent::ProviderTextDelta {
+                turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+                model_call_id: WebLiveResourceId::from_uuid_bytes(
+                    live_call().into_uuid().into_bytes()
+                ),
+                part_index: 2,
+                content: "draft".to_owned(),
+            }
+        );
+        assert_eq!(
+            durable,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::ModelCallTransition,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_discards_provider_draft_queued_before_snapshot() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: Arc::from("stale draft"),
+        });
+        state.covered_at_snapshot = state.subscription.queued_len();
+        state.queued_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnCompleted,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("the post-snapshot durable event is delivered");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::TurnCompleted,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_lag_requires_transient_presentation_resync() {
+        let monitor = ProcessMonitor::test_channel();
+        let state = live_follow_state(&monitor, 7, 0);
+        monitor.fill_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnActivated,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("lag produces one explicit terminal event");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::ResyncRequired {
+                cursor: WebPositiveU64::from_nonzero(
+                    NonZeroU64::new(7).expect("the fixture cursor is positive"),
+                ),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_consumes_lag_covered_by_snapshot_cutoff() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        monitor.fill_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: Arc::from("stale draft"),
+        });
+        state.covered_at_snapshot = state.subscription.queued_len();
+        state.queued_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnCompleted,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("the post-snapshot durable event is delivered");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::TurnCompleted,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_discards_a_draft_raced_between_sample_and_snapshot() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        state.covered_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: Arc::from("raced draft"),
+        });
+        state.queued_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnCompleted,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("the post-snapshot durable event is delivered");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::TurnCompleted,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_resyncs_a_saturated_monitor_before_draining_fragments() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        state.provider_fragment = Some(super::PendingProviderTextDelta {
+            turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+            model_call_id: WebLiveResourceId::from_uuid_bytes(live_call().into_uuid().into_bytes()),
+            part_index: 0,
+            text: Arc::from("retained draft"),
+            offset: 0,
+            emitted_empty: false,
+        });
+        monitor.fill_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnActivated,
+        });
+        let (event, state) = live_follow_next(state)
+            .await
+            .expect("saturation produces one explicit terminal event");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::ResyncRequired {
+                cursor: WebPositiveU64::from_nonzero(
+                    NonZeroU64::new(7).expect("the fixture cursor is positive"),
+                ),
+            }
+        );
+        assert!(state.ended);
+        assert!(state.provider_fragment.is_none());
+    }
+
+    #[tokio::test]
+    async fn live_follow_fragments_provider_text_lazily() {
+        let monitor = ProcessMonitor::test_channel();
+        let state = live_follow_state(&monitor, 7, 0);
+        let text: Arc<str> = Arc::from("x".repeat(super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES + 1));
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: Arc::clone(&text),
+        });
+        let (first, state) = live_follow_next(state)
+            .await
+            .expect("the first fragment is delivered");
+        let retained = state
+            .provider_fragment
+            .as_ref()
+            .expect("the unencoded suffix remains pending");
+
+        assert!(state.pending.is_empty());
+        assert!(Arc::ptr_eq(&text, &retained.text));
+        assert_eq!(retained.offset, super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
+        assert_eq!(
+            provider_text_content_length(first),
+            super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES,
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_ends_when_http_shutdown_is_requested() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        state.shutdown = Some(shutdown);
+        shutdown_sender
+            .send(true)
+            .expect("the follow stream observes shutdown");
+
+        let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
+            .await
+            .expect("shutdown ends the follow stream promptly");
+
+        assert!(event.is_none());
+    }
+
+    #[tokio::test]
+    async fn live_follow_ends_when_the_shutdown_sender_is_dropped() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        state.shutdown = Some(shutdown);
+        drop(shutdown_sender);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
+            .await
+            .expect("a closed shutdown channel ends the follow stream promptly");
+
+        assert!(event.is_none());
+    }
+
+    /// The retained-fragment fast path returns before the monitor is polled,
+    /// so it must observe channel closure itself: provider delta text has no
+    /// size bound, and draining it for a slow client would otherwise keep
+    /// graceful shutdown waiting arbitrarily long.
+    #[tokio::test]
+    async fn live_follow_stops_draining_a_retained_fragment_on_closed_shutdown() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        state.provider_fragment = Some(super::PendingProviderTextDelta {
+            turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+            model_call_id: WebLiveResourceId::from_uuid_bytes(live_call().into_uuid().into_bytes()),
+            part_index: 0,
+            text: Arc::from("retained draft"),
+            offset: 0,
+            emitted_empty: false,
+        });
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        state.shutdown = Some(shutdown);
+        drop(shutdown_sender);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
+            .await
+            .expect("a closed shutdown channel preempts retained fragments promptly");
+
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn provider_text_fragment_fits_after_worst_case_json_escaping() {
+        let source = "\u{0001}".repeat(super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
+        let content = super::next_web_text_fragment(&source, &mut 0, &mut false)
+            .expect("nonempty provider text has a first fragment");
+        let encoded = super::encode_ndjson_item(WebSessionLiveStreamEvent::ProviderTextDelta {
+            turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+            model_call_id: WebLiveResourceId::from_uuid_bytes(live_call().into_uuid().into_bytes()),
+            part_index: u32::MAX,
+            content,
+        })
+        .expect("the worst-case escaped fragment remains below the NDJSON ceiling");
+
+        assert!(encoded.len() <= MAX_NDJSON_ITEM_BYTES + 1);
+    }
 }
 
 /// Deployment-owned browser listener and production assets configuration.
@@ -274,6 +665,48 @@ pub struct WebHttpRuntime {
     follow_shutdown: Option<watch::Sender<bool>>,
 }
 
+/// Browser listener bound before runtime-owned monitor construction.
+pub struct BoundWebHttpListener {
+    listener: TcpListener,
+    asset_root: Option<PathBuf>,
+    pool: PgPool,
+    blobs: Option<WebBlobRuntime>,
+    model_configuration: HubModelConfiguration,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    snapshot_reader_budget: Arc<Semaphore>,
+}
+
+#[derive(Clone, Debug)]
+struct ProductionReadRuntime {
+    snapshot_reader_budget: Option<Arc<Semaphore>>,
+    shutdown: Option<watch::Receiver<bool>>,
+    monitor: Option<ProcessMonitor>,
+}
+
+impl BoundWebHttpListener {
+    /// Attaches the daemon's one bounded monitor and builds the production router.
+    pub fn into_runtime(self, monitor: ProcessMonitor) -> WebHttpRuntime {
+        let (follow_shutdown, follow_shutdown_receiver) = watch::channel(false);
+        let router = production_router_with_budget(
+            self.asset_root,
+            Some(self.pool),
+            self.blobs,
+            Some(self.model_configuration),
+            self.blob_store_registry,
+            ProductionReadRuntime {
+                snapshot_reader_budget: Some(self.snapshot_reader_budget),
+                shutdown: Some(follow_shutdown_receiver),
+                monitor: Some(monitor),
+            },
+        );
+        WebHttpRuntime {
+            listener: self.listener,
+            router,
+            follow_shutdown: Some(follow_shutdown),
+        }
+    }
+}
+
 impl WebHttpRuntime {
     /// Binds the production same-origin router.
     ///
@@ -325,6 +758,29 @@ impl WebHttpRuntime {
         .await
     }
 
+    /// Binds the production socket while deferring monitor-dependent router composition.
+    pub async fn bind_listener_with_snapshot_reader_budget(
+        configuration: WebHttpConfiguration,
+        pool: PgPool,
+        blobs: Option<WebBlobRuntime>,
+        model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+        snapshot_reader_budget: Arc<Semaphore>,
+    ) -> Result<BoundWebHttpListener, WebHttpRuntimeError> {
+        let listener = TcpListener::bind(configuration.bind_address)
+            .await
+            .map_err(|_| WebHttpRuntimeError::Bind)?;
+        Ok(BoundWebHttpListener {
+            listener,
+            asset_root: configuration.asset_root,
+            pool,
+            blobs,
+            model_configuration,
+            blob_store_registry,
+            snapshot_reader_budget,
+        })
+    }
+
     async fn bind_production(
         configuration: WebHttpConfiguration,
         pool: PgPool,
@@ -340,8 +796,11 @@ impl WebHttpRuntime {
             blobs,
             Some(model_configuration),
             blob_store_registry,
-            snapshot_reader_budget,
-            Some(follow_shutdown_receiver),
+            ProductionReadRuntime {
+                snapshot_reader_budget,
+                shutdown: Some(follow_shutdown_receiver),
+                monitor: None,
+            },
         );
         Self::bind_router_with_follow_shutdown(
             configuration.bind_address,
@@ -408,12 +867,17 @@ impl WebHttpRuntime {
 }
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
+///
+/// `shutdown` must be driven before an enclosing Axum graceful shutdown waits
+/// for requests, so live snapshot and follow reads can release their database
+/// and reader-budget waits.
 pub fn production_router(
     asset_root: Option<PathBuf>,
     pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
     model_configuration: Option<HubModelConfiguration>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    shutdown: Option<watch::Receiver<bool>>,
 ) -> Router {
     let snapshot_reader_budget = pool.as_ref().and_then(|pool| {
         super::process_runtime::shared_snapshot_reader_budget(
@@ -427,8 +891,11 @@ pub fn production_router(
         blobs,
         model_configuration,
         blob_store_registry,
-        snapshot_reader_budget,
-        None,
+        ProductionReadRuntime {
+            snapshot_reader_budget,
+            shutdown,
+            monitor: None,
+        },
     )
 }
 
@@ -438,8 +905,7 @@ fn production_router_with_budget(
     blobs: Option<WebBlobRuntime>,
     model_configuration: Option<HubModelConfiguration>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
-    snapshot_reader_budget: Option<Arc<Semaphore>>,
-    shutdown: Option<watch::Receiver<bool>>,
+    read_runtime: ProductionReadRuntime,
 ) -> Router {
     let http_state = WebHttpState {
         blobs,
@@ -452,11 +918,13 @@ fn production_router_with_budget(
             .clone()
             .map(|pool| AttentionRepository::new(pool, automatic_resume_attempts)),
         timeline: pool.clone().map(SessionTimelineRepository::new),
+        live: pool.clone().map(SessionLiveRepository::new),
         search: pool.clone().map(SearchRepository::new),
         usage: pool.clone().map(UsageRepository::new),
         model_configuration: model_configuration.clone().map(Arc::new),
-        snapshot_reader_budget: snapshot_reader_budget.clone(),
-        shutdown,
+        snapshot_reader_budget: read_runtime.snapshot_reader_budget.clone(),
+        shutdown: read_runtime.shutdown,
+        monitor: read_runtime.monitor,
     };
     // Every route that reads session data sits behind the loopback authority
     // gate. The attention projection returns session identities, goal-need
@@ -471,23 +939,28 @@ fn production_router_with_budget(
             "/sessions/{session_id}/timeline",
             get(session_timeline_window),
         )
+        .route("/sessions/{session_id}/live", get(session_live_snapshot))
+        .route("/sessions/{session_id}/follow", get(session_live_follow))
         .route("/sessions", get(session_catalog))
         .route("/search", get(search))
         .route("/usage/summary", get(usage_summary))
         .route("/usage/calls", get(usage_calls))
         .route("/attention", get(attention_snapshot))
         .route("/attention/follow", get(attention_follow))
+        .route(
+            "/sessions/{session_id}/timeline/{address}/detail",
+            get(session_timeline_item_detail),
+        )
+        .route(
+            "/sessions/{session_id}/turns/{turn_id}/timeline-detail",
+            get(session_timeline_turn_detail),
+        )
+        .route(
+            "/sessions/{session_id}/timeline-detail",
+            get(session_timeline_region_detail),
+        )
         .route_layer(middleware::from_fn(validate_loopback_host))
         .with_state(state);
-    // Repository-watch operator projections carry session identities, dispatch
-    // state, and webhook activity, so they sit behind the same inner gate for
-    // the same reason the session reads do.
-    let repository_watch_reads = crate::web_repo_watch::router(
-        pool.clone(),
-        snapshot_reader_budget,
-        automatic_resume_attempts,
-    )
-    .route_layer(middleware::from_fn(validate_loopback_host));
     // Every route that reads session-attached content sits behind the
     // loopback authority gate. Blob descriptors and bytes are reachable by
     // digest alone and a descriptor read can start isolated derivation work,
@@ -513,8 +986,7 @@ fn production_router_with_budget(
         .route("/bootstrap", get(contract_bootstrap))
         .with_state(http_state)
         .merge(session_reads)
-        .merge(blob_reads)
-        .merge(repository_watch_reads);
+        .merge(blob_reads);
     // Imported-conversation reads need both a pool and hub model settings; the
     // bootstrap and session surfaces stay routable without either.
     let api = match (pool, model_configuration) {
@@ -571,11 +1043,13 @@ fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
 struct WebApiState {
     attention: Option<AttentionRepository>,
     timeline: Option<SessionTimelineRepository>,
+    live: Option<SessionLiveRepository>,
     search: Option<SearchRepository>,
     usage: Option<UsageRepository>,
     model_configuration: Option<Arc<HubModelConfiguration>>,
     snapshot_reader_budget: Option<Arc<Semaphore>>,
     shutdown: Option<watch::Receiver<bool>>,
+    monitor: Option<ProcessMonitor>,
 }
 
 #[derive(Debug, Default)]
@@ -678,14 +1152,9 @@ async fn attention_snapshot(
 fn parse_session_catalog_query(raw: Option<&str>) -> Result<SessionCatalogQuery, ()> {
     let mut query = SessionCatalogQuery::default();
     let mut filter_bytes = 0_usize;
-    for pair in raw.unwrap_or_default().split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = decode_query_component(key)?;
-        let value = decode_query_component(value)?;
-        match key.as_str() {
+    for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+        let value = value.into_owned();
+        match key.as_ref() {
             "search" => {
                 filter_bytes = filter_bytes.checked_add(value.len()).ok_or(())?;
                 if filter_bytes > usize::from(max_attention_filter_utf8_bytes()) {
@@ -722,51 +1191,9 @@ fn set_once(target: &mut Option<String>, value: String) -> Result<(), ()> {
     Ok(())
 }
 
-fn decode_query_component(raw: &str) -> Result<String, ()> {
-    let bytes = raw.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            b'%' => {
-                let high = bytes.get(index + 1).copied().and_then(hex_digit_value);
-                let low = bytes.get(index + 2).copied().and_then(hex_digit_value);
-                let (Some(high), Some(low)) = (high, low) else {
-                    return Err(());
-                };
-                decoded.push(high * 16 + low);
-                index += 3;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).map_err(|_| ())
-}
-
-const fn hex_digit_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 fn parse_catalog_canonical_u64(value: &str) -> Result<u64, ()> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(());
-    }
-    if value != "0" && value.starts_with('0') {
-        return Err(());
-    }
-    value.parse::<u64>().map_err(|_| ())
+    let parsed = value.parse::<u64>().map_err(|_| ())?;
+    (parsed.to_string() == value).then_some(parsed).ok_or(())
 }
 
 fn parse_canonical_session_id(value: &str) -> Result<SessionId, ()> {
@@ -1113,6 +1540,7 @@ pub(crate) fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAtte
             .current_turn
             .map(|turn| turn.into_uuid().to_string()),
         state: web_attention_state(summary.state),
+        lifecycle_state: web_attention_lifecycle_state(summary.lifecycle_state),
         action: summary.action.map(web_attention_action),
         goal_block,
         judge: WebAttentionJudgeFacts {
@@ -1239,11 +1667,29 @@ fn attention_goal_block_dto(
                 AttentionBlockedReason::ExecutionFailure => {
                     WebAttentionBlockedReason::ExecutionFailure
                 }
+                AttentionBlockedReason::FinishCheckFailed => {
+                    WebAttentionBlockedReason::FinishCheckFailed
+                }
             },
             need_summary: goal.need_summary,
         })
     })
     .transpose()
+}
+
+const fn web_attention_lifecycle_state(
+    state: AttentionLifecycleState,
+) -> WebAttentionLifecycleState {
+    match state {
+        AttentionLifecycleState::Created => WebAttentionLifecycleState::Created,
+        AttentionLifecycleState::Dispatched => WebAttentionLifecycleState::Dispatched,
+        AttentionLifecycleState::Active => WebAttentionLifecycleState::Active,
+        AttentionLifecycleState::Waiting => WebAttentionLifecycleState::Waiting,
+        AttentionLifecycleState::Recovering => WebAttentionLifecycleState::Recovering,
+        AttentionLifecycleState::Blocked => WebAttentionLifecycleState::Blocked,
+        AttentionLifecycleState::Parked => WebAttentionLifecycleState::Parked,
+        AttentionLifecycleState::Terminal => WebAttentionLifecycleState::Terminal,
+    }
 }
 
 const fn web_attention_state(state: AttentionState) -> WebAttentionState {
@@ -1256,6 +1702,7 @@ const fn web_attention_state(state: AttentionState) -> WebAttentionState {
         AttentionState::AwaitingToolRecovery => WebAttentionState::AwaitingToolRecovery,
         AttentionState::AwaitingReconciliation => WebAttentionState::AwaitingReconciliation,
         AttentionState::RunnerLost => WebAttentionState::RunnerLost,
+        AttentionState::Parked => WebAttentionState::Parked,
         AttentionState::Idle => WebAttentionState::Idle,
     }
 }
@@ -1304,6 +1751,30 @@ struct TimelineWindowQuery {
     address: Option<String>,
     max_items: Option<String>,
     max_bytes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineDetailQuery {
+    max_items: Option<String>,
+    max_bytes: Option<String>,
+    cursor_address: Option<String>,
+    cursor_field: Option<String>,
+    cursor_member: Option<String>,
+    cursor_offset: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineRegionDetailQuery {
+    first: Option<String>,
+    through: Option<String>,
+    max_items: Option<String>,
+    max_bytes: Option<String>,
+    cursor_address: Option<String>,
+    cursor_field: Option<String>,
+    cursor_member: Option<String>,
+    cursor_offset: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1385,12 +1856,6 @@ fn parse_search_query(query: SearchHttpQuery) -> Option<SearchQuery> {
 }
 
 fn parse_positive_u64(value: &str) -> Option<std::num::NonZeroU64> {
-    if value.is_empty()
-        || value.starts_with('0')
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
     value
         .parse::<u64>()
         .ok()
@@ -1398,9 +1863,11 @@ fn parse_positive_u64(value: &str) -> Option<std::num::NonZeroU64> {
 }
 
 fn parse_positive_i64(value: &str) -> Option<std::num::NonZeroU64> {
-    let value = parse_positive_u64(value)?;
-    i64::try_from(value.get()).ok()?;
-    Some(value)
+    value
+        .parse::<i64>()
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
+        .and_then(std::num::NonZeroU64::new)
 }
 
 fn invalid_search_query() -> Response {
@@ -1718,14 +2185,7 @@ fn parse_optional<T>(
 }
 
 fn parse_usage_timestamp(value: &str) -> Option<UsageTimestampMicros> {
-    if value.is_empty()
-        || (value.starts_with('0') && value != "0")
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let timestamp = UsageTimestampMicros::new(value.parse().ok()?).ok()?;
-    usage_timestamp_is_representable(timestamp).then_some(timestamp)
+    UsageTimestampMicros::new(value.parse().ok()?).ok()
 }
 
 fn parse_model_call_id(value: &str) -> Option<ModelCallId> {
@@ -2034,6 +2494,7 @@ enum SessionTimelineRequestError {
     InvalidAddress,
     InvalidAnchor,
     MissingBounds,
+    InvalidProjectedSessionId,
 }
 
 impl SessionTimelineRequestError {
@@ -2063,6 +2524,17 @@ impl SessionTimelineRequestError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "session_projection_failed",
                     "an existing session has no durable timeline bound",
+                )
+            }
+            Self::InvalidProjectedSessionId => {
+                tracing::error!(
+                    failure_class = "fail_closed_corruption",
+                    "session timeline projection has an invalid session identity"
+                );
+                application_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_projection_failed",
+                    "an existing session has an invalid durable identity",
                 )
             }
         }
@@ -2137,7 +2609,10 @@ async fn session_timeline_window(
         Err(error) => return error.into_response(),
     };
     match repository.read_window(session, anchor, limits).await {
-        Ok(Some(window)) => Json(window_dto(window)).into_response(),
+        Ok(Some(window)) => match window_dto(window) {
+            Ok(window) => Json(window).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => application_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -2145,6 +2620,199 @@ async fn session_timeline_window(
         ),
         Err(error) => repository_projection_error(error),
     }
+}
+
+async fn session_timeline_item_detail(
+    State(state): State<WebApiState>,
+    Path((session_id, address)): Path<(String, String)>,
+    query: Result<Query<TimelineDetailQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_detail_query(),
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let address = match parse_timeline_address(&address) {
+        Ok(address) => address,
+        Err(error) => return error.into_response(),
+    };
+    let (limits, cursor) = match parse_detail_query(&query) {
+        Some(parsed) => parsed,
+        None => return invalid_timeline_detail_query(),
+    };
+    let Some(repository) = state.timeline else {
+        return session_projection_unavailable();
+    };
+    match repository
+        .read_item_details(session, address, cursor, limits)
+        .await
+    {
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Ok(None) => timeline_detail_not_found(),
+        Err(error) => repository_projection_error(error),
+    }
+}
+
+async fn session_timeline_turn_detail(
+    State(state): State<WebApiState>,
+    Path((session_id, turn_id)): Path<(String, String)>,
+    query: Result<Query<TimelineDetailQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_detail_query(),
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let turn = match uuid::Uuid::parse_str(&turn_id) {
+        Ok(turn) => TurnId::from_uuid(turn),
+        Err(_) => {
+            return application_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_turn_id",
+                "turn id is not a UUID",
+            );
+        }
+    };
+    let (limits, cursor) = match parse_detail_query(&query) {
+        Some(parsed) => parsed,
+        None => return invalid_timeline_detail_query(),
+    };
+    let Some(repository) = state.timeline else {
+        return session_projection_unavailable();
+    };
+    match repository
+        .read_turn_details(session, turn, cursor, limits)
+        .await
+    {
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Ok(None) => timeline_detail_not_found(),
+        Err(error) => repository_projection_error(error),
+    }
+}
+
+async fn session_timeline_region_detail(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+    query: Result<Query<TimelineRegionDetailQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_detail_query(),
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let (Some(first), Some(through)) = (query.first.as_deref(), query.through.as_deref()) else {
+        return invalid_timeline_detail_query();
+    };
+    let first = match parse_timeline_address(first) {
+        Ok(address) => address,
+        Err(error) => return error.into_response(),
+    };
+    let through = match parse_timeline_address(through) {
+        Ok(address) => address,
+        Err(error) => return error.into_response(),
+    };
+    let detail_query = TimelineDetailQuery {
+        max_items: query.max_items,
+        max_bytes: query.max_bytes,
+        cursor_address: query.cursor_address,
+        cursor_field: query.cursor_field,
+        cursor_member: query.cursor_member,
+        cursor_offset: query.cursor_offset,
+    };
+    let Some((limits, cursor)) = parse_detail_query(&detail_query) else {
+        return invalid_timeline_detail_query();
+    };
+    let Some(repository) = state.timeline else {
+        return session_projection_unavailable();
+    };
+    match repository
+        .read_region_details(session, first, through, cursor, limits)
+        .await
+    {
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Ok(None) => timeline_detail_not_found(),
+        Err(error) => repository_projection_error(error),
+    }
+}
+
+fn parse_detail_query(
+    query: &TimelineDetailQuery,
+) -> Option<(TimelineDetailLimits, Option<TimelineDetailCursor>)> {
+    let max_items = query.max_items.as_deref()?.parse::<u16>().ok()?;
+    let max_bytes = query.max_bytes.as_deref()?.parse::<u32>().ok()?;
+    let limits = TimelineDetailLimits::new(max_items, max_bytes).ok()?;
+    let cursor = match (
+        query.cursor_address.as_deref(),
+        query.cursor_field.as_deref(),
+        query.cursor_member.as_deref(),
+        query.cursor_offset.as_deref(),
+    ) {
+        (None, None, None, None) => None,
+        (Some(address), None, None, None) => Some(TimelineDetailCursor {
+            address: parse_timeline_address(address).ok()?,
+            field: None,
+            member_index: 0,
+            offset_bytes: 0,
+        }),
+        (Some(address), Some(field), Some(member), Some(offset)) => Some(TimelineDetailCursor {
+            address: parse_timeline_address(address).ok()?,
+            field: Some(parse_body_field(field).ok()?),
+            member_index: member.parse().ok()?,
+            offset_bytes: offset.parse().ok()?,
+        }),
+        _ => return None,
+    };
+    Some((limits, cursor))
+}
+
+fn parse_body_field(value: &str) -> Result<TimelineBodyField, ()> {
+    match value {
+        "input_text" => Ok(TimelineBodyField::InputText),
+        "model_response" => Ok(TimelineBodyField::ModelResponse),
+        _ => Err(()),
+    }
+}
+
+fn invalid_timeline_detail_query() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_timeline_detail_limits",
+        "timeline detail parameters are malformed or outside the contract bounds",
+    )
+}
+
+fn timeline_detail_not_found() -> Response {
+    application_error(
+        StatusCode::NOT_FOUND,
+        "timeline_detail_not_found",
+        "the requested session timeline detail does not exist",
+    )
+}
+
+fn session_projection_unavailable() -> Response {
+    application_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session_projection_unavailable",
+        "session projection is not configured",
+    )
 }
 
 fn invalid_timeline_query() -> Response {
@@ -2157,8 +2825,18 @@ fn invalid_timeline_query() -> Response {
 
 fn repository_projection_error(error: SessionTimelineRepositoryError) -> Response {
     let failure_class = match &error {
+        SessionTimelineRepositoryError::InvalidDetailQuery => {
+            return invalid_timeline_detail_query();
+        }
         SessionTimelineRepositoryError::Database(_) => "infrastructure",
-        SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
+        SessionTimelineRepositoryError::InvalidStoredUtf8
+        | SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
+        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Database(_)) => {
+            "infrastructure"
+        }
+        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Corruption(_)) => {
+            "fail_closed_corruption"
+        }
     };
     tracing::error!(
         failure_class,
@@ -2178,21 +2856,23 @@ fn parse_session_id(value: &str) -> Result<SessionId, SessionTimelineRequestErro
         .map_err(|_| SessionTimelineRequestError::InvalidSessionId)
 }
 
+fn parse_timeline_address(value: &str) -> Result<TimelineAddress, SessionTimelineRequestError> {
+    value
+        .parse::<u64>()
+        .ok()
+        .and_then(std::num::NonZeroU64::new)
+        .map(TimelineAddress::new)
+        .ok_or(SessionTimelineRequestError::InvalidAddress)
+}
+
 fn parse_window_anchor(
     anchor: &str,
     address: Option<&str>,
 ) -> Result<TimelineWindowAnchor, SessionTimelineRequestError> {
     let parsed_address = || {
         address
-            .filter(|value| {
-                !value.is_empty()
-                    && value.bytes().all(|byte| byte.is_ascii_digit())
-                    && !value.starts_with('0')
-            })
-            .and_then(|value| value.parse::<u64>().ok())
-            .and_then(std::num::NonZeroU64::new)
-            .map(TimelineAddress::new)
             .ok_or(SessionTimelineRequestError::InvalidAddress)
+            .and_then(parse_timeline_address)
     };
     match (anchor, address) {
         ("first", None) => Ok(TimelineWindowAnchor::First),
@@ -2240,7 +2920,9 @@ fn descriptor_dto(
     })
 }
 
-fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
+fn window_dto(
+    window: SessionTimelineWindow,
+) -> Result<WebSessionTimelineWindow, SessionTimelineRequestError> {
     let continuation_before = match window.continuation_before {
         TimelineContinuation::Exhausted => None,
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
@@ -2249,7 +2931,7 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::Exhausted => None,
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
-    WebSessionTimelineWindow {
+    Ok(WebSessionTimelineWindow {
         session_id: WebSessionId::from_uuid_bytes(*window.session.into_uuid().as_bytes()),
         items: window
             .items
@@ -2263,12 +2945,208 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         projected_structured_bytes: window.projected_structured_bytes,
         continuation_before,
         continuation_after,
+    })
+}
+
+fn detail_page_dto(
+    page: SessionTimelineDetailPage,
+) -> Result<WebSessionTimelineDetailPage, SessionTimelineRequestError> {
+    Ok(WebSessionTimelineDetailPage {
+        session_id: WebSessionId::from_uuid_bytes(*page.session.into_uuid().as_bytes()),
+        items: page
+            .items
+            .into_iter()
+            .map(|item| {
+                Ok(WebSessionTimelineDetail {
+                    address: address_dto(item.address),
+                    kind: event_kind_dto(item.kind),
+                    body: detail_body_dto(item.body)?,
+                    projected_body_bytes: item.projected_body_bytes,
+                })
+            })
+            .collect::<Result<Vec<_>, SessionTimelineRequestError>>()?,
+        projected_body_bytes: page.projected_body_bytes,
+        continuation: page.continuation.map(|continuation| match continuation {
+            TimelineDetailContinuation::MoreAt(address) => WebTimelineDetailContinuation::MoreAt {
+                address: address_dto(address),
+            },
+            TimelineDetailContinuation::MoreBody(body) => WebTimelineDetailContinuation::MoreBody {
+                body: body_continuation_dto(body),
+            },
+        }),
+    })
+}
+
+fn detail_body_dto(
+    body: SessionTimelineDetailBody,
+) -> Result<WebSessionTimelineDetailBody, SessionTimelineRequestError> {
+    Ok(match body {
+        SessionTimelineDetailBody::UserInput {
+            turn_id,
+            text,
+            attachments,
+        } => WebSessionTimelineDetailBody::UserInput {
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            text: text_excerpt_dto(text),
+            attachments: attachments
+                .into_iter()
+                .map(|reference| {
+                    Ok(WebTimelineBlobReference {
+                        blob_id: WebBlobId::from_canonical(reference.blob_id.to_string())
+                            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+                        length_bytes: WebU64::from_u64(reference.length_bytes),
+                        media_type: reference.media_type,
+                    })
+                })
+                .collect::<Result<Vec<_>, SessionTimelineRequestError>>()?,
+        },
+        SessionTimelineDetailBody::ModelCall {
+            turn_id,
+            model_call_id,
+            state,
+            model_identity_id,
+            request_context_items,
+            response,
+            usage,
+            provider_failure_cause,
+        } => WebSessionTimelineDetailBody::ModelCall {
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            model_call_id: WebSessionId::from_canonical(model_call_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            state: model_call_state_dto(state),
+            model_identity_id: WebSessionId::from_canonical(
+                model_identity_id.into_uuid().to_string(),
+            )
+            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            request_context_items: WebU64::from_u64(request_context_items),
+            response: response.map(text_excerpt_dto),
+            usage: WebTimelineModelUsage {
+                input_tokens: usage.input_tokens.map(WebU64::from_u64),
+                output_tokens: usage.output_tokens.map(WebU64::from_u64),
+                cache_creation_input_tokens: usage
+                    .cache_creation_input_tokens
+                    .map(WebU64::from_u64),
+                cache_read_input_tokens: usage.cache_read_input_tokens.map(WebU64::from_u64),
+            },
+            provider_failure_cause: provider_failure_cause.map(provider_failure_cause_dto),
+        },
+        SessionTimelineDetailBody::TurnLifecycle {
+            turn_id,
+            lifecycle,
+            cause_code,
+        } => WebSessionTimelineDetailBody::TurnLifecycle {
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            lifecycle: match lifecycle {
+                TimelineTurnLifecycleKind::Activated => WebTimelineTurnLifecycleKind::Activated,
+                TimelineTurnLifecycleKind::Terminalized => {
+                    WebTimelineTurnLifecycleKind::Terminalized
+                }
+            },
+            cause_code,
+        },
+        SessionTimelineDetailBody::EventFact { kind } => WebSessionTimelineDetailBody::EventFact {
+            kind: event_kind_dto(kind),
+        },
+    })
+}
+
+fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallState {
+    match state {
+        TimelineModelCallState::Prepared => WebTimelineModelCallState::Prepared {},
+        TimelineModelCallState::InFlight => WebTimelineModelCallState::InFlight {},
+        TimelineModelCallState::CancellationRequested => {
+            WebTimelineModelCallState::CancellationRequested {}
+        }
+        TimelineModelCallState::Terminal(disposition) => WebTimelineModelCallState::Terminal {
+            disposition: match disposition {
+                TimelineModelCallDisposition::Completed => {
+                    WebTimelineModelCallDisposition::Completed
+                }
+                TimelineModelCallDisposition::KnownFailed => {
+                    WebTimelineModelCallDisposition::KnownFailed
+                }
+                TimelineModelCallDisposition::Refused => WebTimelineModelCallDisposition::Refused,
+                TimelineModelCallDisposition::Cancelled => {
+                    WebTimelineModelCallDisposition::Cancelled
+                }
+                TimelineModelCallDisposition::Ambiguous => {
+                    WebTimelineModelCallDisposition::Ambiguous
+                }
+            },
+        },
+    }
+}
+
+fn provider_failure_cause_dto(
+    cause: ProviderModelCallFailureCause,
+) -> WebProviderModelCallFailureCause {
+    match cause {
+        ProviderModelCallFailureCause::CredentialRejected => {
+            WebProviderModelCallFailureCause::CredentialRejected
+        }
+        ProviderModelCallFailureCause::PermissionDenied => {
+            WebProviderModelCallFailureCause::PermissionDenied
+        }
+        ProviderModelCallFailureCause::InvalidRequest => {
+            WebProviderModelCallFailureCause::InvalidRequest
+        }
+        ProviderModelCallFailureCause::TargetNotFound => {
+            WebProviderModelCallFailureCause::TargetNotFound
+        }
+        ProviderModelCallFailureCause::RequestTooLarge => {
+            WebProviderModelCallFailureCause::RequestTooLarge
+        }
+        ProviderModelCallFailureCause::RateLimited => WebProviderModelCallFailureCause::RateLimited,
+        ProviderModelCallFailureCause::QuotaExhausted => {
+            WebProviderModelCallFailureCause::QuotaExhausted
+        }
+        ProviderModelCallFailureCause::Overloaded => WebProviderModelCallFailureCause::Overloaded,
+        ProviderModelCallFailureCause::ProviderInternal => {
+            WebProviderModelCallFailureCause::ProviderInternal
+        }
+        ProviderModelCallFailureCause::Unrecognized => {
+            WebProviderModelCallFailureCause::Unrecognized
+        }
+    }
+}
+
+fn text_excerpt_dto(excerpt: TimelineTextExcerpt) -> WebTimelineTextExcerpt {
+    WebTimelineTextExcerpt {
+        text: excerpt.text,
+        offset_bytes: WebU64::from_u64(excerpt.offset_bytes),
+        total_bytes: WebU64::from_u64(excerpt.total_bytes),
+        continuation: excerpt.continuation.map(body_continuation_dto),
+    }
+}
+
+fn body_continuation_dto(continuation: TimelineBodyContinuation) -> WebTimelineBodyContinuation {
+    WebTimelineBodyContinuation {
+        address: address_dto(continuation.address),
+        field: match continuation.field {
+            TimelineBodyField::InputText => WebTimelineBodyField::InputText,
+            TimelineBodyField::ModelResponse => WebTimelineBodyField::ModelResponse,
+        },
+        member_index: continuation.member_index,
+        offset_bytes: WebU64::from_u64(continuation.offset_bytes),
     }
 }
 
 fn event_kind_dto(kind: SessionTimelineEventKind) -> WebSessionTimelineEventKind {
     match kind {
         SessionTimelineEventKind::SessionCreated => WebSessionTimelineEventKind::SessionCreated,
+        SessionTimelineEventKind::SessionStateChanged => {
+            WebSessionTimelineEventKind::SessionStateChanged
+        }
+        SessionTimelineEventKind::SessionTerminal => WebSessionTimelineEventKind::SessionTerminal,
+        SessionTimelineEventKind::GoalChanged => WebSessionTimelineEventKind::GoalChanged,
+        SessionTimelineEventKind::CommandSettled => WebSessionTimelineEventKind::CommandSettled,
+        SessionTimelineEventKind::InjectionSettled => WebSessionTimelineEventKind::InjectionSettled,
+        SessionTimelineEventKind::SessionOwnershipChanged => {
+            WebSessionTimelineEventKind::SessionOwnershipChanged
+        }
         SessionTimelineEventKind::SessionModelSettingsChanged => {
             WebSessionTimelineEventKind::SessionModelSettingsChanged
         }
@@ -2301,6 +3179,491 @@ fn event_kind_dto(kind: SessionTimelineEventKind) -> WebSessionTimelineEventKind
         SessionTimelineEventKind::DelegationUpdate => WebSessionTimelineEventKind::DelegationUpdate,
         SessionTimelineEventKind::DelegationWake => WebSessionTimelineEventKind::DelegationWake,
     }
+}
+
+async fn session_live_snapshot(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let mut shutdown = state.shutdown;
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let Some(repository) = state.live else {
+        return live_projection_unavailable();
+    };
+    let Some(budget) = state.snapshot_reader_budget else {
+        return live_projection_unavailable();
+    };
+    let snapshot_permit = tokio::select! {
+        () = live_follow_shutdown(&mut shutdown) => return live_projection_unavailable(),
+        permit = budget.acquire() => permit,
+    };
+    let Ok(_snapshot_permit) = snapshot_permit else {
+        return live_projection_unavailable();
+    };
+    match tokio::select! {
+        () = live_follow_shutdown(&mut shutdown) => return live_projection_unavailable(),
+        snapshot = repository.read_live_snapshot(session) => snapshot,
+    } {
+        Ok(Some(snapshot)) => match live_snapshot_dto(snapshot) {
+            Some(snapshot) => Json(snapshot).into_response(),
+            None => live_projection_corruption(),
+        },
+        Ok(None) => application_error(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "the requested session does not exist",
+        ),
+        Err(error) => live_projection_error(error),
+    }
+}
+
+async fn session_live_follow(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let mut shutdown = state.shutdown;
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let Some(repository) = state.live else {
+        return live_projection_unavailable();
+    };
+    let Some(monitor) = state.monitor else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_monitor_unavailable",
+            "the live session monitor is not configured",
+        );
+    };
+    let Some(budget) = state.snapshot_reader_budget else {
+        return live_projection_unavailable();
+    };
+    let snapshot_permit = tokio::select! {
+        () = live_follow_shutdown(&mut shutdown) => return empty_ndjson_response(),
+        permit = Arc::clone(&budget).acquire_owned() => permit,
+    };
+    let Ok(snapshot_permit) = snapshot_permit else {
+        return live_projection_unavailable();
+    };
+    let subscription = monitor.subscribe();
+    let covered_at_snapshot = subscription.queued_len();
+    let snapshot = match tokio::select! {
+        () = live_follow_shutdown(&mut shutdown) => return empty_ndjson_response(),
+        snapshot = repository
+            .read_live_snapshot_at_completion(session, || subscription.queued_len()) => snapshot,
+    } {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            return application_error(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "the requested session does not exist",
+            );
+        }
+        Err(error) => return live_projection_error(error),
+    };
+    drop(snapshot_permit);
+    let (snapshot, queued_at_snapshot) = snapshot;
+    let Some(observed_through) = NonZeroU64::new(snapshot.observed_through) else {
+        return live_projection_corruption();
+    };
+    let mut pending = VecDeque::new();
+    let Some(snapshot) = live_snapshot_dto(snapshot) else {
+        return live_projection_corruption();
+    };
+    pending.push_back(WebSessionLiveStreamEvent::Snapshot {
+        snapshot: Box::new(snapshot),
+    });
+    let source = stream::unfold(
+        LiveFollowState {
+            subscription,
+            session,
+            observed_through,
+            covered_at_snapshot,
+            queued_at_snapshot,
+            pending,
+            provider_fragment: None,
+            shutdown,
+            ended: false,
+        },
+        live_follow_next,
+    );
+    ndjson_response(source)
+}
+
+struct LiveFollowState {
+    subscription: crate::ProcessMonitorSubscription,
+    session: SessionId,
+    observed_through: NonZeroU64,
+    covered_at_snapshot: usize,
+    queued_at_snapshot: usize,
+    pending: VecDeque<WebSessionLiveStreamEvent>,
+    provider_fragment: Option<PendingProviderTextDelta>,
+    shutdown: Option<watch::Receiver<bool>>,
+    ended: bool,
+}
+
+struct PendingProviderTextDelta {
+    turn_id: WebTurnId,
+    model_call_id: WebLiveResourceId,
+    part_index: u32,
+    text: Arc<str>,
+    offset: usize,
+    emitted_empty: bool,
+}
+
+impl PendingProviderTextDelta {
+    fn next_event(&mut self) -> Option<WebSessionLiveStreamEvent> {
+        let content =
+            next_web_text_fragment(&self.text, &mut self.offset, &mut self.emitted_empty)?;
+        Some(WebSessionLiveStreamEvent::ProviderTextDelta {
+            turn_id: self.turn_id.clone(),
+            model_call_id: self.model_call_id.clone(),
+            part_index: self.part_index,
+            content,
+        })
+    }
+}
+
+async fn live_follow_next(
+    mut state: LiveFollowState,
+) -> Option<(WebSessionLiveStreamEvent, LiveFollowState)> {
+    if state
+        .shutdown
+        .as_ref()
+        .is_some_and(|shutdown| *shutdown.borrow() || shutdown.has_changed().is_err())
+    {
+        return None;
+    }
+    if let Some(event) = state.pending.pop_front() {
+        return Some((event, state));
+    }
+    if let Some(mut fragment) = state.provider_fragment.take() {
+        if state.subscription.is_saturated() {
+            state.ended = true;
+            return Some((
+                WebSessionLiveStreamEvent::ResyncRequired {
+                    cursor: WebPositiveU64::from_nonzero(state.observed_through),
+                },
+                state,
+            ));
+        }
+        if let Some(event) = fragment.next_event() {
+            state.provider_fragment = Some(fragment);
+            return Some((event, state));
+        }
+    }
+    if state.ended {
+        return None;
+    }
+    loop {
+        let update = match tokio::select! {
+            () = live_follow_shutdown(&mut state.shutdown) => return None,
+            update = state.subscription.recv() => update,
+        } {
+            Ok(update) => update,
+            Err(ProcessMonitorReceiveError::Lagged(skipped))
+                if skipped <= state.covered_at_snapshot =>
+            {
+                state.covered_at_snapshot -= skipped;
+                state.queued_at_snapshot = state.queued_at_snapshot.saturating_sub(skipped);
+                continue;
+            }
+            Err(ProcessMonitorReceiveError::Lagged(_)) => {
+                state.ended = true;
+                return Some((
+                    WebSessionLiveStreamEvent::ResyncRequired {
+                        cursor: WebPositiveU64::from_nonzero(state.observed_through),
+                    },
+                    state,
+                ));
+            }
+            Err(ProcessMonitorReceiveError::Closed) => return None,
+        };
+        state.covered_at_snapshot = state.covered_at_snapshot.saturating_sub(1);
+        let queued_at_snapshot = if state.queued_at_snapshot == 0 {
+            false
+        } else {
+            state.queued_at_snapshot -= 1;
+            true
+        };
+        match update {
+            ProcessMonitorUpdate::Durable {
+                cursor,
+                session,
+                kind,
+            } => {
+                let Some(sequence) = NonZeroU64::new(cursor)
+                    .filter(|sequence| sequence.get() > state.observed_through.get())
+                else {
+                    continue;
+                };
+                state.observed_through = sequence;
+                if session != state.session {
+                    continue;
+                }
+                return Some((
+                    WebSessionLiveStreamEvent::Durable {
+                        cursor: WebU64::from_u64(cursor),
+                        address: address_dto(TimelineAddress::new(sequence)),
+                        event_kind: event_kind_dto(kind),
+                    },
+                    state,
+                ));
+            }
+            ProcessMonitorUpdate::ProviderTextDelta {
+                session,
+                turn,
+                call,
+                part_index,
+                text,
+            } => {
+                if queued_at_snapshot || session != state.session {
+                    continue;
+                }
+                let mut fragment = PendingProviderTextDelta {
+                    turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                    model_call_id: WebLiveResourceId::from_uuid_bytes(
+                        call.into_uuid().into_bytes(),
+                    ),
+                    part_index,
+                    text,
+                    offset: 0,
+                    emitted_empty: false,
+                };
+                let event = fragment.next_event()?;
+                state.provider_fragment = Some(fragment);
+                return Some((event, state));
+            }
+        }
+    }
+}
+
+async fn live_follow_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
+    let Some(shutdown) = shutdown else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
+        }
+    }
+}
+
+fn next_web_text_fragment(
+    value: &str,
+    offset: &mut usize,
+    emitted_empty: &mut bool,
+) -> Option<String> {
+    if value.is_empty() {
+        if *emitted_empty {
+            return None;
+        }
+        *emitted_empty = true;
+        return Some(String::new());
+    }
+    if *offset == value.len() {
+        return None;
+    }
+    let remaining = &value[*offset..];
+    let mut length = remaining.len().min(MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
+    while !remaining.is_char_boundary(length) {
+        length -= 1;
+    }
+    let fragment = remaining[..length].to_owned();
+    *offset += length;
+    Some(fragment)
+}
+
+fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> Option<WebSessionLiveSnapshot> {
+    let observed_through = NonZeroU64::new(snapshot.observed_through)?;
+    let active = snapshot
+        .active
+        .map(|active| {
+            let state = match active.state {
+                SessionLiveActiveState::Running { model_call } => {
+                    WebSessionLiveActiveState::Running {
+                        model_call_id: model_call.map(|call| {
+                            WebLiveResourceId::from_uuid_bytes(call.into_uuid().into_bytes())
+                        }),
+                    }
+                }
+                SessionLiveActiveState::AwaitingModelCallRecovery { call } => {
+                    WebSessionLiveActiveState::AwaitingModelCallRecovery {
+                        model_call_id: WebLiveResourceId::from_uuid_bytes(
+                            call.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+                SessionLiveActiveState::AwaitingToolApproval { request } => {
+                    WebSessionLiveActiveState::AwaitingToolApproval {
+                        tool_request_id: WebLiveResourceId::from_uuid_bytes(
+                            request.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+                SessionLiveActiveState::AwaitingChild { request, child } => {
+                    WebSessionLiveActiveState::AwaitingChild {
+                        tool_request_id: WebLiveResourceId::from_uuid_bytes(
+                            request.into_uuid().into_bytes(),
+                        ),
+                        child_session_id: WebSessionId::from_uuid_bytes(
+                            child.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+                SessionLiveActiveState::AwaitingToolRecovery { attempt } => {
+                    WebSessionLiveActiveState::AwaitingToolRecovery {
+                        tool_attempt_id: WebLiveResourceId::from_uuid_bytes(
+                            attempt.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+                SessionLiveActiveState::AwaitingRunnerRecovery {
+                    runner,
+                    placement_revision,
+                } => WebSessionLiveActiveState::AwaitingRunnerRecovery {
+                    runner_id: WebLiveResourceId::from_uuid_bytes(runner.into_uuid().into_bytes()),
+                    placement_revision: WebPositiveU64::from_nonzero(
+                        NonZeroU64::new(placement_revision).ok_or(())?,
+                    ),
+                },
+            };
+            Ok::<WebSessionLiveActiveTurn, ()>(WebSessionLiveActiveTurn {
+                turn_id: WebTurnId::from_uuid_bytes(active.turn.into_uuid().into_bytes()),
+                state,
+            })
+        })
+        .transpose()
+        .ok()?;
+    let runner = snapshot
+        .runner
+        .map(|runner| {
+            let placement_revision =
+                WebPositiveU64::from_nonzero(NonZeroU64::new(runner.placement_revision).ok_or(())?);
+            Ok::<_, ()>((runner, placement_revision))
+        })
+        .transpose()
+        .ok()?
+        .and_then(|(runner, placement_revision)| {
+            match (runner.state, runner.runner, runner.connection_health) {
+                (SessionLiveRunnerState::Unpinned, None, None) => {
+                    Some(WebSessionLiveRunner::Unpinned { placement_revision })
+                }
+                (SessionLiveRunnerState::Pinned, Some(runner), Some(connection_health)) => {
+                    Some(WebSessionLiveRunner::Pinned {
+                        runner_id: WebLiveResourceId::from_uuid_bytes(
+                            runner.into_uuid().into_bytes(),
+                        ),
+                        placement_revision,
+                        connection_health: match connection_health {
+                            SessionLiveRunnerConnectionHealth::Connected => {
+                                WebSessionLiveRunnerConnectionHealth::Connected
+                            }
+                            SessionLiveRunnerConnectionHealth::Suspect => {
+                                WebSessionLiveRunnerConnectionHealth::Suspect
+                            }
+                            SessionLiveRunnerConnectionHealth::Shutdown => {
+                                WebSessionLiveRunnerConnectionHealth::Shutdown
+                            }
+                            SessionLiveRunnerConnectionHealth::Lost => {
+                                WebSessionLiveRunnerConnectionHealth::Lost
+                            }
+                        },
+                    })
+                }
+                (SessionLiveRunnerState::RunnerLostBeforePin, Some(runner), None) => {
+                    Some(WebSessionLiveRunner::RunnerLostBeforePin {
+                        runner_id: WebLiveResourceId::from_uuid_bytes(
+                            runner.into_uuid().into_bytes(),
+                        ),
+                        placement_revision,
+                    })
+                }
+                (SessionLiveRunnerState::RunnerLost, Some(runner), None) => {
+                    Some(WebSessionLiveRunner::RunnerLost {
+                        runner_id: WebLiveResourceId::from_uuid_bytes(
+                            runner.into_uuid().into_bytes(),
+                        ),
+                        placement_revision,
+                    })
+                }
+                (SessionLiveRunnerState::RunnerAbandoned, Some(runner), None) => {
+                    Some(WebSessionLiveRunner::RunnerAbandoned {
+                        runner_id: WebLiveResourceId::from_uuid_bytes(
+                            runner.into_uuid().into_bytes(),
+                        ),
+                        placement_revision,
+                    })
+                }
+                _ => None,
+            }
+        });
+    Some(WebSessionLiveSnapshot {
+        session_id: WebSessionId::from_uuid_bytes(snapshot.session.into_uuid().into_bytes()),
+        observed_through: WebPositiveU64::from_nonzero(observed_through),
+        active,
+        queued_turn_count: WebU64::from_u64(snapshot.queued_turn_count),
+        queued_turn_ids: snapshot
+            .queued_turns
+            .into_iter()
+            .map(|turn| WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()))
+            .collect(),
+        reconciliation: snapshot
+            .reconciliation
+            .map(|reconciliation| match reconciliation {
+                SessionLiveReconciliation::ModelCall { turn, call } => {
+                    WebSessionLiveReconciliation::ModelCall {
+                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                        model_call_id: WebLiveResourceId::from_uuid_bytes(
+                            call.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+                SessionLiveReconciliation::ToolAttempt { turn, attempt } => {
+                    WebSessionLiveReconciliation::ToolAttempt {
+                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                        tool_attempt_id: WebLiveResourceId::from_uuid_bytes(
+                            attempt.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+            }),
+        runner,
+    })
+}
+
+fn live_projection_corruption() -> Response {
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "session_live_projection_corrupt",
+        "the durable live session projection contains invalid positive values",
+    )
+}
+
+fn live_projection_unavailable() -> Response {
+    application_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session_live_projection_unavailable",
+        "the live session projection is not configured",
+    )
+}
+
+fn live_projection_error(error: SessionLiveRepositoryError) -> Response {
+    tracing::error!(cause = %error, "session live projection read failed");
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "session_live_projection_failed",
+        "the durable live session projection could not be read",
+    )
 }
 
 /// Builds an in-memory deterministic server with no persistence dependency.
@@ -2338,6 +3701,7 @@ async fn contract_bootstrap(State(state): State<WebHttpState>) -> Json<WebContra
 async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {
     let mut bootstrap = WebContractBootstrap::current();
     bootstrap.capabilities.bounded_session_timeline = false;
+    bootstrap.capabilities.bounded_session_live = false;
     Json(bootstrap)
 }
 
@@ -2783,39 +4147,32 @@ fn reader_body_until(
 }
 
 fn parse_byte_range(value: &HeaderValue, total: u64) -> Result<(u64, u64, bool), ()> {
-    let value = value.to_str().map_err(|_| ())?;
-    let range = value.strip_prefix("bytes=").ok_or(())?;
-    if range.contains(',') {
+    if value.as_bytes().contains(&b',') {
         return Err(());
     }
-    let (start, end) = range.split_once('-').ok_or(())?;
-    if start.is_empty() {
-        let suffix = parse_canonical_u64(end)?.min(total);
-        if suffix == 0 {
-            return Err(());
-        }
-        return Ok((total - suffix, suffix, true));
-    }
-    let start = parse_canonical_u64(start)?;
-    if start >= total {
+    let mut headers = HeaderMap::new();
+    headers.insert(RANGE, value.clone());
+    let range = headers
+        .typed_try_get::<TypedRange>()
+        .map_err(|_| ())?
+        .ok_or(())?;
+    let mut ranges = range.satisfiable_ranges(total);
+    let (start, end) = ranges.next().ok_or(())?;
+    if ranges.next().is_some() {
         return Err(());
     }
-    let end = if end.is_empty() {
-        total - 1
-    } else {
-        parse_canonical_u64(end)?.min(total - 1)
+    let std::ops::Bound::Included(start) = start else {
+        return Err(());
     };
-    if end < start {
+    let end = match end {
+        std::ops::Bound::Included(end) => end.min(total.saturating_sub(1)),
+        std::ops::Bound::Unbounded => total.checked_sub(1).ok_or(())?,
+        std::ops::Bound::Excluded(_) => return Err(()),
+    };
+    if start > end || start >= total {
         return Err(());
     }
     Ok((start, end - start + 1, true))
-}
-
-fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
-    if value.is_empty() || (value.starts_with('0') && value.len() > 1) {
-        return Err(());
-    }
-    value.parse().map_err(|_| ())
 }
 
 /// Reports the `Range` field a blob response applies, once `If-Range` has decided.
@@ -2845,86 +4202,32 @@ fn single_range_header(headers: &HeaderMap) -> Result<Option<&HeaderValue>, ()> 
 }
 
 fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
-    let mut member_count = 0;
-    let mut matched = false;
-    let mut wildcard = false;
-    for value in headers.get_all(IF_NONE_MATCH) {
-        let Some((field_count, field_matched, field_wildcard)) =
-            parse_if_none_match_field(value.as_bytes(), etag.as_bytes())
-        else {
-            return false;
-        };
-        member_count += field_count;
-        matched |= field_matched;
-        wildcard |= field_wildcard;
-    }
-    member_count > 0 && ((wildcard && member_count == 1) || (!wildcard && matched))
-}
-
-fn parse_if_none_match_field(value: &[u8], etag: &[u8]) -> Option<(usize, bool, bool)> {
-    let mut cursor = 0;
-    let mut member_count = 0;
-    let mut matched = false;
-    let mut wildcard = false;
-    loop {
-        while matches!(value.get(cursor), Some(b' ' | b'\t')) {
-            cursor += 1;
-        }
-        if cursor == value.len() {
-            return (member_count > 0).then_some((member_count, matched, wildcard));
-        }
-        let start = cursor;
-        if value[cursor] == b'*' {
-            wildcard = true;
-            cursor += 1;
-        } else {
-            if value.get(cursor..cursor + 2) == Some(b"W/") {
-                cursor += 2;
-            }
-            if value.get(cursor) != Some(&b'\"') {
-                return None;
-            }
-            cursor += 1;
-            while let Some(byte) = value.get(cursor).copied() {
-                if byte == b'\"' {
-                    break;
-                }
-                if byte != 0x21 && !(0x23..=0x7e).contains(&byte) && byte < 0x80 {
-                    return None;
-                }
-                cursor += 1;
-            }
-            if value.get(cursor) != Some(&b'\"') {
-                return None;
-            }
-            cursor += 1;
-            matched |= &value[start..cursor] == etag
-                || value.get(start..start + 2) == Some(b"W/") && &value[start + 2..cursor] == etag;
-        }
-        member_count += 1;
-        while matches!(value.get(cursor), Some(b' ' | b'\t')) {
-            cursor += 1;
-        }
-        if cursor == value.len() {
-            return Some((member_count, matched, wildcard));
-        }
-        if value[cursor] != b',' {
-            return None;
-        }
-        cursor += 1;
-        if wildcard {
-            return None;
-        }
-    }
+    let Ok(etag) = etag.parse::<TypedEtag>() else {
+        return false;
+    };
+    headers
+        .typed_try_get::<TypedIfNoneMatch>()
+        .ok()
+        .flatten()
+        .is_some_and(|condition| !condition.precondition_passes(&etag))
 }
 
 fn if_range_matches(headers: &HeaderMap, etag: &str) -> bool {
     let mut values = headers.get_all(IF_RANGE).iter();
-    match (values.next(), values.next()) {
-        (None, None) => true,
-        (Some(value), None) => value.to_str().is_ok_and(|value| value.trim() == etag),
-        _ => false,
+    if values.next().is_none() {
+        return true;
     }
+    if values.next().is_some() {
+        return false;
+    }
+    let Ok(etag) = etag.parse::<TypedEtag>() else {
+        return false;
+    };
+    headers
+        .typed_try_get::<TypedIfRange>()
+        .ok()
+        .flatten()
+        .is_some_and(|condition| !condition.is_modified(Some(&etag), None))
 }
 
 fn not_modified_response(etag: &str) -> Response {
@@ -2966,14 +4269,29 @@ fn insert_header(headers: &mut HeaderMap, name: axum::http::HeaderName, value: S
 }
 
 fn content_disposition(filename: &str) -> String {
-    let mut encoded = String::new();
-    for byte in filename.bytes() {
-        if byte.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&byte) {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
+    const RFC_5987_VALUE: &AsciiSet = &CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'%')
+        .add(b'\'')
+        .add(b'(')
+        .add(b')')
+        .add(b'*')
+        .add(b',')
+        .add(b'/')
+        .add(b':')
+        .add(b';')
+        .add(b'<')
+        .add(b'=')
+        .add(b'>')
+        .add(b'?')
+        .add(b'@')
+        .add(b'[')
+        .add(b'\\')
+        .add(b']')
+        .add(b'{')
+        .add(b'}');
+    let encoded = utf8_percent_encode(filename, RFC_5987_VALUE);
     format!("attachment; filename=\"download\"; filename*=UTF-8''{encoded}")
 }
 
@@ -3300,8 +4618,8 @@ fn has_content_type(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .is_some_and(|value| value.essence_str() == expected)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3395,6 +4713,7 @@ mod tests {
     };
 
     use axum::{
+        Router,
         body::{Body, Bytes},
         http::{Request, StatusCode, header},
     };
@@ -3402,7 +4721,8 @@ mod tests {
     use signalbox_application::{
         AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
         AttentionContinuation, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts,
-        AttentionSort, AttentionState, AttentionSummary, UsageAggregateGroup, UsageAggregateKey,
+        AttentionLifecycleState, AttentionSort, AttentionState, AttentionSummary, TimelineAddress,
+        TimelineBodyField, TimelineDetailCursor, UsageAggregateGroup, UsageAggregateKey,
         UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallKind,
         UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance, UsageTokenAxes,
         UsageTokenCoverage, UsageTokenPresence, max_attention_change_items,
@@ -3415,20 +4735,21 @@ mod tests {
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
         WebContractExample, WebUsageCost, WebUsageCostUnavailableReason,
     };
-    use sqlx::types::Uuid;
+    use sqlx::{PgPool, types::Uuid};
     use tokio::sync::{Semaphore, mpsc, watch};
     use tower::ServiceExt as _;
     use url::Url;
 
     use super::{
-        DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
-        WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError, attention_snapshot_dto,
-        blob_descriptor_head, content_disposition, deterministic_test_router, if_none_match,
-        ndjson_response, parse_byte_range, production_router, reader_body_until,
-        single_range_header, try_acquire_web_blob_read_permit, usage_aggregate_cost_dto,
-        usage_cost_dto,
+        DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, TimelineDetailQuery,
+        WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
+        attention_snapshot_dto, blob_descriptor_head, content_disposition,
+        deterministic_test_router, if_none_match, ndjson_response, parse_byte_range,
+        parse_detail_query, production_router as production_router_with_shutdown,
+        reader_body_until, single_range_header, try_acquire_web_blob_read_permit,
+        usage_aggregate_cost_dto, usage_cost_dto,
     };
-    use crate::HubModelConfiguration;
+    use crate::{BlobStoreRegistry, HubModelConfiguration, ProcessMonitor, WebBlobRuntime};
 
     /// A descriptor method rejection must name the method clients can use.
     #[tokio::test]
@@ -3453,6 +4774,64 @@ mod tests {
             .expect("the test listener address is valid")
     }
 
+    fn production_router(
+        asset_root: Option<PathBuf>,
+        pool: Option<PgPool>,
+        blobs: Option<WebBlobRuntime>,
+        model_configuration: Option<HubModelConfiguration>,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    ) -> Router {
+        production_router_with_shutdown(
+            asset_root,
+            pool,
+            blobs,
+            model_configuration,
+            blob_store_registry,
+            None,
+        )
+    }
+
+    fn router_with_closed_snapshot_reader_budget(monitor: Option<ProcessMonitor>) -> Router {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://signalbox:signalbox@localhost/signalbox")
+            .expect("the unused fixture pool URL is valid");
+        let budget = Arc::new(Semaphore::new(1));
+        budget.close();
+        super::production_router_with_budget(
+            None,
+            Some(pool),
+            None,
+            None,
+            None,
+            super::ProductionReadRuntime {
+                snapshot_reader_budget: Some(budget),
+                shutdown: None,
+                monitor,
+            },
+        )
+    }
+
+    fn router_with_snapshot_reader_shutdown(
+        budget: Arc<Semaphore>,
+        shutdown: watch::Receiver<bool>,
+    ) -> Router {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://signalbox:signalbox@localhost/signalbox")
+            .expect("the unused fixture pool URL is valid");
+        super::production_router_with_budget(
+            None,
+            Some(pool),
+            None,
+            None,
+            None,
+            super::ProductionReadRuntime {
+                snapshot_reader_budget: Some(budget),
+                shutdown: Some(shutdown),
+                monitor: None,
+            },
+        )
+    }
+
     #[test]
     fn http_byte_ranges_cover_closed_open_and_suffix_forms() {
         let closed = parse_byte_range(&header::HeaderValue::from_static("bytes=2-5"), 10);
@@ -3465,13 +4844,16 @@ mod tests {
     }
 
     #[test]
-    fn http_byte_ranges_reject_multiple_noncanonical_and_unsatisfied_forms() {
+    fn http_byte_ranges_use_rfc_digit_grammar_and_reject_multiple_or_unsatisfied_forms() {
         let multiple = parse_byte_range(&header::HeaderValue::from_static("bytes=0-1,4-5"), 10);
+        let partly_unsatisfied =
+            parse_byte_range(&header::HeaderValue::from_static("bytes=0-1,20-21"), 10);
         let noncanonical = parse_byte_range(&header::HeaderValue::from_static("bytes=01-2"), 10);
         let unsatisfied = parse_byte_range(&header::HeaderValue::from_static("bytes=10-"), 10);
 
         assert_eq!(multiple, Err(()));
-        assert_eq!(noncanonical, Err(()));
+        assert_eq!(partly_unsatisfied, Err(()));
+        assert_eq!(noncanonical, Ok((1, 2, true)));
         assert_eq!(unsatisfied, Err(()));
     }
 
@@ -3508,25 +4890,25 @@ mod tests {
     }
 
     #[test]
-    fn malformed_if_none_match_list_is_ignored() {
+    fn typed_if_none_match_finds_a_matching_member_after_opaque_material() {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::IF_NONE_MATCH,
             header::HeaderValue::from_static("garbage, \"matching\""),
         );
 
-        assert!(!if_none_match(&headers, "\"matching\""));
+        assert!(if_none_match(&headers, "\"matching\""));
     }
 
     #[test]
-    fn wildcard_if_none_match_cannot_be_combined_with_members() {
+    fn typed_if_none_match_finds_a_member_after_a_wildcard_token() {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::IF_NONE_MATCH,
             header::HeaderValue::from_static("*, \"matching\""),
         );
 
-        assert!(!if_none_match(&headers, "\"matching\""));
+        assert!(if_none_match(&headers, "\"matching\""));
     }
 
     #[test]
@@ -4270,6 +5652,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_snapshot_requires_an_available_snapshot_reader_permit() {
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991/live")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = router_with_closed_snapshot_reader_budget(None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "session_live_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn live_snapshot_reader_wait_stops_when_web_shutdown_begins() {
+        let budget = Arc::new(Semaphore::new(1));
+        let _held = Arc::clone(&budget)
+            .acquire_owned()
+            .await
+            .expect("the fixture holds the snapshot reader permit");
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991/live")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let mut waiting = tokio::spawn(
+            router_with_snapshot_reader_shutdown(budget, shutdown_receiver).oneshot(request),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err(),
+            "the held reader permit keeps the snapshot request pending before shutdown"
+        );
+
+        shutdown
+            .send(true)
+            .expect("the snapshot request still observes web shutdown");
+        let response = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the snapshot request exits promptly on shutdown")
+            .expect("the snapshot request task completes cleanly")
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "session_live_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn live_follow_requires_an_available_snapshot_reader_permit() {
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991/follow")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response =
+            router_with_closed_snapshot_reader_budget(Some(ProcessMonitor::test_channel()))
+                .oneshot(request)
+                .await
+                .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "session_live_projection_unavailable");
+    }
+
+    #[tokio::test]
     async fn attention_follower_wait_stops_when_web_shutdown_begins() {
         let (shutdown, shutdown_receiver) = watch::channel(false);
         let mut shutdown_receiver = Some(shutdown_receiver);
@@ -4299,6 +5756,7 @@ mod tests {
             active_turn_count: 0,
             queued_turn_count: 0,
             state: AttentionState::Idle,
+            lifecycle_state: AttentionLifecycleState::Created,
             action: None,
             goal_block: None,
             judge: AttentionJudgeFacts {
@@ -4336,6 +5794,7 @@ mod tests {
             active_turn_count: 0,
             queued_turn_count: 0,
             state: AttentionState::Idle,
+            lifecycle_state: AttentionLifecycleState::Created,
             action: None,
             goal_block: None,
             judge: AttentionJudgeFacts {
@@ -4378,6 +5837,7 @@ mod tests {
             active_turn_count: 0,
             queued_turn_count: 0,
             state: AttentionState::Idle,
+            lifecycle_state: AttentionLifecycleState::Created,
             action: None,
             goal_block: None,
             judge: AttentionJudgeFacts {
@@ -4454,6 +5914,7 @@ mod tests {
             active_turn_count: u64::MAX,
             queued_turn_count: u64::MAX,
             state: AttentionState::Blocked,
+            lifecycle_state: AttentionLifecycleState::Blocked,
             action: Some(AttentionAction::ProvideGoalNeed),
             goal_block: Some(AttentionGoalBlock {
                 generation: u64::MAX,
@@ -4573,6 +6034,27 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "invalid_timeline_limits");
+    }
+
+    #[tokio::test]
+    async fn missing_detail_ceiling_uses_the_structured_error_envelope() {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline/1/detail?max_items=1",
+        )
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["kind"], "application");
+        assert_eq!(body["error"]["code"], "invalid_timeline_detail_limits");
     }
 
     #[tokio::test]
@@ -5181,14 +6663,67 @@ mod tests {
     }
 
     #[test]
-    fn timeline_addresses_require_canonical_positive_decimal() {
-        assert!(super::parse_window_anchor("after", Some("+5")).is_err());
-        assert!(super::parse_window_anchor("after", Some("05")).is_err());
-        assert!(super::parse_window_anchor("after", Some("0")).is_err());
-        assert!(super::parse_window_anchor("after", Some("-5")).is_err());
-        assert!(super::parse_window_anchor("after", Some(" 5")).is_err());
-        assert!(super::parse_window_anchor("after", Some("5 ")).is_err());
-        assert!(super::parse_window_anchor("after", Some("5")).is_ok());
+    fn detail_cursors_require_closed_fields_and_canonical_addresses() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: Some(String::from("model_response")),
+            cursor_member: Some(String::from("0")),
+            cursor_offset: Some(String::from("31")),
+        };
+        let parsed = parse_detail_query(&query).expect("the closed cursor is valid");
+
+        assert_eq!(
+            parsed.1,
+            Some(TimelineDetailCursor {
+                address: TimelineAddress::new(
+                    std::num::NonZeroU64::new(7).expect("fixture address is positive")
+                ),
+                field: Some(TimelineBodyField::ModelResponse),
+                member_index: 0,
+                offset_bytes: 31,
+            })
+        );
+    }
+
+    #[test]
+    fn detail_cursors_accept_address_only_item_continuations() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: None,
+            cursor_member: None,
+            cursor_offset: None,
+        };
+        let parsed = parse_detail_query(&query).expect("the item cursor is valid");
+
+        assert_eq!(
+            parsed.1,
+            Some(TimelineDetailCursor {
+                address: TimelineAddress::new(
+                    std::num::NonZeroU64::new(7).expect("fixture address is positive")
+                ),
+                field: None,
+                member_index: 0,
+                offset_bytes: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn detail_cursors_reject_incomplete_body_continuations() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: Some(String::from("model_response")),
+            cursor_member: None,
+            cursor_offset: Some(String::from("31")),
+        };
+
+        assert!(parse_detail_query(&query).is_none());
     }
 
     #[tokio::test]

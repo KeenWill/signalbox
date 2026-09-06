@@ -7,7 +7,6 @@
 use std::{
     borrow::Cow,
     collections::HashSet,
-    error::Error,
     fmt,
     future::Future,
     time::{Duration, Instant},
@@ -867,17 +866,11 @@ fn decode_operation(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("invalid GitHub tool arguments")]
 /// A model-provided GitHub argument failed its checked representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidGitHubArguments;
-
-impl fmt::Display for InvalidGitHubArguments {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid GitHub tool arguments")
-    }
-}
-
-impl Error for InvalidGitHubArguments {}
 
 #[derive(Clone, Debug)]
 struct GitHubArgumentValidator {
@@ -913,11 +906,14 @@ impl fmt::Debug for SanitizedGitHubError {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized physical transport failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitHubTransportFailure {
+    #[error("invalid GitHub credential")]
     /// Credential bytes were unusable.
     InvalidCredential,
+    #[error("GitHub rejected the request with HTTP status {status}")]
     /// GitHub definitively rejected the request.
     Rejected {
         /// HTTP status.
@@ -925,21 +921,28 @@ pub enum GitHubTransportFailure {
         /// Sanitized response excerpt.
         detail: Option<SanitizedGitHubError>,
     },
+    #[error("GitHub returned definitive GraphQL rejection evidence")]
     /// GitHub returned definitive GraphQL rejection evidence.
     GraphQlRejected,
+    #[error("GitHub returned an invalid response")]
     /// A success response violated the bounded contract.
     InvalidResponse {
         /// Sanitized response excerpt.
         detail: Option<SanitizedGitHubError>,
     },
+    #[error("GitHub response exceeded the byte cap")]
     /// Response bytes exceeded the cap.
     ResponseTooLarge,
+    #[error("GitHub pull-request revision changed during the read")]
     /// Base or head changed during a diff read.
     RevisionChanged,
+    #[error("GitHub request could not be dispatched")]
     /// Client setup failed before the request could be dispatched.
     PreDispatchInfrastructure,
+    #[error("GitHub request outcome is unknown")]
     /// Physical dispatch outcome is unknown.
     DispatchUnknown,
+    #[error("GitHub request destination was rejected")]
     /// The destination was outside the explicit policy.
     EgressRejected,
 }
@@ -982,37 +985,6 @@ impl GitHubTransportFailure {
         }
     }
 }
-
-impl fmt::Display for GitHubTransportFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidCredential => formatter.write_str("invalid GitHub credential"),
-            Self::Rejected { status, detail: _ } => {
-                write!(
-                    formatter,
-                    "GitHub rejected the request with HTTP status {status}"
-                )
-            }
-            Self::GraphQlRejected => {
-                formatter.write_str("GitHub returned definitive GraphQL rejection evidence")
-            }
-            Self::InvalidResponse { detail: _ } => {
-                formatter.write_str("GitHub returned an invalid response")
-            }
-            Self::ResponseTooLarge => formatter.write_str("GitHub response exceeded the byte cap"),
-            Self::RevisionChanged => {
-                formatter.write_str("GitHub pull-request revision changed during the read")
-            }
-            Self::PreDispatchInfrastructure => {
-                formatter.write_str("GitHub request could not be dispatched")
-            }
-            Self::DispatchUnknown => formatter.write_str("GitHub request outcome is unknown"),
-            Self::EgressRejected => formatter.write_str("GitHub request destination was rejected"),
-        }
-    }
-}
-
-impl Error for GitHubTransportFailure {}
 
 /// Result category crossing the injected transport boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1378,28 +1350,26 @@ impl<Credentials, Transport> GitHubPullRequestCreateExecutor<Credentials, Transp
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Static suite construction failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitHubToolsConstructionError {
+    #[error("GitHub pull-request tool construction failed")]
     /// Static name rejected.
     Name,
+    #[error("GitHub pull-request tool construction failed")]
     /// Static schema rejected.
     Schema,
+    #[error("GitHub pull-request tool construction failed")]
     /// Static sanitized detail rejected.
     ErrorDetail,
+    #[error("GitHub pull-request tool construction failed")]
     /// Duplicate static name.
     Duplicate,
+    #[error("GitHub pull-request tool construction failed")]
     /// Production transport construction failed.
     Transport,
 }
-
-impl fmt::Display for GitHubToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("GitHub pull-request tool construction failed")
-    }
-}
-
-impl Error for GitHubToolsConstructionError {}
 
 fn make_detail(value: &str) -> Result<ToolExecutionErrorDetail, GitHubToolsConstructionError> {
     ToolExecutionErrorDetail::try_new(value.to_owned())
@@ -1418,19 +1388,13 @@ pub struct GitHubExecutor<Credentials, Transport> {
     revision_detail: ToolExecutionErrorDetail,
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("GitHub pull-request executor failed")]
 /// Sanitized executor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubExecutorError {
     class: OperatorFailureClass,
 }
-
-impl fmt::Display for GitHubExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("GitHub pull-request executor failed")
-    }
-}
-
-impl Error for GitHubExecutorError {}
 
 impl ClassifyOperatorFailure for GitHubExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -2354,17 +2318,11 @@ impl GitHubTransport for GitHubApiTransport {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("GitHub API transport construction failed")]
 /// Production transport construction failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubApiTransportConstructionError;
-
-impl fmt::Display for GitHubApiTransportConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("GitHub API transport construction failed")
-    }
-}
-
-impl Error for GitHubApiTransportConstructionError {}
 
 fn mutation_failure(failure: GitHubTransportFailure) -> GitHubTransportFailure {
     match failure {
@@ -2943,6 +2901,7 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::{
         cell::RefCell,
         io::{self, Write},
@@ -3447,11 +3406,11 @@ mod tests {
         .1
     }
 
-    /// INV-025: a rejection GitHub answered definitively closes creation as a
+    /// a rejection GitHub answered definitively closes creation as a
     /// known failure, so the workflow reports the denial instead of stalling
     /// in reconciliation for an effect that never happened.
     #[test]
-    fn inv_025_definitive_create_rejection_is_a_known_failure() {
+    fn definitive_create_rejection_is_a_known_failure() {
         let executor = create_executor();
         let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
 
@@ -3461,11 +3420,11 @@ mod tests {
         );
     }
 
-    /// INV-025: a server-side rejection cannot establish whether the pull
+    /// a server-side rejection cannot establish whether the pull
     /// request was created, so it surfaces as an ambiguous commit rather than
     /// a definite failure the agent would retry into a duplicate pull request.
     #[test]
-    fn inv_025_server_side_create_rejection_is_an_ambiguous_commit() {
+    fn server_side_create_rejection_is_an_ambiguous_commit() {
         let executor = create_executor();
         let error = executor
             .failure_detail(&GitHubTransportFailure::rejected(BAD_GATEWAY_STATUS))
@@ -3521,7 +3480,7 @@ mod tests {
         }
     }
 
-    /// INV-025: a definitively rejected creation reaches the workflow as
+    /// a definitively rejected creation reaches the workflow as
     /// `KnownFailed` *evidence* carrying the sanitized rejection detail.
     ///
     /// The classifier tests above call `failure_detail` directly, so they stay
@@ -3531,7 +3490,7 @@ mod tests {
     /// executor through a real correlated invocation so the bound evidence
     /// variant is what is asserted.
     #[tokio::test]
-    async fn inv_025_definitive_create_rejection_binds_known_failure_evidence() {
+    async fn definitive_create_rejection_binds_known_failure_evidence() {
         let (transport, dispatches) = RejectingCreateTransport::new(FORBIDDEN_STATUS);
         let outcome = create_pull_request_evidence(transport).await;
         let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
@@ -3572,11 +3531,11 @@ mod tests {
         assert_eq!(error.detail(), Some(&expected));
     }
 
-    /// INV-025: the same path refuses to bind *any* evidence when GitHub
+    /// the same path refuses to bind *any* evidence when GitHub
     /// answered ambiguously, so an effect that may have happened is never
     /// reported as a definitive outcome the agent would retry.
     #[tokio::test]
-    async fn inv_025_server_side_create_rejection_binds_no_evidence() {
+    async fn server_side_create_rejection_binds_no_evidence() {
         let (transport, dispatches) = RejectingCreateTransport::new(BAD_GATEWAY_STATUS);
         let outcome = create_pull_request_evidence(transport).await;
 
@@ -4280,7 +4239,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_provider_response_text_never_enters_durable_error_detail() {
+    fn provider_response_text_never_enters_durable_error_detail() {
         let executor = GitHubTools::try_new(
             SyntheticCredentials,
             SyntheticTransport,
@@ -4521,7 +4480,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_error_body_redaction_precedes_truncation() {
+    fn error_body_redaction_precedes_truncation() {
         let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let prefix = "x".repeat(
@@ -4540,7 +4499,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_truncated_error_source_redacts_trailing_token_prefix() {
+    fn truncated_error_source_redacts_trailing_token_prefix() {
         let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let token_prefix = &SYNTHETIC_TOKEN[..SYNTHETIC_TOKEN.len() - 3];
@@ -4553,7 +4512,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_truncated_error_source_handles_unicode_token_prefix() {
+    fn truncated_error_source_handles_unicode_token_prefix() {
         let credential = CredentialValue::new(SYNTHETIC_UNICODE_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let body = format!("{ERROR_BODY_PREFIX}{SYNTHETIC_UNICODE_PREFIX}");
@@ -4565,7 +4524,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_truncated_error_source_discards_partial_unicode_before_redaction() {
+    fn truncated_error_source_discards_partial_unicode_before_redaction() {
         let credential = CredentialValue::new(SYNTHETIC_UNICODE_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let partial_prefix_end = SYNTHETIC_UNICODE_PREFIX.len() + 1;
@@ -4580,7 +4539,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_result_debug_never_formats_provider_content() {
+    fn result_debug_never_formats_provider_content() {
         let result = GitHubResult::metadata(serde_json::json!({"body": SYNTHETIC_TOKEN}));
 
         let diagnostic = format!("{result:?}");

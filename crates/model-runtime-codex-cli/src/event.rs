@@ -361,12 +361,22 @@ impl<C: Clone> EventDecoder<C> {
 
     pub(crate) fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
         match self.terminal {
-            Some(CliTerminal::Failed(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, true)
-            }
-            Some(CliTerminal::Unrecoverable(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, false)
-            }
+            Some(CliTerminal::Failed(message)) => provider_failure(
+                self.exchange,
+                self.usage,
+                &message,
+                classify_error(&message),
+                sink,
+                true,
+            ),
+            Some(CliTerminal::Unrecoverable(message)) => provider_failure(
+                self.exchange,
+                self.usage,
+                &message,
+                classify_error(&message),
+                sink,
+                false,
+            ),
             Some(CliTerminal::Completed) => self.completed(sink),
             None => boundary_loss_before_envelope(
                 self.exchange,
@@ -389,14 +399,24 @@ impl<C: Clone> EventDecoder<C> {
         sink: &RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         match self.terminal {
-            Some(CliTerminal::Failed(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, true)
-            }
-            Some(CliTerminal::Unrecoverable(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, false)
-            }
+            Some(CliTerminal::Failed(message)) => provider_failure(
+                self.exchange,
+                self.usage,
+                &message,
+                classify_error(&message),
+                sink,
+                true,
+            ),
+            Some(CliTerminal::Unrecoverable(message)) => provider_failure(
+                self.exchange,
+                self.usage,
+                &message,
+                classify_error(&message),
+                sink,
+                false,
+            ),
             Some(CliTerminal::Completed) | None => {
-                provider_failure_classified(self.exchange, self.usage, fallback, kind, sink)
+                provider_failure(self.exchange, self.usage, fallback, kind, sink, false)
             }
         }
     }
@@ -411,12 +431,22 @@ impl<C: Clone> EventDecoder<C> {
         sink: &RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         match self.terminal {
-            Some(CliTerminal::Failed(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, true)
-            }
-            Some(CliTerminal::Unrecoverable(message)) => {
-                provider_failure(self.exchange, self.usage, &message, sink, false)
-            }
+            Some(CliTerminal::Failed(message)) => provider_failure(
+                self.exchange,
+                self.usage,
+                &message,
+                classify_error(&message),
+                sink,
+                true,
+            ),
+            Some(CliTerminal::Unrecoverable(message)) => provider_failure(
+                self.exchange,
+                self.usage,
+                &message,
+                classify_error(&message),
+                sink,
+                false,
+            ),
             Some(CliTerminal::Completed) | None => {
                 boundary_loss_before_envelope(self.exchange, self.usage, cause)
             }
@@ -626,6 +656,8 @@ impl<C: Clone> EventDecoder<C> {
                 reported_model: None,
                 content,
                 usage: self.usage,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
             }),
             EnvelopeOutcome::Completed => {
                 let finish = if envelope.tool_calls.is_empty() {
@@ -857,6 +889,7 @@ impl<C: Clone> EventDecoder<C> {
                     }),
                     AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::ProviderCompaction { .. }
                     | AssistantPart::SuppressedToolCall(_) => {}
                 }
             }
@@ -1142,6 +1175,7 @@ fn provider_failure<C: Clone>(
     mut exchange: ExchangeFacts,
     usage: TokenUsage,
     message: &str,
+    kind: ProviderErrorKind,
     sink: &RedactingSink<'_, C>,
     non_acceptance_proven: bool,
 ) -> TerminalEvidence {
@@ -1149,33 +1183,8 @@ fn provider_failure<C: Clone>(
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
         reported_model: None,
-        kind: classify_error(message),
-        non_acceptance_proven,
-        native: NativeErrorFacts {
-            error_token: Some("codex_cli_error".to_string()),
-            error_code: None,
-            message: Some(sink.redact_terminal_failure_text(message)),
-        },
-        usage,
-    })
-}
-
-/// Builds provider-failure evidence whose typed kind is classified from
-/// provider-controlled material before the emitted native message receives
-/// the stateful redaction of `message`.
-fn provider_failure_classified<C: Clone>(
-    mut exchange: ExchangeFacts,
-    usage: TokenUsage,
-    message: &str,
-    kind: ProviderErrorKind,
-    sink: &RedactingSink<'_, C>,
-) -> TerminalEvidence {
-    exchange.retry_after = retry_after(message);
-    TerminalEvidence::ProviderError(ProviderErrorEvidence {
-        exchange,
-        reported_model: None,
         kind,
-        non_acceptance_proven: false,
+        non_acceptance_proven,
         native: NativeErrorFacts {
             error_token: Some("codex_cli_error".to_string()),
             error_code: None,
@@ -1331,16 +1340,13 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
     }
 
-    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind {
-        classify_error(classification)
-    }
-
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
+        classification: &str,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
+        let kind = classify_error(classification);
         EventDecoder::provider_error_after_exit(self, message, kind, sink)
     }
 }

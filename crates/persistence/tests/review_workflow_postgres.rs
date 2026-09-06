@@ -689,10 +689,7 @@ async fn insert_active_turn_with_offset(
 ) {
     let create = CreateSession::new(
         DurableCommandId::from_uuid(uuid(0x101 + offset)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(uuid(0x102 + offset)),
         )),
@@ -1626,11 +1623,11 @@ fn assert_concurrent_attachment_outcomes(
     );
 }
 
-/// INV-040: the event-head migration retains the connection-selected workflow
+/// the event-head migration retains the connection-selected workflow
 /// schema and pins trigger lookups ahead of temporary objects.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_event_head_retains_configured_workflow_schema() -> Result<(), Box<dyn Error>> {
+async fn event_head_retains_configured_workflow_schema() -> Result<(), Box<dyn Error>> {
     const WORKFLOW_SCHEMA: &str = "configured_review_workflow";
     const PINNED_SEARCH_PATH: &str = "search_path=configured_review_workflow, pg_catalog, pg_temp";
 
@@ -1668,12 +1665,11 @@ async fn inv040_event_head_retains_configured_workflow_schema() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-040 / INV-041: the store reconstructs complete workflow evidence,
+/// the store reconstructs complete workflow evidence,
 /// including the canonical reservation, attachment, and observation sequence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
--> Result<(), Box<dyn Error>> {
+async fn review_workflow_store_reconstructs_complete_evidence() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
     let store = ReviewWorkflowStore::new(pool.clone());
     let session = SessionId::from_uuid(uuid(0x201));
@@ -2153,10 +2149,10 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     Ok(())
 }
 
-/// INV-040: pass loading validates the accepted input's canonical session.
+/// pass loading validates the accepted input's canonical session.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_loader_rejects_cross_wired_accepted_input() -> Result<(), Box<dyn Error>> {
+async fn pass_loader_rejects_cross_wired_accepted_input() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let pass = fixture.pass.pass();
@@ -2254,11 +2250,11 @@ async fn inv040_pass_loader_rejects_cross_wired_accepted_input() -> Result<(), B
     Ok(())
 }
 
-/// INV-040: pass loading authenticates the queued pass's exact origin turn,
+/// pass loading authenticates the queued pass's exact origin turn,
 /// independently of its accepted-input snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_loader_rejects_missing_origin_turn() -> Result<(), Box<dyn Error>> {
+async fn pass_loader_rejects_missing_origin_turn() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let missing_turn = uuid(0x21f);
@@ -2310,11 +2306,11 @@ async fn inv040_pass_loader_rejects_missing_origin_turn() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-040: a pass whose canonical target row is missing is corruption, even
+/// a pass whose canonical target row is missing is corruption, even
 /// when its run row remains present.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_loader_rejects_missing_target() -> Result<(), Box<dyn Error>> {
+async fn pass_loader_rejects_missing_target() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     sqlx::query(
@@ -2347,11 +2343,11 @@ async fn inv040_pass_loader_rejects_missing_target() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// INV-040: an accepted orchestration input is owned by at most one review
+/// an accepted orchestration input is owned by at most one review
 /// pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_accepted_input_owns_at_most_one_review_pass() -> Result<(), Box<dyn Error>> {
+async fn accepted_input_owns_at_most_one_review_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let run_ref = ReviewRunRef::new(fixture.target, ReviewRunId::from_uuid(uuid(0x215)));
@@ -2387,10 +2383,10 @@ async fn inv040_accepted_input_owns_at_most_one_review_pass() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-040: pass loading validates the referenced turn's canonical session.
+/// pass loading validates the referenced turn's canonical session.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_loader_rejects_cross_wired_turn() -> Result<(), Box<dyn Error>> {
+async fn pass_loader_rejects_cross_wired_turn() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let pass = fixture.pass.pass();
@@ -2445,11 +2441,11 @@ async fn inv040_pass_loader_rejects_cross_wired_turn() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// INV-040: a run projection may report only the canonical outcome of its
+/// a run projection may report only the canonical outcome of its
 /// referenced pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_run_projection_rejects_noncanonical_pass_outcome() -> Result<(), Box<dyn Error>> {
+async fn run_projection_rejects_noncanonical_pass_outcome() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     start_review_pass(&fixture.store, fixture.pass).await;
@@ -2499,10 +2495,10 @@ async fn inv040_run_projection_rejects_noncanonical_pass_outcome() -> Result<(),
     Ok(())
 }
 
-/// INV-040: loading a pass validates the canonical state projection of its run.
+/// loading a pass validates the canonical state projection of its run.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_loader_rejects_noncanonical_run_projection() -> Result<(), Box<dyn Error>> {
+async fn pass_loader_rejects_noncanonical_run_projection() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
 
@@ -2541,11 +2537,11 @@ async fn inv040_pass_loader_rejects_noncanonical_run_projection() -> Result<(), 
     Ok(())
 }
 
-/// INV-040: a pass projection may report only the canonical outcome of its
+/// a pass projection may report only the canonical outcome of its
 /// referenced turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_projection_rejects_noncanonical_turn_outcome() -> Result<(), Box<dyn Error>> {
+async fn pass_projection_rejects_noncanonical_turn_outcome() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     start_review_pass(&fixture.store, fixture.pass).await;
@@ -2595,11 +2591,11 @@ async fn inv040_pass_projection_rejects_noncanonical_turn_outcome() -> Result<()
     Ok(())
 }
 
-/// INV-040: pass failure is the workflow-operation outcome and may follow a
+/// pass failure is the workflow-operation outcome and may follow a
 /// canonically completed turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_failed_pass_accepts_completed_turn_evidence() -> Result<(), Box<dyn Error>> {
+async fn failed_pass_accepts_completed_turn_evidence() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let (_, turn) = start_review_pass(&fixture.store, fixture.pass).await;
@@ -2625,11 +2621,11 @@ async fn inv040_failed_pass_accepts_completed_turn_evidence() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-040: lifecycle-only transition APIs reject an effect result before
+/// lifecycle-only transition APIs reject an effect result before
 /// changing the pass or run projection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_generic_transition_rejects_effect_result() -> Result<(), Box<dyn Error>> {
+async fn generic_transition_rejects_effect_result() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let (_, turn) = start_review_pass(&fixture.store, fixture.pass).await;
@@ -2669,12 +2665,11 @@ async fn inv040_generic_transition_rejects_effect_result() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-040: canonical read-only success admission is atomic, so every committed
+/// canonical read-only success admission is atomic, so every committed
 /// intermediate aggregate remains loadable rather than appearing corrupt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_read_only_success_admission_is_atomic_and_always_loadable()
--> Result<(), Box<dyn Error>> {
+async fn read_only_success_admission_is_atomic_and_always_loadable() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
 
@@ -2758,11 +2753,11 @@ async fn inv040_read_only_success_admission_is_atomic_and_always_loadable()
     Ok(())
 }
 
-/// INV-040: once a produced-finding inventory is sealed, later canonical
+/// once a produced-finding inventory is sealed, later canonical
 /// finding inserts cannot expand the result—even when the inventory was empty.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_sealed_finding_inventory_cannot_expand() -> Result<(), Box<dyn Error>> {
+async fn sealed_finding_inventory_cannot_expand() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let succeeded = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass]).await[0].clone();
@@ -2792,11 +2787,11 @@ async fn inv040_sealed_finding_inventory_cannot_expand() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// INV-040: pass loading authenticates both directions of the sealed
+/// pass loading authenticates both directions of the sealed
 /// produced-finding inventory against canonical finding rows.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_loader_rejects_incomplete_finding_inventory() -> Result<(), Box<dyn Error>> {
+async fn pass_loader_rejects_incomplete_finding_inventory() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let succeeded = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass]).await[0].clone();
@@ -2859,11 +2854,11 @@ async fn inv040_pass_loader_rejects_incomplete_finding_inventory() -> Result<(),
     Ok(())
 }
 
-/// INV-040: finding-event validation reuses its held transaction connection,
+/// finding-event validation reuses its held transaction connection,
 /// so a one-connection pool cannot self-deadlock while loading current history.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_event_uses_held_transaction_connection() -> Result<(), Box<dyn Error>> {
+async fn finding_event_uses_held_transaction_connection() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x32a, ReviewPassKind::Judge).await;
@@ -2897,11 +2892,11 @@ async fn inv040_finding_event_uses_held_transaction_connection() -> Result<(), B
     Ok(())
 }
 
-/// INV-040: appending an event through another same-run finding fails before
+/// appending an event through another same-run finding fails before
 /// persistence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
+async fn finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let review_evidence =
@@ -2946,10 +2941,10 @@ async fn inv040_finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// INV-040: a referenced finding reconstitutes with its exact producing pass.
+/// a referenced finding reconstitutes with its exact producing pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dyn Error>> {
+async fn referenced_finding_retains_producing_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let canonical_pass = insert_fixture_pass(&fixture, 0x332, ReviewPassKind::ReadOnlyReview).await;
@@ -3023,11 +3018,11 @@ async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-040: reference admission and reconstitution observe terminalization
+/// reference admission and reconstitution observe terminalization
 /// that commits while waiting for the relational transition barrier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_reference_refreshes_after_terminalization_wait() -> Result<(), Box<dyn Error>> {
+async fn reference_refreshes_after_terminalization_wait() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let canonical_pass = insert_fixture_pass(&fixture, 0x8a1, ReviewPassKind::ReadOnlyReview).await;
@@ -3210,11 +3205,11 @@ async fn inv040_reference_refreshes_after_terminalization_wait() -> Result<(), B
     Ok(())
 }
 
-/// INV-040: finding reconstitution rejects a mutable head that does not name
+/// finding reconstitution rejects a mutable head that does not name
 /// the exact latest append-only event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_load_rejects_mismatched_event_head() -> Result<(), Box<dyn Error>> {
+async fn finding_load_rejects_mismatched_event_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x8b1, ReviewPassKind::Judge).await;
@@ -3270,11 +3265,11 @@ async fn inv040_finding_load_rejects_mismatched_event_head() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-040: a relational caller cannot forge an event head and then append a
+/// a relational caller cannot forge an event head and then append a
 /// later event while omitting the event that supposedly established the head.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_rejects_forged_head_with_gapped_history() -> Result<(), Box<dyn Error>> {
+async fn schema_rejects_forged_head_with_gapped_history() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let fix_pass = insert_fixture_pass(&fixture, 0x8d1, ReviewPassKind::Fix).await;
@@ -3346,12 +3341,11 @@ async fn inv040_schema_rejects_forged_head_with_gapped_history() -> Result<(), B
     Ok(())
 }
 
-/// INV-040 / INV-041: a non-posting attachment associated with a finding waits
+/// a non-posting attachment associated with a finding waits
 /// for a concurrent finding transition before loading the aggregate projection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_attachment_load_waits_for_finding_transition() -> Result<(), Box<dyn Error>>
-{
+async fn attachment_load_waits_for_finding_transition() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x8e1, ReviewPassKind::Judge).await;
@@ -3479,12 +3473,11 @@ async fn inv040_inv041_attachment_load_waits_for_finding_transition() -> Result<
     Ok(())
 }
 
-/// INV-040: a direct event insert that waits behind its uncommitted predecessor
+/// a direct event insert that waits behind its uncommitted predecessor
 /// authenticates the post-wait head and admits the next ordinal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_event_sequence_admits_committed_predecessor_after_wait()
--> Result<(), Box<dyn Error>> {
+async fn event_sequence_admits_committed_predecessor_after_wait() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x8c1, ReviewPassKind::Judge).await;
@@ -3622,11 +3615,11 @@ async fn inv040_event_sequence_admits_committed_predecessor_after_wait()
     Ok(())
 }
 
-/// INV-040: a superseded event round-trips a successor from another sealed
+/// a superseded event round-trips a successor from another sealed
 /// producer run without rewriting either finding's ancestry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_cross_run_superseded_retains_independent_ancestry() -> Result<(), Box<dyn Error>> {
+async fn cross_run_superseded_retains_independent_ancestry() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let successor_pass =
@@ -3685,11 +3678,11 @@ async fn inv040_cross_run_superseded_retains_independent_ancestry() -> Result<()
     Ok(())
 }
 
-/// INV-040: the persistence boundary rejects a complete reference whose
+/// the persistence boundary rejects a complete reference whose
 /// authenticated producer belongs to another immutable target.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_store_rejects_cross_target_finding_reference() -> Result<(), Box<dyn Error>> {
+async fn store_rejects_cross_target_finding_reference() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let foreign_target = ReviewTargetId::from_uuid(uuid(0x6330));
@@ -3769,12 +3762,11 @@ async fn inv040_store_rejects_cross_target_finding_reference() -> Result<(), Box
     Ok(())
 }
 
-/// INV-040: reconstitution rejects a referenced producer whose durable frozen
+/// reconstitution rejects a referenced producer whose durable frozen
 /// policy differs or whose canonical pass is no longer read-only review.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_loader_rejects_reference_policy_or_producer_mismatch() -> Result<(), Box<dyn Error>>
-{
+async fn loader_rejects_reference_policy_or_producer_mismatch() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let canonical_pass =
@@ -3887,12 +3879,11 @@ async fn inv040_loader_rejects_reference_policy_or_producer_mismatch() -> Result
     Ok(())
 }
 
-/// INV-040: target/run/pass/finding legs are independently retained; corrupting
+/// target/run/pass/finding legs are independently retained; corrupting
 /// any one leg cannot be normalized into a plausible reference during load.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_loader_rejects_each_cross_wired_reference_ancestry_leg()
--> Result<(), Box<dyn Error>> {
+async fn loader_rejects_each_cross_wired_reference_ancestry_leg() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let canonical_pass =
@@ -4014,12 +4005,11 @@ async fn inv040_loader_rejects_each_cross_wired_reference_ancestry_leg()
     Ok(())
 }
 
-/// INV-040: referenced producer reconstitution requires both its immutable
+/// referenced producer reconstitution requires both its immutable
 /// inventory seal and the exact referenced finding member.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_loader_rejects_unsealed_or_nonmember_referenced_producer()
--> Result<(), Box<dyn Error>> {
+async fn loader_rejects_unsealed_or_nonmember_referenced_producer() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let canonical_pass =
@@ -4130,11 +4120,11 @@ async fn inv040_loader_rejects_unsealed_or_nonmember_referenced_producer()
     Ok(())
 }
 
-/// INV-040: duplicate/superseded references cannot close a cycle by
+/// duplicate/superseded references cannot close a cycle by
 /// referencing a finding whose current status is already terminal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_references_reject_cycles() -> Result<(), Box<dyn Error>> {
+async fn finding_references_reject_cycles() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let second_producer =
@@ -4201,12 +4191,11 @@ async fn inv040_finding_references_reject_cycles() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// INV-040: complete-target loading rejects a transitive cross-run cycle even
+/// complete-target loading rejects a transitive cross-run cycle even
 /// when corrupt SQL bypassed the admission trigger that prevents it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_loader_rejects_transitive_cross_run_reference_cycle() -> Result<(), Box<dyn Error>>
-{
+async fn loader_rejects_transitive_cross_run_reference_cycle() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let second_producer =
@@ -4375,11 +4364,11 @@ async fn inv040_loader_rejects_transitive_cross_run_reference_cycle() -> Result<
     Ok(())
 }
 
-/// INV-040: a referenced finding's missing canonical producer is corruption,
+/// a referenced finding's missing canonical producer is corruption,
 /// even when the aggregate finding's own producer remains intact.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_load_rejects_missing_referenced_producer() -> Result<(), Box<dyn Error>> {
+async fn finding_load_rejects_missing_referenced_producer() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let dedupe_pass = insert_fixture_pass(&fixture, 0x33a, ReviewPassKind::Dedupe).await;
@@ -4469,11 +4458,11 @@ async fn inv040_finding_load_rejects_missing_referenced_producer() -> Result<(),
     Ok(())
 }
 
-/// INV-040: direct SQL cannot admit a judgment below the finding producer's
+/// direct SQL cannot admit a judgment below the finding producer's
 /// frozen minimum confidence threshold.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_enforces_judge_confidence_threshold() -> Result<(), Box<dyn Error>> {
+async fn schema_enforces_judge_confidence_threshold() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x33e, ReviewPassKind::Judge).await;
@@ -4528,12 +4517,11 @@ async fn inv040_schema_enforces_judge_confidence_threshold() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-040 / INV-041: direct SQL cannot publish a finding below the producer's
+/// direct SQL cannot publish a finding below the producer's
 /// frozen publication threshold, even with matching attachment evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_schema_enforces_publication_confidence_threshold()
--> Result<(), Box<dyn Error>> {
+async fn schema_enforces_publication_confidence_threshold() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x34a, ReviewPassKind::Judge).await;
@@ -4696,12 +4684,11 @@ async fn inv040_inv041_schema_enforces_publication_confidence_threshold()
     Ok(())
 }
 
-/// INV-040 / INV-041: severity-label uncertainty cannot suppress a finding
+/// severity-label uncertainty cannot suppress a finding
 /// whose is-real confidence clears both frozen policy thresholds.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_schema_thresholds_ignore_severity_label_confidence()
--> Result<(), Box<dyn Error>> {
+async fn schema_thresholds_ignore_severity_label_confidence() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x34e, ReviewPassKind::Judge).await;
@@ -4771,11 +4758,11 @@ async fn inv040_inv041_schema_thresholds_ignore_severity_label_confidence()
     Ok(())
 }
 
-/// INV-040: event compatibility is checked against the canonical persisted
+/// event compatibility is checked against the canonical persisted
 /// pass kind, not only the kind carried by the in-memory event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_canonical_pass_kind_rejects_misclassified_event() -> Result<(), Box<dyn Error>> {
+async fn canonical_pass_kind_rejects_misclassified_event() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let publish_pass = insert_fixture_pass(&fixture, 0x334, ReviewPassKind::Publish).await;
@@ -4821,11 +4808,11 @@ async fn inv040_canonical_pass_kind_rejects_misclassified_event() -> Result<(), 
     Ok(())
 }
 
-/// INV-040: the event row must exactly match the finding result committed by
+/// the event row must exactly match the finding result committed by
 /// its terminal pass, including ordinal and event type.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_event_requires_exact_pass_result() -> Result<(), Box<dyn Error>> {
+async fn finding_event_requires_exact_pass_result() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x33e, ReviewPassKind::Judge).await;
@@ -4881,10 +4868,10 @@ async fn inv040_finding_event_requires_exact_pass_result() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-040: an effect result cannot be changed after its first atomic binding.
+/// an effect result cannot be changed after its first atomic binding.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_bound_pass_result_is_immutable() -> Result<(), Box<dyn Error>> {
+async fn bound_pass_result_is_immutable() -> Result<(), Box<dyn Error>> {
     const JUDGE_PASS_IDENTITY: u128 = 0x3342;
     const FINDING_IDENTITY: u128 = 0x3343;
 
@@ -4932,11 +4919,11 @@ async fn inv040_bound_pass_result_is_immutable() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// INV-040: persistence rejects review policy versions that the domain cannot
+/// persistence rejects review policy versions that the domain cannot
 /// reconstitute.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_rejects_unsupported_policy_version() -> Result<(), Box<dyn Error>> {
+async fn schema_rejects_unsupported_policy_version() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let unsupported_policy = sqlx::query(
@@ -4955,11 +4942,11 @@ async fn inv040_schema_rejects_unsupported_policy_version() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-041: an attachment carried through another same-target reservation
+/// an attachment carried through another same-target reservation
 /// fails before persistence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_external_attachment_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
+async fn external_attachment_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let first = ReviewExternalLinkId::from_uuid(uuid(0x336));
@@ -5000,11 +4987,11 @@ async fn inv041_external_attachment_rejects_foreign_owner() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-040: appending an observation through another same-target external link
+/// appending an observation through another same-target external link
 /// fails before persistence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_external_observation_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
+async fn external_observation_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let first_publish_pass = insert_fixture_pass(&fixture, 0x338, ReviewPassKind::Publish).await;
@@ -5087,11 +5074,11 @@ async fn inv040_external_observation_rejects_foreign_owner() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-040: file-relative findings admit no diff side, while a diff-relative
+/// file-relative findings admit no diff side, while a diff-relative
 /// location requires a canonical target base.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_diff_side_requires_target_base() -> Result<(), Box<dyn Error>> {
+async fn finding_diff_side_requires_target_base() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let target = ReviewTarget::try_new(
@@ -5150,10 +5137,10 @@ async fn inv040_finding_diff_side_requires_target_base() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// INV-040: the store refuses to insert a run projection after transition.
+/// the store refuses to insert a run projection after transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_run_insert_requires_queued_state() -> Result<(), Box<dyn Error>> {
+async fn run_insert_requires_queued_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let running = fixture
@@ -5184,10 +5171,10 @@ async fn inv040_run_insert_requires_queued_state() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// INV-040: the store refuses to insert a pass projection after transition.
+/// the store refuses to insert a pass projection after transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_insert_requires_queued_state() -> Result<(), Box<dyn Error>> {
+async fn pass_insert_requires_queued_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let turn = TurnId::from_uuid(uuid(0x203));
@@ -5216,10 +5203,10 @@ async fn inv040_pass_insert_requires_queued_state() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// INV-040: the store refuses to insert a finding carrying event history.
+/// the store refuses to insert a finding carrying event history.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_insert_requires_open_state() -> Result<(), Box<dyn Error>> {
+async fn finding_insert_requires_open_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x3060, ReviewPassKind::Judge).await;
@@ -5242,10 +5229,10 @@ async fn inv040_finding_insert_requires_open_state() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// INV-041: reservation insertion refuses post-effect attachment evidence.
+/// reservation insertion refuses post-effect attachment evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_reservation_insert_requires_pending_state() -> Result<(), Box<dyn Error>> {
+async fn reservation_insert_requires_pending_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let link = ReviewExternalLinkId::from_uuid(uuid(0x307));
@@ -5303,11 +5290,11 @@ async fn inv041_reservation_insert_requires_pending_state() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-041: a blocked publication pass is consumed by the exact pending
+/// a blocked publication pass is consumed by the exact pending
 /// reservation and its nonempty reconciliation reason.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_blocked_publication_binds_pending_reservation() -> Result<(), Box<dyn Error>> {
+async fn blocked_publication_binds_pending_reservation() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let publish_pass = insert_fixture_pass(&fixture, 0x30a, ReviewPassKind::Publish).await;
@@ -5364,11 +5351,11 @@ async fn inv041_blocked_publication_binds_pending_reservation() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-041: a finding-associated reservation authenticates the finding's exact
+/// a finding-associated reservation authenticates the finding's exact
 /// canonical producing pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_reservation_rejects_forged_finding_producer() -> Result<(), Box<dyn Error>> {
+async fn reservation_rejects_forged_finding_producer() -> Result<(), Box<dyn Error>> {
     const FINDING_IDENTITY: u128 = 0x751;
     const FORGED_PASS_IDENTITY: u128 = 0x752;
     const LINK_IDENTITY: u128 = 0x753;
@@ -5412,11 +5399,11 @@ async fn inv041_reservation_rejects_forged_finding_producer() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-041: raw reservation inserts cannot diverge from the canonical target
+/// raw reservation inserts cannot diverge from the canonical target
 /// provider.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_reservation_requires_canonical_target_provider() -> Result<(), Box<dyn Error>> {
+async fn reservation_requires_canonical_target_provider() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let forged = sqlx::query(
@@ -5436,11 +5423,11 @@ async fn inv041_reservation_requires_canonical_target_provider() -> Result<(), B
     Ok(())
 }
 
-/// INV-041: the identity registry is derivable attachment evidence, not an
+/// the identity registry is derivable attachment evidence, not an
 /// independently writable claim.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_external_identity_requires_establishing_attachment() -> Result<(), Box<dyn Error>> {
+async fn external_identity_requires_establishing_attachment() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let unbacked = sqlx::query(
@@ -5458,11 +5445,11 @@ async fn inv041_external_identity_requires_establishing_attachment() -> Result<(
     Ok(())
 }
 
-/// INV-040 / INV-041: the canonical pass/finding and external-claim lookup
+/// the canonical pass/finding and external-claim lookup
 /// paths remain indexed by their leading filter columns.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_review_lookup_indexes_are_pinned() -> Result<(), Box<dyn Error>> {
+async fn review_lookup_indexes_are_pinned() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let external_link_index: String = sqlx::query_scalar(
         "SELECT indexdef
@@ -5508,10 +5495,10 @@ async fn inv040_inv041_review_lookup_indexes_are_pinned() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-040: raw run rows must begin queued.
+/// raw run rows must begin queued.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_requires_new_run_to_be_queued() -> Result<(), Box<dyn Error>> {
+async fn schema_requires_new_run_to_be_queued() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let direct_cancelled_run = sqlx::query(
@@ -5533,10 +5520,10 @@ async fn inv040_schema_requires_new_run_to_be_queued() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// INV-040: raw pass rows must begin queued.
+/// raw pass rows must begin queued.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_requires_new_pass_to_be_queued() -> Result<(), Box<dyn Error>> {
+async fn schema_requires_new_pass_to_be_queued() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let direct_failed_pass = sqlx::query(
@@ -5562,11 +5549,11 @@ async fn inv040_schema_requires_new_pass_to_be_queued() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// S29 / INV-040: change-request targets require a frozen comparison
+/// S29: change-request targets require a frozen comparison
 /// revision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s29_inv040_schema_requires_change_request_base() -> Result<(), Box<dyn Error>> {
+async fn s29_schema_requires_change_request_base() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let missing_change_request = sqlx::query(
         "INSERT INTO review_target
@@ -5586,10 +5573,10 @@ async fn s29_inv040_schema_requires_change_request_base() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-040: policy version one has one canonical threshold tuple.
+/// policy version one has one canonical threshold tuple.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_requires_canonical_version_one_policy() -> Result<(), Box<dyn Error>> {
+async fn schema_requires_canonical_version_one_policy() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let noncanonical_policy = sqlx::query(
@@ -5608,10 +5595,10 @@ async fn inv040_schema_requires_canonical_version_one_policy() -> Result<(), Box
     Ok(())
 }
 
-/// INV-040: finding line ranges are absent or complete.
+/// finding line ranges are absent or complete.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_rejects_half_populated_line_range() -> Result<(), Box<dyn Error>> {
+async fn schema_rejects_half_populated_line_range() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let half_populated_range = sqlx::query(
@@ -5637,10 +5624,10 @@ async fn inv040_schema_rejects_half_populated_line_range() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-040: rejected finding events require their exact reason.
+/// rejected finding events require their exact reason.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_requires_rejection_reason() -> Result<(), Box<dyn Error>> {
+async fn schema_requires_rejection_reason() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x609, ReviewPassKind::Judge).await;
@@ -5675,11 +5662,10 @@ async fn inv040_schema_requires_rejection_reason() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// INV-041: a posted event requires attached external review content.
+/// a posted event requires attached external review content.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_schema_authenticates_posted_external_review_content() -> Result<(), Box<dyn Error>>
-{
+async fn schema_authenticates_posted_external_review_content() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x607, ReviewPassKind::Judge).await;
@@ -5792,10 +5778,10 @@ async fn inv041_schema_authenticates_posted_external_review_content() -> Result<
     Ok(())
 }
 
-/// INV-040: cancelling a running run cannot erase its active pass.
+/// cancelling a running run cannot erase its active pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_running_run_cancellation_retains_pass() -> Result<(), Box<dyn Error>> {
+async fn schema_running_run_cancellation_retains_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     start_review_pass(&fixture.store, fixture.pass).await;
@@ -5813,11 +5799,11 @@ async fn inv040_schema_running_run_cancellation_retains_pass() -> Result<(), Box
     Ok(())
 }
 
-/// INV-040: loading a queued run retains its already-recorded pass, so the
+/// loading a queued run retains its already-recorded pass, so the
 /// store rejects a passless cancellation before issuing an update.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_queued_run_cannot_discard_recorded_pass() -> Result<(), Box<dyn Error>> {
+async fn queued_run_cannot_discard_recorded_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
 
@@ -5837,10 +5823,10 @@ async fn inv040_queued_run_cannot_discard_recorded_pass() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-040: cancelling a running pass cannot erase its active turn.
+/// cancelling a running pass cannot erase its active turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_schema_running_pass_cancellation_retains_turn() -> Result<(), Box<dyn Error>> {
+async fn schema_running_pass_cancellation_retains_turn() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     start_review_pass(&fixture.store, fixture.pass).await;
@@ -5858,11 +5844,11 @@ async fn inv040_schema_running_pass_cancellation_retains_turn() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-041: a multi-row external-link load observes one database snapshot
+/// a multi-row external-link load observes one database snapshot
 /// while a concurrent attachment and observation commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_external_link_load_is_one_repeatable_snapshot() -> Result<(), Box<dyn Error>> {
+async fn external_link_load_is_one_repeatable_snapshot() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let publish_pass = insert_fixture_pass(&fixture, 0x60a, ReviewPassKind::Publish).await;
@@ -5965,11 +5951,11 @@ async fn inv041_external_link_load_is_one_repeatable_snapshot() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-040: finding-event serialization remains compatible with the key-share
+/// finding-event serialization remains compatible with the key-share
 /// lock PostgreSQL takes while checking a foreign finding reference.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_event_serialization_is_fk_compatible() -> Result<(), Box<dyn Error>> {
+async fn finding_event_serialization_is_fk_compatible() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x30a, ReviewPassKind::Judge).await;
@@ -6038,12 +6024,11 @@ async fn inv040_finding_event_serialization_is_fk_compatible() -> Result<(), Box
     Ok(())
 }
 
-/// INV-041: observation ordinal serialization remains compatible with the
+/// observation ordinal serialization remains compatible with the
 /// key-share lock used by external-link foreign-key checks.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_external_observation_serialization_is_fk_compatible() -> Result<(), Box<dyn Error>>
-{
+async fn external_observation_serialization_is_fk_compatible() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let publish_pass = insert_fixture_pass(&fixture, 0x30c, ReviewPassKind::Publish).await;
@@ -6119,10 +6104,10 @@ async fn inv041_external_observation_serialization_is_fk_compatible() -> Result<
     Ok(())
 }
 
-/// INV-040: PostgreSQL rejects an event history that does not begin at one.
+/// PostgreSQL rejects an event history that does not begin at one.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_gapped_finding_history_is_rejected() -> Result<(), Box<dyn Error>> {
+async fn gapped_finding_history_is_rejected() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x30b, ReviewPassKind::Judge).await;
@@ -6159,10 +6144,10 @@ async fn inv040_gapped_finding_history_is_rejected() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// INV-040: PostgreSQL rejects a producing pass from another target/run edge.
+/// PostgreSQL rejects a producing pass from another target/run edge.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_cross_wired_pass_ancestry_is_rejected() -> Result<(), Box<dyn Error>> {
+async fn cross_wired_pass_ancestry_is_rejected() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let other_target = ReviewTargetId::from_uuid(uuid(0x401));
@@ -6217,10 +6202,10 @@ async fn inv040_cross_wired_pass_ancestry_is_rejected() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// INV-040: a missing immutable finding producer is corruption, not absence.
+/// a missing immutable finding producer is corruption, not absence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_load_rejects_missing_producing_pass() -> Result<(), Box<dyn Error>> {
+async fn finding_load_rejects_missing_producing_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let review_evidence =
@@ -6283,12 +6268,11 @@ async fn inv040_finding_load_rejects_missing_producing_pass() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-040: a finding-associated external link cannot load when its finding's
+/// a finding-associated external link cannot load when its finding's
 /// canonical producing pass is missing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_external_link_load_rejects_missing_finding_producer() -> Result<(), Box<dyn Error>>
-{
+async fn external_link_load_rejects_missing_finding_producer() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let review_evidence =
@@ -6369,10 +6353,10 @@ async fn inv040_external_link_load_rejects_missing_finding_producer() -> Result<
     Ok(())
 }
 
-/// INV-041: a missing attachment-pass run is corruption, not absence.
+/// a missing attachment-pass run is corruption, not absence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_external_link_load_rejects_missing_attachment_run() -> Result<(), Box<dyn Error>> {
+async fn external_link_load_rejects_missing_attachment_run() -> Result<(), Box<dyn Error>> {
     const PUBLISH_PASS_IDENTITY: u128 = 0x745;
     const LINK_IDENTITY: u128 = 0x746;
 
@@ -6526,11 +6510,11 @@ async fn inv041_external_link_load_rejects_missing_attachment_run() -> Result<()
     Ok(())
 }
 
-/// INV-041: a missing observation-pass run is corruption, not a shortened
+/// a missing observation-pass run is corruption, not a shortened
 /// observation history.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_external_link_load_rejects_missing_observation_run() -> Result<(), Box<dyn Error>> {
+async fn external_link_load_rejects_missing_observation_run() -> Result<(), Box<dyn Error>> {
     const PUBLISH_PASS_IDENTITY: u128 = 0x747;
     const IMPORT_PASS_IDENTITY: u128 = 0x748;
     const LINK_IDENTITY: u128 = 0x749;
@@ -6611,11 +6595,11 @@ async fn inv041_external_link_load_rejects_missing_observation_run() -> Result<(
     Ok(())
 }
 
-/// INV-040: a missing finding-event pass is corruption, not a silently
+/// a missing finding-event pass is corruption, not a silently
 /// shortened history.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_load_rejects_missing_event_pass() -> Result<(), Box<dyn Error>> {
+async fn finding_load_rejects_missing_event_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x741, ReviewPassKind::Judge).await;
@@ -6678,12 +6662,12 @@ async fn inv040_finding_load_rejects_missing_event_pass() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-041: one provider/kind/object identity has at most one attachment per
+/// one provider/kind/object identity has at most one attachment per
 /// frozen target, cannot move to an unrelated logical target, and may follow
 /// one change request across refreshed snapshots.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Error>> {
+async fn external_object_attachment_is_unique() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let first_publish_pass = insert_fixture_pass(&fixture, 0x503, ReviewPassKind::Publish).await;
@@ -6915,12 +6899,12 @@ async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// INV-041: concurrent first attachments serialize on canonical object identity,
+/// concurrent first attachments serialize on canonical object identity,
 /// so unrelated targets cannot both establish ownership.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_concurrent_external_object_attachment_has_one_logical_target()
--> Result<(), Box<dyn Error>> {
+async fn concurrent_external_object_attachment_has_one_logical_target() -> Result<(), Box<dyn Error>>
+{
     const FIRST_PASS_IDENTITY: u128 = 0x820;
     const SECOND_TARGET_IDENTITY: u128 = 0x821;
     const SECOND_PASS_IDENTITY: u128 = 0x822;
@@ -7031,11 +7015,11 @@ async fn inv041_concurrent_external_object_attachment_has_one_logical_target()
     Ok(())
 }
 
-/// INV-040: target loading reconstructs the complete stack ancestry, and the
+/// target loading reconstructs the complete stack ancestry, and the
 /// schema rejects a logical change request repeated anywhere in that chain.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_target_stack_ancestry_is_complete_and_nonrepeating() -> Result<(), Box<dyn Error>> {
+async fn target_stack_ancestry_is_complete_and_nonrepeating() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = ReviewWorkflowStore::new(pool.clone());
     let provider = key("example-code-host");
@@ -7100,11 +7084,11 @@ async fn inv040_target_stack_ancestry_is_complete_and_nonrepeating() -> Result<(
     Ok(())
 }
 
-/// INV-040: stack parents are confined to the target's provider and
+/// stack parents are confined to the target's provider and
 /// repository.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_stack_parent_requires_same_repository() -> Result<(), Box<dyn Error>> {
+async fn stack_parent_requires_same_repository() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let foreign_repository_parent = sqlx::query(
@@ -7127,10 +7111,10 @@ async fn inv040_stack_parent_requires_same_repository() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// INV-040: a stack edge joins the child base to the canonical parent head.
+/// a stack edge joins the child base to the canonical parent head.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_stack_parent_requires_canonical_revision() -> Result<(), Box<dyn Error>> {
+async fn stack_parent_requires_canonical_revision() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let child = ReviewTarget::try_new(
@@ -7185,11 +7169,11 @@ async fn inv040_stack_parent_requires_canonical_revision() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-040: a pass kind is the exact one-to-one projection of its run
+/// a pass kind is the exact one-to-one projection of its run
 /// workflow.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_kind_requires_matching_run_workflow() -> Result<(), Box<dyn Error>> {
+async fn pass_kind_requires_matching_run_workflow() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let run = ReviewRunRef::new(fixture.target, ReviewRunId::from_uuid(uuid(0x702)));
@@ -7224,10 +7208,10 @@ async fn inv040_pass_kind_requires_matching_run_workflow() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-040: one run owns at most one pass.
+/// one run owns at most one pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_run_rejects_second_pass() -> Result<(), Box<dyn Error>> {
+async fn run_rejects_second_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let second = sqlx::query(
@@ -7253,11 +7237,11 @@ async fn inv040_run_rejects_second_pass() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// INV-040: a pass-only state change cannot commit without its run
+/// a pass-only state change cannot commit without its run
 /// projection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_only_projection_is_rejected() -> Result<(), Box<dyn Error>> {
+async fn pass_only_projection_is_rejected() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let turn = fixture
@@ -7285,10 +7269,10 @@ async fn inv040_pass_only_projection_is_rejected() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// INV-040: pre-start cancellation updates the run and pass atomically.
+/// pre-start cancellation updates the run and pass atomically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_queued_run_and_pass_cancel_together() -> Result<(), Box<dyn Error>> {
+async fn queued_run_and_pass_cancel_together() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let (run, pass) = fixture
@@ -7313,11 +7297,11 @@ async fn inv040_queued_run_and_pass_cancel_together() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// INV-040: a running pass may load while its canonical turn has reached a
+/// a running pass may load while its canonical turn has reached a
 /// terminal outcome not yet projected into the pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_running_pass_admits_monotonic_terminal_turn_lag() -> Result<(), Box<dyn Error>> {
+async fn running_pass_admits_monotonic_terminal_turn_lag() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let turn = TurnId::from_uuid(uuid(0x203));
@@ -7332,11 +7316,11 @@ async fn inv040_running_pass_admits_monotonic_terminal_turn_lag() -> Result<(), 
     Ok(())
 }
 
-/// INV-040: finding insertion authenticates a succeeded read-only-review
+/// finding insertion authenticates a succeeded read-only-review
 /// producer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_rejects_queued_producer() -> Result<(), Box<dyn Error>> {
+async fn finding_rejects_queued_producer() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let unauthorized = sqlx::query(
@@ -7362,10 +7346,10 @@ async fn inv040_finding_rejects_queued_producer() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// INV-040: a finding event cannot claim a failed disposition pass.
+/// a finding event cannot claim a failed disposition pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_finding_event_rejects_failed_pass() -> Result<(), Box<dyn Error>> {
+async fn finding_event_rejects_failed_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let other_session = SessionId::from_uuid(uuid(0x721));
@@ -7423,11 +7407,11 @@ async fn inv040_finding_event_rejects_failed_pass() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// INV-041: attachment insertion rejects an otherwise canonical pass of the
+/// attachment insertion rejects an otherwise canonical pass of the
 /// wrong kind.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_attachment_rejects_read_only_review_pass() -> Result<(), Box<dyn Error>> {
+async fn attachment_rejects_read_only_review_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let review_evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass]).await;
@@ -7467,11 +7451,11 @@ async fn inv041_attachment_rejects_read_only_review_pass() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-040 / INV-041: terminal pass effects require their exact finding-event,
+/// terminal pass effects require their exact finding-event,
 /// attachment, or observation child row in the same transaction.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_pass_results_require_exact_child_rows() -> Result<(), Box<dyn Error>> {
+async fn pass_results_require_exact_child_rows() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let publish_pass = insert_fixture_pass(&fixture, 0x7a0, ReviewPassKind::Publish).await;
@@ -7578,10 +7562,10 @@ async fn inv040_inv041_pass_results_require_exact_child_rows() -> Result<(), Box
     Ok(())
 }
 
-/// INV-041: observation insertion authenticates a succeeded import pass.
+/// observation insertion authenticates a succeeded import pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_observation_rejects_queued_import_pass() -> Result<(), Box<dyn Error>> {
+async fn observation_rejects_queued_import_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let publish_pass = insert_fixture_pass(&fixture, 0x709, ReviewPassKind::Publish).await;
@@ -7624,12 +7608,11 @@ async fn inv041_observation_rejects_queued_import_pass() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// INV-040 / INV-041: a linked publication block and a non-posting attachment
+/// a linked publication block and a non-posting attachment
 /// serialize on their shared reservation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_linked_block_serializes_with_non_posting_attachment()
--> Result<(), Box<dyn Error>> {
+async fn linked_block_serializes_with_non_posting_attachment() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x7b0, ReviewPassKind::Judge).await;
@@ -7792,11 +7775,11 @@ async fn inv040_inv041_linked_block_serializes_with_non_posting_attachment()
     Ok(())
 }
 
-/// INV-041: attachment returns the canonical aggregate reloaded under the
+/// attachment returns the canonical aggregate reloaded under the
 /// reservation lock, including a publication claim that won the lock first.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_attachment_returns_claim_committed_while_waiting() -> Result<(), Box<dyn Error>> {
+async fn attachment_returns_claim_committed_while_waiting() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let attaching_pass =
@@ -7903,11 +7886,11 @@ async fn inv041_attachment_returns_claim_committed_while_waiting() -> Result<(),
     Ok(())
 }
 
-/// INV-041: direct attachment and publication-block writers serialize through
+/// direct attachment and publication-block writers serialize through
 /// the reservation root, so the later block observes the winning attachment.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_schema_serializes_attachment_and_publication_block() -> Result<(), Box<dyn Error>> {
+async fn schema_serializes_attachment_and_publication_block() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let attaching_pass =
@@ -8005,12 +7988,11 @@ async fn inv041_schema_serializes_attachment_and_publication_block() -> Result<(
     Ok(())
 }
 
-/// INV-040 / INV-041: a publication-blocked finding reconciles only through
+/// a publication-blocked finding reconciles only through
 /// the succeeded pass that produced the attached object.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
--> Result<(), Box<dyn Error>> {
+async fn blocked_publication_reconciles_with_attachment_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x70c, ReviewPassKind::Judge).await;
@@ -8250,10 +8232,10 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
     Ok(())
 }
 
-/// INV-040: a frozen review target rejects in-place revision mutation.
+/// a frozen review target rejects in-place revision mutation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_target_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
+async fn target_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = ReviewWorkflowStore::new(pool.clone());
     let target_id = ReviewTargetId::from_uuid(uuid(0x301));
@@ -8283,7 +8265,7 @@ async fn inv040_target_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// INV-040 / INV-041: append-only workflow evidence also rejects statement-
+/// append-only workflow evidence also rejects statement-
 /// level truncation, which bypasses row delete triggers.
 async fn assert_review_workflow_truncate_rejected(
     pool: &PgPool,
@@ -8306,7 +8288,7 @@ async fn assert_review_workflow_truncate_rejected(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_review_workflow_tables_reject_truncate() -> Result<(), Box<dyn Error>> {
+async fn review_workflow_tables_reject_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     assert_review_workflow_truncate_rejected(
         &pool,
@@ -8389,11 +8371,11 @@ async fn inv040_inv041_review_workflow_tables_reject_truncate() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-040: maximum-size target keys remain persistable without a wide-index
+/// maximum-size target keys remain persistable without a wide-index
 /// size failure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_maximum_target_keys_do_not_overflow_indexes() -> Result<(), Box<dyn Error>> {
+async fn maximum_target_keys_do_not_overflow_indexes() -> Result<(), Box<dyn Error>> {
     const TARGET_IDENTITY: u128 = 0x750;
 
     let (_container, pool) = migrated_postgres().await?;
@@ -8414,7 +8396,7 @@ async fn inv040_maximum_target_keys_do_not_overflow_indexes() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-012: exact review-command replay and effect recovery preserve one result.
+/// exact review-command replay and effect recovery preserve one result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn review_workflow_command_receipts_replay_and_recover() -> Result<(), Box<dyn Error>> {
@@ -8516,11 +8498,11 @@ async fn review_workflow_command_receipts_replay_and_recover() -> Result<(), Box
     Ok(())
 }
 
-/// INV-012: a formerly legal run-only commit remains loadable and its exact
+/// a formerly legal run-only commit remains loadable and its exact
 /// command retry completes the admitted pass.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_start_run_recovers_a_loadable_run_only_commit() -> Result<(), Box<dyn Error>> {
+async fn start_run_recovers_a_loadable_run_only_commit() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x777;
 
     let (_container, pool) = migrated_postgres().await?;
@@ -8563,10 +8545,10 @@ async fn inv012_start_run_recovers_a_loadable_run_only_commit() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-012: a rejected fresh admission cannot leave a run-only aggregate.
+/// a rejected fresh admission cannot leave a run-only aggregate.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_start_run_rolls_back_run_when_pass_admission_fails() -> Result<(), Box<dyn Error>> {
+async fn start_run_rolls_back_run_when_pass_admission_fails() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x778;
 
     let (_container, pool) = migrated_postgres().await?;
@@ -8610,11 +8592,10 @@ async fn inv012_start_run_rolls_back_run_when_pass_admission_fails() -> Result<(
     Ok(())
 }
 
-/// INV-040: atomic admission rejects a pass owned by another run root.
+/// atomic admission rejects a pass owned by another run root.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_atomic_run_pass_admission_rejects_cross_wired_roots() -> Result<(), Box<dyn Error>>
-{
+async fn atomic_run_pass_admission_rejects_cross_wired_roots() -> Result<(), Box<dyn Error>> {
     const STORED_RUN_IDENTITY: u128 = 0x77b;
     const STORED_PASS_IDENTITY: u128 = 0x77c;
 
@@ -8681,11 +8662,10 @@ async fn inv040_atomic_run_pass_admission_rejects_cross_wired_roots() -> Result<
     Ok(())
 }
 
-/// INV-012: run admission recovery ignores later lifecycle advancement.
+/// run admission recovery ignores later lifecycle advancement.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_start_run_receipt_recovers_after_lifecycle_advancement()
--> Result<(), Box<dyn Error>> {
+async fn start_run_receipt_recovers_after_lifecycle_advancement() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x764;
 
     let (_container, pool) = migrated_postgres().await?;
@@ -8730,10 +8710,10 @@ async fn inv012_start_run_receipt_recovers_after_lifecycle_advancement()
     Ok(())
 }
 
-/// INV-012: a findings receipt cannot omit its stable result count.
+/// a findings receipt cannot omit its stable result count.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_findings_receipt_rejects_missing_count() -> Result<(), Box<dyn Error>> {
+async fn findings_receipt_rejects_missing_count() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x765;
 
     let (_container, pool) = migrated_postgres().await?;
@@ -8756,10 +8736,10 @@ async fn inv012_findings_receipt_rejects_missing_count() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// INV-012: activation recovery recognizes the same pass after completion.
+/// activation recovery recognizes the same pass after completion.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_activation_receipt_recovers_after_pass_completion() -> Result<(), Box<dyn Error>> {
+async fn activation_receipt_recovers_after_pass_completion() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x768;
 
     let (_container, pool) = migrated_postgres().await?;
@@ -8798,10 +8778,10 @@ async fn inv012_activation_receipt_recovers_after_pass_completion() -> Result<()
     Ok(())
 }
 
-/// INV-012: findings recovery compares immutable proposals after disposition.
+/// findings recovery compares immutable proposals after disposition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_findings_receipt_recovers_after_later_disposition() -> Result<(), Box<dyn Error>> {
+async fn findings_receipt_recovers_after_later_disposition() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x769;
     const JUDGE_PASS_IDENTITY: u128 = 0x76a;
     const FINDING_IDENTITY: u128 = 0x76b;
@@ -8861,11 +8841,11 @@ async fn inv012_findings_receipt_recovers_after_later_disposition() -> Result<()
     Ok(())
 }
 
-/// INV-012: the generic result-free terminal command commits and replays one
+/// the generic result-free terminal command commits and replays one
 /// exact run/pass completion receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_complete_pass_commits_and_replays_terminal_status() -> Result<(), Box<dyn Error>> {
+async fn complete_pass_commits_and_replays_terminal_status() -> Result<(), Box<dyn Error>> {
     const COMMAND_IDENTITY: u128 = 0x790;
     const PASS_IDENTITY: u128 = 0x791;
 
@@ -9261,17 +9241,9 @@ async fn review_orchestration_snapshot_excludes_a_write_committed_after_it_began
 
 /// A snapshot under construction blocks no writer.
 ///
-/// This is the regression the redesign exists for. The read previously held
-/// `SHARE` locks over 34 tables for its whole duration, two of which were
-/// `accepted_input` and `turn_lifecycle` — so daemon-wide and across every
-/// session, no user could submit input, no queued turn could start, no
-/// in-flight turn could advance, and no approval could be recorded until a
-/// client-facing read finished.
-///
-/// The snapshot is held mid-construction on a table lock, and a real input
-/// submission that starts a turn must complete anyway. Against the lock-guarded
-/// form this times out: that form takes `accepted_input` first in its lock
-/// inventory, so it is still holding it while it waits for the rest.
+/// An import-table lock pauses `load_snapshot` mid-construction while
+/// `insert_active_turn_with_offset` writes `accepted_input` and `turn_lifecycle`.
+/// Completing that write before the timeout proves the snapshot blocks no writer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn review_orchestration_snapshot_does_not_block_input_or_turns() -> Result<(), Box<dyn Error>>
@@ -9322,8 +9294,8 @@ async fn review_orchestration_snapshot_does_not_block_input_or_turns() -> Result
 /// A single connection is a single transaction, which is what makes the read
 /// coherent under MVCC rather than under locks. Pinning it against a
 /// one-connection pool states that structurally: a construction that reached
-/// for a second connection — as the lock-guarded form did, holding a guard
-/// transaction while its loaders ran elsewhere — could not finish here at all.
+/// for a second connection — one holding a guard transaction while its loaders
+/// ran elsewhere — could not finish here at all.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn review_orchestration_snapshot_completes_on_a_single_connection()
@@ -9642,8 +9614,8 @@ async fn review_orchestration_intent_blocks_cross_kind_registry_insert()
     let mut transaction = pool.begin().await?;
     let error = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'review_workflow', 1, transaction_timestamp())",
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+         VALUES ($1, 'review_workflow', 1, transaction_timestamp(), 'operator')",
     )
     .bind(command.command_id.into_uuid())
     .execute(&mut *transaction)

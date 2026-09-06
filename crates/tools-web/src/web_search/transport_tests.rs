@@ -8,7 +8,7 @@ use super::{
     text_decoding::*, transport::*, transport_failure::*,
 };
 
-/// INV-035: a provider status equal to the API key is retained for
+/// a provider status equal to the API key is retained for
 /// request-scoped sanitization but omitted from raw public diagnostics.
 #[test]
 fn web_search_transport_diagnostics_omit_credential_colliding_status() {
@@ -29,7 +29,7 @@ fn web_search_transport_diagnostics_omit_credential_colliding_status() {
     assert!(failure.source().is_some());
 }
 
-/// INV-035: a successful response whose fixed Debug rendering collides
+/// a successful response whose fixed Debug rendering collides
 /// with the request credential is replaced before leaving the transport.
 #[test]
 fn web_search_transport_rejects_success_diagnostic_credential_collision() {
@@ -55,7 +55,7 @@ fn web_search_transport_rejects_success_diagnostic_credential_collision() {
     ));
 }
 
-/// INV-035: a transport failure's case-normalized fixed Debug spelling
+/// a transport failure's case-normalized fixed Debug spelling
 /// cannot survive in the public transport outcome.
 #[test]
 fn web_search_transport_rejects_case_normalized_failure_collision() {
@@ -77,7 +77,7 @@ fn web_search_transport_rejects_case_normalized_failure_collision() {
     ));
 }
 
-/// INV-035: the public successful transport outcome cannot synthesize a
+/// the public successful transport outcome cannot synthesize a
 /// request credential in its outer `Result` diagnostic.
 #[test]
 fn web_search_transport_rejects_ok_wrapper_credential_collision() {
@@ -97,7 +97,7 @@ fn web_search_transport_rejects_ok_wrapper_credential_collision() {
     );
 }
 
-/// INV-035: the public failed transport outcome cannot synthesize a
+/// the public failed transport outcome cannot synthesize a
 /// request credential in its outer `Result` diagnostic and preserves the
 /// original failure class.
 #[test]
@@ -121,7 +121,7 @@ fn web_search_transport_rejects_err_wrapper_credential_collision() {
     );
 }
 
-/// INV-035: a credential colliding with fixed provider-rejection prose is
+/// a credential colliding with fixed provider-rejection prose is
 /// rejected before that public diagnostic can leave the transport.
 #[test]
 fn web_search_transport_rejects_credential_colliding_provider_prose() {
@@ -146,7 +146,7 @@ fn web_search_transport_rejects_credential_colliding_provider_prose() {
     ));
 }
 
-/// INV-035: every transport failure is sanitized against its request key,
+/// every transport failure is sanitized against its request key,
 /// including a pre-dispatch fixed-URL collision whose error prose overlaps.
 #[test]
 fn web_search_transport_sanitizes_fixed_url_and_failure_prose_collision() {
@@ -172,7 +172,7 @@ fn web_search_transport_sanitizes_fixed_url_and_failure_prose_collision() {
     ));
 }
 
-/// INV-035: generating a safe transport diagnostic fails closed when the
+/// generating a safe transport diagnostic fails closed when the
 /// ordinary redaction sentinel itself contains the credential.
 #[test]
 fn web_search_transport_diagnostic_redaction_overlap_fails_closed() {

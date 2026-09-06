@@ -1,6 +1,6 @@
 //! Durable daemon-owned reconciliation of ambiguous physical operations.
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{future::Future, time::Duration};
 
 use signalbox_application::{
     AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
@@ -263,24 +263,32 @@ fn decode_operation(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure while discovering, claiming, or applying automatic reconciliation.
 #[derive(Debug)]
 pub enum AutomaticReconciliationRepositoryError {
+    #[error("automatic operation reconciliation failed: {source}")]
     /// PostgreSQL failed before or during a commit.
     Database {
         /// Whether a commit acknowledgement was lost.
         commit_ambiguous: bool,
+        #[source]
         /// Driver failure.
         source: sqlx::Error,
     },
+    #[error(transparent)]
     /// Session rows could not be reconstructed.
-    Session(SessionRepositoryError),
+    Session(#[source] SessionRepositoryError),
+    #[error(transparent)]
     /// Scheduling rows could not be reconstructed.
-    Scheduling(SubmitInputRepositoryError),
+    Scheduling(#[source] SubmitInputRepositoryError),
+    #[error(transparent)]
     /// The shared model-call terminal transition failed.
-    Model(ModelCallRepositoryError),
+    Model(#[source] ModelCallRepositoryError),
+    #[error(transparent)]
     /// Tool-round evidence could not reconstruct the exact recovery wait.
-    Tool(ToolLoopRepositoryError),
+    Tool(#[source] ToolLoopRepositoryError),
+    #[error("invalid automatic operation reconciliation {field_0}")]
     /// A durable recovery row was outside the closed application vocabulary.
     Corruption(&'static str),
 }
@@ -309,42 +317,6 @@ impl AutomaticReconciliationRepositoryError {
             | Self::Model(_)
             | Self::Tool(_)
             | Self::Corruption(_) => AutomaticReconciliationFailureKind::Integrity,
-        }
-    }
-}
-
-impl fmt::Display for AutomaticReconciliationRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(
-                    formatter,
-                    "automatic operation reconciliation failed: {source}"
-                )
-            }
-            Self::Session(source) => source.fmt(formatter),
-            Self::Scheduling(source) => source.fmt(formatter),
-            Self::Model(source) => source.fmt(formatter),
-            Self::Tool(source) => source.fmt(formatter),
-            Self::Corruption(detail) => {
-                write!(
-                    formatter,
-                    "invalid automatic operation reconciliation {detail}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for AutomaticReconciliationRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Session(source) => Some(source),
-            Self::Scheduling(source) => Some(source),
-            Self::Model(source) => Some(source),
-            Self::Tool(source) => Some(source),
-            Self::Corruption(_) => None,
         }
     }
 }

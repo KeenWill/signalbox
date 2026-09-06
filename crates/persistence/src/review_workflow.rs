@@ -4,11 +4,7 @@
 //! the domain API defined by `docs/spec/review-workflows.md`.
 
 use signalbox_application::ReviewWorkflowReader;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error,
-    fmt,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -415,6 +411,70 @@ impl ReviewWorkflowStore {
         Ok(pass)
     }
 
+    /// Loads the session and originating turn recorded for one accepted input.
+    ///
+    /// A review run is authorized against the input that produced the turn it
+    /// reviews, and this is the projection that check reads.
+    pub async fn load_accepted_input_origin(
+        &self,
+        accepted_input: AcceptedInputId,
+    ) -> Result<Option<ReviewAcceptedInputOrigin>, ReviewWorkflowStoreError> {
+        let row = sqlx::query(
+            "SELECT session_id, origin_turn_id
+               FROM accepted_input
+              WHERE accepted_input_id = $1",
+        )
+        .bind(accepted_input.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let session: Uuid = projected(&row, "accepted_input", "session_id")?;
+        let origin_turn: Option<Uuid> = projected(&row, "accepted_input", "origin_turn_id")?;
+        Ok(Some(ReviewAcceptedInputOrigin {
+            session: session_id(session),
+            origin_turn: origin_turn.map(turn_id),
+        }))
+    }
+
+    /// Loads the durable lifecycle position recorded for one turn.
+    ///
+    /// A pass attributes its outcome to a turn, and every fact that
+    /// attribution turns on — the owning session, the originating input, the
+    /// lifecycle state and its terminal frontier — is decoded here rather than
+    /// read column by column outside this crate.
+    pub async fn load_turn_lifecycle(
+        &self,
+        turn: TurnId,
+    ) -> Result<Option<ReviewTurnLifecycle>, ReviewWorkflowStoreError> {
+        let row = sqlx::query(
+            "SELECT session_id, origin_accepted_input_id, state_kind,
+                    terminal_disposition_kind, terminal_frontier_id
+               FROM turn_lifecycle
+              WHERE turn_id = $1",
+        )
+        .bind(turn.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let session: Uuid = projected(&row, "turn_lifecycle", "session_id")?;
+        let accepted_input: Option<Uuid> =
+            projected(&row, "turn_lifecycle", "origin_accepted_input_id")?;
+        let state: String = projected(&row, "turn_lifecycle", "state_kind")?;
+        let disposition: Option<String> =
+            projected(&row, "turn_lifecycle", "terminal_disposition_kind")?;
+        let frontier: Option<Uuid> = projected(&row, "turn_lifecycle", "terminal_frontier_id")?;
+        Ok(Some(ReviewTurnLifecycle {
+            session: session_id(session),
+            accepted_input: accepted_input.map(accepted_input_id),
+            state: decode_turn_lifecycle_state(&state, disposition.as_deref())?,
+            terminal_frontier: frontier.map(context_frontier_id),
+        }))
+    }
+
     /// Applies one pass transition and its matching run projection atomically.
     pub async fn transition_run_and_pass(
         &self,
@@ -623,20 +683,10 @@ impl ReviewWorkflowStore {
             // graph from snapshots taken after the winning event commits; the
             // held inventory keeps later event writes from changing that graph
             // across the loader statements.
-            sqlx::query(
-                "SELECT finding_id
-                   FROM review_finding
-                  WHERE target_id = (
-                            SELECT target_id
-                              FROM review_finding
-                             WHERE finding_id = $1
-                        )
-                  ORDER BY finding_id
-                  FOR NO KEY UPDATE",
-            )
-            .bind(finding.into_uuid())
-            .fetch_all(&mut *transaction)
-            .await?;
+            sqlx::query(crate::lock_inventory::REVIEW_TARGET_FINDINGS_TRANSITION)
+                .bind(finding.into_uuid())
+                .fetch_all(&mut *transaction)
+                .await?;
         }
         let current = if publication_link.is_some() {
             // The held reservation and finding locks make the subject projection
@@ -3371,7 +3421,7 @@ fn decode_pass_turn_evidence(
                 turn_id(turn),
                 session_id(session),
                 accepted_input_id(accepted_input),
-                decode_turn_outcome(&state, disposition.as_deref())?,
+                decode_turn_outcome("review_pass", &state, disposition.as_deref())?,
                 frontier.map(context_frontier_id),
             )))
         }
@@ -3382,7 +3432,43 @@ fn decode_pass_turn_evidence(
     }
 }
 
+/// Reads one column of a returned row, reporting a decode failure as corruption.
+///
+/// The fetch keeps `?`: a connection that dropped mid-query is retryable, and
+/// `mutation_unavailable` is the honest answer. A column read on a row the
+/// query already returned is not — a type or a name the projection and the
+/// schema disagree about is a fault no retry repairs, and the handlers these
+/// projections replaced answered it with the internal projection diagnostic.
+fn projected<'row, T>(
+    row: &'row PgRow,
+    aggregate: &'static str,
+    column: &'static str,
+) -> Result<T, ReviewWorkflowStoreError>
+where
+    T: sqlx::Decode<'row, Postgres> + sqlx::Type<Postgres>,
+{
+    row.try_get(column).map_err(|error| {
+        // The driver's `Display` output is unstable prose and nothing downstream
+        // can match on it, so the classification carries labels instead: the
+        // aggregate, the static column name, and which of the ways a row that
+        // was returned can still fail to answer for one of its columns.
+        let failure = match error {
+            sqlx::Error::ColumnNotFound(_) => "absent",
+            sqlx::Error::ColumnDecode { .. } => "undecodable",
+            _ => "unreadable",
+        };
+        corruption(aggregate, format!("{failure} column {column}"))
+    })
+}
+
+/// Decodes one turn outcome, reporting corruption against the reading table.
+///
+/// The same state/disposition pair is stored on `turn_lifecycle` and copied
+/// onto the `review_pass` evidence columns, so the caller names which of the
+/// two it read: a corruption report that named the other one would send a
+/// reader to a table whose rows are intact.
 fn decode_turn_outcome(
+    aggregate: &'static str,
     state: &str,
     disposition: Option<&str>,
 ) -> Result<ReviewPassTurnOutcome, ReviewWorkflowStoreError> {
@@ -3396,8 +3482,27 @@ fn decode_turn_outcome(
             Ok(ReviewPassTurnOutcome::ReconciliationRequired)
         }
         _ => Err(corruption(
-            "review_pass",
+            aggregate,
             format!("invalid canonical turn outcome {state}/{disposition:?}"),
+        )),
+    }
+}
+
+fn decode_turn_lifecycle_state(
+    state: &str,
+    disposition: Option<&str>,
+) -> Result<ReviewTurnLifecycleState, ReviewWorkflowStoreError> {
+    match (state, disposition) {
+        ("queued", None) => Ok(ReviewTurnLifecycleState::Queued),
+        ("active", None) => Ok(ReviewTurnLifecycleState::Active),
+        ("terminal", Some(_)) => Ok(ReviewTurnLifecycleState::Terminal(decode_turn_outcome(
+            "turn_lifecycle",
+            state,
+            disposition,
+        )?)),
+        _ => Err(corruption(
+            "turn_lifecycle",
+            format!("invalid turn lifecycle state {state}/{disposition:?}"),
         )),
     }
 }
@@ -4915,6 +5020,67 @@ pub(crate) fn corruption(aggregate: &'static str, detail: String) -> ReviewWorkf
     ReviewWorkflowStoreError::Corruption(ReviewWorkflowCorruption { aggregate, detail })
 }
 
+/// The session and originating turn one accepted input records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewAcceptedInputOrigin {
+    session: SessionId,
+    origin_turn: Option<TurnId>,
+}
+
+impl ReviewAcceptedInputOrigin {
+    /// The session the input was accepted into.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// The turn the input originated, absent while it originated none.
+    pub const fn origin_turn(&self) -> Option<TurnId> {
+        self.origin_turn
+    }
+}
+
+/// The lifecycle position one turn row records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewTurnLifecycleState {
+    /// Accepted, with no attempt started.
+    Queued,
+    /// Started, with no terminal disposition recorded.
+    Active,
+    /// Finished under the recorded disposition.
+    Terminal(ReviewPassTurnOutcome),
+}
+
+/// One turn's durable lifecycle facts, as a review pass reads them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewTurnLifecycle {
+    session: SessionId,
+    accepted_input: Option<AcceptedInputId>,
+    state: ReviewTurnLifecycleState,
+    terminal_frontier: Option<ContextFrontierId>,
+}
+
+impl ReviewTurnLifecycle {
+    /// The session the turn runs in.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// The input the turn originated from, absent for a delegated turn.
+    pub const fn accepted_input(&self) -> Option<AcceptedInputId> {
+        self.accepted_input
+    }
+
+    /// The lifecycle position the row records.
+    pub const fn state(&self) -> ReviewTurnLifecycleState {
+        self.state
+    }
+
+    /// The frontier the turn ended on, absent until it is terminal.
+    pub const fn terminal_frontier(&self) -> Option<ContextFrontierId> {
+        self.terminal_frontier
+    }
+}
+
 /// First reservation outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReserveExternalLinkOutcome {
@@ -4924,129 +5090,82 @@ pub enum ReserveExternalLinkOutcome {
     Existing(ReviewExternalLink),
 }
 
+#[derive(signalbox_derive::Accessors, signalbox_derive::OperatorError)]
+#[error("review external-link identity was reused for a different canonical reservation")]
 /// Conflicting reuse of a review external-link reservation identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewExternalLinkReservationConflict {
+    /// Borrows the retained canonical aggregate.
+    #[get(unbox)]
     existing: Box<ReviewExternalLink>,
+    /// Borrows the rejected reservation request.
+    #[get(unbox)]
     requested: Box<ReviewExternalLink>,
 }
 
 impl ReviewExternalLinkReservationConflict {
-    /// Borrows the retained canonical aggregate.
-    pub fn existing(&self) -> &ReviewExternalLink {
-        &self.existing
-    }
-
-    /// Borrows the rejected reservation request.
-    pub fn requested(&self) -> &ReviewExternalLink {
-        &self.requested
-    }
-
     /// Returns both complete aggregates.
     pub fn into_parts(self) -> (ReviewExternalLink, ReviewExternalLink) {
         (*self.existing, *self.requested)
     }
 }
 
-impl fmt::Display for ReviewExternalLinkReservationConflict {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(
-            "review external-link identity was reused for a different canonical reservation",
-        )
-    }
-}
-
-impl Error for ReviewExternalLinkReservationConflict {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Caller-supplied aggregate shape that cannot begin a new store record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewWorkflowInsertionError {
+    #[error("new review run is not queued: {state:?}")]
     /// A run insertion carried state that can only result from transition.
     RunNotQueued {
         /// Rejected current state.
         state: Box<ReviewRunState>,
     },
+    #[error("new review pass is not queued: {state:?}")]
     /// A pass insertion carried state that can only result from transition.
     PassNotQueued {
         /// Rejected current state.
         state: Box<ReviewPassState>,
     },
+    #[error("new review run and pass are not one coherent admission")]
     /// A paired run and pass do not describe one domain-coherent admission.
     RunPassMismatch,
+    #[error("new review finding is not open: {status:?}")]
     /// A finding insertion already carried lifecycle history.
     FindingNotOpen {
         /// Rejected current status.
         status: ReviewFindingStatus,
     },
+    #[error("new review external-link reservation is not pending")]
     /// A reservation insertion already carried post-effect evidence.
     ExternalLinkNotPending,
 }
 
-impl fmt::Display for ReviewWorkflowInsertionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RunNotQueued { state } => {
-                write!(formatter, "new review run is not queued: {state:?}")
-            }
-            Self::PassNotQueued { state } => {
-                write!(formatter, "new review pass is not queued: {state:?}")
-            }
-            Self::RunPassMismatch => {
-                formatter.write_str("new review run and pass are not one coherent admission")
-            }
-            Self::FindingNotOpen { status } => {
-                write!(formatter, "new review finding is not open: {status:?}")
-            }
-            Self::ExternalLinkNotPending => {
-                formatter.write_str("new review external-link reservation is not pending")
-            }
-        }
-    }
-}
-
-impl Error for ReviewWorkflowInsertionError {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Domain transition rejected before persistence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewWorkflowTransitionError {
+    #[error("review-run transition rejected: {field_0:?}")]
     /// Run transition failed.
     Run(signalbox_domain::ReviewRunTransitionError),
+    #[error("review-pass transition rejected: {field_0:?}")]
     /// Pass transition failed.
     Pass(signalbox_domain::ReviewPassTransitionError),
+    #[error("review-finding transition rejected: {:?}", field_0.failure())]
     /// Finding event application failed.
     Finding(signalbox_domain::ReviewFindingTransitionError),
+    #[error("review external-link transition rejected: {field_0:?}")]
     /// External-link attachment or observation failed.
     ExternalLink(signalbox_domain::ReviewExternalLinkTransitionError),
 }
 
-impl fmt::Display for ReviewWorkflowTransitionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Run(error) => write!(formatter, "review-run transition rejected: {error:?}"),
-            Self::Pass(error) => write!(formatter, "review-pass transition rejected: {error:?}"),
-            Self::Finding(error) => {
-                write!(
-                    formatter,
-                    "review-finding transition rejected: {:?}",
-                    error.failure()
-                )
-            }
-            Self::ExternalLink(error) => {
-                write!(
-                    formatter,
-                    "review external-link transition rejected: {error:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ReviewWorkflowTransitionError {}
-
+#[derive(signalbox_derive::Accessors, signalbox_derive::OperatorError)]
+#[error("{} durable facts are corrupt: {}", aggregate, detail)]
 /// Stored workflow facts could not form one domain aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewWorkflowCorruption {
     aggregate: &'static str,
+    /// Borrows the content-safe diagnostic detail.
+    #[get(str)]
     detail: String,
 }
 
@@ -5055,87 +5174,39 @@ impl ReviewWorkflowCorruption {
     pub const fn aggregate(&self) -> &'static str {
         self.aggregate
     }
-
-    /// Borrows the content-safe diagnostic detail.
-    pub fn detail(&self) -> &str {
-        &self.detail
-    }
 }
 
-impl fmt::Display for ReviewWorkflowCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} durable facts are corrupt: {}",
-            self.aggregate, self.detail
-        )
-    }
-}
-
-impl Error for ReviewWorkflowCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Review-workflow persistence failure.
 #[derive(Debug)]
 pub enum ReviewWorkflowStoreError {
+    #[error("review-workflow database failure: {field_0}")]
     /// PostgreSQL or transport failure.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("review-workflow commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL may have committed a mutation before the response was lost.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Stored facts failed closed reconstitution.
-    Corruption(ReviewWorkflowCorruption),
+    Corruption(#[source] ReviewWorkflowCorruption),
+    #[error(transparent)]
     /// A caller attempted to insert a post-transition aggregate as new.
-    InvalidInsertion(ReviewWorkflowInsertionError),
+    InvalidInsertion(#[source] ReviewWorkflowInsertionError),
+    #[error(transparent)]
     /// A caller requested an invalid domain transition.
-    InvalidTransition(ReviewWorkflowTransitionError),
+    InvalidTransition(#[source] ReviewWorkflowTransitionError),
+    #[error("review pass results must bind in the same transaction as their exact effect")]
     /// A lifecycle-only transition attempted to persist an effect result.
     NonAtomicPassResult,
+    #[error("produced findings must be admitted as one complete exact inventory")]
     /// A produced-finding write omitted or contradicted the exact inventory.
     IncompleteFindingInventory,
+    #[error("blocked publication reservations require one atomic reconciliation effect")]
     /// A blocked publication reservation was not reconciled atomically.
     IncompletePublicationReconciliation,
+    #[error(transparent)]
     /// An external-link identity was reused for another canonical payload.
-    ReservationConflict(ReviewExternalLinkReservationConflict),
-}
-
-impl fmt::Display for ReviewWorkflowStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "review-workflow database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "review-workflow commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::InvalidInsertion(error) => error.fmt(formatter),
-            Self::InvalidTransition(error) => error.fmt(formatter),
-            Self::NonAtomicPassResult => formatter.write_str(
-                "review pass results must bind in the same transaction as their exact effect",
-            ),
-            Self::IncompleteFindingInventory => formatter
-                .write_str("produced findings must be admitted as one complete exact inventory"),
-            Self::IncompletePublicationReconciliation => formatter.write_str(
-                "blocked publication reservations require one atomic reconciliation effect",
-            ),
-            Self::ReservationConflict(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ReviewWorkflowStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::InvalidInsertion(error) => Some(error),
-            Self::InvalidTransition(error) => Some(error),
-            Self::NonAtomicPassResult
-            | Self::IncompleteFindingInventory
-            | Self::IncompletePublicationReconciliation => None,
-            Self::ReservationConflict(error) => Some(error),
-        }
-    }
+    ReservationConflict(#[source] ReviewExternalLinkReservationConflict),
 }
 
 impl From<sqlx::Error> for ReviewWorkflowStoreError {

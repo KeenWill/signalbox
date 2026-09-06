@@ -1,6 +1,4 @@
 use std::{
-    error::Error,
-    fmt,
     os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
 };
@@ -246,14 +244,8 @@ pub(super) fn parse_gitdir_marker(directory: &Path, bytes: &[u8]) -> Option<Path
     (resolved.as_os_str().as_bytes().len() <= 4096).then_some(resolved)
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("invalid Git tool arguments")]
 /// Model arguments were outside the closed Git contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidGitArguments;
-
-impl fmt::Display for InvalidGitArguments {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid Git tool arguments")
-    }
-}
-
-impl Error for InvalidGitArguments {}

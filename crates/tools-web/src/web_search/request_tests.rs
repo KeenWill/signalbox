@@ -56,7 +56,7 @@ fn brave_request_uses_the_mapped_endpoint_and_parameters() {
     );
 }
 
-/// INV-035: the API key is header-only, marked sensitive, and absent from
+/// the API key is header-only, marked sensitive, and absent from
 /// both the request URL and its diagnostic rendering.
 #[test]
 fn brave_request_never_records_credential_in_url_or_debug() {
@@ -72,7 +72,7 @@ fn brave_request_never_records_credential_in_url_or_debug() {
     assert!(!diagnostic.contains(SYNTHETIC_KEY));
 }
 
-/// INV-035: a query containing the resolved API key fails before a request
+/// a query containing the resolved API key fails before a request
 /// URL can leave the builder or be dispatched.
 #[test]
 fn brave_request_rejects_query_credential_collision() {
@@ -82,7 +82,7 @@ fn brave_request_rejects_query_credential_collision() {
     ));
 }
 
-/// INV-035: canonical Unicode normalization cannot conceal a credential
+/// canonical Unicode normalization cannot conceal a credential
 /// in a query before provider dispatch.
 #[test]
 fn brave_request_rejects_unicode_normalized_query_credential_collision() {
@@ -98,7 +98,7 @@ fn brave_request_rejects_unicode_normalized_query_credential_collision() {
     );
 }
 
-/// INV-035: a reversibly encoded API key in the query fails before URL
+/// a reversibly encoded API key in the query fails before URL
 /// serialization can double-encode it or dispatch it to the provider.
 #[test]
 fn brave_request_rejects_percent_encoded_query_credential_collision() {
@@ -108,7 +108,7 @@ fn brave_request_rejects_percent_encoded_query_credential_collision() {
     ));
 }
 
-/// INV-035: an HTML-reference spelling of the API key fails before URL
+/// an HTML-reference spelling of the API key fails before URL
 /// construction can dispatch it as provider-controlled query text.
 #[test]
 fn brave_request_rejects_html_encoded_query_credential_collision() {
@@ -121,7 +121,7 @@ fn brave_request_rejects_html_encoded_query_credential_collision() {
     );
 }
 
-/// INV-035: repeated HTML character-reference decoding cannot conceal an
+/// repeated HTML character-reference decoding cannot conceal an
 /// API key in a query before dispatch.
 #[test]
 fn brave_request_rejects_nested_html_encoded_query_credential_collision() {
@@ -137,7 +137,7 @@ fn brave_request_rejects_nested_html_encoded_query_credential_collision() {
     );
 }
 
-/// INV-035: composed form and HTML decoding cannot conceal an API key in a
+/// composed form and HTML decoding cannot conceal an API key in a
 /// query before dispatch.
 #[test]
 fn brave_request_rejects_form_then_html_encoded_query_credential_collision() {
@@ -150,7 +150,7 @@ fn brave_request_rejects_form_then_html_encoded_query_credential_collision() {
     );
 }
 
-/// INV-035: a key matching fixed provider URL text fails before the URL
+/// a key matching fixed provider URL text fails before the URL
 /// can be dispatched or recorded.
 #[test]
 fn brave_request_rejects_fixed_url_credential_collision() {
@@ -160,7 +160,7 @@ fn brave_request_rejects_fixed_url_credential_collision() {
     ));
 }
 
-/// INV-035: a key matching fixed request metadata fails before the request
+/// a key matching fixed request metadata fails before the request
 /// diagnostic can leave the transport boundary.
 #[test]
 fn brave_request_rejects_fixed_header_credential_collision() {
@@ -170,7 +170,7 @@ fn brave_request_rejects_fixed_header_credential_collision() {
     ));
 }
 
-/// INV-035: canonicalized scheme spelling in fixed request metadata cannot
+/// canonicalized scheme spelling in fixed request metadata cannot
 /// conceal the credential before dispatch.
 #[test]
 fn brave_request_rejects_case_normalized_fixed_scheme_collision() {
@@ -183,7 +183,7 @@ fn brave_request_rejects_case_normalized_fixed_scheme_collision() {
     );
 }
 
-/// INV-035: canonicalized host spelling in fixed request metadata cannot
+/// canonicalized host spelling in fixed request metadata cannot
 /// conceal the credential before dispatch.
 #[test]
 fn brave_request_rejects_case_normalized_fixed_host_collision() {
@@ -196,7 +196,7 @@ fn brave_request_rejects_case_normalized_fixed_host_collision() {
     );
 }
 
-/// INV-035: canonicalized media-type spelling in fixed request metadata
+/// canonicalized media-type spelling in fixed request metadata
 /// cannot conceal the credential before dispatch.
 #[test]
 fn brave_request_rejects_case_normalized_fixed_media_type_collision() {
@@ -209,7 +209,7 @@ fn brave_request_rejects_case_normalized_fixed_media_type_collision() {
     );
 }
 
-/// INV-035: optional HTTP field whitespace cannot alter a credential at
+/// optional HTTP field whitespace cannot alter a credential at
 /// the header boundary before dispatch.
 #[test]
 fn brave_request_rejects_leading_header_whitespace_in_credential() {
@@ -222,7 +222,7 @@ fn brave_request_rejects_leading_header_whitespace_in_credential() {
     );
 }
 
-/// INV-035: a credential beyond the scrubber's inspection bound cannot enter
+/// a credential beyond the scrubber's inspection bound cannot enter
 /// the provider header before dispatch.
 #[test]
 fn brave_request_rejects_credential_beyond_scrubber_bound() {

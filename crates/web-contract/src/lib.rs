@@ -11,8 +11,10 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
     MAX_SEARCH_HIGHLIGHTS_PER_RESULT, max_search_page_items, max_search_query_bytes,
-    max_search_snippet_bytes, max_timeline_window_bytes, max_timeline_window_items,
+    max_search_snippet_bytes, max_session_live_queued_turns, max_timeline_detail_bytes,
+    max_timeline_detail_items, max_timeline_window_bytes, max_timeline_window_items,
     max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
+    timeline_detail_envelope_bytes,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -24,6 +26,11 @@ pub const WEB_CONTRACT_NAME: &str = "signalbox.web-http";
 pub const MAX_JSON_BODY_BYTES: usize = 64 * 1024;
 /// Hard safety ceiling protecting client and daemon memory per NDJSON item.
 pub const MAX_NDJSON_ITEM_BYTES: usize = 64 * 1024;
+/// Hard safety ceiling on one ephemeral provider text fragment. Production
+/// splits deltas at this bound, so the generated decoder rejects anything
+/// larger as a value the server cannot emit.
+// numeric-bound: hard safety - leaves room for worst-case JSON escaping and the event envelope
+pub const MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES: usize = 8_192;
 
 /// Identity of the one exact browser contract this daemon serves.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -57,6 +64,10 @@ pub struct WebContractCapabilities {
     pub imported_continuations: bool,
     /// Stable bounded session descriptors and historical windows are available.
     pub bounded_session_timeline: bool,
+    /// Typed item, turn, and contiguous-region detail reads are available.
+    pub bounded_session_timeline_detail: bool,
+    /// Bounded current snapshots and snapshot-first live follow are available.
+    pub bounded_session_live: bool,
     /// Bounded lexical search with stable history reveal addresses is available.
     pub bounded_lexical_search: bool,
     /// Dedicated bounded aggregate and per-call usage/cost reads are available.
@@ -75,6 +86,12 @@ pub struct WebContractLimits {
     pub max_timeline_window_items: u32,
     /// Maximum projected structured item bytes in one timeline window.
     pub max_timeline_window_bytes: u32,
+    /// Maximum detailed timeline records in one response.
+    pub max_timeline_detail_items: u32,
+    /// Maximum projected typed-body bytes in one detail response.
+    pub max_timeline_detail_bytes: u32,
+    /// Maximum queued turn identities retained in one live snapshot.
+    pub max_session_live_queued_turns: u32,
     /// Maximum UTF-8 bytes in one product search expression.
     pub max_search_query_bytes: u32,
     /// Maximum results in one search page.
@@ -124,6 +141,8 @@ impl WebContractBootstrap {
                 import_discovery: true,
                 imported_continuations: true,
                 bounded_session_timeline: true,
+                bounded_session_timeline_detail: true,
+                bounded_session_live: true,
                 bounded_lexical_search: true,
                 bounded_usage_cost: true,
             },
@@ -132,6 +151,9 @@ impl WebContractBootstrap {
                 max_ndjson_item_bytes: MAX_NDJSON_ITEM_BYTES as u32,
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
+                max_timeline_detail_items: u32::from(max_timeline_detail_items()),
+                max_timeline_detail_bytes: max_timeline_detail_bytes(),
+                max_session_live_queued_turns: u32::from(max_session_live_queued_turns()),
                 max_search_query_bytes: max_search_query_bytes() as u32,
                 max_search_page_items: u32::from(max_search_page_items()),
                 max_search_snippet_bytes: max_search_snippet_bytes() as u32,
@@ -557,18 +579,14 @@ pub struct WebImportContinuationResponse {
 pub struct WebTimelineEventSequence(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
 
 fn canonical_u64(value: &str) -> Option<u64> {
-    let canonical = !value.is_empty()
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-        && (value == "0" || !value.starts_with('0'));
-    canonical.then(|| value.parse::<u64>().ok()).flatten()
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|parsed| parsed.to_string() == value)
 }
 
 fn canonical_session_id(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| match index {
-            8 | 13 | 18 | 23 => byte == b'-',
-            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
-        })
+    uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
 
 /// Checked canonical UUID used for browser-visible session identities.
@@ -592,25 +610,7 @@ impl WebSessionId {
     /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
     #[must_use]
     pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
-        Self(format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            bytes[0],
-            bytes[1],
-            bytes[2],
-            bytes[3],
-            bytes[4],
-            bytes[5],
-            bytes[6],
-            bytes[7],
-            bytes[8],
-            bytes[9],
-            bytes[10],
-            bytes[11],
-            bytes[12],
-            bytes[13],
-            bytes[14],
-            bytes[15],
-        ))
+        Self(uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
     }
 
     /// Constructs a session identity from its canonical lowercase UUID spelling.
@@ -634,6 +634,36 @@ impl<'de> Deserialize<'de> for WebSessionId {
         let value = String::deserialize(deserializer)?;
         Self::from_canonical(value)
             .ok_or_else(|| de::Error::custom("session ID must be a canonical lowercase UUID"))
+    }
+}
+
+/// Checked canonical UUID used for browser-visible turn identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebTurnId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebTurnId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(WebSessionId::from_uuid_bytes(bytes).0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebTurnId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_session_id(&value)
+            .then_some(Self(value))
+            .ok_or_else(|| de::Error::custom("turn ID must be a canonical lowercase UUID"))
     }
 }
 
@@ -673,6 +703,36 @@ impl<'de> Deserialize<'de> for WebUuid {
     }
 }
 
+/// Checked canonical UUID used for browser-visible live resource identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebLiveResourceId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebLiveResourceId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(WebSessionId::from_uuid_bytes(bytes).0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebLiveResourceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_session_id(&value)
+            .then_some(Self(value))
+            .ok_or_else(|| de::Error::custom("live resource ID must be a canonical lowercase UUID"))
+    }
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -697,6 +757,41 @@ impl<'de> Deserialize<'de> for WebTimelineEventSequence {
         if positive.is_none() {
             return Err(de::Error::custom(
                 "timeline event sequence must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked positive unsigned 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebPositiveU64(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+impl WebPositiveU64 {
+    /// Encodes one already-validated positive value in canonical decimal form.
+    #[must_use]
+    pub fn from_nonzero(value: std::num::NonZeroU64) -> Self {
+        Self(value.get().to_string())
+    }
+
+    /// Returns the canonical positive decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebPositiveU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let positive = canonical_u64(&value).and_then(std::num::NonZeroU64::new);
+        if positive.is_none() {
+            return Err(de::Error::custom(
+                "wire value must be a canonical positive u64",
             ));
         }
         Ok(Self(value))
@@ -813,6 +908,12 @@ pub struct WebSessionTimelineDescriptor {
 #[serde(rename_all = "snake_case")]
 pub enum WebSessionTimelineEventKind {
     SessionCreated,
+    SessionStateChanged,
+    SessionTerminal,
+    GoalChanged,
+    CommandSettled,
+    InjectionSettled,
+    SessionOwnershipChanged,
     SessionModelSettingsChanged,
     TurnModelSettingsResolved,
     InputAccepted,
@@ -856,12 +957,325 @@ pub struct WebSessionTimelineWindow {
     pub continuation_after: Option<WebTimelineAddress>,
 }
 
+/// Text-bearing field within one typed timeline body.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineBodyField {
+    InputText,
+    ModelResponse,
+}
+
+/// Exact continuation within an oversized typed body.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineBodyContinuation {
+    pub address: WebTimelineAddress,
+    pub field: WebTimelineBodyField,
+    pub member_index: u32,
+    pub offset_bytes: WebU64,
+}
+
+/// Bounded UTF-8 excerpt with explicit completeness evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineTextExcerpt {
+    /// The generator stamps `max_timeline_detail_bytes()` onto this field as
+    /// `maxLength`: UTF-16 length never exceeds UTF-8 length, so every valid
+    /// excerpt within the detail byte budget passes that pre-encoding bound.
+    pub text: String,
+    pub offset_bytes: WebU64,
+    pub total_bytes: WebU64,
+    pub continuation: Option<WebTimelineBodyContinuation>,
+}
+
+/// Checked canonical SHA-256 identity used for browser-visible blob references.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebBlobId(#[schemars(regex(pattern = r"^sha256:[0-9a-f]{64}$"))] String);
+
+impl WebBlobId {
+    /// Constructs a blob identity from its canonical external spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        let digest = value.strip_prefix("sha256:")?;
+        let mut bytes = [0_u8; 32];
+        hex::decode_to_slice(digest, &mut bytes).ok()?;
+        (hex::encode(bytes) == digest).then_some(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for WebBlobId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("blob ID must be a canonical SHA-256 identity"))
+    }
+}
+
+/// Reference-only blob fact carried without blob bytes.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineBlobReference {
+    pub blob_id: WebBlobId,
+    pub length_bytes: WebU64,
+    /// Visible-ASCII pattern plus the 255 bound express the multipart
+    /// contract's "at most 255 visible ASCII bytes"; for visible ASCII,
+    /// UTF-16 length equals byte length, so maxLength is a byte bound.
+    #[schemars(length(max = 255), regex(pattern = r"^[!-~]+$"))]
+    pub media_type: Option<String>,
+}
+
+/// Closed model-call lifecycle checkpoint with terminal disposition in-band.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineModelCallState {
+    Prepared {},
+    InFlight {},
+    CancellationRequested {},
+    Terminal {
+        disposition: WebTimelineModelCallDisposition,
+    },
+}
+
+/// Closed terminal model-call disposition.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineModelCallDisposition {
+    Completed,
+    KnownFailed,
+    Refused,
+    Cancelled,
+    Ambiguous,
+}
+
+/// Closed provider-neutral failure cause exposed at the browser boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebProviderModelCallFailureCause {
+    CredentialRejected,
+    PermissionDenied,
+    InvalidRequest,
+    TargetNotFound,
+    RequestTooLarge,
+    RateLimited,
+    QuotaExhausted,
+    Overloaded,
+    ProviderInternal,
+    Unrecognized,
+}
+
+/// Independently optional provider-reported usage counts.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineModelUsage {
+    pub input_tokens: Option<WebU64>,
+    pub output_tokens: Option<WebU64>,
+    pub cache_creation_input_tokens: Option<WebU64>,
+    pub cache_read_input_tokens: Option<WebU64>,
+}
+
+/// Closed turn lifecycle boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineTurnLifecycleKind {
+    Activated,
+    Terminalized,
+}
+
+/// Typed browser body, distinct from application and persistence projections.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebSessionTimelineDetailBody {
+    UserInput {
+        turn_id: WebSessionId,
+        text: WebTimelineTextExcerpt,
+        #[schemars(length(max = 256))]
+        attachments: Vec<WebTimelineBlobReference>,
+    },
+    ModelCall {
+        turn_id: WebSessionId,
+        model_call_id: WebSessionId,
+        state: WebTimelineModelCallState,
+        model_identity_id: WebSessionId,
+        request_context_items: WebU64,
+        response: Option<WebTimelineTextExcerpt>,
+        usage: WebTimelineModelUsage,
+        provider_failure_cause: Option<WebProviderModelCallFailureCause>,
+    },
+    TurnLifecycle {
+        turn_id: WebSessionId,
+        lifecycle: WebTimelineTurnLifecycleKind,
+        cause_code: String,
+    },
+    EventFact {
+        kind: WebSessionTimelineEventKind,
+    },
+}
+
+/// One typed body at a stable timeline address.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineDetail {
+    pub address: WebTimelineAddress,
+    pub kind: WebSessionTimelineEventKind,
+    pub body: WebSessionTimelineDetailBody,
+    pub projected_body_bytes: u32,
+}
+
+/// Explicit next position after a bounded detail response.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDetailContinuation {
+    MoreAt { address: WebTimelineAddress },
+    MoreBody { body: WebTimelineBodyContinuation },
+}
+
+/// One bounded item, turn, or contiguous-region detail response.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineDetailPage {
+    pub session_id: WebSessionId,
+    // The generator stamps `max_timeline_detail_items()` onto this field as
+    // `maxItems`; the bound lives in the application crate, not restated here.
+    pub items: Vec<WebSessionTimelineDetail>,
+    pub projected_body_bytes: u32,
+    pub continuation: Option<WebTimelineDetailContinuation>,
+}
+
 fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
+}
+
+/// Current durable state of one active turn.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionLiveActiveState {
+    Running {
+        #[serde(deserialize_with = "deserialize_present_option")]
+        #[schemars(required)]
+        model_call_id: Option<WebLiveResourceId>,
+    },
+    AwaitingModelCallRecovery {
+        model_call_id: WebLiveResourceId,
+    },
+    AwaitingToolApproval {
+        tool_request_id: WebLiveResourceId,
+    },
+    AwaitingChild {
+        tool_request_id: WebLiveResourceId,
+        child_session_id: WebSessionId,
+    },
+    AwaitingToolRecovery {
+        tool_attempt_id: WebLiveResourceId,
+    },
+    AwaitingRunnerRecovery {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionLiveActiveTurn {
+    pub turn_id: WebTurnId,
+    pub state: WebSessionLiveActiveState,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionLiveReconciliation {
+    ModelCall {
+        turn_id: WebTurnId,
+        model_call_id: WebLiveResourceId,
+    },
+    ToolAttempt {
+        turn_id: WebTurnId,
+        tool_attempt_id: WebLiveResourceId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionLiveRunnerConnectionHealth {
+    Connected,
+    Suspect,
+    Shutdown,
+    Lost,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionLiveRunner {
+    Unpinned {
+        placement_revision: WebPositiveU64,
+    },
+    Pinned {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+        connection_health: WebSessionLiveRunnerConnectionHealth,
+    },
+    RunnerLostBeforePin {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+    },
+    RunnerLost {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+    },
+    RunnerAbandoned {
+        runner_id: WebLiveResourceId,
+        placement_revision: WebPositiveU64,
+    },
+}
+
+/// Bounded repeatable-read current projection for one open workspace.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionLiveSnapshot {
+    pub session_id: WebSessionId,
+    pub observed_through: WebPositiveU64,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub active: Option<WebSessionLiveActiveTurn>,
+    pub queued_turn_count: WebU64,
+    pub queued_turn_ids: Vec<WebTurnId>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub reconciliation: Option<WebSessionLiveReconciliation>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub runner: Option<WebSessionLiveRunner>,
+}
+
+/// Snapshot-first event stream for one open workspace.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionLiveStreamEvent {
+    Snapshot {
+        snapshot: Box<WebSessionLiveSnapshot>,
+    },
+    Durable {
+        cursor: WebU64,
+        address: WebTimelineAddress,
+        event_kind: WebSessionTimelineEventKind,
+    },
+    ProviderTextDelta {
+        turn_id: WebTurnId,
+        model_call_id: WebLiveResourceId,
+        part_index: u32,
+        content: String,
+    },
+    ResyncRequired {
+        /// Positive because production starts from a positive snapshot cursor.
+        cursor: WebPositiveU64,
+    },
 }
 
 /// Closed browser-visible class of matched indexed content.
@@ -1123,26 +1537,12 @@ impl<'de> Deserialize<'de> for WebDollarAmount {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let (whole, fractional) = value
-            .split_once('.')
-            .map_or((value.as_str(), None), |(whole, fractional)| {
-                (whole, Some(fractional))
-            });
-        let whole_is_canonical = !whole.is_empty()
-            && whole.bytes().all(|byte| byte.is_ascii_digit())
-            && (whole == "0" || !whole.starts_with('0'));
-        let fractional_is_canonical = fractional.is_none_or(|fractional| {
-            !fractional.is_empty()
-                && fractional.len() <= 28
-                && fractional.bytes().all(|byte| byte.is_ascii_digit())
-                && !fractional.ends_with('0')
-        });
-        let coefficient = format!("{whole}{}", fractional.unwrap_or_default());
-        let significant_coefficient = coefficient.trim_start_matches('0');
-        let coefficient_fits = significant_coefficient.len() < 29
-            || (significant_coefficient.len() == 29
-                && significant_coefficient <= "79228162514264337593543950335");
-        if !whole_is_canonical || !fractional_is_canonical || !coefficient_fits {
+        let parsed = value.parse::<rust_decimal::Decimal>();
+        if parsed.is_err()
+            || parsed.is_ok_and(|parsed| {
+                parsed.is_sign_negative() || parsed.normalize().to_string() != value
+            })
+        {
             return Err(de::Error::custom(
                 "dollar amount must be a canonical nonnegative decimal",
             ));
@@ -1416,7 +1816,22 @@ pub enum WebAttentionState {
     AwaitingToolRecovery,
     AwaitingReconciliation,
     RunnerLost,
+    Parked,
     Idle,
+}
+
+/// The durable session state one attention summary projects.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionLifecycleState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+    Terminal,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1434,6 +1849,7 @@ pub enum WebAttentionBlockedReason {
     ExternalChangeRequired,
     AuthorizationRequired,
     ExecutionFailure,
+    FinishCheckFailed,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1490,6 +1906,7 @@ pub struct WebAttentionSummary {
     ))]
     pub current_turn_id: Option<String>,
     pub state: WebAttentionState,
+    pub lifecycle_state: WebAttentionLifecycleState,
     pub action: Option<WebAttentionAction>,
     pub goal_block: Option<WebAttentionGoalBlock>,
     pub judge: WebAttentionJudgeFacts,
@@ -1589,386 +2006,6 @@ pub struct WebSessionCatalogSnapshot {
     pub continuation: Option<WebSessionCatalogContinuation>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchEventKind {
-    PullRequestOpened,
-    PullRequestClosed,
-    PullRequestMerged,
-    HeadChanged,
-    MergeableStateChanged,
-    ChecksCompleted,
-    CheckRunCompleted,
-    BranchWorkflowRunCompleted,
-    ReviewSubmitted,
-    ThreadOpened,
-    ThreadResolved,
-    Labeled,
-    Unlabeled,
-    BaseAdvanced,
-    ReactionChanged,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchEvent {
-    pub id: String,
-    pub cursor_generation: String,
-    pub event_ordinal: u32,
-    pub kind: WebRepoWatchEventKind,
-    pub pull_request: Option<String>,
-    pub observed_at_unix_milliseconds: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchDispatch {
-    pub id: String,
-    pub event_id: String,
-    pub rule: String,
-    pub attempted_at_unix_milliseconds: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchSettlement {
-    pub dispatch_id: String,
-    pub event_id: String,
-    pub settled_at_unix_milliseconds: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchLatestWebhook {
-    pub receipt_sequence: String,
-    pub event_name: String,
-    pub action_name: Option<String>,
-    pub received_at_unix_milliseconds: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchWebhookWindow {
-    pub seconds: u32,
-    pub received: String,
-    pub projected: String,
-    pub terminal: String,
-    pub quarantined: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchEventKindCount {
-    pub kind: WebRepoWatchEventKind,
-    pub count: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchRepositoryStatus {
-    pub repository: String,
-    pub cursor_generation: Option<String>,
-    pub observed_at_unix_milliseconds: Option<String>,
-    pub latest_webhook: Option<WebRepoWatchLatestWebhook>,
-    pub previous_five_minutes: WebRepoWatchWebhookWindow,
-    pub previous_hour: WebRepoWatchWebhookWindow,
-    pub latest_projection_latency_milliseconds: Option<String>,
-    pub maximum_projection_latency_milliseconds_previous_hour: Option<String>,
-    pub event_kind_counts_previous_hour: Vec<WebRepoWatchEventKindCount>,
-    pub last_observed_event: Option<WebRepoWatchEvent>,
-    pub last_actionable_event: Option<WebRepoWatchEvent>,
-    pub last_dispatch_attempt: Option<WebRepoWatchDispatch>,
-    pub last_automation_settlement: Option<WebRepoWatchSettlement>,
-    pub held_slot_count: String,
-    pub queued_obligation_count: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchRepositoryStatusPage {
-    #[schemars(length(max = 64))]
-    pub repositories: Vec<WebRepoWatchRepositoryStatus>,
-    pub continuation_after_repository: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchLifecycle {
-    Open,
-    Closed,
-    Merged,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchMergeable {
-    Mergeable,
-    Conflicting,
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchDraftStatus {
-    Draft,
-    ReadyForReview,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchChecksStatus {
-    NoCompletedSuites,
-    Passing,
-    Failing,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchReviewDecision {
-    None,
-    Commented,
-    Approved,
-    ChangesRequested,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebRepoWatchAutomationStatus {
-    Unattempted {},
-    Held {
-        dispatch_id: String,
-    },
-    Queued {
-        latest_event_id: String,
-    },
-    NonConverged {
-        dispatch_id: String,
-    },
-    StaleSeal {
-        dispatch_id: String,
-        sealed_event_id: String,
-    },
-    CurrentHeadSealed {
-        dispatch_id: String,
-        sealed_event_id: String,
-        settled_at_unix_milliseconds: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchPullRequest {
-    pub number: String,
-    pub title: String,
-    pub head: String,
-    pub head_repository: String,
-    pub head_branch: String,
-    pub base_branch: String,
-    pub lifecycle: WebRepoWatchLifecycle,
-    pub mergeable: WebRepoWatchMergeable,
-    pub draft: WebRepoWatchDraftStatus,
-    pub checks: WebRepoWatchChecksStatus,
-    pub review_decision: WebRepoWatchReviewDecision,
-    pub stale_review_count: String,
-    pub unresolved_thread_count: String,
-    pub open_parent: Option<String>,
-    pub open_child_count: String,
-    pub automation: WebRepoWatchAutomationStatus,
-    pub last_observed_event: Option<WebRepoWatchEvent>,
-    pub last_actionable_event: Option<WebRepoWatchEvent>,
-    pub last_dispatch_attempt: Option<WebRepoWatchDispatch>,
-    pub last_automation_settlement: Option<WebRepoWatchSettlement>,
-    pub held_slot_count: String,
-    pub queued_obligation_count: String,
-    pub commissioned_session_count: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchPullRequestPage {
-    pub repository: String,
-    #[schemars(length(max = 64))]
-    pub pull_requests: Vec<WebRepoWatchPullRequest>,
-    pub continuation_after_pull_request: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchHeldSlotBlocker {
-    UndeliveredAction,
-    DeliveryTurnRuntimeRelevant,
-    LiveRuntimeTurn,
-    PursuingGoal,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebRepoWatchSingletonScope {
-    PullRequest {
-        repository: String,
-        number: String,
-    },
-    Stack {
-        repository: String,
-        root_pull_request: String,
-    },
-    Rule {},
-    Repository {
-        repository: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchHeldSlot {
-    pub dispatch_id: String,
-    pub scope: WebRepoWatchSingletonScope,
-    pub rule: String,
-    pub held_since_unix_microseconds: String,
-    pub session_ids: Vec<String>,
-    pub blockers: Vec<WebRepoWatchHeldSlotBlocker>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebRepoWatchObligationReadiness {
-    Ready {},
-    Occupied {
-        dispatch_id: String,
-        session_ids: Vec<String>,
-    },
-    /// Held by a live independently commissioned session, which owns no
-    /// repository-watch dispatch identity to report alongside it.
-    ExternallyBlocked {
-        session_ids: Vec<String>,
-    },
-    Cooldown {
-        eligible_at_unix_milliseconds: Option<String>,
-    },
-    Parked {
-        parked_at_unix_milliseconds: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchQueuedObligation {
-    pub id: String,
-    pub scope: WebRepoWatchSingletonScope,
-    pub rule: String,
-    pub first_event_id: String,
-    pub latest_event_id: String,
-    pub matched_event_count: String,
-    pub owed_since_unix_microseconds: String,
-    pub latest_match_at_unix_milliseconds: String,
-    pub failed_attempts: String,
-    pub readiness: WebRepoWatchObligationReadiness,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchHeldCursor {
-    pub held_since_unix_microseconds: String,
-    pub dispatch_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchObligationCursor {
-    pub owed_since_unix_microseconds: String,
-    pub obligation_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchWorkPage {
-    #[schemars(length(max = 64))]
-    pub held_slots: Vec<WebRepoWatchHeldSlot>,
-    pub held_continuation_after: Option<WebRepoWatchHeldCursor>,
-    #[schemars(length(max = 64))]
-    pub queued_obligations: Vec<WebRepoWatchQueuedObligation>,
-    pub obligation_continuation_after: Option<WebRepoWatchObligationCursor>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebRepoWatchSessionPurpose {
-    RuleDispatch {
-        dispatch_id: String,
-        event_id: String,
-        rule: String,
-        template: String,
-    },
-    OperatorCommission {
-        dispatch_id: String,
-        template: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchPullRequestSession {
-    pub commissioned_at_unix_microseconds: String,
-    pub purpose: WebRepoWatchSessionPurpose,
-    pub attention: WebAttentionSummary,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchSessionCursor {
-    pub commissioned_at_unix_microseconds: String,
-    pub session_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchPullRequestSessionPage {
-    #[schemars(length(max = 64))]
-    pub sessions: Vec<WebRepoWatchPullRequestSession>,
-    pub continuation_before: Option<WebRepoWatchSessionCursor>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchWebhookDisposition {
-    Projected,
-    Committed,
-    DuplicateState,
-    Superseded,
-    Ignored,
-    Quarantined,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchWebhookActivity {
-    pub receipt_sequence: String,
-    pub event_name: String,
-    pub action_name: Option<String>,
-    pub received_at_unix_milliseconds: String,
-    pub projection_count: String,
-    pub latest_projected_at_unix_milliseconds: Option<String>,
-    pub disposition: Option<WebRepoWatchWebhookDisposition>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchEventCursor {
-    pub cursor_generation: String,
-    pub event_ordinal: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchActivityPage {
-    #[schemars(length(max = 100))]
-    pub events: Vec<WebRepoWatchEvent>,
-    pub event_continuation_before: Option<WebRepoWatchEventCursor>,
-    #[schemars(length(max = 100))]
-    pub webhooks: Vec<WebRepoWatchWebhookActivity>,
-    pub webhook_continuation_before_receipt_sequence: Option<String>,
-}
-
 /// One generated file and its repository-relative destination.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedArtifact {
@@ -2015,6 +2052,9 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let example_json = serde_json::to_string_pretty(&example)
         .map_err(|_| GenerateWebContractError::Serialization)?
         + "\n";
+    let bootstrap_json = serde_json::to_string_pretty(&WebContractBootstrap::current())
+        .map_err(|_| GenerateWebContractError::Serialization)?
+        + "\n";
 
     Ok(vec![
         GeneratedArtifact {
@@ -2028,6 +2068,10 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
             contents: example_json,
+        },
+        GeneratedArtifact {
+            path: "clients/web/src/generated/web-contract-bootstrap.json",
+            contents: bootstrap_json,
         },
     ])
 }
@@ -2044,6 +2088,19 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
     make_property_nullable(&mut timeline_window_schema, "continuation_before")?;
     make_property_nullable(&mut timeline_window_schema, "continuation_after")?;
 
+    let mut timeline_detail_schema =
+        canonical_schema(schemars::schema_for!(WebSessionTimelineDetailPage).to_value());
+    set_string_max_length(
+        &mut timeline_detail_schema,
+        "/$defs/WebTimelineTextExcerpt/properties/text",
+        max_timeline_detail_bytes(),
+    )?;
+    set_array_max_items(
+        &mut timeline_detail_schema,
+        "/properties/items",
+        u32::from(max_timeline_detail_items()),
+    )?;
+
     let attention_snapshot_schema =
         canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
     let attention_event_schema =
@@ -2055,6 +2112,45 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
     make_pointer_nullable(
         &mut session_catalog_schema,
         "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
+    )?;
+
+    let mut live_snapshot_schema =
+        canonical_schema(schemars::schema_for!(WebSessionLiveSnapshot).to_value());
+    make_property_nullable(&mut live_snapshot_schema, "active")?;
+    make_property_nullable(&mut live_snapshot_schema, "reconciliation")?;
+    make_property_nullable(&mut live_snapshot_schema, "runner")?;
+    make_pointer_nullable(
+        &mut live_snapshot_schema,
+        "/$defs/WebSessionLiveActiveState/oneOf/0/properties/model_call_id",
+    )?;
+    set_array_max_items(
+        &mut live_snapshot_schema,
+        "/properties/queued_turn_ids",
+        u32::from(max_session_live_queued_turns()),
+    )?;
+
+    let mut live_event_schema =
+        canonical_schema(schemars::schema_for!(WebSessionLiveStreamEvent).to_value());
+    make_pointer_nullable(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveSnapshot/properties/active",
+    )?;
+    make_pointer_nullable(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveSnapshot/properties/reconciliation",
+    )?;
+    make_pointer_nullable(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveSnapshot/properties/runner",
+    )?;
+    make_pointer_nullable(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveActiveState/oneOf/0/properties/model_call_id",
+    )?;
+    set_array_max_items(
+        &mut live_event_schema,
+        "/$defs/WebSessionLiveSnapshot/properties/queued_turn_ids",
+        u32::from(max_session_live_queued_turns()),
     )?;
 
     let mut search_page_schema = schemars::schema_for!(WebSearchPage).to_value();
@@ -2101,6 +2197,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             schema: timeline_window_schema,
         },
         ContractSchema {
+            name: "WebSessionTimelineDetailPage",
+            decoder: "decodeWebSessionTimelineDetailPage",
+            schema: timeline_detail_schema,
+        },
+        ContractSchema {
             name: "WebAttentionSnapshot",
             decoder: "decodeWebAttentionSnapshot",
             schema: attention_snapshot_schema,
@@ -2114,6 +2215,16 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebSessionCatalogSnapshot",
             decoder: "decodeWebSessionCatalogSnapshot",
             schema: session_catalog_schema,
+        },
+        ContractSchema {
+            name: "WebSessionLiveSnapshot",
+            decoder: "decodeWebSessionLiveSnapshot",
+            schema: live_snapshot_schema,
+        },
+        ContractSchema {
+            name: "WebSessionLiveStreamEvent",
+            decoder: "decodeWebSessionLiveStreamEvent",
+            schema: live_event_schema,
         },
         ContractSchema {
             name: "WebImportListRequest",
@@ -2169,35 +2280,6 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             decoder: "decodeWebUsageCallPage",
             schema: usage_call_page_schema,
         },
-        ContractSchema {
-            name: "WebRepoWatchRepositoryStatusPage",
-            decoder: "decodeWebRepoWatchRepositoryStatusPage",
-            schema: canonical_schema(
-                schemars::schema_for!(WebRepoWatchRepositoryStatusPage).to_value(),
-            ),
-        },
-        ContractSchema {
-            name: "WebRepoWatchPullRequestPage",
-            decoder: "decodeWebRepoWatchPullRequestPage",
-            schema: canonical_schema(schemars::schema_for!(WebRepoWatchPullRequestPage).to_value()),
-        },
-        ContractSchema {
-            name: "WebRepoWatchWorkPage",
-            decoder: "decodeWebRepoWatchWorkPage",
-            schema: canonical_schema(schemars::schema_for!(WebRepoWatchWorkPage).to_value()),
-        },
-        ContractSchema {
-            name: "WebRepoWatchPullRequestSessionPage",
-            decoder: "decodeWebRepoWatchPullRequestSessionPage",
-            schema: canonical_schema(
-                schemars::schema_for!(WebRepoWatchPullRequestSessionPage).to_value(),
-            ),
-        },
-        ContractSchema {
-            name: "WebRepoWatchActivityPage",
-            decoder: "decodeWebRepoWatchActivityPage",
-            schema: canonical_schema(schemars::schema_for!(WebRepoWatchActivityPage).to_value()),
-        },
     ])
 }
 
@@ -2225,6 +2307,39 @@ fn make_pointer_nullable(
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
     let concrete = property.take();
     *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
+}
+
+fn set_string_max_length(
+    schema: &mut Value,
+    property_pointer: &str,
+    max_length: u32,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(property_pointer)
+        .and_then(Value::as_object_mut)
+        .filter(|property| property.get("type").and_then(Value::as_str) == Some("string"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    property.insert("maxLength".to_owned(), json!(max_length));
+    Ok(())
+}
+
+/// Stamps an array bound onto a generated schema from the value's owning crate.
+///
+/// Restating the ceiling as a `schemars` literal lets the generated client and
+/// the advertised bootstrap limit drift apart when the owning crate changes, so
+/// the bound is written here from the same function bootstrap reports.
+fn set_array_max_items(
+    schema: &mut Value,
+    property_pointer: &str,
+    max_items: u32,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(property_pointer)
+        .and_then(Value::as_object_mut)
+        .filter(|property| property.get("type").and_then(Value::as_str) == Some("array"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    property.insert("maxItems".to_owned(), json!(max_items));
     Ok(())
 }
 
@@ -2256,6 +2371,8 @@ fn runtime_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebContr
     schema_values.sort_all_objects();
     let schema_values = serde_json::to_string_pretty(&schema_values)
         .map_err(|_| GenerateWebContractError::Serialization)?;
+    let max_detail_bytes = max_timeline_detail_bytes();
+    let detail_envelope_bytes = timeline_detail_envelope_bytes();
     let mut output = format!(
         r##"// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.
 // Do not edit by hand.
@@ -2461,6 +2578,266 @@ function assertSchema(root, schema, value, path) {{
   }}
 }}
 
+function sameTimelineAddress(left, right) {{
+  return left.event_sequence === right.event_sequence;
+}}
+
+function sameBodyContinuation(left, right) {{
+  return (
+    sameTimelineAddress(left.address, right.address) &&
+    left.field === right.field &&
+    left.member_index === right.member_index &&
+    left.offset_bytes === right.offset_bytes
+  );
+}}
+
+function assertTimelineExcerpt(excerpt, address, field, path) {{
+  const offset = BigInt(excerpt.offset_bytes);
+  const total = BigInt(excerpt.total_bytes);
+  const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
+  if (offset > total || end > total) {{
+    fail(path, "an excerpt within its declared byte range");
+  }}
+  if (excerpt.continuation === undefined || excerpt.continuation === null) {{
+    if (end !== total) {{
+      fail(path, "complete when no continuation is present");
+    }}
+    return null;
+  }}
+  const continuation = excerpt.continuation;
+  if (continuation.member_index !== 0) {{
+    fail(`${{path}}.continuation.member_index`, "zero for a singular body field");
+  }}
+  if (end >= total) {{
+    fail(`${{path}}.continuation`, "present only before the declared body end");
+  }}
+  if (!sameTimelineAddress(continuation.address, address) || continuation.field !== field) {{
+    fail(`${{path}}.continuation`, "the same body field at the same address");
+  }}
+  if (BigInt(continuation.offset_bytes) !== end) {{
+    fail(`${{path}}.continuation.offset_bytes`, "the byte immediately after the excerpt");
+  }}
+  return continuation;
+}}
+
+function assertTimelineDetailPage(value) {{
+  const maxProjectedBodyBytes = {max_detail_bytes};
+  const detailEnvelopeBytes = {detail_envelope_bytes};
+  const terminalKinds = new Set([
+    "turn_failed",
+    "turn_completed",
+    "turn_refused",
+    "turn_cancelled",
+    "turn_reconciliation_required",
+  ]);
+  const bodyOwnedKinds = new Set([
+    "input_accepted",
+    "model_call_transition",
+    "turn_activated",
+    ...terminalKinds,
+  ]);
+  let expectedBodyContinuation = null;
+  let computedProjectedBodyBytes = 0;
+  let previousAddress = null;
+  value.items.forEach((item, index) => {{
+    const path = `timeline_detail_page.items[${{index}}]`;
+    if (expectedBodyContinuation !== null) {{
+      fail(path, "absent after a continued body");
+    }}
+    const address = BigInt(item.address.event_sequence);
+    if (previousAddress !== null && address <= previousAddress) {{
+      fail(`${{path}}.address`, "strictly increasing after the previous item");
+    }}
+    previousAddress = address;
+    let continuation = null;
+    let textBytes = 0;
+    switch (item.body.type) {{
+      case "user_input":
+        if (item.kind !== "input_accepted") {{
+          fail(`${{path}}.kind`, "input_accepted for a user_input body");
+        }}
+        continuation = assertTimelineExcerpt(
+          item.body.text,
+          item.address,
+          "input_text",
+          `${{path}}.body.text`,
+        );
+        textBytes = new TextEncoder().encode(item.body.text.text).byteLength;
+        break;
+      case "model_call":
+        if (item.kind !== "model_call_transition") {{
+          fail(`${{path}}.kind`, "model_call_transition for a model_call body");
+        }}
+        if (item.body.response !== undefined && item.body.response !== null) {{
+          continuation = assertTimelineExcerpt(
+            item.body.response,
+            item.address,
+            "model_response",
+            `${{path}}.body.response`,
+          );
+          textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+        }}
+        if (item.body.state.type !== "terminal") {{
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (
+            (item.body.response !== undefined && item.body.response !== null) ||
+            hasUsage ||
+            (item.body.provider_failure_cause !== undefined &&
+              item.body.provider_failure_cause !== null)
+          ) {{
+            fail(
+              `${{path}}.body`,
+              "terminal evidence only at a terminal model-call state",
+            );
+          }}
+        }} else {{
+          const hasFailureCause =
+            item.body.provider_failure_cause !== undefined &&
+            item.body.provider_failure_cause !== null;
+          if (hasFailureCause && item.body.state.disposition !== "known_failed") {{
+            fail(
+              `${{path}}.body.provider_failure_cause`,
+              "present only for a known_failed terminal model call",
+            );
+          }}
+          if (
+            item.body.response !== undefined &&
+            item.body.response !== null &&
+            item.body.state.disposition !== "completed"
+          ) {{
+            fail(
+              `${{path}}.body.response`,
+              "present only for a completed terminal model call",
+            );
+          }}
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (hasUsage && item.body.state.disposition === "cancelled") {{
+            fail(
+              `${{path}}.body.usage`,
+              "unreported for a cancelled terminal model call",
+            );
+          }}
+        }}
+        break;
+      case "turn_lifecycle":
+        if (item.body.lifecycle === "activated" && item.kind !== "turn_activated") {{
+          fail(`${{path}}.kind`, "turn_activated for an activated lifecycle");
+        }}
+        if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {{
+          fail(`${{path}}.kind`, "a terminal turn event for a terminalized lifecycle");
+        }}
+        const lifecycleCauseByKind = {{
+          turn_activated: "activated",
+          turn_failed: "failed",
+          turn_completed: "completed",
+          turn_refused: "refused",
+          turn_cancelled: "cancelled",
+          turn_reconciliation_required: "reconciliation_required",
+        }};
+        if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {{
+          fail(`${{path}}.body.cause_code`, `the cause for ${{item.kind}}`);
+        }}
+        break;
+      case "event_fact":
+        if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {{
+          fail(`${{path}}.body.kind`, "the matching header-only event kind");
+        }}
+        break;
+      default:
+        fail(`${{path}}.body.type`, "a detail body variant this decoder classifies");
+    }}
+    const computedItemBytes = detailEnvelopeBytes + textBytes;
+    if (item.projected_body_bytes !== computedItemBytes) {{
+      fail(`${{path}}.projected_body_bytes`, `the computed ${{computedItemBytes}} bytes`);
+    }}
+    computedProjectedBodyBytes += computedItemBytes;
+    if (computedProjectedBodyBytes > maxProjectedBodyBytes) {{
+      fail("timeline_detail_page.projected_body_bytes", `at most ${{maxProjectedBodyBytes}} bytes`);
+    }}
+    if (continuation !== null) {{
+      expectedBodyContinuation = continuation;
+    }}
+  }});
+  if (value.projected_body_bytes !== computedProjectedBodyBytes) {{
+    fail(
+      "timeline_detail_page.projected_body_bytes",
+      `the computed ${{computedProjectedBodyBytes}} bytes`,
+    );
+  }}
+
+  if (value.continuation === undefined || value.continuation === null) {{
+    if (expectedBodyContinuation !== null) {{
+      fail("timeline_detail_page.continuation", "the excerpt body continuation");
+    }}
+    return;
+  }}
+  if (value.continuation.type === "more_body") {{
+    if (
+      expectedBodyContinuation === null ||
+      !sameBodyContinuation(value.continuation.body, expectedBodyContinuation)
+    ) {{
+      fail("timeline_detail_page.continuation.body", "the excerpt body continuation");
+    }}
+  }} else {{
+    if (expectedBodyContinuation !== null) {{
+      fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
+    }}
+    if (previousAddress === null) {{
+      fail("timeline_detail_page.continuation", "absent on an empty page");
+    }}
+    if (BigInt(value.continuation.address.event_sequence) <= previousAddress) {{
+      fail("timeline_detail_page.continuation.address", "after the final returned item");
+    }}
+  }}
+}}
+
+export function decodeWebSessionTimelineDetailPage(value) {{
+  assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
+  assertTimelineDetailPage(value);
+  return value;
+}}
+
+function assertLiveSnapshot(snapshot, path) {{
+  const queuedTurnCount = BigInt(snapshot.queued_turn_count);
+  const previewLimit = BigInt({live_preview_limit});
+  const expectedPreviewLength = queuedTurnCount > previewLimit ? previewLimit : queuedTurnCount;
+  if (BigInt(snapshot.queued_turn_ids.length) !== expectedPreviewLength) {{
+    fail(`${{path}}.queued_turn_ids`, `exactly ${{expectedPreviewLength}} IDs for queued_turn_count`);
+  }}
+  if (new Set(snapshot.queued_turn_ids).size !== snapshot.queued_turn_ids.length) {{
+    fail(`${{path}}.queued_turn_ids`, "unique turn IDs");
+  }}
+  const occupiedTurnId = snapshot.active?.turn_id ?? snapshot.reconciliation?.turn_id;
+  if (occupiedTurnId !== undefined && snapshot.queued_turn_ids.includes(occupiedTurnId)) {{
+    fail(`${{path}}.queued_turn_ids`, "disjoint from active and reconciliation turn IDs");
+  }}
+  if (snapshot.active != null && snapshot.reconciliation != null) {{
+    fail(`${{path}}.reconciliation`, "absent while an active turn is present");
+  }}
+  if (
+    snapshot.active?.state.kind === "awaiting_child" &&
+    snapshot.active.state.child_session_id === snapshot.session_id
+  ) {{
+    fail(`${{path}}.active.state.child_session_id`, "different from the parent session ID");
+  }}
+  if (snapshot.active?.state.kind === "awaiting_runner_recovery") {{
+    const recovery = snapshot.active.state;
+    const runner = snapshot.runner;
+    const compatibleRunner =
+      runner != null &&
+      (runner.state === "runner_lost" || runner.state === "runner_lost_before_pin") &&
+      runner.runner_id === recovery.runner_id &&
+      runner.placement_revision === recovery.placement_revision;
+    if (!compatibleRunner) {{
+      fail(`${{path}}.runner`, "the runner placement required by awaiting_runner_recovery");
+    }}
+  }}
+}}
+
 function assertAttentionSummary(summary, path) {{
   const action = summary.action ?? null;
   const goalBlock = summary.goal_block ?? null;
@@ -2477,6 +2854,7 @@ function assertAttentionSummary(summary, path) {{
       "awaiting_tool_recovery",
       "awaiting_reconciliation",
       "runner_lost",
+      "parked",
       "idle",
     ].includes(summary.state) && action === null);
   if (!valid) {{
@@ -3255,16 +3633,18 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
 }}
 "##,
         max_attention_title_scalars = MAX_ATTENTION_TITLE_SCALARS,
+        live_preview_limit = max_session_live_queued_turns(),
         max_search_snippet_bytes = max_search_snippet_bytes(),
     );
     for schema in schemas {
         // These decoders carry hand-written structural invariants beyond their
-        // schema shape (blob view provenance, attention state/action agreement,
-        // search highlight ranges) and are emitted verbatim in the template
-        // above.
+        // schema shape (blob view provenance, timeline-detail correlations,
+        // attention state/action agreement, search highlight ranges) and are
+        // emitted verbatim in the template above.
         if matches!(
             schema.name,
             "WebBlobDescriptor"
+                | "WebSessionTimelineDetailPage"
                 | "WebAttentionSnapshot"
                 | "WebAttentionStreamEvent"
                 | "WebSessionCatalogSnapshot"
@@ -3282,7 +3662,7 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
         ));
         if schema.name == "WebContractBootstrap" {
             output.push_str(&format!(
-                "  if (value.contract.name !== {name:?} || value.contract.version !== {version:?} ||\n      value.capabilities.bounded_json !== {bounded_json} ||\n      value.capabilities.same_origin_json_mutations !== {same_origin_json_mutations} ||\n      value.capabilities.ndjson_streaming !== {ndjson_streaming} ||\n      value.capabilities.import_discovery !== {import_discovery} ||\n      value.capabilities.imported_continuations !== {imported_continuations} ||\n      value.limits.max_json_body_bytes !== {max_json_body_bytes} ||\n      value.limits.max_ndjson_item_bytes !== {max_ndjson_item_bytes}) {{\n    throw new TypeError(\"bootstrap carries an incompatible web contract\");\n  }}\n",
+                "  if (value.contract.name !== {name:?} || value.contract.version !== {version:?} ||\n      value.capabilities.bounded_json !== {bounded_json} ||\n      value.capabilities.same_origin_json_mutations !== {same_origin_json_mutations} ||\n      value.capabilities.ndjson_streaming !== {ndjson_streaming} ||\n      value.capabilities.import_discovery !== {import_discovery} ||\n      value.capabilities.imported_continuations !== {imported_continuations} ||\n      value.capabilities.bounded_session_live !== {bounded_session_live} ||\n      value.limits.max_json_body_bytes !== {max_json_body_bytes} ||\n      value.limits.max_ndjson_item_bytes !== {max_ndjson_item_bytes} ||\n      value.limits.max_session_live_queued_turns !== {max_session_live_queued_turns}) {{\n    throw new TypeError(\"bootstrap carries an incompatible web contract\");\n  }}\n",
                 name = WEB_CONTRACT_NAME,
                 version = WEB_CONTRACT_VERSION,
                 bounded_json = current_bootstrap.capabilities.bounded_json,
@@ -3290,8 +3670,21 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
                 ndjson_streaming = current_bootstrap.capabilities.ndjson_streaming,
                 import_discovery = current_bootstrap.capabilities.import_discovery,
                 imported_continuations = current_bootstrap.capabilities.imported_continuations,
+                bounded_session_live = current_bootstrap.capabilities.bounded_session_live,
                 max_json_body_bytes = current_bootstrap.limits.max_json_body_bytes,
                 max_ndjson_item_bytes = current_bootstrap.limits.max_ndjson_item_bytes,
+                max_session_live_queued_turns = current_bootstrap.limits.max_session_live_queued_turns,
+            ));
+        }
+        if schema.name == "WebSessionLiveSnapshot" {
+            output.push_str("  assertLiveSnapshot(value, \"session_live_snapshot\");\n");
+        }
+        if schema.name == "WebSessionLiveStreamEvent" {
+            output.push_str(
+                "  if (value.kind === \"snapshot\") {\n    assertLiveSnapshot(value.snapshot, \"session_live_event.snapshot\");\n  }\n  if (value.kind === \"durable\" && value.cursor !== value.address.event_sequence) {\n    fail(\"session_live_event.address.event_sequence\", \"equal to cursor\");\n  }\n",
+            );
+            output.push_str(&format!(
+                "  if (value.kind === \"provider_text_delta\" && new TextEncoder().encode(value.content).length > {MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES}) {{\n    fail(\"session_live_event.content\", \"at most {MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES} UTF-8 bytes\");\n  }}\n"
             ));
         }
         output.push_str("  return value;\n}\n\n");
@@ -3449,9 +3842,8 @@ mod tests {
 
     use super::{
         WebAttentionStreamEvent, WebContractBootstrap, WebContractExample, WebDollarAmount,
-        WebRepoWatchAutomationStatus, WebRepoWatchObligationReadiness, WebRepoWatchSessionPurpose,
-        WebSessionId, WebTimelineEventSequence, WebU64, WebUsageCallCount, WebUsageRateVersion,
-        WebUsageTimestampMicros, generated_artifacts,
+        WebSessionId, WebTimelineEventSequence, WebTimelineModelCallState, WebU64,
+        WebUsageCallCount, WebUsageRateVersion, WebUsageTimestampMicros, generated_artifacts,
     };
 
     #[track_caller]
@@ -3481,6 +3873,11 @@ mod tests {
     #[test]
     fn checked_in_round_trip_fixture_matches_rust_authority() {
         assert_generated_artifact_current("crates/web-contract/tests/fixtures/example.json");
+    }
+
+    #[test]
+    fn checked_in_bootstrap_fixture_matches_rust_authority() {
+        assert_generated_artifact_current("clients/web/src/generated/web-contract-bootstrap.json");
     }
 
     #[test]
@@ -3522,28 +3919,6 @@ mod tests {
     }
 
     #[test]
-    fn repository_tagged_variants_reject_unknown_fields() {
-        assert!(
-            serde_json::from_str::<WebRepoWatchAutomationStatus>(
-                r#"{"kind":"held","dispatch_id":"dispatch","future_field":true}"#,
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_str::<WebRepoWatchObligationReadiness>(
-                r#"{"kind":"ready","future_field":true}"#,
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_str::<WebRepoWatchSessionPurpose>(
-                r#"{"kind":"operator_commission","dispatch_id":"dispatch","template":"template","future_field":true}"#,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn attention_runtime_decoder_enforces_string_patterns() {
         let runtime = generated_artifacts()
             .expect("the Rust schemas can generate browser artifacts")
@@ -3568,6 +3943,22 @@ mod tests {
             serde_json::from_str::<WebTimelineEventSequence>(r#""18446744073709551616""#).is_err()
         );
         assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""1""#).is_ok());
+    }
+
+    #[test]
+    fn model_call_state_rejects_contradictory_extra_fields() {
+        assert!(
+            serde_json::from_str::<WebTimelineModelCallState>(
+                r#"{"type":"prepared","disposition":"completed"}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WebTimelineModelCallState>(
+                r#"{"type":"terminal","disposition":"completed"}"#,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

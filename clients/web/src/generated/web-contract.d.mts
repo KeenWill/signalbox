@@ -18,7 +18,7 @@ export type WebAttentionActivity = {
 
 export type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" | "runner";
 
-export type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
+export type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure" | "finish_check_failed";
 
 export type WebAttentionGoalBlock = {
   readonly generation: string;
@@ -33,7 +33,9 @@ export type WebAttentionJudgeFacts = {
   readonly failed: string;
 };
 
-export type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_tool_recovery" | "awaiting_reconciliation" | "runner_lost" | "idle";
+export type WebAttentionLifecycleState = "created" | "dispatched" | "active" | "waiting" | "recovering" | "blocked" | "parked" | "terminal";
+
+export type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_tool_recovery" | "awaiting_reconciliation" | "runner_lost" | "parked" | "idle";
 
 export type WebAttentionSummary = {
   readonly action?: WebAttentionAction | null;
@@ -41,6 +43,7 @@ export type WebAttentionSummary = {
   readonly goal_block?: WebAttentionGoalBlock | null;
   readonly judge: WebAttentionJudgeFacts;
   readonly last_activity: WebAttentionActivity;
+  readonly lifecycle_state: WebAttentionLifecycleState;
   readonly session_id: string;
   readonly state: WebAttentionState;
 };
@@ -76,13 +79,17 @@ export type WebBlobDerivationProducer = {
   readonly model_call_id: string;
 };
 
+export type WebBlobId = string;
+
 export type WebBlobViewKind = "download" | "browser_native" | "thumbnail" | "preview";
 
 export type WebContractCapabilities = {
   readonly blob_derivations: boolean;
   readonly bounded_json: boolean;
   readonly bounded_lexical_search: boolean;
+  readonly bounded_session_live: boolean;
   readonly bounded_session_timeline: boolean;
+  readonly bounded_session_timeline_detail: boolean;
   readonly bounded_usage_cost: boolean;
   readonly image_derivatives: boolean;
   readonly immutable_blob_content: boolean;
@@ -103,6 +110,9 @@ export type WebContractLimits = {
   readonly max_search_page_items: number;
   readonly max_search_query_bytes: number;
   readonly max_search_snippet_bytes: number;
+  readonly max_session_live_queued_turns: number;
+  readonly max_timeline_detail_bytes: number;
+  readonly max_timeline_detail_items: number;
   readonly max_timeline_window_bytes: number;
   readonly max_timeline_window_items: number;
   readonly max_usage_aggregate_groups: number;
@@ -179,6 +189,8 @@ export type WebImportedSessionRelationship = "resume" | "fork";
 
 export type WebImportedSpeakerEvidence = "not_attested" | "attested_absent" | "user" | "assistant";
 
+export type WebLiveResourceId = string;
+
 export type WebModelSelection = {
   readonly kind: "direct";
   readonly selection_id: string;
@@ -191,231 +203,9 @@ export type WebNullableU128 = WebU128 | null;
 
 export type WebNullableU64 = WebU64 | null;
 
-export type WebRepoWatchAutomationStatus = {
-  readonly kind: "unattempted";
-} | {
-  readonly dispatch_id: string;
-  readonly kind: "held";
-} | {
-  readonly kind: "queued";
-  readonly latest_event_id: string;
-} | {
-  readonly dispatch_id: string;
-  readonly kind: "non_converged";
-} | {
-  readonly dispatch_id: string;
-  readonly kind: "stale_seal";
-  readonly sealed_event_id: string;
-} | {
-  readonly dispatch_id: string;
-  readonly kind: "current_head_sealed";
-  readonly sealed_event_id: string;
-  readonly settled_at_unix_milliseconds: string;
-};
+export type WebPositiveU64 = string;
 
-export type WebRepoWatchChecksStatus = "no_completed_suites" | "passing" | "failing";
-
-export type WebRepoWatchDispatch = {
-  readonly attempted_at_unix_milliseconds: string;
-  readonly event_id: string;
-  readonly id: string;
-  readonly rule: string;
-};
-
-export type WebRepoWatchDraftStatus = "draft" | "ready_for_review";
-
-export type WebRepoWatchEvent = {
-  readonly cursor_generation: string;
-  readonly event_ordinal: number;
-  readonly id: string;
-  readonly kind: WebRepoWatchEventKind;
-  readonly observed_at_unix_milliseconds: string;
-  readonly pull_request?: string | null;
-};
-
-export type WebRepoWatchEventCursor = {
-  readonly cursor_generation: string;
-  readonly event_ordinal: number;
-};
-
-export type WebRepoWatchEventKind = "pull_request_opened" | "pull_request_closed" | "pull_request_merged" | "head_changed" | "mergeable_state_changed" | "checks_completed" | "check_run_completed" | "branch_workflow_run_completed" | "review_submitted" | "thread_opened" | "thread_resolved" | "labeled" | "unlabeled" | "base_advanced" | "reaction_changed";
-
-export type WebRepoWatchEventKindCount = {
-  readonly count: string;
-  readonly kind: WebRepoWatchEventKind;
-};
-
-export type WebRepoWatchHeldCursor = {
-  readonly dispatch_id: string;
-  readonly held_since_unix_microseconds: string;
-};
-
-export type WebRepoWatchHeldSlot = {
-  readonly blockers: ReadonlyArray<WebRepoWatchHeldSlotBlocker>;
-  readonly dispatch_id: string;
-  readonly held_since_unix_microseconds: string;
-  readonly rule: string;
-  readonly scope: WebRepoWatchSingletonScope;
-  readonly session_ids: ReadonlyArray<string>;
-};
-
-export type WebRepoWatchHeldSlotBlocker = "undelivered_action" | "delivery_turn_runtime_relevant" | "live_runtime_turn" | "pursuing_goal";
-
-export type WebRepoWatchLatestWebhook = {
-  readonly action_name?: string | null;
-  readonly event_name: string;
-  readonly receipt_sequence: string;
-  readonly received_at_unix_milliseconds: string;
-};
-
-export type WebRepoWatchLifecycle = "open" | "closed" | "merged";
-
-export type WebRepoWatchMergeable = "mergeable" | "conflicting" | "unknown";
-
-export type WebRepoWatchObligationCursor = {
-  readonly obligation_id: string;
-  readonly owed_since_unix_microseconds: string;
-};
-
-export type WebRepoWatchObligationReadiness = {
-  readonly kind: "ready";
-} | {
-  readonly dispatch_id: string;
-  readonly kind: "occupied";
-  readonly session_ids: ReadonlyArray<string>;
-} | {
-  readonly kind: "externally_blocked";
-  readonly session_ids: ReadonlyArray<string>;
-} | {
-  readonly eligible_at_unix_milliseconds?: string | null;
-  readonly kind: "cooldown";
-} | {
-  readonly kind: "parked";
-  readonly parked_at_unix_milliseconds: string;
-};
-
-export type WebRepoWatchPullRequest = {
-  readonly automation: WebRepoWatchAutomationStatus;
-  readonly base_branch: string;
-  readonly checks: WebRepoWatchChecksStatus;
-  readonly commissioned_session_count: string;
-  readonly draft: WebRepoWatchDraftStatus;
-  readonly head: string;
-  readonly head_branch: string;
-  readonly head_repository: string;
-  readonly held_slot_count: string;
-  readonly last_actionable_event?: WebRepoWatchEvent | null;
-  readonly last_automation_settlement?: WebRepoWatchSettlement | null;
-  readonly last_dispatch_attempt?: WebRepoWatchDispatch | null;
-  readonly last_observed_event?: WebRepoWatchEvent | null;
-  readonly lifecycle: WebRepoWatchLifecycle;
-  readonly mergeable: WebRepoWatchMergeable;
-  readonly number: string;
-  readonly open_child_count: string;
-  readonly open_parent?: string | null;
-  readonly queued_obligation_count: string;
-  readonly review_decision: WebRepoWatchReviewDecision;
-  readonly stale_review_count: string;
-  readonly title: string;
-  readonly unresolved_thread_count: string;
-};
-
-export type WebRepoWatchPullRequestSession = {
-  readonly attention: WebAttentionSummary;
-  readonly commissioned_at_unix_microseconds: string;
-  readonly purpose: WebRepoWatchSessionPurpose;
-};
-
-export type WebRepoWatchQueuedObligation = {
-  readonly failed_attempts: string;
-  readonly first_event_id: string;
-  readonly id: string;
-  readonly latest_event_id: string;
-  readonly latest_match_at_unix_milliseconds: string;
-  readonly matched_event_count: string;
-  readonly owed_since_unix_microseconds: string;
-  readonly readiness: WebRepoWatchObligationReadiness;
-  readonly rule: string;
-  readonly scope: WebRepoWatchSingletonScope;
-};
-
-export type WebRepoWatchRepositoryStatus = {
-  readonly cursor_generation?: string | null;
-  readonly event_kind_counts_previous_hour: ReadonlyArray<WebRepoWatchEventKindCount>;
-  readonly held_slot_count: string;
-  readonly last_actionable_event?: WebRepoWatchEvent | null;
-  readonly last_automation_settlement?: WebRepoWatchSettlement | null;
-  readonly last_dispatch_attempt?: WebRepoWatchDispatch | null;
-  readonly last_observed_event?: WebRepoWatchEvent | null;
-  readonly latest_projection_latency_milliseconds?: string | null;
-  readonly latest_webhook?: WebRepoWatchLatestWebhook | null;
-  readonly maximum_projection_latency_milliseconds_previous_hour?: string | null;
-  readonly observed_at_unix_milliseconds?: string | null;
-  readonly previous_five_minutes: WebRepoWatchWebhookWindow;
-  readonly previous_hour: WebRepoWatchWebhookWindow;
-  readonly queued_obligation_count: string;
-  readonly repository: string;
-};
-
-export type WebRepoWatchReviewDecision = "none" | "commented" | "approved" | "changes_requested";
-
-export type WebRepoWatchSessionCursor = {
-  readonly commissioned_at_unix_microseconds: string;
-  readonly session_id: string;
-};
-
-export type WebRepoWatchSessionPurpose = {
-  readonly dispatch_id: string;
-  readonly event_id: string;
-  readonly kind: "rule_dispatch";
-  readonly rule: string;
-  readonly template: string;
-} | {
-  readonly dispatch_id: string;
-  readonly kind: "operator_commission";
-  readonly template: string;
-};
-
-export type WebRepoWatchSettlement = {
-  readonly dispatch_id: string;
-  readonly event_id: string;
-  readonly settled_at_unix_milliseconds: string;
-};
-
-export type WebRepoWatchSingletonScope = {
-  readonly kind: "pull_request";
-  readonly number: string;
-  readonly repository: string;
-} | {
-  readonly kind: "stack";
-  readonly repository: string;
-  readonly root_pull_request: string;
-} | {
-  readonly kind: "rule";
-} | {
-  readonly kind: "repository";
-  readonly repository: string;
-};
-
-export type WebRepoWatchWebhookActivity = {
-  readonly action_name?: string | null;
-  readonly disposition?: WebRepoWatchWebhookDisposition | null;
-  readonly event_name: string;
-  readonly latest_projected_at_unix_milliseconds?: string | null;
-  readonly projection_count: string;
-  readonly receipt_sequence: string;
-  readonly received_at_unix_milliseconds: string;
-};
-
-export type WebRepoWatchWebhookDisposition = "projected" | "committed" | "duplicate_state" | "superseded" | "ignored" | "quarantined";
-
-export type WebRepoWatchWebhookWindow = {
-  readonly projected: string;
-  readonly quarantined: string;
-  readonly received: string;
-  readonly seconds: number;
-  readonly terminal: string;
-};
+export type WebProviderModelCallFailureCause = "credential_rejected" | "permission_denied" | "invalid_request" | "target_not_found" | "request_too_large" | "rate_limited" | "quota_exhausted" | "overloaded" | "provider_internal" | "unrecognized";
 
 export type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
 
@@ -494,7 +284,63 @@ export type WebSessionCatalogSummary = {
 
 export type WebSessionId = string;
 
-export type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
+export type WebSessionLiveActiveState = {
+  readonly kind: "running";
+  readonly model_call_id: string | null;
+} | {
+  readonly kind: "awaiting_model_call_recovery";
+  readonly model_call_id: WebLiveResourceId;
+} | {
+  readonly kind: "awaiting_tool_approval";
+  readonly tool_request_id: WebLiveResourceId;
+} | {
+  readonly child_session_id: WebSessionId;
+  readonly kind: "awaiting_child";
+  readonly tool_request_id: WebLiveResourceId;
+} | {
+  readonly kind: "awaiting_tool_recovery";
+  readonly tool_attempt_id: WebLiveResourceId;
+} | {
+  readonly kind: "awaiting_runner_recovery";
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+};
+
+export type WebSessionLiveRunnerConnectionHealth = "connected" | "suspect" | "shutdown" | "lost";
+
+export type WebSessionTimelineDetail = {
+  readonly address: WebTimelineAddress;
+  readonly body: WebSessionTimelineDetailBody;
+  readonly kind: WebSessionTimelineEventKind;
+  readonly projected_body_bytes: number;
+};
+
+export type WebSessionTimelineDetailBody = {
+  readonly attachments: ReadonlyArray<WebTimelineBlobReference>;
+  readonly text: WebTimelineTextExcerpt;
+  readonly turn_id: WebSessionId;
+  readonly type: "user_input";
+} | {
+  readonly model_call_id: WebSessionId;
+  readonly model_identity_id: WebSessionId;
+  readonly provider_failure_cause?: WebProviderModelCallFailureCause | null;
+  readonly request_context_items: WebU64;
+  readonly response?: WebTimelineTextExcerpt | null;
+  readonly state: WebTimelineModelCallState;
+  readonly turn_id: WebSessionId;
+  readonly type: "model_call";
+  readonly usage: WebTimelineModelUsage;
+} | {
+  readonly cause_code: string;
+  readonly lifecycle: WebTimelineTurnLifecycleKind;
+  readonly turn_id: WebSessionId;
+  readonly type: "turn_lifecycle";
+} | {
+  readonly kind: WebSessionTimelineEventKind;
+  readonly type: "event_fact";
+};
+
+export type WebSessionTimelineEventKind = "session_created" | "session_state_changed" | "session_terminal" | "goal_changed" | "command_settled" | "injection_settled" | "session_ownership_changed" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
 
 export type WebSessionTimelineItem = {
   readonly address: WebTimelineAddress;
@@ -519,7 +365,61 @@ export type WebTimelineAddress = {
   readonly event_sequence: WebTimelineEventSequence;
 };
 
+export type WebTimelineBlobReference = {
+  readonly blob_id: WebBlobId;
+  readonly length_bytes: WebU64;
+  readonly media_type?: string | null;
+};
+
+export type WebTimelineBodyContinuation = {
+  readonly address: WebTimelineAddress;
+  readonly field: WebTimelineBodyField;
+  readonly member_index: number;
+  readonly offset_bytes: WebU64;
+};
+
+export type WebTimelineBodyField = "input_text" | "model_response";
+
+export type WebTimelineDetailContinuation = {
+  readonly address: WebTimelineAddress;
+  readonly type: "more_at";
+} | {
+  readonly body: WebTimelineBodyContinuation;
+  readonly type: "more_body";
+};
+
 export type WebTimelineEventSequence = string;
+
+export type WebTimelineModelCallDisposition = "completed" | "known_failed" | "refused" | "cancelled" | "ambiguous";
+
+export type WebTimelineModelCallState = {
+  readonly type: "prepared";
+} | {
+  readonly type: "in_flight";
+} | {
+  readonly type: "cancellation_requested";
+} | {
+  readonly disposition: WebTimelineModelCallDisposition;
+  readonly type: "terminal";
+};
+
+export type WebTimelineModelUsage = {
+  readonly cache_creation_input_tokens?: WebU64 | null;
+  readonly cache_read_input_tokens?: WebU64 | null;
+  readonly input_tokens?: WebU64 | null;
+  readonly output_tokens?: WebU64 | null;
+};
+
+export type WebTimelineTextExcerpt = {
+  readonly continuation?: WebTimelineBodyContinuation | null;
+  readonly offset_bytes: WebU64;
+  readonly text: string;
+  readonly total_bytes: WebU64;
+};
+
+export type WebTimelineTurnLifecycleKind = "activated" | "terminalized";
+
+export type WebTurnId = string;
 
 export type WebU128 = string;
 
@@ -646,6 +546,13 @@ export type WebSessionTimelineWindow = {
   readonly session_id: WebSessionId;
 };
 
+export type WebSessionTimelineDetailPage = {
+  readonly continuation?: WebTimelineDetailContinuation | null;
+  readonly items: ReadonlyArray<WebSessionTimelineDetail>;
+  readonly projected_body_bytes: number;
+  readonly session_id: WebSessionId;
+};
+
 export type WebAttentionSnapshot = {
   readonly continuation_after_session_id?: string | null;
   readonly cursor: string;
@@ -677,6 +584,66 @@ export type WebSessionCatalogSnapshot = {
   readonly sort: WebSessionCatalogSort;
   readonly summaries: ReadonlyArray<WebSessionCatalogSummary>;
   readonly total: WebU64;
+};
+
+export type WebSessionLiveSnapshot = {
+  readonly active: {
+  readonly state: WebSessionLiveActiveState;
+  readonly turn_id: WebTurnId;
+} | null;
+  readonly observed_through: WebPositiveU64;
+  readonly queued_turn_count: WebU64;
+  readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
+  readonly reconciliation: {
+  readonly kind: "model_call";
+  readonly model_call_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
+} | {
+  readonly kind: "tool_attempt";
+  readonly tool_attempt_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
+} | null;
+  readonly runner: {
+  readonly placement_revision: WebPositiveU64;
+  readonly state: "unpinned";
+} | {
+  readonly connection_health: WebSessionLiveRunnerConnectionHealth;
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "pinned";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_lost_before_pin";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_lost";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_abandoned";
+} | null;
+  readonly session_id: WebSessionId;
+};
+
+export type WebSessionLiveStreamEvent = {
+  readonly kind: "snapshot";
+  readonly snapshot: WebSessionLiveSnapshot;
+} | {
+  readonly address: WebTimelineAddress;
+  readonly cursor: WebU64;
+  readonly event_kind: WebSessionTimelineEventKind;
+  readonly kind: "durable";
+} | {
+  readonly content: string;
+  readonly kind: "provider_text_delta";
+  readonly model_call_id: WebLiveResourceId;
+  readonly part_index: number;
+  readonly turn_id: WebTurnId;
+} | {
+  readonly cursor: WebPositiveU64;
+  readonly kind: "resync_required";
 };
 
 export type WebImportListRequest = {
@@ -755,45 +722,18 @@ export type WebUsageCallPage = {
 } | null;
 };
 
-export type WebRepoWatchRepositoryStatusPage = {
-  readonly continuation_after_repository?: string | null;
-  readonly repositories: ReadonlyArray<WebRepoWatchRepositoryStatus>;
-};
-
-export type WebRepoWatchPullRequestPage = {
-  readonly continuation_after_pull_request?: string | null;
-  readonly pull_requests: ReadonlyArray<WebRepoWatchPullRequest>;
-  readonly repository: string;
-};
-
-export type WebRepoWatchWorkPage = {
-  readonly held_continuation_after?: WebRepoWatchHeldCursor | null;
-  readonly held_slots: ReadonlyArray<WebRepoWatchHeldSlot>;
-  readonly obligation_continuation_after?: WebRepoWatchObligationCursor | null;
-  readonly queued_obligations: ReadonlyArray<WebRepoWatchQueuedObligation>;
-};
-
-export type WebRepoWatchPullRequestSessionPage = {
-  readonly continuation_before?: WebRepoWatchSessionCursor | null;
-  readonly sessions: ReadonlyArray<WebRepoWatchPullRequestSession>;
-};
-
-export type WebRepoWatchActivityPage = {
-  readonly event_continuation_before?: WebRepoWatchEventCursor | null;
-  readonly events: ReadonlyArray<WebRepoWatchEvent>;
-  readonly webhook_continuation_before_receipt_sequence?: string | null;
-  readonly webhooks: ReadonlyArray<WebRepoWatchWebhookActivity>;
-};
-
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
 export function decodeWebBlobDescriptor(value: unknown): WebBlobDescriptor;
 export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
+export function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTimelineDetailPage;
 export function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;
 export function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;
 export function decodeWebSessionCatalogSnapshot(value: unknown): WebSessionCatalogSnapshot;
+export function decodeWebSessionLiveSnapshot(value: unknown): WebSessionLiveSnapshot;
+export function decodeWebSessionLiveStreamEvent(value: unknown): WebSessionLiveStreamEvent;
 export function decodeWebImportListRequest(value: unknown): WebImportListRequest;
 export function decodeWebImportListPage(value: unknown): WebImportListPage;
 export function decodeWebImportDescriptor(value: unknown): WebImportDescriptor;
@@ -804,8 +744,3 @@ export function decodeWebImportContinuationResponse(value: unknown): WebImportCo
 export function decodeWebSearchPage(value: unknown): WebSearchPage;
 export function decodeWebUsageSummary(value: unknown): WebUsageSummary;
 export function decodeWebUsageCallPage(value: unknown, order: "newest"): WebUsageCallPage;
-export function decodeWebRepoWatchRepositoryStatusPage(value: unknown): WebRepoWatchRepositoryStatusPage;
-export function decodeWebRepoWatchPullRequestPage(value: unknown): WebRepoWatchPullRequestPage;
-export function decodeWebRepoWatchWorkPage(value: unknown): WebRepoWatchWorkPage;
-export function decodeWebRepoWatchPullRequestSessionPage(value: unknown): WebRepoWatchPullRequestSessionPage;
-export function decodeWebRepoWatchActivityPage(value: unknown): WebRepoWatchActivityPage;

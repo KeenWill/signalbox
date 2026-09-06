@@ -23,9 +23,8 @@ use signalbox_domain::{
     RepoWatchEventKindNameV1, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput,
     RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
     RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
-    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
-    ValidatedModelSettings,
+    RepositorySlug, ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay,
+    ToolApprovalPosture, ToolName, UnsupportedModelSetting, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -60,7 +59,6 @@ use signalbox_process_protocol::{
 use signalbox_tools_git::GitIdentity;
 use signalbox_tools_github::{GITHUB_CREDENTIAL_REFERENCE, GitHubEgressPolicy};
 use signalbox_tools_web::WebFetchEgressPolicy;
-use tokio::io::AsyncReadExt;
 use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
@@ -106,7 +104,9 @@ pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
+// numeric-bound: guard - bounds structured repository-watch rules retained by the shared convergence configuration parser
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
+// numeric-bound: guard - bounds actions decoded for one retained repository-watch rule
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
 /// One provider-availability cause a pool trigger can react to.
 ///
@@ -321,11 +321,12 @@ impl DerivedModelCallCost {
     }
 }
 
-/// Validated deployment paths used to construct the Codex CLI adapter.
+/// Validated deployment settings used to construct the Codex CLI adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexCliConfiguration {
     executable: PathBuf,
     working_directory: PathBuf,
+    model_context_window_overrides: HashMap<String, u32>,
 }
 
 impl CodexCliConfiguration {
@@ -485,7 +486,9 @@ pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// Default maximum assembled source bytes for one conversation import.
 pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
+// numeric-bound: guard - bounds independently credentialed repositories available to the shared convergence sweep
 const MAX_WATCHED_REPOSITORIES: usize = 128;
+// numeric-bound: guard - bounds reviewer identities decoded by the retained configuration grammar
 const MAX_SIGNAL_REVIEWERS: usize = 128;
 
 /// Loopback-only reference address selected when the webhook listener table
@@ -703,23 +706,6 @@ impl RepositoryWatchConfiguration {
             )
         }
     }
-
-    /// Validates every rule against the immutable session-template catalog.
-    pub fn validate_template_contexts(
-        &self,
-        declarations: &[RepoWatchTemplateContextDeclaration],
-    ) -> Result<(), HubModelConfigurationError> {
-        for rule in &self.rules {
-            rule.validate_template_contexts(declarations)
-                .map_err(
-                    |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
-                        rule: rule.id().as_str().to_owned(),
-                        reason: error.to_string(),
-                    },
-                )?;
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -742,11 +728,6 @@ pub struct NumericBoundsConfiguration {
 }
 
 const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
-    (
-        "repository_reconciliation_quantum",
-        NumericBoundKind::Integer,
-    ),
-    ("webhook_drain_work_budget", NumericBoundKind::Duration),
     ("fenced_pool_min_connections", NumericBoundKind::Integer),
     (
         "fenced_pool_floor_reconciliation_interval",
@@ -878,6 +859,10 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "max_automatic_tool_rounds_per_turn",
         NumericBoundKind::Integer,
     ),
+    (
+        "max_same_credential_attempts_per_turn",
+        NumericBoundKind::Integer,
+    ),
     ("max_required_tags", NumericBoundKind::Integer),
     ("reconciliation_sweep_interval", NumericBoundKind::Duration),
     ("nudge_buffer_capacity", NumericBoundKind::Integer),
@@ -903,6 +888,13 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
     (
         "max_repository_file_content_bytes",
         NumericBoundKind::Integer,
+    ),
+    ("session_admission_deadline", NumericBoundKind::Duration),
+    ("session_active_stall_deadline", NumericBoundKind::Duration),
+    ("session_waiting_deadline", NumericBoundKind::Duration),
+    (
+        "session_lifecycle_metric_scan_interval",
+        NumericBoundKind::Duration,
     ),
 ];
 
@@ -983,16 +975,9 @@ impl NumericBoundsConfiguration {
 }
 
 fn parse_numeric_bound_duration(value: &str) -> Option<Duration> {
-    value
-        .strip_suffix("ms")
-        .and_then(|amount| amount.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .or_else(|| {
-            value
-                .strip_suffix('s')
-                .and_then(|amount| amount.parse::<u64>().ok())
-                .map(Duration::from_secs)
-        })
+    jiff::fmt::friendly::SpanParser::new()
+        .parse_unsigned_duration(value)
+        .ok()
 }
 
 /// Validated static model and alias definitions used by hub composition.
@@ -1033,6 +1018,7 @@ pub struct HubModelConfiguration {
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     approval_judge_selection: Option<DirectModelSelection>,
+    convergence: Option<signalbox_convergence::ConvergencePolicy>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
     workspace_instructions: WorkspaceInstructionConfiguration,
@@ -1078,6 +1064,7 @@ impl HubModelConfiguration {
                 "git_identity",
                 "tool_approval_postures",
                 "approval_judge",
+                "convergence",
                 "repository_watch",
                 "blob_storage",
                 "workspace_instructions",
@@ -1169,6 +1156,18 @@ impl HubModelConfiguration {
         let tool_approval_postures =
             parse_tool_approval_postures(document.get("tool_approval_postures"))?;
         let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
+        #[derive(serde::Deserialize)]
+        struct ConvergenceSection {
+            convergence: Option<signalbox_convergence::ConvergencePolicy>,
+        }
+        let convergence = toml::from_str::<ConvergenceSection>(content)
+            .map_err(|_| HubModelConfigurationError::InvalidDocument)?
+            .convergence;
+        if let Some(policy) = &convergence {
+            policy
+                .validate()
+                .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
+        }
         let repository_watch = document
             .get("repository_watch")
             .map(|item| parse_repository_watch_configuration(item, &numeric_bounds))
@@ -1269,9 +1268,18 @@ impl HubModelConfiguration {
                 let table = item
                     .as_table()
                     .ok_or(HubModelConfigurationError::InvalidCodexCliConfiguration)?;
-                reject_unknown_fields(table, &["executable", "working_directory"])?;
+                reject_unknown_fields(
+                    table,
+                    &[
+                        "executable",
+                        "working_directory",
+                        "model_context_window_overrides",
+                    ],
+                )?;
                 let executable = PathBuf::from(required_string(table, "executable")?);
                 let working_directory = PathBuf::from(required_string(table, "working_directory")?);
+                let model_context_window_overrides =
+                    parse_positive_u32_inline_map(table.get("model_context_window_overrides"))?;
                 if !executable.is_absolute()
                     || !executable.is_file()
                     || !working_directory.is_absolute()
@@ -1282,6 +1290,7 @@ impl HubModelConfiguration {
                 Ok(CodexCliConfiguration {
                     executable,
                     working_directory,
+                    model_context_window_overrides,
                 })
             })
             .transpose()?;
@@ -1293,7 +1302,7 @@ impl HubModelConfiguration {
             return Err(HubModelConfigurationError::MissingCodexCliConfiguration);
         }
         if let Some(configuration) = codex_cli.as_ref() {
-            CodexCliRuntime::new(CodexCliConfig::new(
+            let mut runtime_configuration = CodexCliConfig::new(
                 configuration.executable.clone(),
                 configuration.working_directory.clone(),
                 CredentialReference::new(
@@ -1302,8 +1311,11 @@ impl HubModelConfiguration {
                         .unwrap_or(CODEX_CLI_CREDENTIAL_REFERENCE),
                 ),
                 None,
-            ))
-            .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+            );
+            runtime_configuration.model_context_window_overrides =
+                configuration.model_context_window_overrides.clone();
+            CodexCliRuntime::new(runtime_configuration)
+                .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
         }
 
         let claude_cli = document
@@ -1396,6 +1408,7 @@ impl HubModelConfiguration {
                     "fast_target_id",
                     "service_tiers",
                     "settings_profile",
+                    "provider_compaction",
                 ],
             )?;
             let selection = DirectModelSelection::from_uuid(required_uuid(model, "selection_id")?);
@@ -1412,6 +1425,7 @@ impl HubModelConfiguration {
             }
             let max_output_tokens = required_positive_u32(model, "max_output_tokens")?;
             let context_window_tokens = required_positive_u32(model, "context_window_tokens")?;
+            let provider_compaction = parse_provider_compaction_capability(model, mapping.adapter)?;
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
@@ -1536,6 +1550,11 @@ impl HubModelConfiguration {
                 context_window_tokens,
             )
             .map_err(|_| HubModelConfigurationError::InvalidField)?;
+            let runtime_definition = if provider_compaction {
+                runtime_definition.with_provider_compaction()
+            } else {
+                runtime_definition
+            };
             runtime_definitions.push(match fast_target {
                 Some(target) => runtime_definition.with_fast_target(target),
                 None => runtime_definition,
@@ -1559,6 +1578,7 @@ impl HubModelConfiguration {
                         "provider_model",
                         "max_output_tokens",
                         "context_window_tokens",
+                        "provider_compaction",
                     ],
                 )?;
                 let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -1577,6 +1597,8 @@ impl HubModelConfiguration {
                     return Err(HubModelConfigurationError::InvalidProviderModel);
                 }
                 let provider_model = provider_model.to_owned();
+                let provider_compaction =
+                    parse_provider_compaction_capability(serving_target, mapping.adapter)?;
                 let max_output_tokens = required_positive_u32(serving_target, "max_output_tokens")?;
                 let context_window_tokens =
                     required_positive_u32(serving_target, "context_window_tokens")?;
@@ -1590,16 +1612,30 @@ impl HubModelConfiguration {
                 {
                     return Err(HubModelConfigurationError::ConflictingProviderModelRoute);
                 }
-                runtime_definitions.push(
-                    RuntimeModelDefinition::try_new(
-                        target,
-                        provider_model,
-                        max_output_tokens,
-                        context_window_tokens,
-                    )
-                    .map_err(|_| HubModelConfigurationError::InvalidField)?,
-                );
+                let runtime_definition = RuntimeModelDefinition::try_new(
+                    target,
+                    provider_model,
+                    max_output_tokens,
+                    context_window_tokens,
+                )
+                .map_err(|_| HubModelConfigurationError::InvalidField)?;
+                runtime_definitions.push(if provider_compaction {
+                    runtime_definition.with_provider_compaction()
+                } else {
+                    runtime_definition
+                });
             }
+        }
+
+        if codex_cli.as_ref().is_some_and(|configuration| {
+            configuration
+                .model_context_window_overrides
+                .keys()
+                .any(|provider_model| {
+                    provider_model_adapters.get(provider_model) != Some(&ModelAdapter::CodexCli)
+                })
+        }) {
+            return Err(HubModelConfigurationError::InvalidCodexCliConfiguration);
         }
 
         if approval_judge_selection.is_some_and(|selection| !direct_selections.contains(&selection))
@@ -1656,12 +1692,17 @@ impl HubModelConfiguration {
                 let effective = runtime_models
                     .effective_definition(definition, fast_mode)
                     .ok_or(HubModelConfigurationError::ConflictingTarget)?;
-                tool_continuation_usage_limits.push(ToolContinuationUsageLimit::new(
+                let limit = ToolContinuationUsageLimit::new(
                     route.target,
                     fast_mode,
                     u64::from(effective.max_output_tokens()),
                     u64::from(effective.context_window_tokens()),
-                ));
+                );
+                tool_continuation_usage_limits.push(if effective.provider_compaction_supported() {
+                    limit.with_provider_compaction_replay()
+                } else {
+                    limit
+                });
             }
         }
         let billing_rates = target_billing_rates
@@ -1708,6 +1749,7 @@ impl HubModelConfiguration {
             daemon_tools,
             tool_approval_postures,
             approval_judge_selection,
+            convergence,
             repository_watch,
             blob_storage,
             workspace_instructions,
@@ -1848,6 +1890,17 @@ impl HubModelConfiguration {
             .iter()
             .filter_map(|(target, adapter)| {
                 adapter.reports_cache_inclusive_input().then_some(*target)
+            })
+            .collect()
+    }
+
+    /// Returns the exact targets whose adapters issue prospective count
+    /// interactions before turn activation.
+    pub fn provider_input_count_targets(&self) -> HashSet<ResolvedProviderTarget> {
+        self.target_adapters
+            .iter()
+            .filter_map(|(target, adapter)| {
+                (*adapter == ModelAdapter::Anthropic).then_some(*target)
             })
             .collect()
     }
@@ -2063,6 +2116,8 @@ impl HubModelConfiguration {
                     }),
                 );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
+                runtime_configuration.model_context_window_overrides =
+                    configuration.model_context_window_overrides.clone();
                 CodexCliRuntime::new(runtime_configuration)
             })
             .transpose()
@@ -2205,6 +2260,11 @@ impl HubModelConfiguration {
     /// Reports whether the configuration contains one direct selection key.
     pub fn contains_selection(&self, selection: DirectModelSelection) -> bool {
         self.direct_selections.contains(&selection)
+    }
+
+    /// Shared pull-request convergence policy for the daemon and code-host tools.
+    pub const fn convergence(&self) -> Option<&signalbox_convergence::ConvergencePolicy> {
+        self.convergence.as_ref()
     }
 
     /// Returns the complete watch configuration, or absence when no task starts.
@@ -3469,6 +3529,30 @@ fn required_positive_u32(table: &Table, key: &str) -> Result<u32, HubModelConfig
     }
 }
 
+fn parse_positive_u32_inline_map(
+    item: Option<&Item>,
+) -> Result<HashMap<String, u32>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(HashMap::new());
+    };
+    let table = item
+        .as_inline_table()
+        .ok_or(HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+    table
+        .iter()
+        .map(|(target, value)| {
+            validated_name(target)
+                .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+            let value = value
+                .as_integer()
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or(HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+            Ok((target.to_string(), value))
+        })
+        .collect()
+}
+
 fn parse_model_settings_profiles(
     item: Option<&Item>,
 ) -> Result<HashMap<Arc<str>, ModelSettingsOverlay>, HubModelConfigurationError> {
@@ -3590,6 +3674,24 @@ struct RuntimeCapabilityProjection {
     adapter: ModelAdapter,
     provider_model: String,
     capabilities: ModelCapabilities,
+}
+
+fn parse_provider_compaction_capability(
+    table: &Table,
+    adapter: ModelAdapter,
+) -> Result<bool, HubModelConfigurationError> {
+    let supported = table
+        .get("provider_compaction")
+        .map(|item| {
+            item.as_bool()
+                .ok_or(HubModelConfigurationError::InvalidModelCapabilities)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if supported && adapter != ModelAdapter::Anthropic {
+        return Err(HubModelConfigurationError::InvalidModelCapabilities);
+    }
+    Ok(supported)
 }
 
 fn project_runtime_model_capabilities(
@@ -4149,7 +4251,7 @@ impl fmt::Display for HubModelConfigurationError {
         }
         // Startup telemetry formats this value, so the failing member and the
         // closed admission cause must both survive. The path never appears, as
-        // `configuration-and-credentials.md#the-codex_home-delivery` requires.
+        // `configuration-and-credentials.md` requires.
         if let Self::InvalidCredentialHome {
             credential_profile,
             failure,
@@ -4398,7 +4500,6 @@ fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
 #[derive(Clone)]
 pub struct FileCredentialAccess {
     paths: Arc<HashMap<CredentialReference, PathBuf>>,
-    maximum_bytes: Option<usize>,
 }
 
 impl FileCredentialAccess {
@@ -4412,18 +4513,6 @@ impl FileCredentialAccess {
     pub fn from_files(files: impl IntoIterator<Item = (CredentialReference, PathBuf)>) -> Self {
         Self {
             paths: Arc::new(files.into_iter().collect()),
-            maximum_bytes: None,
-        }
-    }
-
-    pub(crate) fn new_bounded(
-        path: PathBuf,
-        reference: CredentialReference,
-        maximum_bytes: usize,
-    ) -> Self {
-        Self {
-            paths: Arc::new(HashMap::from([(reference, path)])),
-            maximum_bytes: Some(maximum_bytes),
         }
     }
 
@@ -4453,10 +4542,7 @@ impl CredentialAccess for FileCredentialAccess {
         let path = self.paths.get(reference).ok_or_else(|| {
             CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unmapped)
         })?;
-        let file_bytes = match self.maximum_bytes {
-            Some(maximum_bytes) => read_bounded_credential_file(path, maximum_bytes).await,
-            None => tokio::fs::read(path).await,
-        };
+        let file_bytes = tokio::fs::read(path).await;
         match file_bytes {
             Ok(file_bytes) => Ok(CredentialValue::new(credential_bytes(&file_bytes))),
             Err(error) => Err(CredentialAccessError::new(
@@ -4468,23 +4554,6 @@ impl CredentialAccess for FileCredentialAccess {
                 },
             )),
         }
-    }
-}
-
-async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
-    let file = tokio::fs::File::open(path).await?;
-    let read_limit = u64::try_from(maximum_bytes)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let mut bytes = Vec::with_capacity(maximum_bytes.min(8 * 1_024));
-    file.take(read_limit).read_to_end(&mut bytes).await?;
-    if bytes.len() > maximum_bytes {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "credential file exceeds its accepted byte bound",
-        ))
-    } else {
-        Ok(bytes)
     }
 }
 
@@ -4503,9 +4572,9 @@ pub(crate) mod tests {
     use signalbox_domain::{
         AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
         ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
-        PullRequestNumber, ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
-        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
-        ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
+        ProviderModelIdentity, PullRequestNumber, ReasoningLevel, RepoWatchEventKindNameV1,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, ResolvedProviderTarget, ServiceTier,
+        SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
@@ -4614,8 +4683,6 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
 version = 1
 
 [numeric_bounds]
-repository_reconciliation_quantum = 16
-webhook_drain_work_budget = "45s"
 fenced_pool_min_connections = 48
 fenced_pool_floor_reconciliation_interval = "5s"
 fenced_pool_floor_reconciliation_attempt_bound = "30s"
@@ -4666,6 +4733,7 @@ min_metadata_page_size = 1
 max_metadata_page_size = 100
 max_review_findings_per_run = 32
 max_automatic_tool_rounds_per_turn = 32
+max_same_credential_attempts_per_turn = 2
 max_required_tags = 256
 reconciliation_sweep_interval = "1s"
 nudge_buffer_capacity = 1024
@@ -4683,6 +4751,10 @@ max_stack_comparisons_in_flight = "none"
 max_code_host_result_text_bytes = "none"
 max_code_host_result_items = "none"
 max_repository_file_content_bytes = "none"
+session_admission_deadline = "none"
+session_active_stall_deadline = "none"
+session_waiting_deadline = "none"
+session_lifecycle_metric_scan_interval = "none"
 
 [[credential_profiles]]
 name = "anthropic-primary"
@@ -4839,6 +4911,19 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 .duration("turn_liveness_scan_interval"),
             Some(None)
         );
+    }
+
+    #[test]
+    fn numeric_bound_durations_accept_jiff_friendly_input() {
+        assert_eq!(
+            super::parse_numeric_bound_duration("2 minutes 30 seconds"),
+            Some(Duration::from_secs(150))
+        );
+        assert_eq!(
+            super::parse_numeric_bound_duration("1.5s"),
+            Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(super::parse_numeric_bound_duration("-1s"), None);
     }
 
     const OPENAI_PROFILE: &str = "openai-primary";
@@ -6015,48 +6100,6 @@ cool_off_seconds = {}
         assert!(rule.matcher().mergeable_state().is_empty());
         assert!(rule.matcher().conclusion().is_empty());
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
-    }
-
-    #[test]
-    fn repository_watch_rule_accepts_its_declared_template_context() {
-        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
-            .expect("repository-watch rule fixture is valid");
-        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
-            .expect("template fixture name is valid");
-        let declaration = RepoWatchTemplateContextDeclaration::try_new(
-            template,
-            vec![RepoWatchDispatchContextShape::PullRequest],
-        )
-        .expect("template declaration is nonempty");
-
-        assert_eq!(
-            configured
-                .repository_watch()
-                .expect("fixture configures repository watch")
-                .validate_template_contexts(&[declaration]),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn repository_watch_rule_rejects_a_template_context_mismatch() {
-        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
-            .expect("repository-watch rule fixture is valid");
-        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
-            .expect("template fixture name is valid");
-        let declaration = RepoWatchTemplateContextDeclaration::try_new(
-            template,
-            vec![RepoWatchDispatchContextShape::Branch],
-        )
-        .expect("template declaration is nonempty");
-        let error = configured
-            .repository_watch()
-            .expect("fixture configures repository watch")
-            .validate_template_contexts(&[declaration])
-            .expect_err("pull-request rule cannot target branch-only template");
-
-        assert!(error.to_string().contains(WATCH_RULE_ID));
-        assert!(error.to_string().contains(WATCH_TEMPLATE));
     }
 
     #[test]
@@ -7592,7 +7635,7 @@ on_rate_limited = "escalate""#,
     }
 
     #[test]
-    fn configuration_rejects_switching_now_on_a_rejected_credential() {
+    fn configuration_admits_switching_now_on_a_rejected_credential() {
         let switching_now = configuration_with_anthropic_pool(
             r#"[[credential_pools]]
 name = "anthropic-main"
@@ -7602,14 +7645,8 @@ members = [{ profile = "anthropic-primary", priority = 1 }]
 on_credential_rejected = "switch_now""#,
         );
 
-        assert_eq!(
-            HubModelConfiguration::parse(&switching_now).err(),
-            Some(
-                HubModelConfigurationError::InadmissibleCredentialPoolAction {
-                    trigger: Arc::from("on_credential_rejected"),
-                }
-            )
-        );
+        HubModelConfiguration::parse(&switching_now)
+            .expect("credential rejection authorizes immediate rotation");
     }
 
     #[test]
@@ -8661,6 +8698,78 @@ context_window_tokens = 200000
     }
 
     #[test]
+    fn codex_model_context_window_overrides_are_positive_exact_target_values() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 1000000 }}\n\n\
+             [[models]]\n\
+             selection_id = \"10000000-0000-4000-8000-00000000000f\"\n\
+             target_id = \"20000000-0000-4000-8000-00000000000f\"\n\
+             model_family = \"codex\"\n\
+             provider_model = \"gpt-5.6-sol\"\n\
+             max_output_tokens = 8192\n\
+             context_window_tokens = 828400\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
+
+        let parsed = HubModelConfiguration::parse(&configuration)
+            .expect("a positive exact-target override is valid");
+
+        assert_eq!(
+            parsed
+                .codex_cli()
+                .and_then(|codex| codex.model_context_window_overrides.get("gpt-5.6-sol")),
+            Some(&1_000_000)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_zero_codex_model_context_window_override() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 0 }}\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unknown_codex_model_context_window_override() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"gpt-5.6-sol\" = 1000000 }}\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_codex_override_for_another_adapter() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}model_context_window_overrides = {{ \"claude-example\" = 1000000 }}\n",
+            configuration_with_codex_paths(&executable, temporary.path())
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidCodexCliConfiguration)
+        );
+    }
+
+    #[test]
     fn unused_codex_mapping_retains_its_declared_credential_profile() {
         let temporary = tempfile::tempdir().expect("fixture directory is available");
         let executable = std::env::current_exe().expect("the test executable has a path");
@@ -9058,6 +9167,55 @@ context_window_tokens = 200000
     }
 
     #[test]
+    fn configuration_loads_the_shared_convergence_policy() {
+        let example = include_str!("../../../crates/convergence/examples/repository.toml");
+        let policy = example.replace("[[reviewers]]", "[[convergence.reviewers]]");
+        let configured = format!("{CONFIGURATION}\n[convergence]\n{policy}");
+        let configuration = HubModelConfiguration::parse(&configured)
+            .expect("the shared policy example is accepted under convergence");
+        let parsed = configuration.convergence().expect("the policy is retained");
+        let expected: signalbox_convergence::ConvergencePolicy =
+            toml::from_str(example).expect("the example is a shared convergence policy");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("policy serializes"),
+            serde_json::to_value(expected).expect("policy serializes")
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_empty_normalized_convergence_reviewers() {
+        let example = include_str!("../../../crates/convergence/examples/repository.toml");
+        for login in ["", " ", "[bot]", "[BOT]"] {
+            let mut policy: toml::Value =
+                toml::from_str(example).expect("the example is valid TOML");
+            policy["reviewers"][0]["login"] = toml::Value::String(login.into());
+            let policy = toml::to_string(&policy)
+                .expect("policy serializes")
+                .replace("[[reviewers]]", "[[convergence.reviewers]]");
+            let configured = format!("{CONFIGURATION}\n[convergence]\n{policy}");
+            assert!(
+                HubModelConfiguration::parse(&configured).is_err(),
+                "a reviewer must have an identity after bot normalization"
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_rejects_unknown_convergence_policy_fields() {
+        let example = include_str!("../../../crates/convergence/examples/repository.toml");
+        let policy = example.replace("[[reviewers]]", "[[convergence.reviewers]]");
+        for configured in [
+            format!("{CONFIGURATION}\n[convergence]\nobsolete = true\n{policy}"),
+            format!("{CONFIGURATION}\n[convergence]\n{policy}\nobsolete = true"),
+        ] {
+            assert_eq!(
+                HubModelConfiguration::parse(&configured).err(),
+                Some(HubModelConfigurationError::InvalidDocument)
+            );
+        }
+    }
+
+    #[test]
     fn configuration_rejects_unknown_fields_and_dangling_aliases() {
         assert_eq!(
             HubModelConfiguration::parse(&CONFIGURATION.replace(
@@ -9165,6 +9323,97 @@ extra = true"#,
         assert_eq!(
             HubModelConfiguration::parse(&impossible_reservation).err(),
             Some(HubModelConfigurationError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn provider_compaction_is_an_explicit_per_target_capability() {
+        let disabled = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("omitted provider compaction defaults closed");
+        let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+            Uuid::parse_str("20000000-0000-4000-8000-000000000001")
+                .expect("fixture target is a UUID"),
+        ));
+        assert!(
+            !disabled
+                .runtime_model_catalog()
+                .resolve(target)
+                .expect("fixture target is configured")
+                .provider_compaction_supported()
+        );
+
+        let enabled = HubModelConfiguration::parse(&CONFIGURATION.replace(
+            "provider_model = \"claude-example\"",
+            "provider_model = \"claude-example\"\nprovider_compaction = true",
+        ))
+        .expect("the Anthropic target declares provider compaction");
+        assert!(
+            enabled
+                .runtime_model_catalog()
+                .resolve(target)
+                .expect("fixture target is configured")
+                .provider_compaction_supported()
+        );
+
+        let malformed = CONFIGURATION.replace(
+            "provider_model = \"claude-example\"",
+            "provider_model = \"claude-example\"\nprovider_compaction = \"true\"",
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&malformed).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+
+        let wrong_adapter = format!(
+            "{}\n[codex_cli]\nexecutable = \"/bin/true\"\nworking_directory = \"/tmp\"\n",
+            CONFIGURATION
+                .replace(
+                    "adapter = \"anthropic\"\ncredential_pool = \"anthropic-main\"",
+                    "adapter = \"codex_cli\"\ncredential_pool = \"codex-main\"",
+                )
+                .replace(
+                    "provider_model = \"claude-example\"",
+                    "provider_model = \"claude-example\"\nprovider_compaction = true",
+                )
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&wrong_adapter).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+    }
+
+    #[test]
+    fn provider_compaction_capability_is_keyed_by_target_not_provider_spelling() {
+        let configuration = format!(
+            "{}\n[[models]]\nselection_id = \"10000000-0000-4000-8000-000000000002\"\ntarget_id = \"20000000-0000-4000-8000-000000000002\"\nmodel_family = \"anthropic\"\nprovider_model = \"claude-example\"\nmax_output_tokens = 256\ncontext_window_tokens = 200000\n",
+            CONFIGURATION.replace(
+                "provider_model = \"claude-example\"",
+                "provider_model = \"claude-example\"\nprovider_compaction = true",
+            )
+        );
+        let configuration = HubModelConfiguration::parse(&configuration)
+            .expect("distinct targets may share a provider spelling and differ in compaction");
+        let models = configuration.runtime_model_catalog();
+        let enabled = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+            Uuid::parse_str("20000000-0000-4000-8000-000000000001")
+                .expect("fixture target is a UUID"),
+        ));
+        let disabled = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+            Uuid::parse_str("20000000-0000-4000-8000-000000000002")
+                .expect("fixture target is a UUID"),
+        ));
+
+        assert!(
+            models
+                .resolve(enabled)
+                .expect("first target is configured")
+                .provider_compaction_supported()
+        );
+        assert!(
+            !models
+                .resolve(disabled)
+                .expect("second target is configured")
+                .provider_compaction_supported()
         );
     }
 
@@ -9319,10 +9568,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: every explicit lower layer is validated even when a
+    /// S37: every explicit lower layer is validated even when a
     /// higher-precedence layer masks it in the effective configuration.
     #[test]
-    fn s37_inv051_configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
+    fn s37_configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
         let profile_configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9345,10 +9594,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: an explicit unsupported selected-profile value is
+    /// S37: an explicit unsupported selected-profile value is
     /// rejected even when the global layer is valid.
     #[test]
-    fn s37_inv051_configuration_rejects_an_unsupported_selected_profile_value() {
+    fn s37_configuration_rejects_an_unsupported_selected_profile_value() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9365,10 +9614,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: a selected profile cannot combine individually
+    /// S37: a selected profile cannot combine individually
     /// supported controls that its adapter cannot enforce together.
     #[test]
-    fn s37_inv051_configuration_rejects_an_adapter_incompatible_selected_profile() {
+    fn s37_configuration_rejects_an_adapter_incompatible_selected_profile() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9385,10 +9634,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: an adapter-incompatible global combination remains
+    /// S37: an adapter-incompatible global combination remains
     /// invalid when a selected profile masks it with a supported combination.
     #[test]
-    fn s37_inv051_configuration_rejects_a_masked_adapter_incompatible_global_layer() {
+    fn s37_configuration_rejects_a_masked_adapter_incompatible_global_layer() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9478,7 +9727,7 @@ context_window_tokens = 200000
         assert_eq!(serving_credential.credential_reference(), fast_profile);
     }
 
-    /// INV-035: credential references stay scoped while paths and values stay
+    /// credential references stay scoped while paths and values stay
     /// out of errors and debug output.
     #[tokio::test]
     async fn file_credentials_are_reference_scoped_and_paths_are_redacted() {
@@ -9509,11 +9758,11 @@ context_window_tokens = 200000
         assert!(!format!("{source:?}").contains("definitely"));
     }
 
-    /// INV-035: each operation preparation observes the file as it exists at
+    /// each operation preparation observes the file as it exists at
     /// that request, so atomic deployment replacement rotates the key without
     /// caching secret bytes in hub composition.
     #[tokio::test]
-    async fn inv035_file_credentials_are_reread_for_rotation() {
+    async fn file_credentials_are_reread_for_rotation() {
         let path = std::env::temp_dir().join(format!("signalbox-credential-{}", Uuid::now_v7()));
         std::fs::write(&path, b"first-test-value").expect("fixture file is writable");
         let source = FileCredentialAccess::new(
@@ -9543,10 +9792,10 @@ context_window_tokens = 200000
         std::fs::remove_file(path).expect("fixture file is removable");
     }
 
-    /// INV-035: a historical session pin can resolve any declared file
+    /// a historical session pin can resolve any declared file
     /// profile, not only the member currently preferred by a pool.
     #[tokio::test]
-    async fn inv035_file_credential_catalog_resolves_each_declared_profile() {
+    async fn file_credential_catalog_resolves_each_declared_profile() {
         let directory = tempfile::tempdir().expect("fixture directory is available");
         let primary_path = directory.path().join("primary");
         let historical_path = directory.path().join("historical");
@@ -9576,33 +9825,6 @@ context_window_tokens = 200000
                 .expect("historical profile resolves")
                 .expose_bytes(),
             historical_value
-        );
-    }
-
-    #[tokio::test]
-    async fn bounded_file_credentials_reject_before_accumulating_past_the_limit() {
-        const ACCEPTED_BYTES: usize = 8;
-        let temporary = tempfile::tempdir().expect("fixture directory is available");
-        let path = temporary.path().join("bounded-credential");
-        std::fs::write(&path, vec![b'x'; ACCEPTED_BYTES + 1])
-            .expect("oversized credential fixture is writable");
-        let source = FileCredentialAccess::new_bounded(
-            path,
-            CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
-            ACCEPTED_BYTES,
-        );
-
-        assert_eq!(
-            source
-                .resolve(
-                    &source
-                        .credential_reference()
-                        .expect("the fixture source has one reference"),
-                )
-                .await
-                .expect_err("oversized credential is rejected")
-                .failure,
-            CredentialAccessFailure::Unreadable
         );
     }
 

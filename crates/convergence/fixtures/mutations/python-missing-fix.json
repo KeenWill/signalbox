@@ -1,0 +1,146 @@
+{
+  "source": "declined-finding.json",
+  "edge": "missing fix",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "Fixed in 417a88fd53464ef0783ec39f5c4da3c50a3ef5e2."
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "Fixed in 417a88fd53464ef0783ec39f5c4da3c50a3ef5e2."
+    },
+    {
+      "path": "/comparisons",
+      "value": {
+        "113746d23d6c7b398ef34464a071dca532791898...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 0
+        },
+        "113746d23d6c7b398ef34464a071dca532791898...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "164f011a95012fb73a4ff3c7cd5ceb62f281d47d...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 16
+        },
+        "164f011a95012fb73a4ff3c7cd5ceb62f281d47d...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "1be052d986733f943116b8db0d586041e1509905...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 0
+        },
+        "2a1d0c82c64726069126136f09132cd1b3df6d07...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 2
+        },
+        "2a1d0c82c64726069126136f09132cd1b3df6d07...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 23
+        },
+        "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": null,
+        "489fcede257a26239b2714db610998d275251489...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 11
+        },
+        "489fcede257a26239b2714db610998d275251489...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "4b7c4b21a77dce6becec91b4e4c86833641fa4ce...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 17
+        },
+        "4b7c4b21a77dce6becec91b4e4c86833641fa4ce...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "52ce3a43c85aaab6630f7b3971070f2f54605e65...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 8
+        },
+        "52ce3a43c85aaab6630f7b3971070f2f54605e65...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "5b9c6778337a997fce26a85f51f722cdddbe056e...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 22
+        },
+        "5b9c6778337a997fce26a85f51f722cdddbe056e...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "5c8634ef11888858e697b1ac7957efc447b973d3...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 13
+        },
+        "5c8634ef11888858e697b1ac7957efc447b973d3...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "600b9ae25bb05aa8f99e53cd0dfc94deedb2a552...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 20
+        },
+        "600b9ae25bb05aa8f99e53cd0dfc94deedb2a552...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "7b575a142807ba9fc62f65f97f841ec815922703...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 19
+        },
+        "7b575a142807ba9fc62f65f97f841ec815922703...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "7fa7b33ee3e3fbccc55467064c9cb1d53056ffd1...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 0
+        },
+        "8233a19bfbc925f7650ea9e90396a1724b8e890d...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 3
+        },
+        "8233a19bfbc925f7650ea9e90396a1724b8e890d...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "9cc86150b28789d7c07443de54e729b059ae7144...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 6
+        },
+        "9cc86150b28789d7c07443de54e729b059ae7144...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "9fde6b461922703ffa59069c39811152fd19c085...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 21
+        },
+        "9fde6b461922703ffa59069c39811152fd19c085...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "a5b0f2ab0c7b222d741a9e19f35cfa988b39295b...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 14
+        },
+        "a5b0f2ab0c7b222d741a9e19f35cfa988b39295b...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 1
+        },
+        "a7d83705ab5dd0b9351b6a23fd3101ee6d6e43e1...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "b3d9401058e5a33eeb99d7b49bccfc649502251d...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 9
+        },
+        "b3d9401058e5a33eeb99d7b49bccfc649502251d...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "d2a1ecac4888503bd07eceb70bfddcf8f8afa056...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 18
+        },
+        "d2a1ecac4888503bd07eceb70bfddcf8f8afa056...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "da1100a98ba67c07864bea93156a4097f9a99ea1...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 0
+        },
+        "ec9213ef14abffdab5dfadf436bdb5d508508990...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 7
+        },
+        "ec9213ef14abffdab5dfadf436bdb5d508508990...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        },
+        "f59d0b7286683b0e97b449bafbff82a030b47029...113746d23d6c7b398ef34464a071dca532791898": {
+          "behind_by": 15
+        },
+        "f59d0b7286683b0e97b449bafbff82a030b47029...417a88fd53464ef0783ec39f5c4da3c50a3ef5e2": {
+          "behind_by": 0
+        }
+      }
+    }
+  ]
+}

@@ -274,11 +274,10 @@ async fn mp3_rejects_fewer_frames_than_its_xing_header_advertises() -> Result<()
 #[tokio::test]
 async fn mp3_rejects_audio_frames_against_a_xing_header_declaring_zero()
 -> Result<(), Box<dyn Error>> {
-    // A Xing header declaring a total of one frame (the header frame
-    // itself, zero audio frames) previously fell through the same
-    // zero-skip meant for FLAC's "unknown total samples" STREAMINFO
-    // convention, silently validating any decoded audio despite
-    // contradicting the declared frame count.
+    // A Xing header declaring a total of one frame (the header frame itself,
+    // zero audio frames) must not take the zero-skip meant for FLAC's "unknown
+    // total samples" STREAMINFO convention, which would silently validate any
+    // decoded audio despite contradicting the declared frame count.
     assert_reason(
         FixtureFormat::Mp3,
         fixtures::mp3_with_xing_frame_count_of_one()?,

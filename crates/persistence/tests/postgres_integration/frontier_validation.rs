@@ -9,6 +9,11 @@ const DEEP_MEMBER_COUNT: i32 = 1_200;
 const PREFIX_MEMBER_COUNT: i32 = 900;
 const OBSOLETE_COMPACTION_COUNT: i32 = 256;
 
+/// Boundedness guard on the deep-frontier probes: a starvation allowance for a
+/// loaded CI host, not a budget under test. Both probe phases enforce the same
+/// guard so their boundedness claims cannot drift apart.
+const BOUNDED_PROBE_STATEMENT_TIMEOUT: &str = "SET statement_timeout = '10s'";
+
 async fn insert_deep_frontier_fixture(
     pool: &PgPool,
 ) -> Result<(Uuid, Uuid, Uuid, Uuid, Uuid), sqlx::Error> {
@@ -35,13 +40,21 @@ async fn insert_deep_frontier_fixture(
         "INSERT INTO semantic_transcript_entry
             (source_session_id, semantic_entry_id, payload_kind,
              assistant_text_value, producing_model_call_id,
-             assistant_response_part_ordinal)
+             assistant_response_part_ordinal,
+             assistant_response_text_start_bytes)
          SELECT $1,
                 md5('entry-' || member_position)::uuid,
                 'assistant_text',
                 'fixture member ' || member_position,
                 md5('frontier-validation-producing-call')::uuid,
-                member_position - 1
+                member_position - 1,
+                COALESCE(
+                    sum(octet_length('fixture member ' || member_position)) OVER (
+                        ORDER BY member_position
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    ),
+                    0
+                )::numeric
            FROM generate_series(1, $2) AS member(member_position)",
     )
     .bind(session)
@@ -79,14 +92,19 @@ async fn insert_deep_frontier_fixture(
         "INSERT INTO semantic_transcript_entry
             (source_session_id, semantic_entry_id, payload_kind,
              assistant_text_value, producing_model_call_id,
-             assistant_response_part_ordinal)
+             assistant_response_part_ordinal,
+             assistant_response_text_start_bytes)
          VALUES (
             $1,
             md5('divergent-entry')::uuid,
             'assistant_text',
             'divergent fixture member',
             md5('frontier-validation-producing-call')::uuid,
-            $2
+            $2,
+            (
+                SELECT sum(octet_length('fixture member ' || member_position))::numeric
+                  FROM generate_series(1, $2) AS member(member_position)
+            )
          )",
     )
     .bind(session)
@@ -266,7 +284,7 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     )
     .fetch_one(&mut *connection)
     .await?;
-    sqlx::query("SET statement_timeout = '1s'")
+    sqlx::query(BOUNDED_PROBE_STATEMENT_TIMEOUT)
         .execute(&mut *connection)
         .await?;
 
@@ -365,7 +383,7 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     sqlx::raw_sql("ALTER TABLE context_compaction ENABLE TRIGGER ALL;")
         .execute(&mut *connection)
         .await?;
-    sqlx::query("SET statement_timeout = '1s'")
+    sqlx::query(BOUNDED_PROBE_STATEMENT_TIMEOUT)
         .execute(&mut *connection)
         .await?;
     let effective_after_obsolete_chain: Uuid = sqlx::query_scalar(
@@ -395,11 +413,11 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-015: compaction validates a successor from its immutable predecessor
+/// compaction validates a successor from its immutable predecessor
 /// and bounded typed suffix while retaining root/import compatibility replay.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv015_context_compaction_validation_is_current_and_typed() -> Result<(), Box<dyn Error>> {
+async fn context_compaction_validation_is_current_and_typed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let validator_shape: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT

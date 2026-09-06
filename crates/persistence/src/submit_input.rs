@@ -1,15 +1,11 @@
 //! Atomic PostgreSQL persistence and replay for durable input acceptance.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::{
-    error::Error,
-    fmt,
-    num::{NonZeroU32, NonZeroU64},
-};
+use std::num::{NonZeroU32, NonZeroU64};
 
 use rust_decimal::Decimal;
 use serde_json::Value;
-use signalbox_application::{SubmitInputOutcome, SubmitInputTransaction};
+use signalbox_application::{SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputTransaction};
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
@@ -19,26 +15,26 @@ use signalbox_domain::{
     ActiveTurnSchedulingReconstitutionInput, Actor, AppliedInterruptCommandResult, AssistantText,
     AttachmentDisplayFilename, AttachmentKind, AutomaticReconciliationAuthority, BlobDigest,
     CancellationStopDisposition, CancelledModelCallTurnIdentities,
-    CancelledTurnExecutionReconstitutionInput, ConsumedSteeringReconstitutionInput,
-    ContextCompactionId, ContextCompactionModelCallReconstitutionInput,
-    ContextCompactionModelCallState, ContextCompactionRange, ContextCompactionReconstitutionInput,
-    ContextCompactionTokenUsage, ContextFrontierId, ContextFrontierProjection,
-    ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
-    DelegatedTurnSchedulingState, DelegationContent, DelegationMessageId, DelegationOutcome,
-    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
-    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
-    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
-    ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    OriginModelSettingsError, PerInputConfigurationChoices,
-    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, RunnerGeneration, RunnerId,
-    SemanticTranscriptEntryId,
+    CancelledTurnExecutionReconstitutionInput, CommandPrincipal,
+    ConsumedSteeringReconstitutionInput, ContextCompactionId,
+    ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
+    ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
+    ContextFrontierId, ContextFrontierProjection, ContinuationRoundReconstitutionInput,
+    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegationContent,
+    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
+    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
+    ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
+    NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, ParentTerminationKind,
+    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
+    ProviderCompactionBlock, ProviderModelIdentity, ReconstitutedSubmitInput,
+    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    ResolvedProviderTarget, RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -102,11 +98,12 @@ use crate::{
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
-        load_active_batch_from_connection, load_continuation_round_evidence,
-        load_optional_foreground_delegation_outcome, load_recovery_batch_by_attempt,
-        load_runner_recovery_batch_without_attempt, load_runner_recovery_cancellation_batch,
-        load_runner_recovery_source_snapshot, load_steering_continuation_round_evidence,
-        load_terminal_result_attempts, load_terminal_result_denials, persist_ended_attempt,
+        deny_awaiting_approvals_for_interrupt, load_active_batch_from_connection,
+        load_continuation_round_evidence, load_optional_foreground_delegation_outcome,
+        load_recovery_batch_by_attempt, load_runner_recovery_batch_without_attempt,
+        load_runner_recovery_cancellation_batch, load_runner_recovery_source_snapshot,
+        load_steering_continuation_round_evidence, load_terminal_result_attempts,
+        load_terminal_result_denials, persist_ended_attempt,
     },
 };
 
@@ -398,11 +395,14 @@ pub enum SubmitInputHandlingOutcome {
     },
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct one complete input handling.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SubmitInputCorruption {
+    #[error("missing durable SubmitInput {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported SubmitInput {field}: {value}")]
     /// A closed discriminator or representation version is unsupported.
     Unsupported {
         /// The record field that could not be decoded.
@@ -410,8 +410,10 @@ pub enum SubmitInputCorruption {
         /// The durable spelling that was observed.
         value: String,
     },
+    #[error("inconsistent SubmitInput {field_0}")]
     /// Typed records or variant-specific fields disagree.
     Inconsistent(&'static str),
+    #[error("invalid SubmitInput {field}: {reason}")]
     /// A stored positive ordinal cannot construct the domain value.
     InvalidOrdinal {
         /// The ordinal-bearing field.
@@ -419,6 +421,7 @@ pub enum SubmitInputCorruption {
         /// Why its numeric representation is invalid.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("invalid SubmitInput {field}: {failure:?}")]
     /// Exact stored text cannot construct baseline user content.
     InvalidContent {
         /// The content-bearing field.
@@ -426,63 +429,36 @@ pub enum SubmitInputCorruption {
         /// Why the exact stored text is outside the baseline.
         failure: NonEmptyUnicodeTextFailure,
     },
+    #[error("SubmitInput current Session is invalid: {field_0}")]
     /// The current session projection required for first handling is invalid.
     CurrentSession(SessionCorruption),
+    #[error("SubmitInput domain reconstitution failed: {field_0:?}")]
     /// Checked stored values fail domain-owned receipt correlation.
     Domain(SubmitInputReconstitutionFailure),
+    #[error("SubmitInput scheduling reconstitution failed: {field_0:?}")]
     /// Complete scheduling facts fail domain-owned aggregate reconstruction.
     Scheduling(AcceptedInputSchedulingReconstitutionFailure),
 }
 
-impl fmt::Display for SubmitInputCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing durable SubmitInput {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported SubmitInput {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent SubmitInput {relationship}")
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(formatter, "invalid SubmitInput {field}: {reason}")
-            }
-            Self::InvalidContent { field, failure } => {
-                write!(formatter, "invalid SubmitInput {field}: {failure:?}")
-            }
-            Self::CurrentSession(error) => {
-                write!(formatter, "SubmitInput current Session is invalid: {error}")
-            }
-            Self::Domain(failure) => {
-                write!(
-                    formatter,
-                    "SubmitInput domain reconstitution failed: {failure:?}"
-                )
-            }
-            Self::Scheduling(failure) => {
-                write!(
-                    formatter,
-                    "SubmitInput scheduling reconstitution failed: {failure:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for SubmitInputCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure, wrong purpose-specific load, or integrity failure.
 #[derive(Debug)]
 pub enum SubmitInputRepositoryError {
+    #[error("SubmitInput database failure: {field_0}")]
     /// PostgreSQL failed before any commit could have succeeded.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("SubmitInput commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL obscured whether the requested commit succeeded.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("durable command {command_id:?} does not name SubmitInput")]
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
+    #[error(
+        "SubmitInput command {command_id:?} proposed accepted input {accepted_input:?}, which is already the origin of active turn {active_turn:?}"
+    )]
     /// A generated accepted-input candidate reused the active turn's origin.
     AcceptedInputIdentityCollision {
         /// The unclaimed durable command.
@@ -492,58 +468,16 @@ pub enum SubmitInputRepositoryError {
         /// The colliding accepted-input candidate and active origin.
         accepted_input: AcceptedInputId,
     },
+    #[error(transparent)]
     /// A caller-owned explicit setting is unsupported by the selected model.
-    UnsupportedModelSetting(UnsupportedModelSetting),
+    UnsupportedModelSetting(#[source] UnsupportedModelSetting),
+    #[error(transparent)]
     /// Durable records cannot reconstruct the requested domain value.
-    Corruption(SubmitInputCorruption),
+    Corruption(#[source] SubmitInputCorruption),
+    #[error("SubmitInput model execution failed: {field_0}")]
     /// The active turn's model-execution aggregate could not apply or persist
     /// the correlated stop transition.
-    ModelExecution(Box<ModelCallRepositoryError>),
-}
-
-impl fmt::Display for SubmitInputRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "SubmitInput database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "SubmitInput commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::DifferentCommandKind { command_id } => {
-                write!(
-                    formatter,
-                    "durable command {command_id:?} does not name SubmitInput"
-                )
-            }
-            Self::AcceptedInputIdentityCollision {
-                command_id,
-                active_turn,
-                accepted_input,
-            } => write!(
-                formatter,
-                "SubmitInput command {command_id:?} proposed accepted input {accepted_input:?}, which is already the origin of active turn {active_turn:?}"
-            ),
-            Self::UnsupportedModelSetting(error) => error.fmt(formatter),
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::ModelExecution(error) => {
-                write!(formatter, "SubmitInput model execution failed: {error}")
-            }
-        }
-    }
-}
-
-impl Error for SubmitInputRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::DifferentCommandKind { .. } | Self::AcceptedInputIdentityCollision { .. } => None,
-            Self::UnsupportedModelSetting(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::ModelExecution(error) => Some(error),
-        }
-    }
+    ModelExecution(#[source] Box<ModelCallRepositoryError>),
 }
 
 impl From<sqlx::Error> for SubmitInputRepositoryError {
@@ -582,6 +516,7 @@ enum TransactionDecision {
 struct PreparedAgainstLockedState {
     prepared: PreparedSubmitInput,
     scheduling: Option<AcceptedInputSchedulingProjection>,
+    settles_closure: bool,
 }
 
 /// PostgreSQL implementation of atomic durable input acceptance.
@@ -680,15 +615,72 @@ impl SubmitInputRepository {
                 signalbox_domain::ContextFrontierId,
             ) + Send,
     {
-        let mut transaction = self.pool.begin().await?;
-        let decision = Box::pin(handle_in_transaction(
-            &mut transaction,
+        let principal = CommandPrincipal::for_actor(command.actor());
+        let unreachable_closure_decision = command.command_id();
+        let unreachable_closure_attempt =
+            TurnAttemptId::from_uuid(command.command_id().into_uuid());
+        self.handle_with_candidates_alias_resolver_as(
             command,
+            principal,
+            ParentTerminationKind::Cancelled,
             accepted_input,
             turn,
             cancellation_identities,
             next_reclassified_turn,
             next_tool_cancellation,
+            || unreachable_closure_decision,
+            || unreachable_closure_attempt,
+            select_definition,
+        )
+        .await
+    }
+
+    /// Handles one command with an authenticated envelope principal and
+    /// deployment model-alias resolution.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_with_candidates_alias_resolver_as<
+        NextTurn,
+        NextToolCancellation,
+        NextClosureDecision,
+        NextClosureAttempt,
+    >(
+        &self,
+        command: SubmitInput,
+        principal: CommandPrincipal,
+        cascade_root_kind: ParentTerminationKind,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        cancellation_identities: CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+        next_tool_cancellation: NextToolCancellation,
+        next_closure_decision: NextClosureDecision,
+        next_closure_attempt: NextClosureAttempt,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        NextToolCancellation: FnMut(
+                &[signalbox_domain::ToolRequestId],
+            ) -> (
+                Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
+            ) + Send,
+        NextClosureDecision: FnMut() -> DurableCommandId + Send,
+        NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
+    {
+        let mut transaction = self.pool.begin().await?;
+        let decision = Box::pin(handle_in_transaction(
+            &mut transaction,
+            command,
+            principal,
+            cascade_root_kind,
+            accepted_input,
+            turn,
+            cancellation_identities,
+            next_reclassified_turn,
+            next_tool_cancellation,
+            next_closure_decision,
+            next_closure_attempt,
             select_definition,
             self.model_capabilities.as_ref(),
             self.attachment_maximum_bytes,
@@ -741,7 +733,8 @@ impl SubmitInputRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Err(Self::wrong_kind(command_id)),
         }
     }
@@ -754,7 +747,7 @@ impl SubmitInputRepository {
 impl SubmitInputTransaction for SubmitInputRepository {
     type Error = SubmitInputRepositoryError;
 
-    async fn handle<NextTurn, NextToolCancellation>(
+    async fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
@@ -762,6 +755,8 @@ impl SubmitInputTransaction for SubmitInputRepository {
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
+        _next_closure_decision: NextClosureDecision,
+        _next_closure_attempt: NextClosureAttempt,
     ) -> Result<SubmitInputOutcome, Self::Error>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -771,6 +766,8 @@ impl SubmitInputTransaction for SubmitInputRepository {
                 Vec<signalbox_domain::SemanticTranscriptEntryId>,
                 signalbox_domain::ContextFrontierId,
             ) + Send,
+        NextClosureDecision: FnMut() -> DurableCommandId + Send,
+        NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
     {
         let outcome = SubmitInputRepository::handle_with_candidates(
             self,
@@ -793,14 +790,23 @@ impl SubmitInputTransaction for SubmitInputRepository {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_in_transaction<NextTurn, NextToolCancellation>(
+async fn handle_in_transaction<
+    NextTurn,
+    NextToolCancellation,
+    NextClosureDecision,
+    NextClosureAttempt,
+>(
     connection: &mut PgConnection,
     command: SubmitInput,
+    principal: CommandPrincipal,
+    cascade_root_kind: ParentTerminationKind,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
     cancellation_identities: CancelledModelCallTurnIdentities,
     mut next_reclassified_turn: NextTurn,
     mut next_tool_cancellation: NextToolCancellation,
+    mut next_closure_decision: NextClosureDecision,
+    mut next_closure_attempt: NextClosureAttempt,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     model_capabilities: Option<&ModelCapabilityCatalog>,
     attachment_maximum_bytes: Option<u64>,
@@ -813,6 +819,8 @@ where
             Vec<signalbox_domain::SemanticTranscriptEntryId>,
             signalbox_domain::ContextFrontierId,
         ) + Send,
+    NextClosureDecision: FnMut() -> DurableCommandId + Send,
+    NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
 {
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
@@ -836,7 +844,8 @@ where
             | CommandKind::UpdateSessionPlacement
             | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
-            | CommandKind::WithdrawGitRemote,
+            | CommandKind::WithdrawGitRemote
+            | CommandKind::SessionLifecycle,
         ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
@@ -845,15 +854,19 @@ where
         None => {}
     }
 
+    let issuer = crate::command_registry::issuer_columns(principal);
     let claimed = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
          ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command_id))
     .bind(SUBMIT_INPUT_KIND)
     .bind(STORAGE_VERSION)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut *connection)
     .await?
     .rows_affected()
@@ -879,7 +892,8 @@ where
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::SessionLifecycle,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             )),
@@ -893,6 +907,7 @@ where
     {
         let recorded = prepared.result().clone();
         insert_prepared_command(connection, &prepared).await?;
+        settle_injection_receipt(connection, &prepared).await?;
         return Ok(TransactionDecision::Commit(
             SubmitInputHandlingOutcome::Recorded(recorded),
         ));
@@ -914,7 +929,7 @@ where
     ) {
         sqlx::query(crate::lock_inventory::DELEGATION_TERMINATION_SESSION_FRONTIER)
             .bind(session_id_to_uuid(command.session()))
-            .bind("cancelled")
+            .bind(parent_termination_kind_to_str(cascade_root_kind))
             .execute(&mut *connection)
             .await?;
     }
@@ -923,15 +938,24 @@ where
     let PreparedAgainstLockedState {
         prepared,
         scheduling,
+        settles_closure,
     } = prepare_against_locked_state(
         connection,
         command,
+        principal,
         accepted_input,
         turn,
+        &mut next_closure_decision,
+        &mut next_closure_attempt,
         select_definition,
         model_capabilities,
     )
     .await?;
+    if settles_closure && matches!(prepared.result(), SubmitInputResult::Rejected(_)) {
+        return Ok(TransactionDecision::Rollback(
+            SubmitInputHandlingOutcome::Recorded(prepared.result().clone()),
+        ));
+    }
     let prior_queued_inputs = scheduling
         .as_ref()
         .map(|scheduling| {
@@ -951,8 +975,9 @@ where
         | SubmitInputResult::Rejected(_) => None,
     };
     insert_prepared_command(connection, &prepared).await?;
-    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1, $2)")
         .bind(durable_command_id_to_uuid(command_id))
+        .bind(parent_termination_kind_to_str(cascade_root_kind))
         .execute(&mut *connection)
         .await?;
     let interrupt_outcome = if let Some(interrupt) = interrupt {
@@ -1688,8 +1713,12 @@ where
     insert_prepared_effects(connection, prepared).await?;
     match interrupt_outcome {
         Some(ModelCallInterruptOutcome::Cancelled(cancelled)) => {
-            persist_terminal_outcome(connection, &ModelCallTerminalOutcome::Cancelled(cancelled))
-                .await?;
+            persist_terminal_outcome(
+                connection,
+                &ModelCallTerminalOutcome::Cancelled(cancelled),
+                None,
+            )
+            .await?;
         }
         Some(ModelCallInterruptOutcome::CancellationRequested(stopped)) => {
             persist_stop_requested(connection, &stopped).await?;
@@ -1700,6 +1729,7 @@ where
             persist_terminal_outcome(
                 connection,
                 &ModelCallTerminalOutcome::ReconciliationRequired(reconciliation),
+                None,
             )
             .await?;
             supersede_automatic_reconciliation(connection, session, turn).await?;
@@ -1942,6 +1972,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
                                 | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
                                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                                | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
                                 | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -2333,6 +2364,7 @@ async fn delegated_parked_attachment_frontier_origins(
                 | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -2653,27 +2685,58 @@ async fn load_runner_recovery_yielded_attempt(
 /// session, its first queued turn, and the dispatch audit become visible at
 /// one commit boundary.
 ///
+/// The core identities a fresh initial input mints: the accepted input, its
+/// queued turn, and the cancellation entry and frontier the turn would need.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreshInitialInput {
+    /// The accepted input.
+    pub accepted_input: AcceptedInputId,
+    /// The queued turn.
+    pub turn: TurnId,
+    /// The reserved cancellation entry.
+    pub cancellation_entry: SemanticTranscriptEntryId,
+    /// The reserved cancellation frontier.
+    pub cancellation_frontier: ContextFrontierId,
+}
+
 /// A freshly inserted session has no active turn, so submit preparation cannot
 /// apply an interrupt. The reclassification and tool-cancellation callbacks
 /// are therefore unreachable and use the reserved identities as placeholders.
-#[allow(clippy::too_many_arguments)]
+/// The four identities are drawn from the submit slice's application-owned
+/// generator under the lock (docs/spec/session-lifecycle.md).
 pub(crate) async fn insert_fresh_initial_input(
     connection: &mut PgConnection,
     command: SubmitInput,
-    accepted_input: AcceptedInputId,
-    turn: TurnId,
-    cancellation_entry: SemanticTranscriptEntryId,
-    cancellation_frontier: ContextFrontierId,
+    principal: CommandPrincipal,
+    ids: &mut impl SubmitInputIdGenerator,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-) -> Result<(), SubmitInputRepositoryError> {
+) -> Result<FreshInitialInput, SubmitInputRepositoryError> {
+    let minted = FreshInitialInput {
+        accepted_input: ids.next_accepted_input_id(),
+        turn: ids.next_turn_id(),
+        cancellation_entry: ids.next_semantic_entry_id(),
+        cancellation_frontier: ids.next_context_frontier_id(),
+    };
+    let FreshInitialInput {
+        accepted_input,
+        turn,
+        cancellation_entry,
+        cancellation_frontier,
+    } = minted;
+    let unreachable_closure_decision = command.command_id();
+    let unreachable_closure_attempt = TurnAttemptId::from_uuid(command.command_id().into_uuid());
     let outcome = handle_in_transaction(
         connection,
         command,
+        principal,
+        ParentTerminationKind::Cancelled,
         accepted_input,
         Some(turn),
         CancelledModelCallTurnIdentities::new(cancellation_entry, cancellation_frontier),
         |_| turn,
         |_| (Vec::new(), cancellation_frontier),
+        || unreachable_closure_decision,
+        || unreachable_closure_attempt,
         select_definition,
         None,
         None,
@@ -2682,7 +2745,7 @@ pub(crate) async fn insert_fresh_initial_input(
     match outcome {
         TransactionDecision::Commit(SubmitInputHandlingOutcome::Recorded(
             SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(result)),
-        )) if result.accepted_input() == accepted_input && result.turn() == turn => Ok(()),
+        )) if result.accepted_input() == accepted_input && result.turn() == turn => Ok(minted),
         TransactionDecision::Commit(_)
         | TransactionDecision::Rollback(SubmitInputHandlingOutcome::Recorded(_))
         | TransactionDecision::Rollback(SubmitInputHandlingOutcome::ConflictingReuse { .. }) => {
@@ -2787,14 +2850,25 @@ fn existing_outcome(
     }
 }
 
-async fn prepare_against_locked_state(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the locked preparation keeps command inputs and deferred identity effects explicit"
+)]
+async fn prepare_against_locked_state<NextClosureDecision, NextClosureAttempt>(
     connection: &mut PgConnection,
     command: SubmitInput,
+    principal: CommandPrincipal,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
+    next_closure_decision: &mut NextClosureDecision,
+    next_closure_attempt: &mut NextClosureAttempt,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     model_capabilities: Option<&ModelCapabilityCatalog>,
-) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError> {
+) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError>
+where
+    NextClosureDecision: FnMut() -> DurableCommandId + Send,
+    NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
+{
     // Lock-mode constraint: these session-row locks must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
     // scheduler row and current-defaults pointer row, while a concurrent
@@ -2843,6 +2917,7 @@ async fn prepare_against_locked_state(
         return Ok(PreparedAgainstLockedState {
             prepared: command.prepare_session_not_found(),
             scheduling: None,
+            settles_closure: false,
         });
     }
 
@@ -2857,6 +2932,37 @@ async fn prepare_against_locked_state(
             SubmitInputCorruption::CurrentSession(SessionCorruption::Missing("scheduler row"))
                 .into(),
         );
+    }
+    let pending_terminal = sqlx::query_scalar::<_, bool>(
+        "SELECT pending_terminal_outcome_kind IS NOT NULL
+           FROM session_lifecycle
+          WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .fetch_one(&mut *connection)
+    .await?;
+    let settles_closure =
+        pending_terminal && settles_committed_closure(connection, &command, principal).await?;
+    if pending_terminal && !settles_closure {
+        return Err(
+            SubmitInputCorruption::Inconsistent("session has a pending terminal handoff").into(),
+        );
+    }
+    if settles_closure
+        && let DeliveryRequest::Interrupt {
+            expected_active_turn,
+            ..
+        } = command.delivery()
+    {
+        deny_awaiting_approvals_for_interrupt(
+            connection,
+            command.session(),
+            expected_active_turn,
+            next_closure_decision,
+            next_closure_attempt,
+        )
+        .await
+        .map_err(map_tool_loop_error)?;
     }
 
     let pointer_exists =
@@ -3009,6 +3115,7 @@ async fn prepare_against_locked_state(
         .map(|prepared| PreparedAgainstLockedState {
             prepared,
             scheduling: Some(scheduling),
+            settles_closure,
         })
         .map_err(|error| match error.failure() {
             SubmitInputPreparationFailure::SessionMismatch { .. } => {
@@ -3035,6 +3142,39 @@ async fn prepare_against_locked_state(
                 map_model_settings_resolution_error(error)
             }
         })
+}
+
+/// Whether this is the core-issued interrupt a committed closure owes its own
+/// live turn. The closure recorded that turn, and the interrupt
+/// terminalizing it is how the handoff settles, so a pending handoff admits
+/// exactly it.
+async fn settles_committed_closure(
+    connection: &mut PgConnection,
+    command: &SubmitInput,
+    principal: CommandPrincipal,
+) -> Result<bool, SubmitInputRepositoryError> {
+    if principal != CommandPrincipal::Core {
+        return Ok(false);
+    }
+    let DeliveryRequest::Interrupt {
+        expected_active_turn,
+        ..
+    } = command.delivery()
+    else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM session_lifecycle_command
+              WHERE session_id = $1
+                AND applied_effect_kind = 'closure_pending'
+                AND live_turn_id = $2)",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .bind(turn_id_to_uuid(expected_active_turn))
+    .fetch_one(&mut *connection)
+    .await?)
 }
 
 fn map_model_settings_resolution_error(
@@ -3306,7 +3446,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
 
         let accepting_command: Option<Uuid> = row.try_get("accepting_command_id")?;
         let goal_generation: Option<Decimal> = row.try_get("goal_generation")?;
-        // A command and a goal generation are no longer exclusive. A dispatched
+        // A command and a goal generation are not exclusive. A dispatched
         // work turn is bound to the generation it runs under while keeping the
         // submit command that accepted its tagged context, so the command is
         // what reconstitutes the input and the generation rides alongside it.
@@ -4700,7 +4840,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
         "SELECT DISTINCT producing_model_call_id
            FROM semantic_transcript_entry
           WHERE source_session_id = $1
-            AND payload_kind IN ('assistant_text', 'assistant_tool_use')
+            AND payload_kind IN ('assistant_text', 'provider_compaction', 'assistant_tool_use')
           ORDER BY producing_model_call_id",
     )
     .bind(session_id_to_uuid(session_id))
@@ -5893,6 +6033,24 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 })?,
             },
             (
+                "provider_compaction",
+                None,
+                None,
+                None,
+                None,
+                Some(block),
+                Some(call),
+                None,
+                None,
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call: ModelCallId::from_uuid(call),
+                block: ProviderCompactionBlock::try_new(block).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("provider compaction block")
+                })?,
+            },
+            (
                 "assistant_tool_use",
                 None,
                 None,
@@ -5974,6 +6132,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 | "turn_failed"
                 | "turn_cancelled"
                 | "assistant_text"
+                | "provider_compaction"
                 | "assistant_tool_use"
                 | "tool_execution_result"
                 | "tool_denied"
@@ -6254,6 +6413,14 @@ fn decode_delegation_provenance(
                 })?,
             })
         }
+        ("parent_lifecycle_command", None, None, Some(command)) => Ok(
+            DelegationProvenanceReconstitutionInput::ParentLifecycleCommand {
+                session: session_id_from_uuid(session),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("delegation provenance command")
+                })?,
+            },
+        ),
         _ => Err(SubmitInputCorruption::Inconsistent(
             "delegation result provenance",
         )),
@@ -6641,11 +6808,15 @@ async fn load_active_acceptance_tail(
                     call: ModelCallId::from_uuid(call),
                 }
             }
+            ("closed_not_delivered", None, None, DeliveryRequest::NextSafePoint { .. }) => {
+                AcceptedInputDisposition::ClosedNotDelivered
+            }
             (
                 "origin_of"
                 | "pending_steering"
                 | "reclassified_as_turn_origin"
-                | "consumed_as_steering",
+                | "consumed_as_steering"
+                | "closed_not_delivered",
                 _,
                 _,
                 _,
@@ -6950,6 +7121,55 @@ async fn insert_prepared_effects(
         mirror_accepted_content_parts(connection, applied.accepted_input()).await?;
     }
 
+    settle_injection_receipt(connection, &prepared).await
+}
+
+/// Settles the command's injection receipt. Pending steering settles at
+/// its boundary; a session that does not exist has no receipt to carry.
+async fn settle_injection_receipt(
+    connection: &mut PgConnection,
+    prepared: &PreparedSubmitInput,
+) -> Result<(), SubmitInputRepositoryError> {
+    let command = prepared.command();
+    let outcome = match prepared.result() {
+        SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) => {
+            outbox::InjectionOutcomeOutbox::Delivered {
+                turn: Some(applied.turn()),
+            }
+        }
+        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+        | SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound { .. }) => {
+            return Ok(());
+        }
+        SubmitInputResult::Rejected(rejected) => {
+            if matches!(
+                rejected,
+                SubmitInputRejectedResult::AttachmentBlobNotFound { .. }
+                    | SubmitInputRejectedResult::AttachmentByteBudgetExceeded { .. }
+            ) && !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)",
+            )
+            .bind(session_id_to_uuid(command.session()))
+            .fetch_one(&mut *connection)
+            .await?
+            {
+                return Ok(());
+            }
+            let kind = encode_result(prepared.result(), command.delivery(), command.session())
+                .rejection_kind
+                .ok_or(SubmitInputCorruption::Inconsistent("rejection kind"))?;
+            outbox::InjectionOutcomeOutbox::Rejected { kind }
+        }
+    };
+    outbox::append(
+        connection,
+        OutboxEvent::InjectionSettled {
+            session: command.session(),
+            command: command.command_id(),
+            outcome,
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -7058,6 +7278,11 @@ fn encode_actor(actor: Actor) -> EncodedActor {
     match actor {
         Actor::User => EncodedActor {
             kind: "user",
+            turn: None,
+            tool_request: None,
+        },
+        Actor::Core => EncodedActor {
+            kind: "core",
             turn: None,
             tool_request: None,
         },
@@ -8753,23 +8978,38 @@ fn decode_complete(
         row.try_get("actor_tool_request_id")?,
     )?;
     let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
-    let command = SubmitInput::new(
-        command_id,
-        session_id_from_uuid(required(&row, "command_session_id")?),
-        decode_content(required(&row, "command_content_parts")?, "command content")?,
-        decode_delivery(
-            required(&row, "command_delivery_kind")?,
-            row.try_get("command_descendant_scope")?,
-            row.try_get("command_expected_active_turn_id")?,
-            row.try_get("command_expected_defaults_version")?,
-            row.try_get("command_model_override_kind")?,
-            row.try_get("command_replacement_model_kind")?,
-            row.try_get("command_replacement_direct_id")?,
-            row.try_get("command_replacement_alias_id")?,
-            command_model_settings_override,
-            "command delivery",
-        )?,
-    );
+    let session = session_id_from_uuid(required(&row, "command_session_id")?);
+    let content = decode_content(required(&row, "command_content_parts")?, "command content")?;
+    let delivery = decode_delivery(
+        required(&row, "command_delivery_kind")?,
+        row.try_get("command_descendant_scope")?,
+        row.try_get("command_expected_active_turn_id")?,
+        row.try_get("command_expected_defaults_version")?,
+        row.try_get("command_model_override_kind")?,
+        row.try_get("command_replacement_model_kind")?,
+        row.try_get("command_replacement_direct_id")?,
+        row.try_get("command_replacement_alias_id")?,
+        command_model_settings_override,
+        "command delivery",
+    )?;
+    let command = match (actor, delivery) {
+        (
+            Actor::Core,
+            DeliveryRequest::Interrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            },
+        ) => SubmitInput::new_core_interrupt(
+            command_id,
+            session,
+            content,
+            expected_active_turn,
+            descendant_scope,
+            configuration,
+        ),
+        (_, delivery) => SubmitInput::new(command_id, session, content, delivery),
+    };
 
     let result_kind: String = required(&row, "result_kind")?;
     let rejection_kind: Option<String> = row.try_get("rejection_kind")?;
@@ -9664,6 +9904,7 @@ fn decode_actor(
 ) -> Result<Actor, SubmitInputRepositoryError> {
     match (kind.as_str(), turn, tool_request) {
         ("user", None, None) => Ok(Actor::User),
+        ("core", None, None) => Ok(Actor::Core),
         ("model", Some(turn), None) => Ok(Actor::Model {
             turn: TurnId::from_uuid(turn),
         }),
@@ -9788,6 +10029,13 @@ const fn descendant_scope_to_str(value: DescendantTerminationScope) -> &'static 
     match value {
         DescendantTerminationScope::ParentAlone => "parent_alone",
         DescendantTerminationScope::ParentAndDescendants => "parent_and_descendants",
+    }
+}
+
+const fn parent_termination_kind_to_str(value: ParentTerminationKind) -> &'static str {
+    match value {
+        ParentTerminationKind::Stopped => "stopped",
+        ParentTerminationKind::Cancelled => "cancelled",
     }
 }
 

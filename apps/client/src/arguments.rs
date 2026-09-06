@@ -425,7 +425,7 @@ enum CliCommand {
     Session(SessionDelegationArguments),
     /// Commission, inspect, or transition one session goal.
     Goal(GoalArguments),
-    /// Show what repository-watch automation is working on now.
+    /// Show lifecycle health metrics and current deadline violations.
     Status,
     /// List current sessions.
     List,
@@ -501,6 +501,7 @@ struct BlobReadArguments {
     /// Zero-based byte offset.
     #[arg(long = "offset", value_name = "DECIMAL")]
     offset_bytes: u64,
+    /// Positive byte count of the range to read; `help` states the ceiling.
     #[arg(
         long = "length",
         value_name = "DECIMAL",

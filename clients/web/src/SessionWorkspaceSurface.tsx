@@ -109,6 +109,7 @@ export const pruneExpandedSessionItems = (
 }
 
 export function SessionWorkspaceSurface({
+  initialSessionId,
   onSelectionEvidence,
   onTimelineIds,
   onTimelineWindowAvailable,
@@ -117,6 +118,7 @@ export function SessionWorkspaceSurface({
   timelineRef,
   windowRequest,
 }: {
+  initialSessionId?: string
   onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
@@ -128,10 +130,12 @@ export function SessionWorkspaceSurface({
   const dispatch = useAppDispatch()
   const queryClient = useQueryClient()
   const app = useAppSelector(selectApp)
-  const [draftId, setDraftId] = useState('')
-  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [draftId, setDraftId] = useState(initialSessionId ?? '')
+  const [sessionId, setSessionId] = useState<string | null>(initialSessionId ?? null)
   const [awaitingSessionId, setAwaitingSessionId] = useState<string | null>(null)
-  const [openingPosition, setOpeningPosition] = useState<string | undefined>()
+  const [openingPosition, setOpeningPosition] = useState<string | undefined>(
+    initialSessionId === undefined ? undefined : app.lastLogicalPositions[initialSessionId],
+  )
   const [refetchRequest, setRefetchRequest] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const rowRefs = useRef(new Map<string, HTMLDivElement>())

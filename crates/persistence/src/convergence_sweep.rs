@@ -7,9 +7,12 @@ use std::{
 };
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use signalbox_domain::{CommitSha, DurableCommandId, PullRequestNumber, RepositorySlug, SessionId};
+use signalbox_domain::{
+    CommitSha, DispatchingModule, DurableCommandId, LifecycleActor, PullRequestNumber,
+    RepositorySlug, SessionId, SessionOwnership, SessionParkCause, SessionParkResponder,
+};
 use sqlx::{
-    PgConnection, PgPool,
+    PgPool,
     types::{Uuid, time::OffsetDateTime},
 };
 
@@ -21,9 +24,11 @@ use crate::mapping::{
     convergence_sweep_state_from_str, convergence_sweep_state_to_str, session_id_from_uuid,
 };
 
+#[derive(signalbox_derive::Accessors)]
 /// The exact pull-request observation used for movement and dispatch-effect checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConvergenceSweepObservation {
+    #[get]
     head_sha: CommitSha,
     unresolved_threads: u64,
 }
@@ -34,10 +39,6 @@ impl ConvergenceSweepObservation {
             head_sha,
             unresolved_threads,
         }
-    }
-
-    pub const fn head_sha(&self) -> &CommitSha {
-        &self.head_sha
     }
 
     pub const fn unresolved_threads(&self) -> u64 {
@@ -180,6 +181,7 @@ impl ConvergenceSweepRetryPolicy {
 struct FailureTransitionRow {
     consecutive_failures: i16,
     parking_kind: String,
+    parked_session_id: Option<Uuid>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -313,6 +315,7 @@ pub enum ConvergenceSweepStoreError {
     Database(sqlx::Error),
     CommitAmbiguous(sqlx::Error),
     Corruption(&'static str),
+    Lifecycle(Box<crate::session_lifecycle::SessionLifecycleRepositoryError>),
 }
 
 impl fmt::Display for ConvergenceSweepStoreError {
@@ -326,6 +329,7 @@ impl fmt::Display for ConvergenceSweepStoreError {
                 formatter,
                 "convergence sweep state is inconsistent: {reason}"
             ),
+            Self::Lifecycle(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -334,6 +338,7 @@ impl Error for ConvergenceSweepStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
+            Self::Lifecycle(error) => Some(error.as_ref()),
             Self::Corruption(_) => None,
         }
     }
@@ -363,10 +368,12 @@ impl PostgresConvergenceSweepStore {
     }
 
     /// Reconciles durable operator-visible membership with configured targets.
+    ///
+    /// Returns sessions restored after their removed target stopped owning a park.
     pub async fn reconcile_configured_targets(
         &self,
         configured: &[(RepositorySlug, PullRequestNumber)],
-    ) -> Result<(), ConvergenceSweepStoreError> {
+    ) -> Result<Vec<SessionId>, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("UPDATE convergence_sweep_target SET enrolled = false")
             .execute(&mut *transaction)
@@ -374,18 +381,47 @@ impl PostgresConvergenceSweepStore {
         for (repository, pull_request) in configured {
             ensure_target(&mut transaction, repository, *pull_request).await?;
         }
+        let parked_sessions: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT parked_session_id
+               FROM convergence_sweep_target
+              WHERE NOT enrolled AND parked_session_id IS NOT NULL
+              ORDER BY parked_session_id",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut restored = Vec::with_capacity(parked_sessions.len());
+        for parked_session in parked_sessions {
+            if restore_commissioned_dispatch_park(&mut transaction, parked_session).await? {
+                restored.push(SessionId::from_uuid(parked_session));
+            }
+        }
         transaction.commit().await?;
-        Ok(())
+        Ok(restored)
     }
 
     /// Re-enrolls one configured target, making daemon restart its explicit recovery path.
+    ///
+    /// Returns the session restored when re-enrollment clears a commissioned park.
     pub async fn reenroll_target(
         &self,
         repository: &RepositorySlug,
         pull_request: PullRequestNumber,
-    ) -> Result<(), ConvergenceSweepStoreError> {
+    ) -> Result<Option<SessionId>, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
+        let parked_session: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT parked_session_id
+               FROM convergence_sweep_target
+              WHERE repository = $1 AND pull_request_number = $2
+                AND state_kind = $3",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(pull_request.get()))
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::Parked,
+        ))
+        .fetch_one(&mut *transaction)
+        .await?;
         sqlx::query(
             "UPDATE convergence_sweep_target
                 SET state_kind = $3, failure_kind = NULL,
@@ -406,8 +442,15 @@ impl PostgresConvergenceSweepStore {
         ))
         .execute(&mut *transaction)
         .await?;
+        let restored = if let Some(parked_session) = parked_session {
+            restore_commissioned_dispatch_park(&mut transaction, parked_session)
+                .await?
+                .then_some(SessionId::from_uuid(parked_session))
+        } else {
+            None
+        };
         transaction.commit().await?;
-        Ok(())
+        Ok(restored)
     }
 
     /// Loads retry/park state and the latest globally commissioned session.
@@ -509,24 +552,10 @@ impl PostgresConvergenceSweepStore {
                                SELECT 1 FROM model_call AS call
                                 WHERE call.session_id = source.session_id
                            ) AS has_model_activity
-                      FROM (
-                           SELECT dispatch.dispatch_id, dispatch.session_id,
-                                  dispatch.recorded_at
-                             FROM commissioned_dispatch AS dispatch
-                            WHERE dispatch.target_kind = 'pull_request'
-                              AND dispatch.repository = target.repository
-                              AND dispatch.pull_request_number = target.pull_request_number
-                           UNION ALL
-                           SELECT action.dispatch_id, action.session_id,
-                                  batch.admitted_at AS recorded_at
-                             FROM repo_watch_dispatch_action AS action
-                             JOIN repo_watch_event AS event ON event.event_id = action.event_id
-                             JOIN repo_watch_dispatch_batch AS batch
-                               ON batch.dispatch_id = action.dispatch_id
-                            WHERE event.target_kind = 'pull_request'
-                              AND event.repository = target.repository
-                              AND event.pull_request_number = target.pull_request_number
-                      ) AS source
+                      FROM commissioned_dispatch AS source
+                     WHERE source.target_kind = 'pull_request'
+                       AND source.repository = target.repository
+                       AND source.pull_request_number = target.pull_request_number
                      ORDER BY source.recorded_at DESC, source.dispatch_id DESC,
                               live DESC, has_model_activity DESC, source.session_id DESC
                      LIMIT 1
@@ -784,25 +813,13 @@ impl PostgresConvergenceSweepStore {
                     census_dispatch_head_sha = $3,
                     census_dispatch_unresolved_threads = $4
               WHERE repository = $1 AND pull_request_number = $2
-                AND (
-                    EXISTS (
-                        SELECT 1 FROM commissioned_dispatch AS dispatch
-                         WHERE dispatch.dispatch_id = $5
-                           AND dispatch.session_id = $6
-                           AND dispatch.target_kind = 'pull_request'
-                           AND dispatch.repository = $1
-                           AND dispatch.pull_request_number = $2
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                          FROM repo_watch_dispatch_action AS action
-                          JOIN repo_watch_event AS event ON event.event_id = action.event_id
-                         WHERE action.dispatch_id = $5
-                           AND action.session_id = $6
-                           AND event.target_kind = 'pull_request'
-                           AND event.repository = $1
-                           AND event.pull_request_number = $2
-                    )
+                AND EXISTS (
+                    SELECT 1 FROM commissioned_dispatch AS dispatch
+                     WHERE dispatch.dispatch_id = $5
+                       AND dispatch.session_id = $6
+                       AND dispatch.target_kind = 'pull_request'
+                       AND dispatch.repository = $1
+                       AND dispatch.pull_request_number = $2
                 )",
         )
         .bind(repository.as_str())
@@ -937,17 +954,6 @@ impl PostgresConvergenceSweepStore {
                      WHERE dispatch.target_kind = 'pull_request'
                        AND dispatch.repository = $1
                        AND dispatch.pull_request_number = $2
-                    UNION ALL
-                    SELECT action.dispatch_id, action.session_id,
-                           batch.admitted_at AS recorded_at
-                      FROM repo_watch_dispatch_action AS action
-                      JOIN repo_watch_event AS event
-                        ON event.event_id = action.event_id
-                      JOIN repo_watch_dispatch_batch AS batch
-                        ON batch.dispatch_id = action.dispatch_id
-                     WHERE event.target_kind = 'pull_request'
-                       AND event.repository = $1
-                       AND event.pull_request_number = $2
                 ), latest_dispatch AS (
                     SELECT dispatch_id, recorded_at
                       FROM target_dispatch
@@ -965,9 +971,14 @@ impl PostgresConvergenceSweepStore {
             .bind(Decimal::from(pull_request.get()))
             .fetch_all(&mut *transaction)
             .await?;
-            for cohort_session in cohort_sessions {
-                lock_model_activity_fence(&mut transaction, SessionId::from_uuid(cohort_session))
-                    .await?;
+            let cohort_sessions = cohort_sessions
+                .into_iter()
+                .map(SessionId::from_uuid)
+                .collect::<Vec<_>>();
+            for cohort_session in &cohort_sessions {
+                crate::session_lifecycle::load_locked(&mut transaction, *cohort_session)
+                    .await
+                    .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))?;
             }
         }
         let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
@@ -994,23 +1005,10 @@ impl PostgresConvergenceSweepStore {
                            SELECT 1 FROM model_call AS call
                             WHERE call.session_id = target.session_id
                        ) AS has_model_activity
-                  FROM (
-                       SELECT dispatch.session_id, dispatch.recorded_at, dispatch.dispatch_id
-                         FROM commissioned_dispatch AS dispatch
-                        WHERE dispatch.target_kind = 'pull_request'
-                          AND dispatch.repository = $1
-                          AND dispatch.pull_request_number = $2
-                       UNION ALL
-                       SELECT action.session_id, batch.admitted_at AS recorded_at,
-                              action.dispatch_id
-                         FROM repo_watch_dispatch_action AS action
-                         JOIN repo_watch_event AS event ON event.event_id = action.event_id
-                         JOIN repo_watch_dispatch_batch AS batch
-                           ON batch.dispatch_id = action.dispatch_id
-                        WHERE event.target_kind = 'pull_request'
-                          AND event.repository = $1
-                          AND event.pull_request_number = $2
-                  ) AS target
+                  FROM commissioned_dispatch AS target
+                 WHERE target.target_kind = 'pull_request'
+                   AND target.repository = $1
+                   AND target.pull_request_number = $2
              ), latest_dispatch AS (
                 SELECT dispatch_id, recorded_at
                   FROM target_dispatch
@@ -1115,7 +1113,8 @@ impl PostgresConvergenceSweepStore {
                     CASE state_kind
                         WHEN $12 THEN 'parked'
                         ELSE 'retry_scheduled'
-                    END AS parking_kind",
+                    END AS parking_kind,
+                    parked_session_id",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
@@ -1147,6 +1146,33 @@ impl PostgresConvergenceSweepStore {
             };
         };
         let parking = FailureParking::decode(&updated.parking_kind)?;
+        if parking == FailureParking::Parked
+            && let Some(parked_session) = updated.parked_session_id
+        {
+            let session = SessionId::from_uuid(parked_session);
+            let lifecycle = crate::session_lifecycle::load_locked(&mut transaction, session)
+                .await
+                .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))?;
+            if lifecycle.ownership() == SessionOwnership::Owned
+                && !lifecycle.state().is_terminal()
+                && !lifecycle.state().is_parked()
+            {
+                crate::session_lifecycle::park_in_transaction(
+                    &mut transaction,
+                    session,
+                    SessionParkCause::ModulePark,
+                    SessionParkResponder::Module {
+                        module: DispatchingModule::CommissionedDispatch,
+                    },
+                    None,
+                    LifecycleActor::Module {
+                        module: DispatchingModule::CommissionedDispatch,
+                    },
+                )
+                .await
+                .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))?;
+            }
+        }
         insert_event(
             &mut transaction,
             event_id,
@@ -1184,19 +1210,17 @@ impl PostgresConvergenceSweepStore {
     }
 }
 
-/// Serializes first model-call creation with inactivity parking for one session.
-pub(crate) async fn lock_model_activity_fence(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!(
-            "convergence_model_activity:{}",
-            session.into_uuid()
-        ))
-        .execute(connection)
-        .await?;
-    Ok(())
+async fn restore_commissioned_dispatch_park(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    parked_session: Uuid,
+) -> Result<bool, ConvergenceSweepStoreError> {
+    crate::session_lifecycle::restore_module_park_in_transaction(
+        transaction,
+        SessionId::from_uuid(parked_session),
+        DispatchingModule::CommissionedDispatch,
+    )
+    .await
+    .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))
 }
 
 async fn ensure_target(

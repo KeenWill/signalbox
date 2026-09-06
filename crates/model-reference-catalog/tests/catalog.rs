@@ -655,7 +655,7 @@ fn query_after_the_evidence_horizon_is_unknown() {
         .resolve(
             Provider::Openai,
             "gpt-5.6-sol",
-            "2026-08-25",
+            "2026-09-04",
             CommercialChannel::Api,
         )
         .unwrap();
@@ -671,6 +671,21 @@ fn malformed_catalog_field_is_rejected() {
     let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
 
     assert!(error.to_string().contains("unsupported_authority"));
+}
+
+#[test]
+fn catalog_dates_require_strict_calendar_dates() {
+    for date in ["2025-02-29", "2024-2-29", "2024-02-30"] {
+        let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+        raw["verified_through"]["openai"] = Value::String(String::from(date));
+
+        let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("YYYY-MM-DD calendar date"),
+            "{date}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -819,12 +834,13 @@ fn projection_breaking_source_text_is_rejected() {
 #[test]
 fn source_ownership_uses_the_canonicalized_url_path() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
-    assert_eq!(
-        raw["sources"][28]["id"],
-        "oai-codex-model-catalog-2026-08-24"
-    );
-    raw["sources"][28]["url"] =
-        Value::String(String::from("https://github.com/openai/../attacker/repo"));
+    let source = raw["sources"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|source| source["id"] == "oai-codex-model-catalog-2026-09-03")
+        .unwrap();
+    source["url"] = Value::String(String::from("https://github.com/openai/../attacker/repo"));
 
     let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
 
@@ -924,7 +940,7 @@ fn incompatible_overlapping_rate_is_rejected() {
 }
 
 #[test]
-fn inv_077_reference_catalog_has_no_workspace_dependency_edge() {
+fn reference_catalog_has_no_workspace_dependency_edge() {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))

@@ -186,7 +186,7 @@ impl CanonicalCallTarget {
 ///
 /// The record deliberately carries no copy of the exact target:
 /// docs/spec/model-call-execution.md derives the target from the canonical
-/// call record inside the serialized transition. S21 / INV-014: raw parts
+/// call record inside the serialized transition. S21: raw parts
 /// cannot claim a recorded evidence fact:
 ///
 /// ```compile_fail
@@ -539,7 +539,7 @@ impl ProviderTargetEvidenceReuseError {
 /// equal evidence replay is idempotent, and later observations cannot
 /// duplicate or replace it. The value carries no exact target and no
 /// authority generation; both derive from the canonical call and transfer
-/// chain inside the serialized transition. S21 / INV-014: raw identities
+/// chain inside the serialized transition. S21: raw identities
 /// cannot claim an invalidation:
 ///
 /// ```compile_fail
@@ -881,7 +881,7 @@ mod tests {
         record_against(target(), evidence, SUBJECT_CALL, mismatch(reported))
     }
 
-    /// S21 / INV-014: identifier lookup precedes any other validation; a
+    /// S21: identifier lookup precedes any other validation; a
     /// fresh consistent record appends, an equal replay returns the
     /// recorded result, and reuse with a different call or payload is
     /// rejected unchanged.
@@ -930,7 +930,7 @@ mod tests {
         assert_eq!(log.lookup(evidence_id(1)), Some(&evidence));
     }
 
-    /// S21 / INV-014: a fresh identifier is durably recorded only when the
+    /// S21: a fresh identifier is durably recorded only when the
     /// claimed variant is consistent with the exact target derived from the
     /// canonical call record.
     #[test]
@@ -972,7 +972,7 @@ mod tests {
         assert_eq!(log.lookup(evidence_id(1)), None);
     }
 
-    /// S21 / INV-014: a correlated mismatch on an issued nonterminal call
+    /// S21: a correlated mismatch on an issued nonterminal call
     /// produces exactly the sealed nonterminal-observation fact; unsent calls,
     /// cross-wired calls, non-mismatch payloads, and target-equal reports
     /// are rejected.
@@ -1050,7 +1050,7 @@ mod tests {
         );
     }
 
-    /// S21 / INV-014: mismatch evidence resolving terminal ambiguity leaves
+    /// S21: mismatch evidence resolving terminal ambiguity leaves
     /// the physical disposition unchanged and produces the resolution
     /// fact only for an `Ambiguous` call.
     #[test]
@@ -1087,7 +1087,7 @@ mod tests {
         );
     }
 
-    /// S21 / INV-014: the completed-call invalidation is unique by
+    /// S21: the completed-call invalidation is unique by
     /// invalidated call — the first valid mismatch fixes it, structurally
     /// equal replay is idempotent, and later observations cannot duplicate
     /// or replace it.
@@ -1152,7 +1152,7 @@ mod tests {
         );
     }
 
-    /// S21 / INV-014: invalidation validates the canonical completed call
+    /// S21: invalidation validates the canonical completed call
     /// and correlated mismatch before uniqueness is even considered.
     #[test]
     fn invalidation_rejects_uncompleted_calls_and_uncorrelated_evidence() {
@@ -1205,7 +1205,7 @@ mod tests {
         );
     }
 
-    /// S21 / INV-014: recording reads the call identity and its exact target
+    /// S21: recording reads the call identity and its exact target
     /// together from one canonical call record, so a match observation is
     /// validated against the call's own target and cannot be cross-wired to
     /// another call's target through the public conversions.
@@ -1251,7 +1251,7 @@ mod tests {
         );
     }
 
-    /// S21 / INV-014: the invalidation log owns the per-call uniqueness, so
+    /// S21: the invalidation log owns the per-call uniqueness, so
     /// the first valid mismatch fixes the entry and a later observation for
     /// the same call is rejected without the caller tracking the existing
     /// value.

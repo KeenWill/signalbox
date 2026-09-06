@@ -4,12 +4,8 @@ use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde_json::value::RawValue;
 
 const SHA256_PREFIX: &str = "sha256:";
-// numeric-bound: not-a-bound - fixed lowercase SHA-256 hexadecimal width
-const SHA256_HEX_BYTES: usize = 64;
 // numeric-bound: ceiling - bounds retained caller media-type text
 const MAX_DECLARED_MEDIA_TYPE_BYTES: usize = 255;
-// numeric-bound: ceiling - enforces the RFC 6838 restricted-name token width
-const MAX_MEDIA_TYPE_TOKEN_BYTES: usize = 127;
 // numeric-bound: ceiling - bounds retained caller display-name text
 const MAX_DISPLAY_FILENAME_BYTES: usize = 255;
 // numeric-bound: ceiling - bounds registry identity and selector storage
@@ -23,29 +19,25 @@ const MAX_METADATA_BYTES: usize = 16_384;
 // numeric-bound: ceiling - bounds retained untrusted continuation state
 const MAX_CONTINUATION_CURSOR_BYTES: usize = 1_024;
 
+#[derive(signalbox_derive::Accessors)]
 /// SHA-256 identity at the provider-neutral boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct FileDigest([u8; 32]);
+pub struct FileDigest(
+    /// Borrows the fixed digest bytes.
+    #[get(as = "as_bytes")]
+    [u8; 32],
+);
 
 impl FileDigest {
     /// Reconstitutes a digest already verified by the blob layer.
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
-
-    /// Borrows the fixed digest bytes.
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
 }
 
 impl fmt::Display for FileDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(SHA256_PREFIX)?;
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        write!(formatter, "{SHA256_PREFIX}{}", hex::encode(self.0))
     }
 }
 
@@ -56,24 +48,16 @@ impl FromStr for FileDigest {
         let encoded = value
             .strip_prefix(SHA256_PREFIX)
             .ok_or(RegistryValueError::Digest)?;
-        if encoded.len() != SHA256_HEX_BYTES {
+        if encoded.len() != 64
+            || !encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
             return Err(RegistryValueError::Digest);
         }
         let mut bytes = [0_u8; 32];
-        for (destination, pair) in bytes.iter_mut().zip(encoded.as_bytes().chunks_exact(2)) {
-            let high = lowercase_hex(pair[0]).ok_or(RegistryValueError::Digest)?;
-            let low = lowercase_hex(pair[1]).ok_or(RegistryValueError::Digest)?;
-            *destination = (high << 4) | low;
-        }
+        hex::decode_to_slice(encoded, &mut bytes).map_err(|_| RegistryValueError::Digest)?;
         Ok(Self(bytes))
-    }
-}
-
-fn lowercase_hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
     }
 }
 
@@ -88,9 +72,14 @@ pub enum AttachmentKind {
     File,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact bounded caller-declared media type.
 #[derive(Clone, Eq, Hash, PartialEq)]
-pub struct DeclaredMediaType(Arc<str>);
+pub struct DeclaredMediaType(
+    /// Borrows the exact caller spelling.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl DeclaredMediaType {
     /// Admits a nonempty visible-ASCII value without normalization.
@@ -107,11 +96,6 @@ impl DeclaredMediaType {
         Ok(Self(value))
     }
 
-    /// Borrows the exact caller spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
     /// Parses only a parameter-free canonical essence.
     pub fn canonical_essence(&self) -> Result<CanonicalMediaType, MediaTypeParseError> {
         CanonicalMediaType::from_str(self.as_str())
@@ -124,9 +108,14 @@ impl fmt::Debug for DeclaredMediaType {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Bounded attachment basename supplied by a caller.
 #[derive(Clone, Eq, Hash, PartialEq)]
-pub struct DisplayFilename(Arc<str>);
+pub struct DisplayFilename(
+    /// Borrows the exact caller spelling.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl DisplayFilename {
     /// Admits one nonempty basename without path or null characters.
@@ -145,11 +134,6 @@ impl DisplayFilename {
             Ok(Self(value))
         }
     }
-
-    /// Borrows the exact caller spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl fmt::Debug for DisplayFilename {
@@ -158,12 +142,15 @@ impl fmt::Debug for DisplayFilename {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One semantic use of immutable file bytes.
 #[derive(Clone, Eq, PartialEq)]
 pub struct FileUse {
     digest: FileDigest,
     byte_length: NonZeroU64,
     attachment_kind: AttachmentKind,
+    /// Borrows the exact declared type.
+    #[get]
     declared_media_type: DeclaredMediaType,
     display_filename: Option<DisplayFilename>,
 }
@@ -201,11 +188,6 @@ impl FileUse {
         self.attachment_kind
     }
 
-    /// Borrows the exact declared type.
-    pub const fn declared_media_type(&self) -> &DeclaredMediaType {
-        &self.declared_media_type
-    }
-
     /// Borrows the optional display basename.
     pub const fn display_filename(&self) -> Option<&DisplayFilename> {
         self.display_filename.as_ref()
@@ -228,16 +210,14 @@ impl fmt::Debug for FileUse {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical lowercase ASCII media-type essence with no parameters.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CanonicalMediaType(Arc<str>);
-
-impl CanonicalMediaType {
+pub struct CanonicalMediaType(
     /// Borrows the canonical `type/subtype` spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl fmt::Display for CanonicalMediaType {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -249,38 +229,17 @@ impl FromStr for CanonicalMediaType {
     type Err = MediaTypeParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() > MAX_DECLARED_MEDIA_TYPE_BYTES || value.contains(';') {
+        if value.len() > MAX_DECLARED_MEDIA_TYPE_BYTES {
             return Err(MediaTypeParseError);
         }
-        let Some((type_name, subtype_name)) = value.split_once('/') else {
-            return Err(MediaTypeParseError);
-        };
-        if subtype_name.contains('/')
-            || !valid_media_token(type_name)
-            || !valid_media_token(subtype_name)
-        {
+        let parsed = value
+            .parse::<mime::Mime>()
+            .map_err(|_| MediaTypeParseError)?;
+        if parsed.params().next().is_some() || parsed.essence_str() != value {
             return Err(MediaTypeParseError);
         }
         Ok(Self(Arc::from(value)))
     }
-}
-
-fn valid_media_token(value: &str) -> bool {
-    if value.len() > MAX_MEDIA_TYPE_TOKEN_BYTES {
-        return false;
-    }
-    let mut bytes = value.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && bytes.all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(
-                    byte,
-                    b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
-                )
-        })
 }
 
 /// A media type was not a canonical parameter-free essence.
@@ -345,9 +304,14 @@ fn valid_registry_name(value: &str) -> bool {
         })
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Immutable reader implementation revision.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct FileReaderRevision(Arc<str>);
+pub struct FileReaderRevision(
+    /// Borrows the exact revision spelling.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl FileReaderRevision {
     /// Admits one bounded visible-ASCII revision label.
@@ -361,18 +325,20 @@ impl FileReaderRevision {
         }
         Ok(Self(value))
     }
-
-    /// Borrows the exact revision spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Stable provider, reader, and revision tuple.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ReaderIdentity {
+    /// Borrows the provider identity.
+    #[get]
     provider: FileReaderProviderName,
+    /// Borrows the reader identity.
+    #[get]
     reader: FileReaderName,
+    /// Borrows the immutable revision.
+    #[get]
     revision: FileReaderRevision,
 }
 
@@ -389,27 +355,17 @@ impl ReaderIdentity {
             revision,
         }
     }
-
-    /// Borrows the provider identity.
-    pub const fn provider(&self) -> &FileReaderProviderName {
-        &self.provider
-    }
-
-    /// Borrows the reader identity.
-    pub const fn reader(&self) -> &FileReaderName {
-        &self.reader
-    }
-
-    /// Borrows the immutable revision.
-    pub const fn revision(&self) -> &FileReaderRevision {
-        &self.revision
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical compact object-rooted JSON Schema declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CanonicalJsonObjectSchema {
+    /// Borrows the compact canonical JSON spelling.
+    #[get(str, as = "as_str")]
     compact: Arc<str>,
+    /// Borrows the parsed schema object.
+    #[get]
     value: serde_json::Value,
 }
 
@@ -434,22 +390,17 @@ impl CanonicalJsonObjectSchema {
             value: parsed,
         })
     }
-
-    /// Borrows the compact canonical JSON spelling.
-    pub fn as_str(&self) -> &str {
-        &self.compact
-    }
-
-    /// Borrows the parsed schema object.
-    pub const fn value(&self) -> &serde_json::Value {
-        &self.value
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Bounded canonical processor metadata object.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundedMetadata {
+    /// Borrows the compact canonical JSON object.
+    #[get(str, as = "as_str")]
     compact: Arc<str>,
+    /// Borrows the parsed object.
+    #[get]
     value: serde_json::Value,
 }
 
@@ -472,16 +423,6 @@ impl BoundedMetadata {
             compact: Arc::from(compact),
             value: parsed,
         })
-    }
-
-    /// Borrows the compact canonical JSON object.
-    pub fn as_str(&self) -> &str {
-        &self.compact
-    }
-
-    /// Borrows the parsed object.
-    pub const fn value(&self) -> &serde_json::Value {
-        &self.value
     }
 }
 
@@ -687,9 +628,14 @@ impl<'de> Visitor<'de> for DuplicateAwareArrayVisitor<'_> {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Stable visible-part selector for repeated digest uses.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct VisiblePartSelector(Arc<str>);
+pub struct VisiblePartSelector(
+    /// Borrows the opaque selector.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl VisiblePartSelector {
     /// Admits one bounded opaque ASCII selector.
@@ -705,16 +651,16 @@ impl VisiblePartSelector {
         }
         Ok(Self(value))
     }
-
-    /// Borrows the opaque selector.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Checked opaque continuation cursor returned by one bounded read.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ReadContinuationCursor(Arc<str>);
+pub struct ReadContinuationCursor(
+    /// Borrows the opaque cursor spelling.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl ReadContinuationCursor {
     /// Admits one bounded control-free restart-ephemeral cursor.
@@ -728,11 +674,6 @@ impl ReadContinuationCursor {
             return Err(RegistryValueError::Continuation);
         }
         Ok(Self(value))
-    }
-
-    /// Borrows the opaque cursor spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Returns the owned opaque cursor spelling.
@@ -826,14 +767,14 @@ mod tests {
     }
 
     #[test]
-    fn canonical_media_types_reject_parameters_and_uppercase() {
+    fn canonical_media_types_use_standard_syntax_and_reject_noncanonical_forms() {
         assert!(CanonicalMediaType::from_str("text/plain").is_ok());
+        assert!(CanonicalMediaType::from_str("!text/!plain").is_ok());
         assert!(CanonicalMediaType::from_str("text/plain; charset=utf-8").is_err());
         assert!(CanonicalMediaType::from_str("Text/plain").is_err());
-        assert!(CanonicalMediaType::from_str("!text/plain").is_err());
-        assert!(CanonicalMediaType::from_str("text/!plain").is_err());
-        assert!(CanonicalMediaType::from_str(&format!("{}/b", "a".repeat(128))).is_err());
-        assert!(CanonicalMediaType::from_str(&format!("a/{}", "b".repeat(128))).is_err());
+        assert!(CanonicalMediaType::from_str("text").is_err());
+        assert!(CanonicalMediaType::from_str("text/plain other").is_err());
+        assert!(CanonicalMediaType::from_str(&format!("a/{}", "b".repeat(254))).is_err());
     }
 
     #[test]

@@ -4,531 +4,29 @@
 //! persistence, and client presentation values remain distinct mappings
 //! (docs/spec/process-protocol.md).
 
+mod operator_status;
+mod review;
+mod scalars;
+
+pub use operator_status::*;
+pub use review::*;
+pub use scalars::*;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
-    error::Error,
     fmt,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as STANDARD_BASE64};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
-    ser::SerializeSeq,
 };
-use serde_json::value::RawValue;
 use signalbox_domain::{
-    BlobDigest, BlobDigestParseError, CredentialProfileName as DomainCredentialProfileName,
+    CredentialProfileName as DomainCredentialProfileName,
     RunnerCapabilityClass as DomainRunnerCapabilityClass,
     RunnerWorkingDirectory as DomainRunnerWorkingDirectory, ToolDecisionRationale,
     ToolDenialReason, WorkspaceRepositoryKey as DomainWorkspaceRepositoryKey,
 };
-use uuid::Uuid;
-
-/// The single admitted process-protocol version.
-pub const PROTOCOL_VERSION: u64 = 1;
-
-/// One admitted process-protocol version.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ProtocolVersion {
-    /// The complete process-protocol vocabulary.
-    One,
-}
-
-impl ProtocolVersion {
-    const fn from_u64(value: u64) -> Option<Self> {
-        match value {
-            PROTOCOL_VERSION => Some(Self::One),
-            _ => None,
-        }
-    }
-}
-
-impl Serialize for ProtocolVersion {
-    fn serialize<SerializerT>(
-        &self,
-        serializer: SerializerT,
-    ) -> Result<SerializerT::Ok, SerializerT::Error>
-    where
-        SerializerT: Serializer,
-    {
-        serializer.serialize_u64(PROTOCOL_VERSION)
-    }
-}
-
-impl<'de> Deserialize<'de> for ProtocolVersion {
-    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
-    where
-        DeserializerT: Deserializer<'de>,
-    {
-        let value = u64::deserialize(deserializer)?;
-        Self::from_u64(value)
-            .ok_or_else(|| serde::de::Error::custom("frame version is unsupported"))
-    }
-}
-
-/// Maximum encoded frame size, including its final newline.
-// numeric-bound: guard - protects process memory from oversized wire frames
-pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-
-/// Maximum decoded source bytes carried by one conversation-import append.
-///
-/// The half-frame raw-byte bound leaves fixed headroom for canonical padded
-/// base64, the request envelope, and the maximum-width correlation identity.
-// numeric-bound: derived guard from MAX_FRAME_BYTES
-pub const MAX_CONVERSATION_IMPORT_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
-
-/// Maximum decoded bytes carried by one immutable-blob append.
-// numeric-bound: derived guard from MAX_FRAME_BYTES
-pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
-
-/// Maximum decoded bytes returned by one direct blob-range request.
-// numeric-bound: derived guard from MAX_FRAME_BYTES
-pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
-
-/// Maximum number of simultaneously open JSON objects and arrays in one frame.
-// numeric-bound: guard - protects parser stack and latency from pathological nesting
-pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
-
-/// Maximum UTF-8 bytes in one transcript content fragment.
-// numeric-bound: guard - protects frame memory from pathological content fragmentation
-pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
-
-/// Maximum total UTF-8 bytes in one complete metadata object or filter.
-// numeric-bound: guard - protects metadata row and frame memory from pathological text volume
-pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
-
-/// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
-// numeric-bound: guard - protects database index keys from oversized values
-pub const MAX_SESSION_METADATA_INDEXED_UTF8_BYTES: usize = 1_024;
-
-/// Maximum entries in one deployment model-alias catalog.
-// numeric-bound: guard - protects model-alias catalog frame memory and wire size
-pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
-
-/// Maximum entries in one deployment model-capability catalog.
-// numeric-bound: guard - protects model-capability catalog frame memory and wire size
-pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
-
-/// Maximum canonical decimal USD amount text.
-// numeric-bound: not-a-bound - the longest canonical rust_decimal spelling
-pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
-
-/// Maximum UTF-8 bytes in one deployment-owned billing rate version.
-// numeric-bound: guard - preserves the advertised billing-rate wire grammar
-pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
-
-/// Maximum finding-indexed members in one review-orchestration request.
-// numeric-bound: guard - protects review-request memory and wire size
-pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
-
-/// Maximum UTF-8 bytes in one operator-status repository slug.
-///
-/// A slug is `owner/name`, and the provider admits 100 bytes on each side.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting repository slugs only to this length
-pub const MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES: usize = 201;
-
-/// Maximum UTF-8 bytes in one operator-status repository-watch rule identity.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting rule identities only to this length
-pub const MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES: usize = 128;
-
-/// Maximum UTF-8 bytes in one operator-status branch name.
-///
-/// Covers a held slot's branch origin and a convergence row's base branch.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting branch names only to this length
-pub const MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES: usize = 255;
-
-/// Maximum sessions named by one operator-status dispatch inventory.
-///
-/// Bounds both a held slot's own sessions and the sessions occupying a queued
-/// obligation, which name the same dispatch-action inventory.
-// numeric-bound: guard - protects decoded frame memory from a runaway dispatch session fan-out
-pub const MAX_OPERATOR_STATUS_DISPATCH_SESSIONS: usize = 32;
-
-/// Maximum independently failing release clauses on one held slot.
-// numeric-bound: not-a-bound - the closed blocker enum's exact variant count, which one slot cannot repeat
-pub const MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS: usize = 4;
-
-/// Maximum unresolved review threads counted by one convergence assessment.
-// numeric-bound: guard - refuses a thread count no durable assessment can have produced
-pub const MAX_OPERATOR_STATUS_UNRESOLVED_THREADS: u64 = 10_000;
-
-/// Maximum gating checks counted by one convergence assessment.
-///
-/// Persistence admits the same inventory, so a divergence here would reject an
-/// otherwise valid projection and fail the whole snapshot.
-// numeric-bound: guard - bounds the non-green check names one convergence frame can carry
-pub const MAX_OPERATOR_STATUS_GATING_CHECKS: u64 = 10_000;
-
-/// Maximum UTF-8 bytes in one operator-status gating-check name.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting check names only to this length
-pub const MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES: usize = 256;
-
-/// Maximum UTF-8 bytes in one operator-status review node identity.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting review node identities only to this length
-pub const MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES: usize = 256;
-
-/// Maximum UTF-8 bytes in one operator-status reviewer login.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting reviewer logins only to this length
-pub const MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES: usize = 44;
-
-/// Maximum UTF-8 bytes in one operator-status reviewer login's base, the
-/// spelling left once the optional App-bot suffix is set aside.
-// numeric-bound: guard - the operator-status wire grammar advertises accepting a login base only to this length
-pub const MAX_OPERATOR_STATUS_REVIEWER_BASE_UTF8_BYTES: usize = 39;
-
-/// Literal suffix an App-bot reviewer login carries after its base.
-pub const OPERATOR_STATUS_BOT_LOGIN_SUFFIX: &str = "[bot]";
-
-/// The one base branch a merge-ready convergence verdict is settled against.
-///
-/// The durable assessment keys both converged verdicts to this spelling: a
-/// merge-ready row's base branch is exactly this branch, and an
-/// internally-converged row's base branch is any other.
-pub const OPERATOR_STATUS_TRUNK_BASE_BRANCH: &str = "main";
-
-/// Exact hexadecimal characters in one operator-status commit revision.
-// numeric-bound: not-a-bound - the fixed width of a git SHA-1 object name
-pub const OPERATOR_STATUS_COMMIT_SHA_LENGTH: usize = 40;
-
-/// A lowercase hyphenated UUID at the process boundary.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CanonicalUuid(Uuid);
-
-impl CanonicalUuid {
-    /// Constructs the canonical wire value from a UUID.
-    pub const fn from_uuid(value: Uuid) -> Self {
-        Self(value)
-    }
-
-    /// Returns the underlying UUID for an explicit adapter mapping.
-    pub const fn into_uuid(self) -> Uuid {
-        self.0
-    }
-
-    fn parse(value: &str) -> Result<Self, CanonicalValueError> {
-        let parsed = Uuid::parse_str(value).map_err(|_| CanonicalValueError::Uuid)?;
-        if parsed.hyphenated().to_string() != value {
-            return Err(CanonicalValueError::Uuid);
-        }
-        Ok(Self(parsed))
-    }
-}
-
-impl fmt::Display for CanonicalUuid {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.hyphenated().fmt(formatter)
-    }
-}
-
-impl Serialize for CanonicalUuid {
-    fn serialize<SerializerT>(
-        &self,
-        serializer: SerializerT,
-    ) -> Result<SerializerT::Ok, SerializerT::Error>
-    where
-        SerializerT: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for CanonicalUuid {
-    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
-    where
-        DeserializerT: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::parse(&value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// A non-sentinel durable command UUID.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CommandId(CanonicalUuid);
-
-impl CommandId {
-    /// Validates the nil and all-ones sentinels reserved by command handling.
-    pub fn try_from_uuid(value: Uuid) -> Result<Self, CanonicalValueError> {
-        if value.is_nil() || value.as_u128() == u128::MAX {
-            return Err(CanonicalValueError::CommandId);
-        }
-        Ok(Self(CanonicalUuid::from_uuid(value)))
-    }
-
-    /// Returns the UUID for explicit application-boundary mapping.
-    pub const fn into_uuid(self) -> Uuid {
-        self.0.into_uuid()
-    }
-}
-
-impl fmt::Display for CommandId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl Serialize for CommandId {
-    fn serialize<SerializerT>(
-        &self,
-        serializer: SerializerT,
-    ) -> Result<SerializerT::Ok, SerializerT::Error>
-    where
-        SerializerT: Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for CommandId {
-    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
-    where
-        DeserializerT: Deserializer<'de>,
-    {
-        let value = CanonicalUuid::deserialize(deserializer)?;
-        Self::try_from_uuid(value.into_uuid()).map_err(serde::de::Error::custom)
-    }
-}
-
-/// A full-range unsigned 64-bit value encoded as its shortest decimal string.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct CanonicalU64(u64);
-
-impl CanonicalU64 {
-    /// Wraps an unsigned value for precision-safe wire encoding.
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the numeric value after canonical decoding.
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-}
-
-impl TryFrom<String> for CanonicalU64 {
-    type Error = CanonicalValueError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        parse_decimal_u64(&value).map(Self)
-    }
-}
-
-impl From<CanonicalU64> for String {
-    fn from(value: CanonicalU64) -> Self {
-        value.0.to_string()
-    }
-}
-
-/// A positive unsigned 64-bit value encoded as its shortest decimal string.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct PositiveCanonicalU64(u64);
-
-impl PositiveCanonicalU64 {
-    /// Checks that the represented wire integer is positive.
-    pub const fn try_new(value: u64) -> Result<Self, CanonicalValueError> {
-        if value == 0 {
-            return Err(CanonicalValueError::Decimal);
-        }
-        Ok(Self(value))
-    }
-
-    /// Returns the positive numeric value.
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-}
-
-impl TryFrom<String> for PositiveCanonicalU64 {
-    type Error = CanonicalValueError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(parse_decimal_u64(&value)?)
-    }
-}
-
-impl From<PositiveCanonicalU64> for String {
-    fn from(value: PositiveCanonicalU64) -> Self {
-        value.0.to_string()
-    }
-}
-
-impl From<signalbox_domain::RunnerGeneration> for PositiveCanonicalU64 {
-    fn from(value: signalbox_domain::RunnerGeneration) -> Self {
-        Self(value.get())
-    }
-}
-
-/// A lowercase 32-byte digest encoded as exactly 64 hexadecimal characters.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct CanonicalDigest(String);
-
-impl CanonicalDigest {
-    /// Checks the exact lowercase hexadecimal digest spelling.
-    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        if value.len() != 64
-            || value
-                .bytes()
-                .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
-        {
-            return Err(CanonicalValueError::Digest);
-        }
-        Ok(Self(value))
-    }
-
-    /// Borrows the exact canonical hexadecimal spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Transfers the exact canonical hexadecimal spelling.
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-impl TryFrom<String> for CanonicalDigest {
-    type Error = CanonicalValueError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
-}
-
-impl From<CanonicalDigest> for String {
-    fn from(value: CanonicalDigest) -> Self {
-        value.0
-    }
-}
-
-/// Exact external blob identity including its fixed SHA-256 algorithm tag.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CanonicalBlobDigest(BlobDigest);
-
-impl CanonicalBlobDigest {
-    /// Constructs the exact SHA-256 identity from an already-computed digest.
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(BlobDigest::from_bytes(bytes))
-    }
-
-    /// Wraps one validated domain digest for the process boundary.
-    pub const fn from_digest(value: BlobDigest) -> Self {
-        Self(value)
-    }
-
-    /// Returns the validated digest for an explicit adapter mapping.
-    pub const fn into_digest(self) -> BlobDigest {
-        self.0
-    }
-}
-
-impl std::str::FromStr for CanonicalBlobDigest {
-    type Err = BlobDigestParseError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
-
-impl fmt::Display for CanonicalBlobDigest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl Serialize for CanonicalBlobDigest {
-    fn serialize<SerializerT>(
-        &self,
-        serializer: SerializerT,
-    ) -> Result<SerializerT::Ok, SerializerT::Error>
-    where
-        SerializerT: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for CanonicalBlobDigest {
-    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
-    where
-        DeserializerT: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        value
-            .parse::<BlobDigest>()
-            .map(Self)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-/// Request correlation identity. Zero is reserved for uncorrelated errors.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct RequestId(u64);
-
-impl RequestId {
-    /// Constructs a client-usable nonzero request identity.
-    pub fn try_new(value: u64) -> Result<Self, CanonicalValueError> {
-        if value == 0 {
-            Err(CanonicalValueError::RequestId)
-        } else {
-            Ok(Self(value))
-        }
-    }
-
-    /// Returns the reserved identity for a frame that cannot be correlated.
-    pub const fn uncorrelated() -> Self {
-        Self(0)
-    }
-
-    /// Returns the numeric identity after canonical decoding.
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-
-    const fn is_correlated(self) -> bool {
-        self.0 != 0
-    }
-}
-
-impl TryFrom<String> for RequestId {
-    type Error = CanonicalValueError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        parse_decimal_u64(&value).map(Self)
-    }
-}
-
-impl From<RequestId> for String {
-    fn from(value: RequestId) -> Self {
-        value.0.to_string()
-    }
-}
-
-/// Exact user input content carried to the application admission boundary.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct InputContent(String);
-
-impl InputContent {
-    /// Wraps decoded content without applying application admission policy.
-    pub fn new(value: String) -> Self {
-        Self(value)
-    }
-
-    /// Borrows exact decoded text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Transfers ownership of the exact decoded text.
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
 
 /// Maximum number of ordered parts in one process-protocol user input.
 // numeric-bound: guard - prevents one submitted input from fragmenting into unbounded decoded parts
@@ -605,10 +103,15 @@ impl fmt::Debug for UserInputPart {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical nonempty ordered user-input parts array.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct UserInputContent(Vec<UserInputPart>);
+pub struct UserInputContent(
+    /// Borrows the exact ordered parts.
+    #[get(slice, as = "parts")]
+    Vec<UserInputPart>,
+);
 
 struct UserInputContentVisitor;
 
@@ -663,11 +166,6 @@ impl UserInputContent {
     /// Wraps a complete parts array for structural validation at frame encode.
     pub fn from_parts(parts: Vec<UserInputPart>) -> Self {
         Self(parts)
-    }
-
-    /// Borrows the exact ordered parts.
-    pub fn parts(&self) -> &[UserInputPart] {
-        &self.0
     }
 
     /// Borrows text when this is exactly one text part.
@@ -732,1021 +230,6 @@ impl UserInputContent {
         }
         Ok(())
     }
-}
-
-/// One closed review target subject at the process boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ReviewTargetSubject {
-    /// A change request frozen at exact head and base revisions.
-    ChangeRequest {
-        /// Positive provider-local change-request number.
-        number: CanonicalU64,
-    },
-    /// One immutable commit revision.
-    Commit {},
-}
-
-/// One immutable review target snapshot.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewTargetSnapshot {
-    /// Stable target identity.
-    pub target_id: CanonicalUuid,
-    /// Opaque canonical provider key.
-    pub provider: String,
-    /// Opaque canonical repository key.
-    pub repository: String,
-    /// Exact subject kind.
-    pub subject: ReviewTargetSubject,
-    /// Frozen head revision.
-    pub head_revision: String,
-    /// Frozen comparison revision when the subject has one.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub base_revision: Option<String>,
-    /// Immediate stack parent snapshot when present.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub stack_parent_target_id: Option<CanonicalUuid>,
-}
-
-/// One admitted review workflow.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewWorkflow {
-    /// Import provider-side review context.
-    ImportExternalContext,
-    /// Produce findings without mutation.
-    ReadOnlyReview,
-    /// Judge proposed findings.
-    JudgeFindings,
-    /// Deduplicate proposed findings.
-    DedupeFindings,
-    /// Publish findings to the provider.
-    PublishReview,
-    /// Repair accepted findings.
-    FixFindings,
-    /// Propagate one reviewed stack edge.
-    PropagateStack,
-}
-
-/// One review pass purpose.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewPassKind {
-    /// Import provider-side context.
-    ImportExternalContext,
-    /// Produce read-only findings.
-    ReadOnlyReview,
-    /// Judge findings.
-    Judge,
-    /// Deduplicate findings.
-    Dedupe,
-    /// Publish findings.
-    Publish,
-    /// Repair findings.
-    Fix,
-    /// Propagate one stack edge.
-    PropagateStack,
-}
-
-/// One projected run lifecycle state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewRunLifecycle {
-    /// Waiting for its pass turn.
-    Queued,
-    /// Its pass turn is active.
-    Running,
-    /// Its pass completed successfully.
-    Succeeded,
-    /// Its pass failed.
-    Failed,
-    /// Its pass needs external resolution.
-    Blocked,
-    /// It was cancelled.
-    Cancelled,
-}
-
-/// One projected pass lifecycle state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewPassLifecycle {
-    /// Accepted input exists but its turn is not active.
-    Queued,
-    /// The pass turn is active.
-    Running,
-    /// The pass turn completed successfully.
-    Succeeded,
-    /// The pass turn failed.
-    Failed,
-    /// The pass needs external resolution.
-    Blocked,
-    /// The pass was cancelled.
-    Cancelled,
-}
-
-/// One complete review-run read projection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewRunSnapshot {
-    /// Owning target.
-    pub target_id: CanonicalUuid,
-    /// Stable run identity.
-    pub run_id: CanonicalUuid,
-    /// Frozen workflow.
-    pub workflow: ReviewWorkflow,
-    /// Frozen policy version.
-    pub policy_version: CanonicalU64,
-    /// Minimum judgment confidence in basis points.
-    pub minimum_judge_confidence: CanonicalU64,
-    /// Minimum publication confidence in basis points.
-    pub minimum_publication_confidence: CanonicalU64,
-    /// Current lifecycle projection.
-    pub state: ReviewRunLifecycle,
-    /// The run's sole pass when admitted.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub pass_id: Option<CanonicalUuid>,
-}
-
-/// One complete review-pass read projection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewPassSnapshot {
-    /// Stable pass identity.
-    pub pass_id: CanonicalUuid,
-    /// Owning run.
-    pub run_id: CanonicalUuid,
-    /// Owning target.
-    pub target_id: CanonicalUuid,
-    /// Exact pass purpose.
-    pub kind: ReviewPassKind,
-    /// Bound session.
-    pub session_id: CanonicalUuid,
-    /// Bound accepted input.
-    pub accepted_input_id: CanonicalUuid,
-    /// Bound origin turn.
-    pub origin_turn_id: CanonicalUuid,
-    /// Current lifecycle projection.
-    pub state: ReviewPassLifecycle,
-    /// Exact active or terminal turn when present.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub turn_id: Option<CanonicalUuid>,
-    /// Exact successful output frontier when present.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub output_frontier_id: Option<CanonicalUuid>,
-}
-
-/// Finding location side relative to a frozen comparison.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewDiffSide {
-    /// Frozen base side.
-    Left,
-    /// Frozen head side.
-    Right,
-}
-
-/// Finding severity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewSeverity {
-    /// Informational observation.
-    Info,
-    /// Low-severity defect.
-    Low,
-    /// Medium-severity defect.
-    Medium,
-    /// High-severity defect.
-    High,
-    /// Critical defect.
-    Critical,
-}
-
-/// Immutable finding content admitted with one read-only pass result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewFindingInput {
-    /// Stable finding identity.
-    pub finding_id: CanonicalUuid,
-    /// Exact repository-relative file path.
-    pub file_path: String,
-    /// Optional positive first line.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub line_start: Option<CanonicalU64>,
-    /// Optional positive final line.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub line_end: Option<CanonicalU64>,
-    /// Optional frozen diff side.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub diff_side: Option<ReviewDiffSide>,
-    /// Short exact title.
-    pub title: String,
-    /// Exact explanatory body.
-    pub body: String,
-    /// Severity classification.
-    pub severity: ReviewSeverity,
-    /// Producer confidence that the issue is real, in basis points.
-    pub is_real_confidence: CanonicalU64,
-    /// Producer confidence that the severity label is correct, in basis points.
-    pub severity_label_confidence: CanonicalU64,
-    /// Opaque canonical category key.
-    pub category: String,
-    /// Optional exact recommended repair.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub recommended_fix: Option<String>,
-}
-
-/// Current finding lifecycle status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewFindingStatus {
-    /// Proposed and not yet judged.
-    Open,
-    /// Accepted by judgment.
-    Accepted,
-    /// Rejected by judgment.
-    Rejected,
-    /// Classified as a duplicate.
-    Duplicate,
-    /// Replaced by a later finding.
-    Superseded,
-    /// No longer applies.
-    Stale,
-    /// Published externally.
-    Posted,
-    /// Repaired.
-    Fixed,
-    /// Publication or repair was blocked.
-    BlockedWithReason,
-}
-
-/// One complete finding read projection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewFindingSnapshot {
-    /// Owning target.
-    pub target_id: CanonicalUuid,
-    /// Owning run.
-    pub run_id: CanonicalUuid,
-    /// Producing read-only pass.
-    pub producing_pass_id: CanonicalUuid,
-    /// Immutable content.
-    pub finding: ReviewFindingInput,
-    /// Current derived lifecycle status.
-    pub status: ReviewFindingStatus,
-    /// Number of committed lifecycle events.
-    pub event_count: CanonicalU64,
-}
-
-/// One immutable finding-machine event recorded by a result-bearing pass.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ReviewFindingEvent {
-    Accepted {},
-    Rejected {
-        reason: String,
-    },
-    Duplicate {
-        canonical_finding_id: CanonicalUuid,
-    },
-    Superseded {
-        successor_finding_id: CanonicalUuid,
-    },
-    Stale {},
-    Fixed {},
-    BlockedWithReason {
-        reason: String,
-        #[serde(deserialize_with = "deserialize_required_nullable")]
-        external_link_id: Option<CanonicalUuid>,
-    },
-}
-
-/// Terminal outcome for a pass that does not otherwise carry typed result data.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewPassTerminalOutcome {
-    Succeeded,
-    Failed,
-    Blocked,
-    Cancelled,
-}
-
-/// One concern entry in a new frozen orchestration attempt.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewOrchestrationConcernInput {
-    pub key: String,
-    pub template_name: String,
-}
-
-/// Terminal imported-context stage outcome.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewImportTerminalOutcome {
-    Succeeded,
-    Failed,
-    Blocked,
-    Cancelled,
-}
-
-/// Terminal concern-member outcome.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewConcernTerminalOutcome {
-    Succeeded,
-    Failed,
-    Blocked,
-    Cancelled,
-}
-
-/// One closed disposition in an immutable judgment plan.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ReviewJudgmentDisposition {
-    Accepted {},
-    Rejected { reason: String },
-    Duplicate { canonical_finding_id: CanonicalUuid },
-    Superseded { successor_finding_id: CanonicalUuid },
-    Stale {},
-}
-
-/// One finding member in a complete judgment plan.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewJudgmentPlanMember {
-    pub finding_id: CanonicalUuid,
-    pub disposition: ReviewJudgmentDisposition,
-}
-
-/// Terminal result of applying one judgment-plan member.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewJudgmentEffectTerminalOutcome {
-    Applied,
-    Failed,
-    Blocked,
-    Cancelled,
-}
-
-/// Terminal result of one repair member.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewRepairTerminalOutcome {
-    Fixed,
-    Failed,
-    Blocked,
-    Cancelled,
-}
-
-/// One finding-indexed repair result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewRepairOutcome {
-    pub finding_id: CanonicalUuid,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub event_pass_id: Option<CanonicalUuid>,
-    pub outcome: ReviewRepairTerminalOutcome,
-}
-
-/// Terminal result of one publication member.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewPublicationTerminalOutcome {
-    Published,
-    Failed,
-    Blocked,
-    Cancelled,
-}
-
-/// One finding-indexed publication result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewPublicationOutcome {
-    pub finding_id: CanonicalUuid,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub external_link_id: Option<CanonicalUuid>,
-    pub outcome: ReviewPublicationTerminalOutcome,
-}
-
-/// Durable stage of one client-driven review-orchestration attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewOrchestrationState {
-    AwaitingImport,
-    ImportIncomplete,
-    AwaitingConcerns,
-    FanoutIncomplete,
-    AwaitingJudgment,
-    AwaitingJudgmentEffects,
-    JudgmentIncomplete,
-    AwaitingRepair,
-    RepairIncomplete,
-    AwaitingPublication,
-    PublicationIncomplete,
-    Complete,
-}
-
-/// Durable progress of one frozen concern member.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewOrchestrationConcernStatus {
-    Pending,
-    Succeeded,
-    Failed,
-    Blocked,
-    Cancelled,
-    Superseded,
-}
-
-/// Resolved non-concern templates frozen into one attempt.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewOrchestrationStageTemplateDigests {
-    pub import: CanonicalDigest,
-    pub judgment: CanonicalDigest,
-    pub repair: CanonicalDigest,
-    pub publication: CanonicalDigest,
-}
-
-/// One frozen concern and its durable progress.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewOrchestrationConcernSnapshot {
-    pub key: String,
-    pub template_digest: CanonicalDigest,
-    pub status: ReviewOrchestrationConcernStatus,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub pass_id: Option<CanonicalUuid>,
-}
-
-/// Progress counts needed to observe one orchestration attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewOrchestrationCounts {
-    pub finding_count: CanonicalU64,
-    pub judgment_member_count: CanonicalU64,
-    pub judgment_effect_applied_count: CanonicalU64,
-    pub repair_fixed_count: CanonicalU64,
-    pub publication_published_count: CanonicalU64,
-}
-
-/// Complete read projection of one review-orchestration attempt.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewOrchestrationSnapshot {
-    pub attempt_id: CanonicalUuid,
-    pub target_id: CanonicalUuid,
-    pub state: ReviewOrchestrationState,
-    pub concern_set_version: String,
-    pub stage_template_digests: ReviewOrchestrationStageTemplateDigests,
-    pub concerns: Vec<ReviewOrchestrationConcernSnapshot>,
-    pub counts: ReviewOrchestrationCounts,
-}
-
-/// Provider object kind reserved for one review aggregate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewExternalObjectKind {
-    /// Provider review object.
-    Review,
-    /// Provider review thread.
-    ReviewThread,
-    /// Provider inline review comment.
-    ReviewComment,
-    /// Provider change-request comment.
-    ChangeRequestComment,
-}
-
-/// One bounded transcript-content fragment.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct ContentFragment(String);
-
-impl ContentFragment {
-    /// Applies the per-fragment UTF-8 byte bound.
-    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        if value.len() > MAX_CONTENT_FRAGMENT_BYTES {
-            Err(CanonicalValueError::Content)
-        } else {
-            Ok(Self(value))
-        }
-    }
-
-    /// Borrows exact fragment text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Independently nullable token fields for one terminal model call.
-///
-/// Every field is required on the wire but independently nullable. A null is
-/// absent evidence; a present zero is encoded as the canonical string
-/// `"0"`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelCallTokenUsage {
-    /// Input-token count from the call's named provenance.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub input_tokens: Option<CanonicalU64>,
-    /// Output-token count from the call's named provenance.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub output_tokens: Option<CanonicalU64>,
-    /// Cache-creation input-token count from the call's named provenance.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub cache_creation_input_tokens: Option<CanonicalU64>,
-    /// Cache-read input-token count from the call's named provenance.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub cache_read_input_tokens: Option<CanonicalU64>,
-}
-
-/// Closed provenance of one terminal model call's token fields.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageProvenance {
-    /// Counts reported by the provider or adapter stream.
-    Reported,
-    /// Counts produced by an explicit estimator.
-    Estimated,
-}
-
-/// How a derived token-rate dollar figure must be labeled.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelCallCostLabel {
-    /// The serving credential profile is directly API-metered.
-    Real,
-    /// The serving credential profile is subscription-backed.
-    MeteredEquivalent,
-}
-
-/// Canonical nonnegative decimal USD text with no exponent or redundant zeroes.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct CanonicalDollarAmount(String);
-
-impl CanonicalDollarAmount {
-    /// Validates one shortest nonnegative base-ten decimal spelling.
-    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        // numeric-bound: not-a-bound - fixed rust_decimal coefficient representation
-        const MAX_DECIMAL_COEFFICIENT: u128 = 79_228_162_514_264_337_593_543_950_335;
-
-        let (integer, fraction) = value
-            .split_once('.')
-            .map_or((value.as_str(), None), |parts| (parts.0, Some(parts.1)));
-        let integer_is_canonical = integer == "0"
-            || (!integer.starts_with('0')
-                && integer.as_bytes().first().is_some_and(u8::is_ascii_digit)
-                && integer.bytes().all(|byte| byte.is_ascii_digit()));
-        let fraction_is_canonical = fraction.is_none_or(|fraction| {
-            !fraction.is_empty()
-                && fraction.bytes().all(|byte| byte.is_ascii_digit())
-                && !fraction.ends_with('0')
-        });
-        let coefficient =
-            value
-                .bytes()
-                .filter(|byte| *byte != b'.')
-                .try_fold(0_u128, |coefficient, digit| {
-                    coefficient
-                        .checked_mul(10)?
-                        .checked_add(u128::from(digit.checked_sub(b'0')?))
-                });
-        if value.is_empty()
-            || value.len() > MAX_DOLLAR_AMOUNT_BYTES
-            || !integer_is_canonical
-            || !fraction_is_canonical
-            || fraction.is_some_and(|fraction| fraction.len() > 28)
-            || coefficient.is_none_or(|coefficient| coefficient > MAX_DECIMAL_COEFFICIENT)
-        {
-            Err(CanonicalValueError::DollarAmount)
-        } else {
-            Ok(Self(value))
-        }
-    }
-
-    /// Borrows the canonical decimal spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for CanonicalDollarAmount {
-    type Error = CanonicalValueError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
-}
-
-impl From<CanonicalDollarAmount> for String {
-    fn from(value: CanonicalDollarAmount) -> Self {
-        value.0
-    }
-}
-
-/// One bounded deployment-owned rate version carried as cost provenance.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct BillingRateVersion(String);
-
-impl BillingRateVersion {
-    /// Validates a nonempty, unpadded, NUL-free version spelling.
-    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        if value.is_empty()
-            || value.len() > MAX_RATE_VERSION_UTF8_BYTES
-            || value.trim() != value
-            || value.contains('\0')
-        {
-            Err(CanonicalValueError::RateVersion)
-        } else {
-            Ok(Self(value))
-        }
-    }
-
-    /// Borrows the exact rate version.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for BillingRateVersion {
-    type Error = CanonicalValueError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
-}
-
-impl From<BillingRateVersion> for String {
-    fn from(value: BillingRateVersion) -> Self {
-        value.0
-    }
-}
-
-/// One read-time dollar figure derived from usage and named configured rates.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelCallDollarCost {
-    /// Dollar amount attributable to the token axes that were present.
-    pub amount_usd: CanonicalDollarAmount,
-    /// Exact configured rate version used for derivation.
-    pub rate_version: BillingRateVersion,
-    /// Real or metered-equivalent label from the pinned credential profile.
-    pub label: ModelCallCostLabel,
-}
-
-impl TryFrom<String> for ContentFragment {
-    type Error = CanonicalValueError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
-}
-
-impl From<ContentFragment> for String {
-    fn from(value: ContentFragment) -> Self {
-        value.0
-    }
-}
-
-/// One exact session system prompt on the wire.
-///
-/// A present prompt is nonempty and rejects U+0000; absence is JSON null on
-/// the owning member, never empty text. The daemon applies deployment policy.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct SystemPromptText(String);
-
-impl SystemPromptText {
-    /// Applies the structural nonempty and U+0000-free admission rules.
-    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        if value.is_empty() || value.contains('\0') {
-            Err(CanonicalValueError::SystemPrompt)
-        } else {
-            Ok(Self(value))
-        }
-    }
-
-    /// Borrows the exact admitted prompt text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Transfers ownership of the exact admitted prompt text.
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-impl TryFrom<String> for SystemPromptText {
-    type Error = CanonicalValueError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
-}
-
-impl From<SystemPromptText> for String {
-    fn from(value: SystemPromptText) -> Self {
-        value.0
-    }
-}
-
-/// Presence-checked required system-prompt member.
-///
-/// JSON null states explicitly that no prompt is configured and a JSON string
-/// states the complete checked bounded prompt.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SystemPromptMember(Option<Option<SystemPromptText>>);
-
-impl SystemPromptMember {
-    /// Marks a missing member during deserialization.
-    pub const fn absent() -> Self {
-        Self(None)
-    }
-
-    /// Carries the explicit required null-or-text member.
-    pub const fn present(value: Option<SystemPromptText>) -> Self {
-        Self(Some(value))
-    }
-
-    /// Returns the explicit member when it was present.
-    pub const fn value(&self) -> Option<&Option<SystemPromptText>> {
-        self.0.as_ref()
-    }
-
-    const fn is_absent(&self) -> bool {
-        self.0.is_none()
-    }
-}
-
-impl Serialize for SystemPromptMember {
-    fn serialize<SerializerT>(
-        &self,
-        serializer: SerializerT,
-    ) -> Result<SerializerT::Ok, SerializerT::Error>
-    where
-        SerializerT: Serializer,
-    {
-        match &self.0 {
-            Some(Some(text)) => text.serialize(serializer),
-            Some(None) | None => serializer.serialize_none(),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for SystemPromptMember {
-    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
-    where
-        DeserializerT: Deserializer<'de>,
-    {
-        Option::<SystemPromptText>::deserialize(deserializer).map(Self::present)
-    }
-}
-
-/// Iterates exact text as bounded fragments split only at UTF-8 boundaries.
-pub fn content_fragments(value: &str) -> ContentFragments<'_> {
-    ContentFragments {
-        remaining: value,
-        emitted_empty: false,
-    }
-}
-
-/// Borrowed iterator returned by [`content_fragments`].
-#[derive(Clone, Debug)]
-pub struct ContentFragments<'a> {
-    remaining: &'a str,
-    emitted_empty: bool,
-}
-
-impl Iterator for ContentFragments<'_> {
-    type Item = ContentFragment;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining.is_empty() {
-            if self.emitted_empty {
-                return None;
-            }
-            self.emitted_empty = true;
-            return Some(ContentFragment(String::new()));
-        }
-        let mut end = self.remaining.len().min(MAX_CONTENT_FRAGMENT_BYTES);
-        while !self.remaining.is_char_boundary(end) {
-            end -= 1;
-        }
-        let (fragment, remaining) = self.remaining.split_at(end);
-        self.remaining = remaining;
-        self.emitted_empty = true;
-        Some(ContentFragment(fragment.to_owned()))
-    }
-}
-
-/// Invalid canonical scalar at the wire boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CanonicalValueError {
-    /// UUID was not lowercase canonical hyphenated text.
-    Uuid,
-    /// Command UUID used a reserved sentinel.
-    CommandId,
-    /// Decimal text was not the shortest full-range unsigned spelling.
-    Decimal,
-    /// Client request identity was zero.
-    RequestId,
-    /// A transcript fragment exceeded its UTF-8 byte bound.
-    Content,
-    /// Session metadata violated its exact string, set, map, or page bound.
-    Metadata,
-    /// Digest was not exactly 64 lowercase hexadecimal characters.
-    Digest,
-    /// A session system prompt was empty, contained U+0000, or exceeded its
-    /// UTF-8 byte bound.
-    SystemPrompt,
-    /// A dotted session placement or root-global-read decision was invalid.
-    Placement,
-    /// Runner working-directory text was empty, NUL-bearing, or oversized.
-    RunnerWorkingDirectory,
-    /// Runner capability, credential-profile, or repository name was invalid.
-    RunnerCatalogName,
-    /// Runner projection state and exact-runner evidence were inconsistent.
-    RunnerProjection,
-    /// Dollar amount was not canonical bounded nonnegative decimal text.
-    DollarAmount,
-    /// Billing rate version was empty, padded, NUL-bearing, or oversized.
-    RateVersion,
-}
-
-impl fmt::Display for CanonicalValueError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Uuid => "UUID is not canonical lowercase hyphenated text",
-            Self::CommandId => "command identity is a reserved sentinel",
-            Self::Decimal => "unsigned integer is not canonical decimal text",
-            Self::RequestId => "client request identity must be nonzero",
-            Self::Content => "content fragment exceeds the process-protocol UTF-8 byte bound",
-            Self::Metadata => "session metadata value is invalid",
-            Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
-            Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
-            Self::Placement => "session placement is invalid",
-            Self::RunnerWorkingDirectory => "runner working directory is invalid",
-            Self::RunnerCatalogName => "runner catalog name is invalid",
-            Self::RunnerProjection => "runner projection state is invalid",
-            Self::DollarAmount => "dollar amount is not canonical nonnegative decimal text",
-            Self::RateVersion => "billing rate version is invalid",
-        })
-    }
-}
-
-impl Error for CanonicalValueError {}
-
-/// Exact source format selected for one conversation import.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversationImportFormat {
-    /// Claude Code session JSONL under Signalbox converter version two.
-    ClaudeCodeSessionJsonlV2,
-    /// Codex rollout JSONL under Signalbox converter version one.
-    CodexRolloutJsonlV1,
-}
-
-/// Content-silent reason an imported-conversation converter rejected source.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversationImportRejectionClass {
-    /// The supplied source contained no JSONL record.
-    EmptySource,
-    /// One physical JSONL record was empty.
-    BlankLine,
-    /// One physical record was not valid UTF-8.
-    InvalidUtf8,
-    /// One physical record was not valid JSON.
-    InvalidJson,
-    /// One physical record exceeded the JSON container-depth bound.
-    JsonDepthExceeded,
-    /// One physical record's top-level JSON value was not an object.
-    TopLevelNotObject,
-    /// A modeled record discriminator had an unsupported value shape.
-    InvalidRecordType,
-    /// Modeled source metadata had an unsupported value shape.
-    InvalidSourceMetadata,
-    /// A modeled message or response-item envelope had an unsupported shape.
-    InvalidMessageEnvelope,
-    /// A modeled message role had an unsupported value shape.
-    InvalidMessageRole,
-    /// A nested message role contradicted its enclosing source speaker.
-    MessageRoleMismatch,
-    /// Modeled message content had an unsupported value shape.
-    InvalidMessageContent,
-    /// A modeled message content block had an unsupported value shape.
-    InvalidContentBlock,
-    /// A modeled tool-result block had an unsupported value shape.
-    InvalidToolResultBlock,
-    /// A modeled reasoning item or block had an unsupported value shape.
-    InvalidReasoning,
-    /// A modeled tool call had an unsupported value shape.
-    InvalidToolCall,
-    /// A modeled tool result had an unsupported value shape.
-    InvalidToolResult,
-}
-
-/// Exact caller-supplied source bytes carried as canonical padded base64.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConversationImportSource(Vec<u8>);
-
-impl ConversationImportSource {
-    /// Wraps one complete source snapshot without interpreting it.
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-
-    /// Borrows the exact decoded source snapshot.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-
-    /// Transfers ownership of the exact decoded source snapshot.
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.0
-    }
-}
-
-impl Serialize for ConversationImportSource {
-    fn serialize<SerializerT>(
-        &self,
-        serializer: SerializerT,
-    ) -> Result<SerializerT::Ok, SerializerT::Error>
-    where
-        SerializerT: Serializer,
-    {
-        serializer.serialize_str(&STANDARD_BASE64.encode(&self.0))
-    }
-}
-
-impl<'de> Deserialize<'de> for ConversationImportSource {
-    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
-    where
-        DeserializerT: Deserializer<'de>,
-    {
-        struct ConversationImportSourceVisitor;
-
-        impl Visitor<'_> for ConversationImportSourceVisitor {
-            type Value = ConversationImportSource;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("canonical padded base64")
-            }
-
-            fn visit_str<ErrorT>(self, encoded: &str) -> Result<Self::Value, ErrorT>
-            where
-                ErrorT: serde::de::Error,
-            {
-                let decoded = STANDARD_BASE64.decode(encoded.as_bytes()).map_err(|_| {
-                    serde::de::Error::custom("import source is not canonical base64")
-                })?;
-                Ok(ConversationImportSource(decoded))
-            }
-        }
-
-        deserializer.deserialize_str(ConversationImportSourceVisitor)
-    }
-}
-
-/// One bounded immutable-blob upload chunk encoded as canonical padded base64.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct BlobChunk(ConversationImportSource);
-
-impl BlobChunk {
-    /// Wraps exact decoded bytes without interpreting them.
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(ConversationImportSource::new(bytes))
-    }
-
-    /// Borrows the exact decoded bytes.
-    pub fn as_bytes(&self) -> &[u8] {
-        self.0.as_bytes()
-    }
-
-    /// Transfers ownership of the exact decoded bytes.
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.0.into_bytes()
-    }
-}
-
-fn parse_decimal_u64(value: &str) -> Result<u64, CanonicalValueError> {
-    if value.is_empty()
-        || (value.len() > 1 && value.starts_with('0'))
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(CanonicalValueError::Decimal);
-    }
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|_| CanonicalValueError::Decimal)?;
-    if parsed.to_string() != value {
-        return Err(CanonicalValueError::Decimal);
-    }
-    Ok(parsed)
 }
 
 /// Direct or alias model-selection request at the process boundary.
@@ -2650,6 +1133,8 @@ where
 pub enum MetadataActor {
     /// The user wrote the snapshot.
     User {},
+    /// Daemon core wrote the snapshot without delegated agency.
+    Core {},
     /// Model output from one exact turn wrote the snapshot.
     Model {
         /// The turn whose model output acted.
@@ -2664,11 +1149,16 @@ pub enum MetadataActor {
     },
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// The post-lock database statement time and actor of the latest replacement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataLastWriter {
+    /// Returns the nonnegative Unix-microsecond transaction timestamp.
+    #[get(copy)]
     updated_at_unix_micros: CanonicalU64,
+    /// Returns the closed actor provenance.
+    #[get(copy)]
     actor: MetadataActor,
 }
 
@@ -2721,16 +1211,6 @@ impl MetadataLastWriter {
             actor,
         }
     }
-
-    /// Returns the nonnegative Unix-microsecond transaction timestamp.
-    pub const fn updated_at_unix_micros(self) -> CanonicalU64 {
-        self.updated_at_unix_micros
-    }
-
-    /// Returns the closed actor provenance.
-    pub const fn actor(self) -> MetadataActor {
-        self.actor
-    }
 }
 
 /// One closed conversation origin class.
@@ -2755,6 +1235,7 @@ pub enum ConversationOriginFilter {
     All,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One exclusive unified keyset cursor naming the last listed conversation.
 ///
 /// The unified page order is by conversation identity UUID value, native
@@ -2763,8 +1244,12 @@ pub enum ConversationOriginFilter {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationCursor {
+    /// Returns the origin class of the cursor position.
+    #[get(copy)]
     /// Origin class of the cursor position.
     origin: ConversationOrigin,
+    /// Returns the conversation identity at the cursor position.
+    #[get(copy)]
     /// Conversation identity at the cursor position.
     conversation_id: CanonicalUuid,
 }
@@ -2776,16 +1261,6 @@ impl ConversationCursor {
             origin,
             conversation_id,
         }
-    }
-
-    /// Returns the origin class of the cursor position.
-    pub const fn origin(self) -> ConversationOrigin {
-        self.origin
-    }
-
-    /// Returns the conversation identity at the cursor position.
-    pub const fn conversation_id(self) -> CanonicalUuid {
-        self.conversation_id
     }
 }
 
@@ -3100,6 +1575,8 @@ fn validate_review_orchestration_snapshot(
 pub enum GoalCommandRejection {
     /// The target session does not exist.
     SessionNotFound,
+    /// The session's closure is pending; the closure settles the goal.
+    SessionClosing,
     /// A goal is already pursuing or blocked.
     GoalAlreadyAttached,
     /// The session has no goal lineage.
@@ -3130,6 +1607,7 @@ pub enum GoalBlockedReason {
     AuthorizationRequired,
     /// The preceding goal turn failed and was not retried.
     ExecutionFailure,
+    FinishCheckFailed,
 }
 
 /// Provenance for one blocked event at the process boundary.
@@ -3177,6 +1655,46 @@ pub enum GoalLifecycleState {
         /// Successor generation commissioned by the same event.
         by_generation: CanonicalU64,
     },
+    /// The session closed beneath this generation.
+    SessionClosed {
+        /// Closed session outcome that settled it.
+        outcome: SessionClosureOutcome,
+    },
+}
+
+/// The closed session outcomes that settle a live goal generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionClosureOutcome {
+    /// Closed with a retryable cause standing.
+    FailedRetryable,
+    /// Closed with a structural cause standing.
+    FailedStructural,
+    /// Closed with no classified cause.
+    FailedUnknown,
+    /// A human or rule stopped the session.
+    Stopped,
+    /// A newer session owns the work, or the work is gone.
+    Superseded,
+    /// An operator wrote the session off.
+    Abandoned,
+    /// The session never did the work and never will.
+    Retired,
+}
+
+/// The closed actor classification recorded with a lifecycle transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleActorClass {
+    /// Daemon core.
+    Core,
+    /// The single user's authority.
+    Operator,
+    /// A module, without saying which: the classification is what the
+    /// boundary carries, and the durable goal event keeps the exact module.
+    Module,
+    /// The recovery scan or liveness watchdog.
+    Watchdog,
 }
 
 /// One append-only goal event payload at the process boundary.
@@ -3228,6 +1746,13 @@ pub enum GoalHistoryEvent {
         /// Durable user command provenance.
         command_id: CommandId,
     },
+    /// The session closed, settling this generation.
+    SessionClosed {
+        /// Closed session outcome that settled it.
+        outcome: SessionClosureOutcome,
+        /// Classified actor that closed the session.
+        actor: LifecycleActorClass,
+    },
 }
 
 fn validate_goal_text(value: &str) -> Result<(), FrameValidationError> {
@@ -3246,7 +1771,8 @@ fn validate_goal_state(state: &GoalLifecycleState) -> Result<(), FrameValidation
         GoalLifecycleState::Pursuing {}
         | GoalLifecycleState::Achieved { .. }
         | GoalLifecycleState::UserStopped {}
-        | GoalLifecycleState::Superseded { .. } => Ok(()),
+        | GoalLifecycleState::Superseded { .. }
+        | GoalLifecycleState::SessionClosed { .. } => Ok(()),
     }
 }
 
@@ -3262,7 +1788,8 @@ fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationEr
             let scheduler_reason = match reason {
                 GoalBlockedReason::UserInputRequired
                 | GoalBlockedReason::ExternalChangeRequired
-                | GoalBlockedReason::AuthorizationRequired => false,
+                | GoalBlockedReason::AuthorizationRequired
+                | GoalBlockedReason::FinishCheckFailed => false,
                 GoalBlockedReason::ExecutionFailure => true,
             };
             let scheduler_provenance = match provenance {
@@ -3283,9 +1810,9 @@ fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationEr
             replacement_statement,
             ..
         } => validate_goal_text(replacement_statement),
-        GoalHistoryEvent::Resumed { guidance: None, .. } | GoalHistoryEvent::UserStopped { .. } => {
-            Ok(())
-        }
+        GoalHistoryEvent::Resumed { guidance: None, .. }
+        | GoalHistoryEvent::UserStopped { .. }
+        | GoalHistoryEvent::SessionClosed { .. } => Ok(()),
     }
 }
 
@@ -3297,62 +1824,6 @@ pub enum DescendantTerminationScope {
     ParentAlone,
     /// Evaluate every reachable delegated-child relationship.
     ParentAndDescendants,
-}
-
-/// Singleton key class shown by repository-watch operator status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusSingletonScope {
-    PullRequest,
-    Stack,
-    Rule,
-    Repo,
-}
-
-/// One independently failing held-slot release clause.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusHeldSlotBlocker {
-    UndeliveredAction,
-    DeliveryTurnRuntimeRelevant,
-    LiveRuntimeTurn,
-    PursuingGoal,
-}
-
-/// Current provider mergeability shown by repository-watch operator status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusMergeableState {
-    Mergeable,
-    Conflicting,
-    Unknown,
-}
-
-/// Current provider review decision shown by repository-watch operator status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusReviewDecision {
-    None,
-    Approved,
-    ReviewRequired,
-    ChangesRequested,
-}
-
-/// Latest repository-watch convergence verdict.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusConvergenceVerdict {
-    NotConverged,
-    InternallyConverged,
-    MergeReady,
-}
-
-/// Durable convergence seal attached to the latest assessment, when any.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorStatusConvergenceSeal {
-    InternallyConverged,
-    MergeReady,
 }
 
 /// Immutable authority fence a commissioned-session request records.
@@ -3389,6 +1860,116 @@ pub enum CommissionedSessionFence {
     },
 }
 
+/// Whether a creation holds its start gate.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartGate {
+    /// The session may dispatch as soon as it has input.
+    #[default]
+    Open,
+    /// The session stays `created` until `release_start` or gate expiry.
+    Held,
+}
+
+/// Whether the daemon holds a liveness obligation for the session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOwnership {
+    /// The daemon drives the session to a declared terminal outcome.
+    Owned,
+    /// A conversation the daemon does not drive.
+    #[default]
+    Unmonitored,
+}
+
+/// Closed finish condition an owned session owes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FinishCondition {
+    /// Completion is declared outside the session.
+    ExternalGate,
+    /// Completion is checked against exact declared text.
+    Declared {
+        /// Exact statement the finish check evaluates.
+        statement: String,
+    },
+}
+
+/// The lifecycle members of a creation: omission means an open gate, an
+/// unmonitored conversation, and no finish condition.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLifecycleMembers {
+    /// Whether the creation holds its start gate.
+    #[serde(default)]
+    pub start_gate: StartGate,
+    /// The ownership the creation establishes.
+    #[serde(default)]
+    pub ownership: SessionOwnership,
+    /// The finish condition an owned session owes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_condition: Option<FinishCondition>,
+}
+
+impl SessionLifecycleMembers {
+    /// Whether every member holds its omission value.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The standing failure cause a parked session closes with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionFailureCause {
+    ProviderTransient,
+    ProviderQuotaExhausted,
+    ProviderOverloaded,
+    InfrastructureFailure,
+    RetryBudgetExhausted,
+    ContextCompactionWall,
+    ContextHeadroomExhausted,
+    BrokenToolchain,
+    ModerationBlock,
+}
+
+/// Closed session-lifecycle command rejection vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleCommandRejection {
+    SessionNotFound,
+    TransitionNotAdmitted,
+    RequiresParked,
+    ReleaseWhileParked,
+    OwnershipUnchanged,
+    FinishConditionAlreadyDeclared,
+    StandingCauseMismatch,
+    SuccessorNotFound,
+    SuccessorIsSelf,
+    GoalResumeRequired,
+    GoalOutcomeMismatch,
+    PendingTerminalConflict,
+}
+
+/// What an applied lifecycle command did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionLifecycleEffect {
+    /// The held start gate opened.
+    StartReleased {},
+    /// The session recorded terminal.
+    Closed {},
+    /// The outcome is committed; the named live turn settles first.
+    ClosurePending {
+        /// The turn the committed interrupt machinery settles.
+        live_turn_id: CanonicalUuid,
+    },
+    /// The park lifted.
+    Resumed {},
+    /// The ownership bit flipped.
+    OwnershipChanged {},
+}
+
 /// Closed versioned request family.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3408,6 +1989,9 @@ pub enum ClientRequest {
         /// Explicit opt-in placement, defaulting to legacy pathless behavior.
         #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
         placement: SessionPlacement,
+        /// Start gate, ownership, and finish condition.
+        #[serde(default, skip_serializing_if = "SessionLifecycleMembers::is_default")]
+        lifecycle: SessionLifecycleMembers,
     },
     /// Create a user-initiated session from one daemon-held template.
     CreateSessionFromTemplate {
@@ -3418,6 +2002,9 @@ pub enum ClientRequest {
         /// Explicit opt-in placement, defaulting to legacy pathless behavior.
         #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
         placement: SessionPlacement,
+        /// Start gate, ownership, and finish condition.
+        #[serde(default, skip_serializing_if = "SessionLifecycleMembers::is_default")]
+        lifecycle: SessionLifecycleMembers,
     },
     /// Atomically commission one session from a daemon-held template: create
     /// it under a recorded immutable authority fence, attach its goal, and
@@ -3440,7 +2027,7 @@ pub enum ClientRequest {
     ReadDeploymentLimits {},
     /// List current sessions.
     ListSessions {},
-    /// Read one coherent repository-watch operator-status snapshot.
+    /// Read one coherent operator-status snapshot.
     ReadOperatorStatus {},
     /// Append one explicit immutable session-placement update event.
     UpdateSessionPlacement {
@@ -3490,6 +2077,56 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// Newly commissioned immutable statement.
         statement: String,
+    },
+    /// Close a session `stopped{sticky}` from any non-terminal state.
+    StopSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        /// Whether re-dispatch stays suppressed until the source is updated.
+        sticky: bool,
+        /// Explicit delegated-child scope.
+        descendant_scope: DescendantTerminationScope,
+    },
+    /// Close a session `superseded{by}` in favour of its successor.
+    SupersedeSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        /// The session that takes the work.
+        successor_session_id: CanonicalUuid,
+    },
+    /// Write off a parked session as `abandoned`.
+    AbandonSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+    },
+    /// Close a parked session as failed; null closes with its standing cause.
+    CloseSessionFailed {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        cause: Option<SessionFailureCause>,
+    },
+    /// Return a parked session whose goal is not blocked to its mapped state.
+    ResumeSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+    },
+    /// Take the liveness obligation, optionally supplying a finish condition.
+    AdoptSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        finish_condition: Option<FinishCondition>,
+    },
+    /// Drop the liveness obligation.
+    ReleaseSession {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+    },
+    /// Open a held start gate so queued admission work may dispatch.
+    ReleaseStart {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
     },
     /// Submit user input with an admitted delivery treatment.
     SubmitInput {
@@ -3900,7 +2537,7 @@ pub enum ClientRequest {
     /// its stop is durably requested and terminalization flows through the
     /// existing lifecycle, while `content` becomes the immediate-successor
     /// origin the session continues with. No standalone cancellation command
-    /// exists; this verb is the interrupt treatment on the wire (INV-029).
+    /// exists; this verb is the interrupt treatment on the wire.
     StopTurn {
         /// Durable mutation identity.
         command_id: CommandId,
@@ -3967,6 +2604,26 @@ impl ClientRequest {
                 guidance: Some(guidance),
                 ..
             } => validate_goal_text(guidance)?,
+            Self::AdoptSession {
+                finish_condition: Some(FinishCondition::Declared { statement }),
+                ..
+            } => validate_goal_text(statement)?,
+            Self::CreateSession {
+                lifecycle:
+                    SessionLifecycleMembers {
+                        finish_condition: Some(FinishCondition::Declared { statement }),
+                        ..
+                    },
+                ..
+            }
+            | Self::CreateSessionFromTemplate {
+                lifecycle:
+                    SessionLifecycleMembers {
+                        finish_condition: Some(FinishCondition::Declared { statement }),
+                        ..
+                    },
+                ..
+            } => validate_goal_text(statement)?,
             Self::CreateSession { .. }
             | Self::CreateSessionFromTemplate { .. }
             | Self::ListTemplates {}
@@ -3977,6 +2634,21 @@ impl ClientRequest {
             | Self::ReadGoal { .. }
             | Self::ResumeGoal { guidance: None, .. }
             | Self::StopGoal { .. }
+            | Self::StopSession { .. }
+            | Self::SupersedeSession { .. }
+            | Self::AbandonSession { .. }
+            | Self::CloseSessionFailed { .. }
+            | Self::ResumeSession { .. }
+            | Self::AdoptSession {
+                finish_condition: None,
+                ..
+            }
+            | Self::AdoptSession {
+                finish_condition: Some(FinishCondition::ExternalGate),
+                ..
+            }
+            | Self::ReleaseSession { .. }
+            | Self::ReleaseStart { .. }
             | Self::SubmitInput { .. }
             | Self::CompactSession { .. }
             | Self::ReadTranscript { .. }
@@ -4321,6 +2993,7 @@ impl ClientRequest {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One validated client frame.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -4328,6 +3001,8 @@ impl ClientRequest {
 pub struct ClientFrame {
     version: ProtocolVersion,
     request_id: RequestId,
+    /// Borrows the closed request.
+    #[get]
     request: ClientRequest,
 }
 
@@ -4363,11 +3038,6 @@ impl ClientFrame {
     /// Returns the correlation identity.
     pub const fn request_id(&self) -> RequestId {
         self.request_id
-    }
-
-    /// Borrows the closed request.
-    pub const fn request(&self) -> &ClientRequest {
-        &self.request
     }
 
     /// Transfers the admitted version, correlation identity, and closed
@@ -4812,6 +3482,13 @@ pub enum RejectionDetail {
         length_bytes: CanonicalU64,
         blob_length_bytes: CanonicalU64,
     },
+    /// A durable session-lifecycle command was rejected by current state.
+    SessionLifecycleCommandRejected {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Closed reason.
+        reason: SessionLifecycleCommandRejection,
+    },
 }
 
 impl RejectionDetail {
@@ -4863,6 +3540,7 @@ impl RejectionDetail {
             | Self::SessionPlacementCurrentVersionMismatch { .. }
             | Self::SessionPlacementVersionExhausted { .. }
             | Self::GoalCommandRejected { .. }
+            | Self::SessionLifecycleCommandRejected { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::CommissionTargetBusy { .. }
             | Self::ActiveTurnMismatch { .. }
@@ -4898,12 +3576,17 @@ impl RejectionDetail {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Presence-checked rejection detail on an error message.
 ///
 /// An absent value omits the JSON member. A present JSON `null` is rejected
 /// rather than being treated as absence.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ErrorDetail(Option<RejectionDetail>);
+pub struct ErrorDetail(
+    /// Returns the typed rejection detail when present.
+    #[get(copy, as = "value")]
+    Option<RejectionDetail>,
+);
 
 impl ErrorDetail {
     /// Omits rejection detail from a non-rejection error.
@@ -4919,11 +3602,6 @@ impl ErrorDetail {
     /// Includes typed import evidence on an invalid request.
     pub const fn invalid_request(detail: RejectionDetail) -> Self {
         Self(Some(detail))
-    }
-
-    /// Returns the typed rejection detail when present.
-    pub const fn value(self) -> Option<RejectionDetail> {
-        self.0
     }
 
     const fn is_absent(&self) -> bool {
@@ -5646,6 +4324,7 @@ pub enum ImportedContentKind {
     MessageContentAbsent,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A leading excerpt of one imported entry's exact attested text.
 ///
 /// The preview is the entry's exact leading Unicode scalar sequence cut at a
@@ -5655,6 +4334,8 @@ pub enum ImportedContentKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawImportedTextPreview")]
 pub struct ImportedTextPreview {
+    /// Returns the exact emitted leading scalars.
+    #[get(str)]
     /// Exact leading scalars within structural wire-text memory.
     preview: String,
     /// Whether exact text remains beyond the emitted scalars.
@@ -5709,11 +4390,6 @@ impl ImportedTextPreview {
             preview: text[..end].to_owned(),
             truncated: end < text.len(),
         }
-    }
-
-    /// Returns the exact emitted leading scalars.
-    pub fn preview(&self) -> &str {
-        &self.preview
     }
 
     /// Returns whether exact text remains beyond the emitted scalars.
@@ -5795,6 +4471,13 @@ pub enum TranscriptEntry {
         defaults_version: CanonicalU64,
         /// Exact direct model identity frozen for the turn.
         selected_model_id: CanonicalUuid,
+    },
+    /// Provider-side compaction occurred; opaque replay bytes stay internal.
+    ProviderCompaction {
+        /// Owning turn.
+        turn_id: CanonicalUuid,
+        /// Producing model call.
+        model_call_id: CanonicalUuid,
     },
     /// Assistant proposed one durable tool request.
     AssistantToolUse {
@@ -5967,10 +4650,15 @@ pub enum RunnerSandboxProfile {
     WorkspaceRestricted,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Checked runner capability-class name carried by a session projection.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RunnerCapabilityClass(String);
+pub struct RunnerCapabilityClass(
+    /// Borrows the validated capability-class name.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl RunnerCapabilityClass {
     /// Applies the runner domain's portable catalog-name validation.
@@ -5978,11 +4666,6 @@ impl RunnerCapabilityClass {
         DomainRunnerCapabilityClass::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| CanonicalValueError::RunnerCatalogName)
-    }
-
-    /// Borrows the validated capability-class name.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -6000,10 +4683,15 @@ impl From<RunnerCapabilityClass> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Checked runner credential-profile name carried by a session projection.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RunnerCredentialProfileName(String);
+pub struct RunnerCredentialProfileName(
+    /// Borrows the validated credential-profile name.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl RunnerCredentialProfileName {
     /// Applies the runner domain's portable catalog-name validation.
@@ -6011,11 +4699,6 @@ impl RunnerCredentialProfileName {
         DomainCredentialProfileName::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| CanonicalValueError::RunnerCatalogName)
-    }
-
-    /// Borrows the validated credential-profile name.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -6033,10 +4716,15 @@ impl From<RunnerCredentialProfileName> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Checked runner repository key carried by a session projection.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RunnerRepositoryKey(String);
+pub struct RunnerRepositoryKey(
+    /// Borrows the validated repository key.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl RunnerRepositoryKey {
     /// Applies the runner domain's portable repository-key validation.
@@ -6044,11 +4732,6 @@ impl RunnerRepositoryKey {
         DomainWorkspaceRepositoryKey::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| CanonicalValueError::RunnerCatalogName)
-    }
-
-    /// Borrows the validated repository key.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -6106,10 +4789,13 @@ pub enum RunnerProjectionState {
     RunnerAbandoned,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Authoritative current runner placement projected in a transcript snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawRunnerProjection")]
 pub struct RunnerProjection {
+    /// Borrows the immutable requested selector.
+    #[get]
     /// Immutable selector requested by this placement revision.
     selector: RunnerProjectionSelector,
     /// Current or lost exact runner when the state names one.
@@ -6210,11 +4896,6 @@ impl RunnerProjection {
         })
     }
 
-    /// Borrows the immutable requested selector.
-    pub const fn selector(&self) -> &RunnerProjectionSelector {
-        &self.selector
-    }
-
     /// Returns the current or lost exact runner when the state names one.
     pub const fn runner_id(&self) -> Option<CanonicalUuid> {
         self.runner_id
@@ -6274,10 +4955,15 @@ impl TryFrom<RawRunnerProjection> for RunnerProjection {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact bounded runner working-directory text carried on the process wire.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RunnerWorkingDirectory(String);
+pub struct RunnerWorkingDirectory(
+    /// Borrows the exact validated directory text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl RunnerWorkingDirectory {
     /// Maximum UTF-8 bytes admitted by the runner domain and process wire.
@@ -6289,11 +4975,6 @@ impl RunnerWorkingDirectory {
         DomainRunnerWorkingDirectory::try_new(value.clone())
             .map_err(|_| CanonicalValueError::RunnerWorkingDirectory)?;
         Ok(Self(value))
-    }
-
-    /// Borrows the exact validated directory text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -6509,6 +5190,15 @@ pub enum DelegationProvenance {
         /// One-based goal generation.
         goal_generation: CanonicalU64,
         /// Durable goal stop command.
+        command_id: CanonicalUuid,
+        /// Explicit kill-time descendant choice.
+        descendant_scope: DescendantTerminationScope,
+    },
+    /// Exact parent lifecycle command.
+    ParentLifecycleCommand {
+        /// Parent session.
+        parent_session_id: CanonicalUuid,
+        /// Durable lifecycle stop command.
         command_id: CanonicalUuid,
         /// Explicit kill-time descendant choice.
         descendant_scope: DescendantTerminationScope,
@@ -6953,6 +5643,9 @@ fn direct_child_result_shape_is_valid(
         }
         | DelegationProvenance::ParentGoalCommand {
             parent_session_id, ..
+        }
+        | DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id, ..
         } => {
             *parent_session_id != child_session_id
                 && child_result_shape_is_valid(
@@ -6990,6 +5683,14 @@ fn parent_delegation_provenance_is_cascade(
                 && goal_generation.value() > 0
                 && parent_delegation_provenance_has_cascade(provenance)
         }
+        DelegationProvenance::ParentLifecycleCommand {
+            parent_session_id: provenance_parent,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => {
+            *provenance_parent == parent_session_id
+                && parent_delegation_provenance_has_cascade(provenance)
+        }
         _ => false,
     }
 }
@@ -7001,6 +5702,9 @@ fn delegation_provenance_parent(provenance: &DelegationProvenance) -> Option<Can
             parent_session_id, ..
         }
         | DelegationProvenance::ParentGoalCommand {
+            parent_session_id, ..
+        }
+        | DelegationProvenance::ParentLifecycleCommand {
             parent_session_id, ..
         } => Some(*parent_session_id),
         _ => None,
@@ -7018,6 +5722,10 @@ fn parent_delegation_provenance_has_cascade(provenance: &DelegationProvenance) -
             goal_generation,
             ..
         } => goal_generation.value() > 0,
+        DelegationProvenance::ParentLifecycleCommand {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => true,
         _ => false,
     }
 }
@@ -7276,135 +5984,6 @@ fn validate_adjustments(adjustments: &[ModelChangeAdjustment]) -> Result<(), Fra
     Ok(())
 }
 
-/// Origin fact whose dispatch holds one repository-watch singleton slot.
-///
-/// A rule matching branch workflow-run completion under `Rule` or `Repo`
-/// singleton scope holds a slot from a branch fact, which names no pull
-/// request; every other admitted origin names one. The two are exclusive, so
-/// the shape is a tagged choice rather than a pair of nullable numbers.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum OperatorStatusHeldSlotOrigin {
-    /// A pull-request fact, named by its number.
-    PullRequest { pull_request_number: CanonicalU64 },
-    /// A branch workflow-run fact, named by its branch.
-    Branch { branch: String },
-}
-
-/// Payload for one active repository-watch dispatch slot.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperatorStatusHeldSlotMessage {
-    pub dispatch_id: CanonicalUuid,
-    pub repository: String,
-    pub origin: OperatorStatusHeldSlotOrigin,
-    pub rule_id: String,
-    pub rule_version: CanonicalU64,
-    pub singleton_scope: OperatorStatusSingletonScope,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub singleton_repository: Option<String>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub singleton_pull_request_number: Option<CanonicalU64>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub singleton_stack_root_pull_request_number: Option<CanonicalU64>,
-    pub held_for_seconds: CanonicalU64,
-    pub session_ids: Vec<CanonicalUuid>,
-    pub blockers: Vec<OperatorStatusHeldSlotBlocker>,
-}
-
-/// Payload for one owed repository-watch dispatch waiting for admission.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperatorStatusQueuedObligationMessage {
-    pub obligation_id: CanonicalUuid,
-    pub repository: String,
-    pub rule_id: String,
-    pub rule_version: CanonicalU64,
-    pub singleton_scope: OperatorStatusSingletonScope,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub singleton_repository: Option<String>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub singleton_pull_request_number: Option<CanonicalU64>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub singleton_stack_root_pull_request_number: Option<CanonicalU64>,
-    pub first_event_id: CanonicalUuid,
-    pub latest_event_id: CanonicalUuid,
-    pub matched_event_count: CanonicalU64,
-    pub waiting_for_seconds: CanonicalU64,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub occupying_dispatch_id: Option<CanonicalUuid>,
-    pub occupying_session_ids: Vec<CanonicalUuid>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub cooldown_remaining_seconds: Option<CanonicalU64>,
-    pub cooldown_never_eligible: bool,
-    pub ready: bool,
-}
-
-/// Payload for one latest pull-request convergence assessment.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperatorStatusPullRequestConvergenceMessage {
-    pub repository: String,
-    pub pull_request_number: CanonicalU64,
-    pub head_sha: String,
-    pub base_branch: String,
-    pub base_revision: String,
-    pub mergeable_state: OperatorStatusMergeableState,
-    pub review_decision: OperatorStatusReviewDecision,
-    pub unresolved_thread_count: CanonicalU64,
-    pub gating_check_count: CanonicalU64,
-    #[serde(
-        serialize_with = "serialize_operator_status_check_names",
-        deserialize_with = "deserialize_operator_status_check_names"
-    )]
-    pub non_green_gating_checks: Vec<String>,
-    pub verdict: OperatorStatusConvergenceVerdict,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub seal: Option<OperatorStatusConvergenceSeal>,
-    pub assessed_seconds_ago: CanonicalU64,
-}
-
-/// Payload for one stale blocking review whose planned clearance is unsettled.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperatorStatusPendingStaleReviewClearanceMessage {
-    pub repository: String,
-    pub pull_request_number: CanonicalU64,
-    pub current_head_sha: String,
-    pub review_node_id: String,
-    pub reviewer: String,
-    pub reviewed_head_sha: String,
-    pub pending_for_seconds: CanonicalU64,
-}
-
-/// Terminal counts for one coherent repository-watch operator-status snapshot.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperatorStatusEndMessage {
-    pub held_slot_count: CanonicalU64,
-    pub queued_obligation_count: CanonicalU64,
-    pub pull_request_convergence_count: CanonicalU64,
-    pub pending_stale_review_clearance_count: CanonicalU64,
-}
-
-/// One member of a coherent repository-watch operator-status snapshot.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum OperatorStatusMessage {
-    /// Begins the snapshot.
-    Start {},
-    /// One active repository-watch dispatch slot.
-    HeldSlot(Box<OperatorStatusHeldSlotMessage>),
-    /// One owed repository-watch dispatch waiting for admission.
-    QueuedObligation(Box<OperatorStatusQueuedObligationMessage>),
-    /// One latest pull-request convergence assessment.
-    PullRequestConvergence(Box<OperatorStatusPullRequestConvergenceMessage>),
-    /// One stale blocking review whose planned clearance is not yet settled.
-    PendingStaleReviewClearance(Box<OperatorStatusPendingStaleReviewClearanceMessage>),
-    /// Completes the snapshot with its section counts.
-    End(Box<OperatorStatusEndMessage>),
-}
-
 /// Closed versioned server message family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -7422,6 +6001,13 @@ pub enum ServerMessage {
         session_id: CanonicalUuid,
         /// Append-only commissioned-dispatch record carrying the fence.
         dispatch_id: CanonicalUuid,
+    },
+    /// A durable session-lifecycle command applied.
+    SessionLifecycleCommandApplied {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// What the command did.
+        effect: SessionLifecycleEffect,
     },
     /// One delegated child spawn was recorded or equally replayed.
     SessionSpawned {
@@ -7562,7 +6148,7 @@ pub enum ServerMessage {
         /// Number of preceding summaries.
         session_count: CanonicalU64,
     },
-    /// One member of a coherent repository-watch operator-status snapshot.
+    /// One member of a coherent operator-status snapshot.
     OperatorStatus(Box<OperatorStatusMessage>),
     /// Begins the available-template sequence.
     TemplatesStart {},
@@ -8366,492 +6952,15 @@ impl ServerMessage {
     }
 }
 
-fn validate_operator_status_message(message: &ServerMessage) -> Result<(), FrameValidationError> {
-    let ServerMessage::OperatorStatus(message) = message else {
-        return Ok(());
-    };
-    let valid = match message.as_ref() {
-        OperatorStatusMessage::HeldSlot(item) => {
-            operator_status_repository_is_valid(&item.repository)
-                && operator_status_held_slot_origin_is_valid(&item.origin, item.singleton_scope)
-                && operator_status_held_slot_origin_matches_singleton(
-                    &item.origin,
-                    item.singleton_scope,
-                    item.singleton_pull_request_number,
-                )
-                && operator_status_rule_id_is_valid(&item.rule_id)
-                && item.rule_version.value() > 0
-                && operator_status_singleton_is_valid(
-                    &item.repository,
-                    &OperatorStatusSingletonAxes {
-                        scope: item.singleton_scope,
-                        repository: item.singleton_repository.as_deref(),
-                        pull_request_number: item.singleton_pull_request_number,
-                        stack_root_pull_request_number: item
-                            .singleton_stack_root_pull_request_number,
-                    },
-                )
-                && (1..=MAX_OPERATOR_STATUS_DISPATCH_SESSIONS).contains(&item.session_ids.len())
-                && values_are_distinct(&item.session_ids)
-                && item.blockers.len() <= MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS
-                && item.blockers.windows(2).all(|pair| {
-                    operator_status_blocker_rank(pair[0]) < operator_status_blocker_rank(pair[1])
-                })
-        }
-        OperatorStatusMessage::QueuedObligation(item) => {
-            // A blocking occupant is either a watch dispatch, which names its
-            // identity and its whole admitted session inventory, or one
-            // independently commissioned live session, which names that single
-            // session and no dispatch. Both a dispatch identity owning no
-            // sessions and a dispatch-less occupant naming more than the one
-            // session the obligation retains contradict the projection.
-            let occupancy_is_valid = match item.occupying_dispatch_id {
-                Some(_) => (1..=MAX_OPERATOR_STATUS_DISPATCH_SESSIONS)
-                    .contains(&item.occupying_session_ids.len()),
-                None => item.occupying_session_ids.len() <= 1,
-            };
-            let is_occupied =
-                item.occupying_dispatch_id.is_some() || !item.occupying_session_ids.is_empty();
-            operator_status_repository_is_valid(&item.repository)
-                && operator_status_rule_id_is_valid(&item.rule_id)
-                && item.rule_version.value() > 0
-                && operator_status_singleton_is_valid(
-                    &item.repository,
-                    &OperatorStatusSingletonAxes {
-                        scope: item.singleton_scope,
-                        repository: item.singleton_repository.as_deref(),
-                        pull_request_number: item.singleton_pull_request_number,
-                        stack_root_pull_request_number: item
-                            .singleton_stack_root_pull_request_number,
-                    },
-                )
-                && operator_status_obligation_lineage_is_coherent(item)
-                && values_are_distinct(&item.occupying_session_ids)
-                && occupancy_is_valid
-                // The projection reports a remaining cooldown only while the
-                // eligibility instant is still ahead of the read, and rounds
-                // that strictly positive interval up, so the smallest value it
-                // can carry is one second. A zero would name a cooldown that
-                // has already lapsed while still claiming to withhold the
-                // obligation.
-                && item
-                    .cooldown_remaining_seconds
-                    .is_none_or(|remaining| remaining.value() > 0)
-                && !(item.cooldown_remaining_seconds.is_some() && item.cooldown_never_eligible)
-                && !(item.ready
-                    && (is_occupied
-                        || item.cooldown_remaining_seconds.is_some()
-                        || item.cooldown_never_eligible))
-        }
-        OperatorStatusMessage::PullRequestConvergence(item) => {
-            operator_status_repository_is_valid(&item.repository)
-                && item.pull_request_number.value() > 0
-                && operator_status_sha_is_valid(&item.head_sha)
-                && operator_status_branch_is_valid(&item.base_branch)
-                && operator_status_sha_is_valid(&item.base_revision)
-                && item.unresolved_thread_count.value() <= MAX_OPERATOR_STATUS_UNRESOLVED_THREADS
-                && item.gating_check_count.value() <= MAX_OPERATOR_STATUS_GATING_CHECKS
-                && u64::try_from(item.non_green_gating_checks.len())
-                    .is_ok_and(|count| count <= item.gating_check_count.value())
-                && item.non_green_gating_checks.iter().all(|name| {
-                    operator_status_text_is_valid(name, MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES)
-                })
-                && item
-                    .non_green_gating_checks
-                    .windows(2)
-                    .all(|pair| pair[0] <= pair[1])
-                && operator_status_convergence_verdict_matches_evidence(item)
-                && operator_status_convergence_base_branch_matches_verdict(item)
-        }
-        OperatorStatusMessage::PendingStaleReviewClearance(item) => {
-            operator_status_repository_is_valid(&item.repository)
-                && item.pull_request_number.value() > 0
-                && operator_status_sha_is_valid(&item.current_head_sha)
-                && operator_status_text_is_valid(
-                    &item.review_node_id,
-                    MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES,
-                )
-                && operator_status_reviewer_is_valid(&item.reviewer)
-                && operator_status_sha_is_valid(&item.reviewed_head_sha)
-                && item.current_head_sha != item.reviewed_head_sha
-        }
-        OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => true,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(FrameValidationError::OperatorStatusShape)
-    }
-}
-
-fn operator_status_held_slot_origin_is_valid(
-    origin: &OperatorStatusHeldSlotOrigin,
-    singleton_scope: OperatorStatusSingletonScope,
-) -> bool {
-    match origin {
-        OperatorStatusHeldSlotOrigin::PullRequest {
-            pull_request_number,
-        } => pull_request_number.value() > 0,
-        // A branch workflow-run completion names no pull request, so the
-        // singleton it takes can only be keyed by the rule or the repository.
-        // A pull-request- or stack-scoped hold would have to name a pull
-        // request the branch fact never carried, so the two fields are only
-        // separately admissible and must be validated together.
-        OperatorStatusHeldSlotOrigin::Branch { branch } => {
-            operator_status_branch_is_valid(branch)
-                && matches!(
-                    singleton_scope,
-                    OperatorStatusSingletonScope::Rule | OperatorStatusSingletonScope::Repo
-                )
-        }
-    }
-}
-
-/// Holds the held-slot projection's own identity on the wire.
-///
-/// The durable projection joins each dispatch batch to the very
-/// `repo_watch_event` row it was admitted from, reads the origin pull request
-/// from that row, and carries the batch's singleton beside it. That singleton
-/// was keyed from the same event, so a pull-request-scoped hold names the very
-/// pull request its origin names; the two can never diverge in a row
-/// persistence produced.
-///
-/// A stack-scoped hold carries no such equality. Its singleton names the root
-/// of the open pull-request component the origin belongs to, which is a
-/// different pull request whenever the origin is not itself that root, so the
-/// stack axis is left to the scope shape alone. A branch origin never reaches
-/// either pull-request scope, which the adjacent origin validator settles.
-fn operator_status_held_slot_origin_matches_singleton(
-    origin: &OperatorStatusHeldSlotOrigin,
-    singleton_scope: OperatorStatusSingletonScope,
-    singleton_pull_request_number: Option<CanonicalU64>,
-) -> bool {
-    match (origin, singleton_scope) {
-        (
-            OperatorStatusHeldSlotOrigin::PullRequest {
-                pull_request_number,
-            },
-            OperatorStatusSingletonScope::PullRequest,
-        ) => singleton_pull_request_number == Some(*pull_request_number),
-        _ => true,
-    }
-}
-
-/// Holds the durable obligation lineage on the wire.
-///
-/// Persistence opens an obligation naming one evaluated event as both its first
-/// and its latest, with a matched count of one. Every later coalesced
-/// evaluation replaces the latest event with a distinct one and increments the
-/// count, and an event is evaluated at most once per rule version, so the count
-/// stands at one exactly while the two endpoints are the same event. A count of
-/// one across differing endpoints, or a larger count across identical ones,
-/// names a lineage no obligation row can hold.
-fn operator_status_obligation_lineage_is_coherent(
-    item: &OperatorStatusQueuedObligationMessage,
-) -> bool {
-    item.matched_event_count.value() > 0
-        && (item.matched_event_count.value() == 1) == (item.first_event_id == item.latest_event_id)
-}
-
-/// Holds the durable
-/// `repo_watch_convergence_verdict_matches_evidence` constraint on the wire.
-/// The stored assessment settles on the unconverged verdict exactly when the
-/// pull request carries at least one blocker, so either converged verdict
-/// contradicts every blocker the row carries beside it. Exactly one durable
-/// disjunct — the unsettled provider snapshot — is not carried on this wire, so
-/// the implication is only enforced in the direction the frame can prove: an
-/// unconverged verdict stays admissible against wholly clean carried evidence,
-/// while a converged verdict requires each carried condition to be clean.
-fn operator_status_convergence_verdict_matches_evidence(
-    item: &OperatorStatusPullRequestConvergenceMessage,
-) -> bool {
-    match item.verdict {
-        OperatorStatusConvergenceVerdict::NotConverged => true,
-        OperatorStatusConvergenceVerdict::InternallyConverged
-        | OperatorStatusConvergenceVerdict::MergeReady => {
-            item.unresolved_thread_count.value() == 0
-                && item.non_green_gating_checks.is_empty()
-                && item.mergeable_state == OperatorStatusMergeableState::Mergeable
-                && item.gating_check_count.value() > 0
-                && item.review_decision != OperatorStatusReviewDecision::ChangesRequested
-        }
-    }
-}
-
-/// Holds the durable base-branch pair on the wire.
-///
-/// Two constraints sit beside the evidence constraint on the same assessment
-/// row, and the status projection reads the verdict and the base branch from
-/// that one row: a merge-ready verdict is settled only against `main`, and an
-/// internally-converged verdict only against a branch that is not `main`. The
-/// pair is what distinguishes the two converged verdicts, so a merge-ready row
-/// on a release branch or an internally-converged row on the trunk names an
-/// assessment persistence cannot hold.
-///
-/// The unconverged verdict carries no base-branch constraint, and neither does
-/// the seal beside it: a seal is retained from the assessment that earned it
-/// and outlives later ones, so a pull request retargeted after it was sealed
-/// carries that seal beside its new base branch.
-fn operator_status_convergence_base_branch_matches_verdict(
-    item: &OperatorStatusPullRequestConvergenceMessage,
-) -> bool {
-    match item.verdict {
-        OperatorStatusConvergenceVerdict::NotConverged => true,
-        OperatorStatusConvergenceVerdict::MergeReady => {
-            item.base_branch == OPERATOR_STATUS_TRUNK_BASE_BRANCH
-        }
-        OperatorStatusConvergenceVerdict::InternallyConverged => {
-            item.base_branch != OPERATOR_STATUS_TRUNK_BASE_BRANCH
-        }
-    }
-}
-
-/// The singleton axes of one operator-status row, each named at its call site.
-///
-/// The two numeric axes carry one type and mean different things, so they are
-/// supplied by name rather than by position: a pull-request number transposed
-/// with a stack-root pull-request number would otherwise compile silently and
-/// admit rows the singleton grammar refuses.
-struct OperatorStatusSingletonAxes<'a> {
-    scope: OperatorStatusSingletonScope,
-    repository: Option<&'a str>,
-    pull_request_number: Option<CanonicalU64>,
-    stack_root_pull_request_number: Option<CanonicalU64>,
-}
-
-/// Holds the singleton axes of one row against the row's own identity.
-///
-/// Every repository-keyed singleton is keyed from the repository of the very
-/// event whose row carries it, and an obligation coalesces only across events
-/// sharing its singleton key, so a carried singleton repository is that row's
-/// own repository rather than an independent slug. The row's repository is
-/// checked against the slug grammar by the caller, so the equality carries that
-/// grammar onto the singleton axis with it.
-fn operator_status_singleton_is_valid(
-    row_repository: &str,
-    axes: &OperatorStatusSingletonAxes<'_>,
-) -> bool {
-    let OperatorStatusSingletonAxes {
-        scope,
-        repository,
-        pull_request_number,
-        stack_root_pull_request_number,
-    } = axes;
-    let repository_is_valid = repository.is_none_or(|value| value == row_repository);
-    repository_is_valid
-        && match scope {
-            OperatorStatusSingletonScope::PullRequest => {
-                repository.is_some()
-                    && pull_request_number.is_some_and(|value| value.value() > 0)
-                    && stack_root_pull_request_number.is_none()
-            }
-            OperatorStatusSingletonScope::Stack => {
-                repository.is_some()
-                    && pull_request_number.is_none()
-                    && stack_root_pull_request_number.is_some_and(|value| value.value() > 0)
-            }
-            OperatorStatusSingletonScope::Rule => {
-                repository.is_none()
-                    && pull_request_number.is_none()
-                    && stack_root_pull_request_number.is_none()
-            }
-            OperatorStatusSingletonScope::Repo => {
-                repository.is_some()
-                    && pull_request_number.is_none()
-                    && stack_root_pull_request_number.is_none()
-            }
-        }
-}
-
-fn operator_status_text_is_valid(value: &str, maximum: usize) -> bool {
-    !value.is_empty() && value.len() <= maximum && !value.contains('\0')
-}
-
-/// Holds the repository-slug grammar on the wire.
-///
-/// Mirrors the `RepositorySlug` constructor and the durable
-/// `repo_watch_repository_is_valid` check: exactly one separator, each segment
-/// nonempty and neither `.` nor `..`, and every byte an ASCII letter, digit,
-/// hyphen, underscore, or dot. The constructor lowercases what it admits and
-/// the durable check refuses anything else, so only the normalized spelling
-/// ever reaches this wire and an uppercase byte is refused with the rest.
-fn operator_status_repository_is_valid(value: &str) -> bool {
-    let mut segments = value.split('/');
-    let namespace = segments.next().unwrap_or_default();
-    let name = segments.next().unwrap_or_default();
-    operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES)
-        && segments.next().is_none()
-        && operator_status_repository_segment_is_valid(namespace)
-        && operator_status_repository_segment_is_valid(name)
-}
-
-/// Holds one side of a repository slug.
-fn operator_status_repository_segment_is_valid(value: &str) -> bool {
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
-        })
-}
-
-/// Holds the rule-identity grammar on the wire.
-///
-/// Mirrors the `RepoWatchRuleId` constructor and the durable
-/// `repo_watch_rule_id_is_valid` check: every byte an ASCII letter, digit,
-/// hyphen, underscore, or dot. Unlike the slug and the login, a rule identity
-/// is the operator's own spelling and is never case-normalized, so both cases
-/// are admitted.
-fn operator_status_rule_id_is_valid(value: &str) -> bool {
-    operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
-/// Holds the branch-name grammar on the wire.
-///
-/// Mirrors the `BranchName` constructor and the durable
-/// `repo_watch_branch_is_valid` check, which are the same git ref-name rules:
-/// the name is not `@`, does not begin with a hyphen, does not end with a dot,
-/// carries neither `..` nor `@{`, carries no space, control byte, delete byte,
-/// or one of `~^:?*[\`, and every slash-separated component is nonempty, does
-/// not begin with a dot, and does not end with `.lock`. Both producers store
-/// the name without its `refs/heads/` prefix, so the prefix is not stripped
-/// again here.
-fn operator_status_branch_is_valid(value: &str) -> bool {
-    operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES)
-        && value != "@"
-        && !value.starts_with('-')
-        && !value.ends_with('.')
-        && !value.contains("..")
-        && !value.contains("@{")
-        && !value.bytes().any(|byte| {
-            byte <= 0x20
-                || byte == 0x7f
-                || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
-        })
-        && value
-            .split('/')
-            .all(operator_status_branch_component_is_valid)
-}
-
-/// Holds one slash-separated component of a branch name.
-fn operator_status_branch_component_is_valid(value: &str) -> bool {
-    !value.is_empty() && !value.starts_with('.') && !value.ends_with(".lock")
-}
-
-/// Holds the reviewer-login grammar on the wire.
-///
-/// Mirrors the `RepoWatchAuthorLogin` constructor and the durable
-/// `repo_watch_login_is_valid` check: an optional literal App-bot suffix is set
-/// aside, and the base left behind is nonempty, no wider than its own ceiling,
-/// begins and ends with something other than a hyphen, carries no doubled
-/// hyphen, and spells itself in ASCII lowercase letters, digits, hyphens, and
-/// underscores. Both producers lowercase what they admit, so only the
-/// normalized spelling reaches this wire.
-fn operator_status_reviewer_is_valid(value: &str) -> bool {
-    let base = value
-        .strip_suffix(OPERATOR_STATUS_BOT_LOGIN_SUFFIX)
-        .unwrap_or(value);
-    operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES)
-        && !base.is_empty()
-        && base.len() <= MAX_OPERATOR_STATUS_REVIEWER_BASE_UTF8_BYTES
-        && !base.starts_with('-')
-        && !base.ends_with('-')
-        && !base.contains("--")
-        && base.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
-}
-
-fn serialize_operator_status_check_names<SerializerT>(
-    names: &[String],
-    serializer: SerializerT,
-) -> Result<SerializerT::Ok, SerializerT::Error>
-where
-    SerializerT: Serializer,
-{
-    let mut sequence = serializer.serialize_seq(Some(names.len()))?;
-    for name in names {
-        sequence.serialize_element(&STANDARD_BASE64.encode(name.as_bytes()))?;
-    }
-    sequence.end()
-}
-
-fn deserialize_operator_status_check_names<'de, DeserializerT>(
-    deserializer: DeserializerT,
-) -> Result<Vec<String>, DeserializerT::Error>
-where
-    DeserializerT: Deserializer<'de>,
-{
-    Vec::<String>::deserialize(deserializer)?
-        .into_iter()
-        .map(|encoded| {
-            let decoded = STANDARD_BASE64.decode(encoded.as_bytes()).map_err(|_| {
-                serde::de::Error::custom("operator-status check name is not canonical base64")
-            })?;
-            if STANDARD_BASE64.encode(&decoded) != encoded {
-                return Err(serde::de::Error::custom(
-                    "operator-status check name is not canonical base64",
-                ));
-            }
-            String::from_utf8(decoded)
-                .map_err(|_| serde::de::Error::custom("operator-status check name is not UTF-8"))
-        })
-        .collect()
-}
-
-fn operator_status_sha_is_valid(value: &str) -> bool {
-    value.len() == OPERATOR_STATUS_COMMIT_SHA_LENGTH
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn operator_status_blocker_rank(blocker: OperatorStatusHeldSlotBlocker) -> u8 {
-    match blocker {
-        OperatorStatusHeldSlotBlocker::UndeliveredAction => 0,
-        OperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant => 1,
-        OperatorStatusHeldSlotBlocker::LiveRuntimeTurn => 2,
-        OperatorStatusHeldSlotBlocker::PursuingGoal => 3,
-    }
-}
-
-fn values_are_distinct<ValueT>(values: &[ValueT]) -> bool
-where
-    ValueT: Eq + std::hash::Hash,
-{
-    let mut distinct = HashSet::with_capacity(values.len());
-    values.iter().all(|value| distinct.insert(value))
-}
-
-fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
-    deserializer: DeserializerT,
-) -> Result<Option<ValueT>, DeserializerT::Error>
-where
-    DeserializerT: Deserializer<'de>,
-    ValueT: Deserialize<'de>,
-{
-    Option::<ValueT>::deserialize(deserializer)
-}
-
-fn deserialize_optional_non_null<'de, DeserializerT, ValueT>(
-    deserializer: DeserializerT,
-) -> Result<Option<ValueT>, DeserializerT::Error>
-where
-    DeserializerT: Deserializer<'de>,
-    ValueT: Deserialize<'de>,
-{
-    ValueT::deserialize(deserializer).map(Some)
-}
-
+#[derive(signalbox_derive::Accessors)]
 /// One validated server frame.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerFrame {
     version: ProtocolVersion,
     request_id: RequestId,
+    /// Borrows the closed server message.
+    #[get]
     message: ServerMessage,
 }
 
@@ -8887,11 +6996,6 @@ impl ServerFrame {
     /// Returns the request correlation identity.
     pub const fn request_id(&self) -> RequestId {
         self.request_id
-    }
-
-    /// Borrows the closed server message.
-    pub const fn message(&self) -> &ServerMessage {
-        &self.message
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
@@ -9016,6 +7120,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
         | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::SessionLifecycleCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
@@ -9125,6 +7230,7 @@ fn validate_conversation_import_detail(
         | RejectionDetail::SessionPlacementCurrentVersionMismatch { .. }
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::SessionLifecycleCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
@@ -9245,209 +7351,6 @@ fn validate_blob_read_detail(detail: RejectionDetail) -> Result<(), FrameValidat
     }
 }
 
-/// A structurally invalid frame value.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FrameValidationError {
-    /// In-memory frame used another version.
-    UnsupportedVersion,
-    /// A client request used reserved correlation identity zero.
-    UncorrelatedClientRequest,
-    /// A success response used reserved correlation identity zero.
-    UncorrelatedSuccess,
-    /// A non-framing error used reserved correlation identity zero.
-    UncorrelatedApplicationError,
-    /// Rejection detail did not match the error code.
-    ErrorDetailShape,
-    /// A transcript turn carried an impossible correlated state shape.
-    TurnStateShape,
-    /// A tool approval event carried inconsistent decision provenance.
-    ToolApprovalShape,
-    /// A metadata request or response carried an invalid correlated shape.
-    MetadataShape,
-    /// A unified conversation-listing frame carried an invalid shape.
-    ConversationListShape,
-    /// A repository-watch operator-status row carried an invalid shape.
-    OperatorStatusShape,
-    SystemPromptShape,
-    /// A chunked conversation-import frame carried a contradictory shape.
-    ConversationImportShape,
-    /// A chunked immutable-blob frame carried a contradictory shape.
-    BlobUploadShape,
-    /// A blob metadata, range, or range-rejection value contradicted its bounds.
-    BlobReadShape,
-    /// An imported-frontier request carried a nonpositive position.
-    ImportedFrontierShape,
-    /// A context-compaction request carried a nonpositive position.
-    ContextCompactionShape,
-    /// An imported-conversation entry carried a nonpositive position.
-    ImportedConversationEntryShape,
-    /// An imported text preview exceeded its bound or contradicted its own
-    /// truncation marker.
-    ImportedTextPreviewShape,
-    /// An out-of-range imported rejection stated a range its own requested
-    /// position falls inside, or an empty selectable range.
-    ImportedFrontierRangeShape,
-    /// A submit-input delivery carried forbidden or missing correlated fields.
-    InputDeliveryShape,
-    /// Ordered user parts violated their canonical shape or resource bounds.
-    UserContentShape,
-    /// A template name or positive version carried an invalid shape.
-    TemplateShape,
-    /// A review lifecycle or orchestration frame carried an invalid shape.
-    ReviewShape,
-    /// A model-call usage row carried cost without any reported usage axis.
-    ModelCallUsageShape,
-    /// A goal request, state, or event carried an invalid shape.
-    GoalShape,
-    /// A delegation update carried an invalid correlated shape.
-    DelegationShape,
-    /// Model settings or capability data carried a contradictory shape.
-    ModelSettingsShape,
-    /// A dotted placement or its root-global-read acknowledgement is invalid.
-    PlacementShape,
-    /// A commissioned-session authority fence carried an invalid shape.
-    DispatchFenceShape,
-}
-
-impl fmt::Display for FrameValidationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::UnsupportedVersion => "frame version is unsupported",
-            Self::UncorrelatedClientRequest => "client request identity is uncorrelated",
-            Self::UncorrelatedSuccess => "successful server message is uncorrelated",
-            Self::UncorrelatedApplicationError => "application server error is uncorrelated",
-            Self::ErrorDetailShape => "server error detail does not match its code",
-            Self::TurnStateShape => "transcript turn state is inconsistent",
-            Self::ToolApprovalShape => "tool approval event shape is inconsistent",
-            Self::MetadataShape => "session metadata frame shape is inconsistent",
-            Self::ConversationListShape => {
-                "unified conversation-listing frame shape is inconsistent"
-            }
-            Self::OperatorStatusShape => "operator-status frame shape is inconsistent",
-            Self::SystemPromptShape => "frame omits its required system-prompt member",
-            Self::ConversationImportShape => "conversation-import frame shape is inconsistent",
-            Self::BlobUploadShape => "blob-upload frame shape is inconsistent",
-            Self::BlobReadShape => "blob-read frame shape is inconsistent",
-            Self::ImportedFrontierShape => "imported frontier position is not positive",
-            Self::ContextCompactionShape => "compaction through position is not positive",
-            Self::ImportedConversationEntryShape => {
-                "imported conversation entry position is not positive"
-            }
-            Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
-            Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
-            Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
-            Self::UserContentShape => "ordered user content shape is inconsistent",
-            Self::TemplateShape => "session-template frame shape is inconsistent",
-            Self::ReviewShape => "review workflow frame shape is inconsistent",
-            Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
-            Self::GoalShape => "commissioned-goal frame shape is inconsistent",
-            Self::DelegationShape => "session-delegation frame shape is inconsistent",
-            Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
-            Self::PlacementShape => "session-placement frame shape is inconsistent",
-            Self::DispatchFenceShape => "commissioned-session fence shape is inconsistent",
-        })
-    }
-}
-
-impl Error for FrameValidationError {}
-
-/// Stable classification of an incoming line failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FrameDecodeErrorKind {
-    /// Frame exceeded the inclusive byte cap.
-    OversizedFrame,
-    /// Framing, JSON, field, or canonical scalar validation failed.
-    MalformedFrame,
-    /// Frame named another integer version.
-    UnsupportedVersion,
-}
-
-/// Incoming-line failure with the recoverable request identity, or zero.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FrameDecodeError {
-    kind: FrameDecodeErrorKind,
-    request_id: RequestId,
-}
-
-impl FrameDecodeError {
-    /// Returns the stable failure classification.
-    pub const fn kind(&self) -> FrameDecodeErrorKind {
-        self.kind
-    }
-
-    /// Returns the recovered request identity or reserved zero.
-    pub const fn request_id(&self) -> RequestId {
-        self.request_id
-    }
-
-    const fn malformed(request_id: RequestId) -> Self {
-        Self {
-            kind: FrameDecodeErrorKind::MalformedFrame,
-            request_id,
-        }
-    }
-}
-
-impl fmt::Display for FrameDecodeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.kind {
-            FrameDecodeErrorKind::OversizedFrame => {
-                formatter.write_str("process-protocol frame is oversized")
-            }
-            FrameDecodeErrorKind::MalformedFrame => {
-                formatter.write_str("process-protocol frame is malformed")
-            }
-            FrameDecodeErrorKind::UnsupportedVersion => formatter
-                .write_str("process-protocol version is unsupported; supported version is 1"),
-        }
-    }
-}
-
-impl Error for FrameDecodeError {}
-
-/// Outgoing frame could not be encoded within the protocol boundary.
-#[derive(Debug)]
-pub enum FrameEncodeError {
-    /// In-memory value violated its closed frame shape.
-    Validation(FrameValidationError),
-    /// JSON serialization failed.
-    Json(serde_json::Error),
-    /// Encoded frame exceeded the inclusive byte cap.
-    OversizedFrame,
-}
-
-impl fmt::Display for FrameEncodeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Validation(error) => write!(formatter, "invalid process-protocol frame: {error}"),
-            Self::Json(_) => formatter.write_str("process-protocol frame serialization failed"),
-            Self::OversizedFrame => formatter.write_str("process-protocol frame is oversized"),
-        }
-    }
-}
-
-impl Error for FrameEncodeError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Validation(error) => Some(error),
-            Self::Json(error) => Some(error),
-            Self::OversizedFrame => None,
-        }
-    }
-}
-
-impl From<FrameValidationError> for FrameEncodeError {
-    fn from(error: FrameValidationError) -> Self {
-        Self::Validation(error)
-    }
-}
-
-impl From<serde_json::Error> for FrameEncodeError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Json(error)
-    }
-}
-
 /// Decodes and validates one complete client line including its final newline.
 pub fn decode_client_line(line: &[u8]) -> Result<ClientFrame, FrameDecodeError> {
     let content = checked_line_content(line, false)?;
@@ -9493,262 +7396,10 @@ fn encode_line<T: Serialize>(frame: &T) -> Result<Vec<u8>, FrameEncodeError> {
     Ok(encoded)
 }
 
-fn checked_line_content(line: &[u8], allow_uncorrelated: bool) -> Result<&[u8], FrameDecodeError> {
-    if line.len() > MAX_FRAME_BYTES {
-        let content = line.strip_suffix(b"\n").unwrap_or(line);
-        return Err(FrameDecodeError {
-            kind: FrameDecodeErrorKind::OversizedFrame,
-            request_id: recover_request_id(content, allow_uncorrelated),
-        });
-    }
-    let Some(content) = line.strip_suffix(b"\n") else {
-        return Err(FrameDecodeError::malformed(recover_request_id(
-            line,
-            allow_uncorrelated,
-        )));
-    };
-    if content.is_empty() || content.ends_with(b"\r") || content.contains(&b'\n') {
-        return Err(FrameDecodeError::malformed(recover_request_id(
-            content,
-            allow_uncorrelated,
-        )));
-    }
-    Ok(content)
-}
-
-struct ProbedHeader {
-    request_id: RequestId,
-}
-
-struct RawHeaderProbe<'a> {
-    members: HashSet<String>,
-    duplicate_member: bool,
-    duplicate_request_id: bool,
-    version: Option<&'a RawValue>,
-    request_id: Option<&'a RawValue>,
-}
-
-struct RawHeaderProbeVisitor;
-
-impl<'de> Visitor<'de> for RawHeaderProbeVisitor {
-    type Value = RawHeaderProbe<'de>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a process-protocol frame object")
-    }
-
-    fn visit_map<AccessT>(self, mut map: AccessT) -> Result<Self::Value, AccessT::Error>
-    where
-        AccessT: MapAccess<'de>,
-    {
-        let mut members = HashSet::new();
-        let mut duplicate_member = false;
-        let mut duplicate_request_id = false;
-        let mut version = None;
-        let mut request_id = None;
-
-        while let Some(member) = map.next_key::<String>()? {
-            let value = map.next_value::<&'de RawValue>()?;
-            if !members.insert(member.clone()) {
-                duplicate_member = true;
-                duplicate_request_id |= member == "request_id";
-                continue;
-            }
-            match member.as_str() {
-                "version" => version = Some(value),
-                "request_id" => request_id = Some(value),
-                _ => {}
-            }
-        }
-
-        Ok(RawHeaderProbe {
-            members,
-            duplicate_member,
-            duplicate_request_id,
-            version,
-            request_id,
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for RawHeaderProbe<'de> {
-    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
-    where
-        DeserializerT: Deserializer<'de>,
-    {
-        deserializer.deserialize_map(RawHeaderProbeVisitor)
-    }
-}
-
-fn probe_header(
-    content: &[u8],
-    payload_member: &str,
-    allow_uncorrelated: bool,
-) -> Result<ProbedHeader, FrameDecodeError> {
-    let probe = deserialize_header_probe(content)
-        .map_err(|_| FrameDecodeError::malformed(RequestId::uncorrelated()))?;
-    let request_id = request_id_from_probe(&probe, allow_uncorrelated);
-    if probe.duplicate_member {
-        return Err(FrameDecodeError::malformed(request_id));
-    }
-    if contains_duplicate_object_member(content)
-        .map_err(|_| FrameDecodeError::malformed(request_id))?
-    {
-        return Err(FrameDecodeError::malformed(request_id));
-    }
-    let Some(version) = probe.version else {
-        return Err(FrameDecodeError::malformed(request_id));
-    };
-    let version_spelling = version.get();
-    let integer_spelling = version_spelling
-        .strip_prefix('-')
-        .unwrap_or(version_spelling);
-    if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(FrameDecodeError::malformed(request_id));
-    }
-    if version_spelling != "1" {
-        return Err(FrameDecodeError {
-            kind: FrameDecodeErrorKind::UnsupportedVersion,
-            request_id,
-        });
-    }
-    if probe.members.len() != 3
-        || !probe.members.contains("version")
-        || !probe.members.contains("request_id")
-        || !probe.members.contains(payload_member)
-    {
-        return Err(FrameDecodeError::malformed(request_id));
-    }
-    Ok(ProbedHeader { request_id })
-}
-
-enum DuplicateMemberScanError {
-    InvalidMemberName,
-    NestingLimitExceeded,
-}
-
-fn contains_duplicate_object_member(content: &[u8]) -> Result<bool, DuplicateMemberScanError> {
-    let mut containers: Vec<Option<HashSet<String>>> = Vec::new();
-    let mut index = 0;
-    while index < content.len() {
-        match content[index] {
-            b'{' => {
-                if containers.len() == MAX_JSON_CONTAINER_DEPTH {
-                    return Err(DuplicateMemberScanError::NestingLimitExceeded);
-                }
-                containers.push(Some(HashSet::new()));
-                index += 1;
-            }
-            b'[' => {
-                if containers.len() == MAX_JSON_CONTAINER_DEPTH {
-                    return Err(DuplicateMemberScanError::NestingLimitExceeded);
-                }
-                containers.push(None);
-                index += 1;
-            }
-            b'}' | b']' => {
-                containers.pop();
-                index += 1;
-            }
-            b'"' => {
-                let start = index;
-                index += 1;
-                while index < content.len() {
-                    match content[index] {
-                        b'\\' => index += 2,
-                        b'"' => {
-                            index += 1;
-                            break;
-                        }
-                        _ => index += 1,
-                    }
-                }
-                let mut following = index;
-                while following < content.len() && content[following].is_ascii_whitespace() {
-                    following += 1;
-                }
-                if content.get(following) == Some(&b':')
-                    && let Some(Some(members)) = containers.last_mut()
-                {
-                    let member = serde_json::from_slice::<String>(&content[start..index])
-                        .map_err(|_| DuplicateMemberScanError::InvalidMemberName)?;
-                    if !members.insert(member) {
-                        return Ok(true);
-                    }
-                }
-            }
-            _ => index += 1,
-        }
-    }
-    Ok(false)
-}
-
-fn deserialize_header_probe(content: &[u8]) -> Result<RawHeaderProbe<'_>, serde_json::Error> {
-    let mut deserializer = serde_json::Deserializer::from_slice(content);
-    RawHeaderProbe::deserialize(&mut deserializer).and_then(|probe| {
-        deserializer.end()?;
-        Ok(probe)
-    })
-}
-
-fn request_id_from_probe(probe: &RawHeaderProbe<'_>, allow_uncorrelated: bool) -> RequestId {
-    if probe.duplicate_request_id {
-        RequestId::uncorrelated()
-    } else {
-        probe
-            .request_id
-            .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
-            .and_then(|value| RequestId::try_from(value).ok())
-            .filter(|value| allow_uncorrelated || value.is_correlated())
-            .unwrap_or_else(RequestId::uncorrelated)
-    }
-}
-
-fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVersion> {
-    if probe.duplicate_member {
-        return None;
-    }
-    match probe.version?.get() {
-        "1" => Some(ProtocolVersion::One),
-        _ => None,
-    }
-}
-
-fn recover_request_id(content: &[u8], allow_uncorrelated: bool) -> RequestId {
-    // Recovery is best effort and must not parse an arbitrarily large rejected
-    // line. A complete minimally oversized line can still fit this content cap.
-    if content.len() > MAX_FRAME_BYTES {
-        return RequestId::uncorrelated();
-    }
-    deserialize_header_probe(content)
-        .map(|probe| request_id_from_probe(&probe, allow_uncorrelated))
-        .unwrap_or_else(|_| RequestId::uncorrelated())
-}
-
-/// Recovers a correlated client request identity from bounded complete frame
-/// content.
-///
-/// This is the server reader's best-effort correlation path when a final
-/// newline is the one byte that takes an otherwise complete JSON object over
-/// the frame limit. Input beyond the content bound is never parsed.
-pub fn recover_bounded_client_request_id(content: &[u8]) -> RequestId {
-    recover_request_id(content, false)
-}
-
-/// Recovers an admitted version from bounded complete client-frame content.
-///
-/// A duplicate top-level member or any unsupported spelling admits no version.
-pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<ProtocolVersion> {
-    if content.len() > MAX_FRAME_BYTES {
-        return None;
-    }
-    deserialize_header_probe(content)
-        .ok()
-        .and_then(|probe| protocol_version_from_probe(&probe))
-}
-
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::{
         BillingRateVersion, BlobChunk, BulkIngestKind, CanonicalBlobDigest, CanonicalDigest,
         CanonicalDollarAmount, CanonicalU64, CanonicalUuid, CanonicalValueError, ClientFrame,
@@ -9769,14 +7420,10 @@ mod tests {
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ModelCapabilities,
         ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
         ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
-        OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict, OperatorStatusEndMessage,
-        OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
-        OperatorStatusMergeableState, OperatorStatusMessage,
-        OperatorStatusPendingStaleReviewClearanceMessage,
-        OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
-        OperatorStatusReviewDecision, OperatorStatusSingletonScope, PROTOCOL_VERSION,
-        PositiveCanonicalU64, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
-        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
+        OperatorStatusEndMessage, OperatorStatusLifecycleDeadlineViolationMessage,
+        OperatorStatusLifecycleState, OperatorStatusLifecycleWeekMessage, OperatorStatusMessage,
+        PROTOCOL_VERSION, PositiveCanonicalU64, ProtocolVersion, ReasoningLevel, RejectionDetail,
+        RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
         ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
@@ -9787,15 +7434,15 @@ mod tests {
         RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
         RunnerRepositoryKey, RunnerSandboxProfile, RunnerStateTransitionState,
         RunnerWorkingDirectory, ServerFrame, ServerMessage, ServiceTier, SessionEvent,
-        SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
-        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
-        TurnState, UsageProvenance, UserAttachmentKind, UserInputContent, UserInputPart,
-        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        SessionLifecycleEffect, SessionLifecycleMembers, SessionMetadata, SettingOverlay,
+        SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
+        TurnModelSettingsSnapshot, TurnState, UsageProvenance, UserAttachmentKind,
+        UserInputContent, UserInputPart, decode_client_line, decode_server_line,
+        encode_client_line, encode_server_line, operator_status_calendar_date_is_valid,
         validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
-    use uuid::Uuid;
 
     fn command(value: u128) -> Result<CommandId, Box<dyn std::error::Error>> {
         Ok(CommandId::try_from_uuid(Uuid::from_u128(value))?)
@@ -10155,1092 +7802,129 @@ mod tests {
         )?;
         assert_server_message_round_trip(
             request(1)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
-                OperatorStatusHeldSlotMessage {
-                    dispatch_id: uuid(2),
-                    repository: String::from("example/repo"),
-                    origin: OperatorStatusHeldSlotOrigin::PullRequest {
-                        pull_request_number: CanonicalU64::new(41),
-                    },
-                    rule_id: String::from("review"),
-                    rule_version: CanonicalU64::new(1),
-                    singleton_scope: OperatorStatusSingletonScope::PullRequest,
-                    singleton_repository: Some(String::from("example/repo")),
-                    singleton_pull_request_number: Some(CanonicalU64::new(41)),
-                    singleton_stack_root_pull_request_number: None,
-                    held_for_seconds: CanonicalU64::new(90),
-                    session_ids: vec![uuid(3)],
-                    blockers: vec![
-                        OperatorStatusHeldSlotBlocker::UndeliveredAction,
-                        OperatorStatusHeldSlotBlocker::PursuingGoal,
-                    ],
-                },
-            )))),
-            r#"{"type":"operator_status","kind":"held_slot","dispatch_id":"00000000-0000-0000-0000-000000000002","repository":"example/repo","origin":{"kind":"pull_request","pull_request_number":"41"},"rule_id":"review","rule_version":"1","singleton_scope":"pull_request","singleton_repository":"example/repo","singleton_pull_request_number":"41","singleton_stack_root_pull_request_number":null,"held_for_seconds":"90","session_ids":["00000000-0000-0000-0000-000000000003"],"blockers":["undelivered_action","pursuing_goal"]}"#,
-        )?;
-        assert_server_message_round_trip(
-            request(1)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
-                OperatorStatusHeldSlotMessage {
-                    dispatch_id: uuid(2),
-                    repository: String::from("example/repo"),
-                    origin: OperatorStatusHeldSlotOrigin::Branch {
-                        branch: String::from("main"),
-                    },
-                    rule_id: String::from("review"),
-                    rule_version: CanonicalU64::new(1),
-                    singleton_scope: OperatorStatusSingletonScope::Rule,
-                    singleton_repository: None,
-                    singleton_pull_request_number: None,
-                    singleton_stack_root_pull_request_number: None,
-                    held_for_seconds: CanonicalU64::new(90),
-                    session_ids: vec![uuid(3)],
-                    blockers: Vec::new(),
-                },
-            )))),
-            r#"{"type":"operator_status","kind":"held_slot","dispatch_id":"00000000-0000-0000-0000-000000000002","repository":"example/repo","origin":{"kind":"branch","branch":"main"},"rule_id":"review","rule_version":"1","singleton_scope":"rule","singleton_repository":null,"singleton_pull_request_number":null,"singleton_stack_root_pull_request_number":null,"held_for_seconds":"90","session_ids":["00000000-0000-0000-0000-000000000003"],"blockers":[]}"#,
-        )?;
-        assert_server_message_round_trip(
-            request(1)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
-                Box::new(OperatorStatusQueuedObligationMessage {
-                    obligation_id: uuid(4),
-                    repository: String::from("example/repo"),
-                    rule_id: String::from("review"),
-                    rule_version: CanonicalU64::new(1),
-                    singleton_scope: OperatorStatusSingletonScope::Rule,
-                    singleton_repository: None,
-                    singleton_pull_request_number: None,
-                    singleton_stack_root_pull_request_number: None,
-                    first_event_id: uuid(5),
-                    latest_event_id: uuid(6),
-                    matched_event_count: CanonicalU64::new(3),
-                    waiting_for_seconds: CanonicalU64::new(45),
-                    occupying_dispatch_id: None,
-                    occupying_session_ids: Vec::new(),
-                    cooldown_remaining_seconds: Some(CanonicalU64::new(15)),
-                    cooldown_never_eligible: false,
-                    ready: false,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::LifecycleWeek(
+                Box::new(OperatorStatusLifecycleWeekMessage {
+                    week_start_date: String::from("2026-08-31"),
+                    completion_failure_numerator: CanonicalU64::new(3),
+                    completion_failure_denominator: CanonicalU64::new(40),
+                    failed_unknown_count: CanonicalU64::new(1),
+                    overflow_numerator: CanonicalU64::new(5),
+                    overflow_denominator: CanonicalU64::new(44),
+                    finish_given_overflow_numerator: CanonicalU64::new(4),
+                    wall_numerator: CanonicalU64::new(0),
+                    wall_denominator: CanonicalU64::new(38),
+                    wall_occurrence_count: CanonicalU64::new(0),
+                    classified_terminal_turn_count: CanonicalU64::new(980),
+                    terminal_turn_count: CanonicalU64::new(985),
+                    classified_known_failed_call_count: CanonicalU64::new(91),
+                    known_failed_call_count: CanonicalU64::new(95),
                 }),
             ))),
-            r#"{"type":"operator_status","kind":"queued_obligation","obligation_id":"00000000-0000-0000-0000-000000000004","repository":"example/repo","rule_id":"review","rule_version":"1","singleton_scope":"rule","singleton_repository":null,"singleton_pull_request_number":null,"singleton_stack_root_pull_request_number":null,"first_event_id":"00000000-0000-0000-0000-000000000005","latest_event_id":"00000000-0000-0000-0000-000000000006","matched_event_count":"3","waiting_for_seconds":"45","occupying_dispatch_id":null,"occupying_session_ids":[],"cooldown_remaining_seconds":"15","cooldown_never_eligible":false,"ready":false}"#,
-        )?;
-        assert_server_message_round_trip(
-            request(1)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(OperatorStatusPullRequestConvergenceMessage {
-                    repository: String::from("example/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    head_sha: String::from("1111111111111111111111111111111111111111"),
-                    base_branch: String::from("main"),
-                    base_revision: String::from("2222222222222222222222222222222222222222"),
-                    mergeable_state: OperatorStatusMergeableState::Mergeable,
-                    review_decision: OperatorStatusReviewDecision::Approved,
-                    unresolved_thread_count: CanonicalU64::new(0),
-                    gating_check_count: CanonicalU64::new(2),
-                    non_green_gating_checks: Vec::new(),
-                    verdict: OperatorStatusConvergenceVerdict::MergeReady,
-                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
-                    assessed_seconds_ago: CanonicalU64::new(12),
-                }),
-            ))),
-            r#"{"type":"operator_status","kind":"pull_request_convergence","repository":"example/repo","pull_request_number":"41","head_sha":"1111111111111111111111111111111111111111","base_branch":"main","base_revision":"2222222222222222222222222222222222222222","mergeable_state":"mergeable","review_decision":"approved","unresolved_thread_count":"0","gating_check_count":"2","non_green_gating_checks":[],"verdict":"merge_ready","seal":"merge_ready","assessed_seconds_ago":"12"}"#,
+            r#"{"type":"operator_status","kind":"lifecycle_week","week_start_date":"2026-08-31","completion_failure_numerator":"3","completion_failure_denominator":"40","failed_unknown_count":"1","overflow_numerator":"5","overflow_denominator":"44","finish_given_overflow_numerator":"4","wall_numerator":"0","wall_denominator":"38","wall_occurrence_count":"0","classified_terminal_turn_count":"980","terminal_turn_count":"985","classified_known_failed_call_count":"91","known_failed_call_count":"95"}"#,
         )?;
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::OperatorStatus(Box::new(
-                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
-                    OperatorStatusPendingStaleReviewClearanceMessage {
-                        repository: String::from("example/repo"),
-                        pull_request_number: CanonicalU64::new(41),
-                        current_head_sha: String::from("1111111111111111111111111111111111111111"),
-                        review_node_id: String::from("PRR_node"),
-                        reviewer: String::from("reviewer"),
-                        reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
-                        pending_for_seconds: CanonicalU64::new(8),
+                OperatorStatusMessage::LifecycleDeadlineViolation(Box::new(
+                    OperatorStatusLifecycleDeadlineViolationMessage {
+                        session_id: CanonicalUuid::from_uuid(uuid::Uuid::from_u128(0x2a)),
+                        state: OperatorStatusLifecycleState::Parked,
+                        deadline_missing: false,
+                        expired_for_seconds: Some(CanonicalU64::new(90)),
                     },
                 )),
             )),
-            r#"{"type":"operator_status","kind":"pending_stale_review_clearance","repository":"example/repo","pull_request_number":"41","current_head_sha":"1111111111111111111111111111111111111111","review_node_id":"PRR_node","reviewer":"reviewer","reviewed_head_sha":"3333333333333333333333333333333333333333","pending_for_seconds":"8"}"#,
+            r#"{"type":"operator_status","kind":"lifecycle_deadline_violation","session_id":"00000000-0000-0000-0000-00000000002a","state":"parked","deadline_missing":false,"expired_for_seconds":"90"}"#,
         )?;
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
                 OperatorStatusEndMessage {
-                    held_slot_count: CanonicalU64::new(1),
-                    queued_obligation_count: CanonicalU64::new(1),
-                    pull_request_convergence_count: CanonicalU64::new(1),
-                    pending_stale_review_clearance_count: CanonicalU64::new(1),
+                    lifecycle_week_count: CanonicalU64::new(1),
+                    lifecycle_deadline_violation_count: CanonicalU64::new(1),
                 },
             )))),
-            r#"{"type":"operator_status","kind":"end","held_slot_count":"1","queued_obligation_count":"1","pull_request_convergence_count":"1","pending_stale_review_clearance_count":"1"}"#,
+            r#"{"type":"operator_status","kind":"end","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1"}"#,
         )?;
         Ok(())
     }
 
+    /// A metric row whose numerator exceeds its own population is not a rate.
     #[test]
-    fn operator_status_rejects_contradictory_singletons_and_ready_waits()
+    fn operator_status_rejects_a_lifecycle_week_that_is_not_a_rate()
     -> Result<(), Box<dyn std::error::Error>> {
-        let invalid_singleton = ServerFrame::try_new(
+        let impossible = ServerFrame::try_new(
             request(1)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
-                OperatorStatusHeldSlotMessage {
-                    dispatch_id: uuid(2),
-                    repository: String::from("example/repo"),
-                    origin: OperatorStatusHeldSlotOrigin::PullRequest {
-                        pull_request_number: CanonicalU64::new(41),
-                    },
-                    rule_id: String::from("review"),
-                    rule_version: CanonicalU64::new(1),
-                    singleton_scope: OperatorStatusSingletonScope::Rule,
-                    singleton_repository: Some(String::from("example/repo")),
-                    singleton_pull_request_number: None,
-                    singleton_stack_root_pull_request_number: None,
-                    held_for_seconds: CanonicalU64::new(1),
-                    session_ids: vec![uuid(3)],
-                    blockers: Vec::new(),
-                },
-            )))),
-        );
-        assert_eq!(
-            invalid_singleton,
-            Err(FrameValidationError::OperatorStatusShape)
-        );
-
-        let invalid_ready = ServerFrame::try_new(
-            request(1)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
-                Box::new(OperatorStatusQueuedObligationMessage {
-                    obligation_id: uuid(4),
-                    repository: String::from("example/repo"),
-                    rule_id: String::from("review"),
-                    rule_version: CanonicalU64::new(1),
-                    singleton_scope: OperatorStatusSingletonScope::Rule,
-                    singleton_repository: None,
-                    singleton_pull_request_number: None,
-                    singleton_stack_root_pull_request_number: None,
-                    first_event_id: uuid(5),
-                    latest_event_id: uuid(6),
-                    matched_event_count: CanonicalU64::new(2),
-                    waiting_for_seconds: CanonicalU64::new(1),
-                    occupying_dispatch_id: None,
-                    occupying_session_ids: Vec::new(),
-                    cooldown_remaining_seconds: Some(CanonicalU64::new(1)),
-                    cooldown_never_eligible: false,
-                    ready: true,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::LifecycleWeek(
+                Box::new(OperatorStatusLifecycleWeekMessage {
+                    week_start_date: String::from("2026-08-31"),
+                    completion_failure_numerator: CanonicalU64::new(41),
+                    completion_failure_denominator: CanonicalU64::new(40),
+                    failed_unknown_count: CanonicalU64::new(0),
+                    overflow_numerator: CanonicalU64::new(0),
+                    overflow_denominator: CanonicalU64::new(44),
+                    finish_given_overflow_numerator: CanonicalU64::new(0),
+                    wall_numerator: CanonicalU64::new(0),
+                    wall_denominator: CanonicalU64::new(38),
+                    wall_occurrence_count: CanonicalU64::new(0),
+                    classified_terminal_turn_count: CanonicalU64::new(0),
+                    terminal_turn_count: CanonicalU64::new(0),
+                    classified_known_failed_call_count: CanonicalU64::new(0),
+                    known_failed_call_count: CanonicalU64::new(0),
                 }),
             ))),
         );
-        assert_eq!(
-            invalid_ready,
+        assert!(matches!(
+            impossible,
             Err(FrameValidationError::OperatorStatusShape)
-        );
+        ));
+
         Ok(())
     }
 
-    /// An obligation blocked by an independently commissioned live session
-    /// names exactly that one session and no dispatch. Both a dispatch identity
-    /// owning no sessions and a dispatch-less occupant naming a second session
-    /// contradict the projection, which retains a single external blocker.
+    /// A session with no armed record has no expiry to be past, so the two
+    /// fields cannot both speak.
     #[test]
-    fn operator_status_admits_an_external_blocker_without_a_dispatch_identity()
+    fn operator_status_rejects_a_deadline_violation_that_contradicts_itself()
     -> Result<(), Box<dyn std::error::Error>> {
-        let externally_blocked = |dispatch, sessions, ready| {
-            ServerFrame::try_new(
-                request(1).expect("a valid request identity"),
-                ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
-                    Box::new(OperatorStatusQueuedObligationMessage {
-                        obligation_id: uuid(4),
-                        repository: String::from("example/repo"),
-                        rule_id: String::from("review"),
-                        rule_version: CanonicalU64::new(1),
-                        singleton_scope: OperatorStatusSingletonScope::Rule,
-                        singleton_repository: None,
-                        singleton_pull_request_number: None,
-                        singleton_stack_root_pull_request_number: None,
-                        first_event_id: uuid(5),
-                        latest_event_id: uuid(6),
-                        matched_event_count: CanonicalU64::new(2),
-                        waiting_for_seconds: CanonicalU64::new(1),
-                        occupying_dispatch_id: dispatch,
-                        occupying_session_ids: sessions,
-                        cooldown_remaining_seconds: None,
-                        cooldown_never_eligible: false,
-                        ready,
-                    }),
-                ))),
-            )
-        };
-
-        assert!(externally_blocked(None, vec![uuid(7)], false).is_ok());
-        assert_eq!(
-            externally_blocked(None, vec![uuid(7)], true),
-            Err(FrameValidationError::OperatorStatusShape)
-        );
-        assert_eq!(
-            externally_blocked(None, vec![uuid(7), uuid(9)], false),
-            Err(FrameValidationError::OperatorStatusShape)
-        );
-        assert_eq!(
-            externally_blocked(Some(uuid(8)), Vec::new(), false),
-            Err(FrameValidationError::OperatorStatusShape)
-        );
-        assert!(externally_blocked(Some(uuid(8)), vec![uuid(7)], false).is_ok());
-        assert!(externally_blocked(Some(uuid(8)), vec![uuid(7), uuid(9)], false).is_ok());
-        Ok(())
-    }
-
-    /// A rule matching branch workflow-run completion holds its singleton slot
-    /// from a branch fact, which names a branch and never a pull request. That
-    /// fact carries no pull request for a singleton to be keyed by, so a branch
-    /// origin admits only the rule and repository scopes. A pull-request- or
-    /// stack-scoped branch hold passes both field validators on its own yet
-    /// names a slot no branch workflow event could ever have taken, so the
-    /// origin and the singleton scope are validated together.
-    #[test]
-    fn operator_status_admits_a_branch_origin_held_slot() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let held = |origin,
-                    singleton_scope,
-                    repository: Option<&str>,
-                    pull_request: Option<u64>,
-                    stack_root: Option<u64>| {
-            ServerFrame::try_new(
-                request(1).expect("a valid request identity"),
-                ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
-                    OperatorStatusHeldSlotMessage {
-                        dispatch_id: uuid(2),
-                        repository: String::from("example/repo"),
-                        origin,
-                        rule_id: String::from("review"),
-                        rule_version: CanonicalU64::new(1),
-                        singleton_scope,
-                        singleton_repository: repository.map(String::from),
-                        singleton_pull_request_number: pull_request.map(CanonicalU64::new),
-                        singleton_stack_root_pull_request_number: stack_root.map(CanonicalU64::new),
-                        held_for_seconds: CanonicalU64::new(1),
-                        session_ids: vec![uuid(3)],
-                        blockers: Vec::new(),
-                    },
-                )))),
-            )
-        };
-        let branch = || OperatorStatusHeldSlotOrigin::Branch {
-            branch: String::from("main"),
-        };
-        let pull_request = || OperatorStatusHeldSlotOrigin::PullRequest {
-            pull_request_number: CanonicalU64::new(41),
-        };
-
-        assert!(
-            held(
-                branch(),
-                OperatorStatusSingletonScope::Rule,
-                None,
-                None,
-                None
-            )
-            .is_ok()
-        );
-        assert!(
-            held(
-                branch(),
-                OperatorStatusSingletonScope::Repo,
-                Some("example/repo"),
-                None,
-                None
-            )
-            .is_ok()
-        );
-        assert_eq!(
-            held(
-                branch(),
-                OperatorStatusSingletonScope::PullRequest,
-                Some("example/repo"),
-                Some(41),
-                None
-            ),
-            Err(FrameValidationError::OperatorStatusShape)
-        );
-        assert_eq!(
-            held(
-                branch(),
-                OperatorStatusSingletonScope::Stack,
-                Some("example/repo"),
-                None,
-                Some(41)
-            ),
-            Err(FrameValidationError::OperatorStatusShape)
-        );
-
-        // Every admitted origin other than a branch fact names a pull request,
-        // which keys any of the four singleton scopes.
-        assert!(
-            held(
-                pull_request(),
-                OperatorStatusSingletonScope::PullRequest,
-                Some("example/repo"),
-                Some(41),
-                None
-            )
-            .is_ok()
-        );
-        assert!(
-            held(
-                pull_request(),
-                OperatorStatusSingletonScope::Stack,
-                Some("example/repo"),
-                None,
-                Some(41)
-            )
-            .is_ok()
-        );
-        assert!(
-            held(
-                pull_request(),
-                OperatorStatusSingletonScope::Rule,
-                None,
-                None,
-                None
-            )
-            .is_ok()
-        );
-        assert!(
-            held(
-                pull_request(),
-                OperatorStatusSingletonScope::Repo,
-                Some("example/repo"),
-                None,
-                None
-            )
-            .is_ok()
-        );
-
-        assert_eq!(
-            held(
-                OperatorStatusHeldSlotOrigin::Branch {
-                    branch: String::new(),
-                },
-                OperatorStatusSingletonScope::Rule,
-                None,
-                None,
-                None
-            ),
-            Err(FrameValidationError::OperatorStatusShape)
-        );
-        assert_eq!(
-            held(
-                OperatorStatusHeldSlotOrigin::PullRequest {
-                    pull_request_number: CanonicalU64::new(0),
-                },
-                OperatorStatusSingletonScope::Rule,
-                None,
-                None,
-                None
-            ),
-            Err(FrameValidationError::OperatorStatusShape)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn operator_status_allows_a_seal_to_outlive_the_latest_assessment()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let frame = ServerFrame::try_new(
+        let contradictory_deadline = ServerFrame::try_new(
             request(1)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(OperatorStatusPullRequestConvergenceMessage {
-                    repository: String::from("example/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    head_sha: String::from("1111111111111111111111111111111111111111"),
-                    base_branch: String::from("main"),
-                    base_revision: String::from("2222222222222222222222222222222222222222"),
-                    mergeable_state: OperatorStatusMergeableState::Mergeable,
-                    review_decision: OperatorStatusReviewDecision::Approved,
-                    unresolved_thread_count: CanonicalU64::new(0),
-                    gating_check_count: CanonicalU64::new(1),
-                    non_green_gating_checks: vec![String::from("rust-checks")],
-                    verdict: OperatorStatusConvergenceVerdict::NotConverged,
-                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
-                    assessed_seconds_ago: CanonicalU64::new(1),
-                }),
-            ))),
-        );
-
-        assert!(frame.is_ok());
-        Ok(())
-    }
-
-    /// One merge-ready convergence row: every carried condition clean, beside
-    /// the trunk base branch the durable side pairs that verdict with. Each
-    /// case below restates only the field whose contradiction it names.
-    fn merge_ready_convergence() -> OperatorStatusPullRequestConvergenceMessage {
-        OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/repo"),
-            pull_request_number: CanonicalU64::new(41),
-            head_sha: String::from("1111111111111111111111111111111111111111"),
-            base_branch: String::from("main"),
-            base_revision: String::from("2222222222222222222222222222222222222222"),
-            mergeable_state: OperatorStatusMergeableState::Mergeable,
-            review_decision: OperatorStatusReviewDecision::Approved,
-            unresolved_thread_count: CanonicalU64::new(0),
-            gating_check_count: CanonicalU64::new(2),
-            non_green_gating_checks: Vec::new(),
-            verdict: OperatorStatusConvergenceVerdict::MergeReady,
-            seal: None,
-            assessed_seconds_ago: CanonicalU64::new(1),
-        }
-    }
-
-    /// The same clean evidence beside the release base branch and the verdict
-    /// the durable side pairs that branch with.
-    fn internally_converged_convergence() -> OperatorStatusPullRequestConvergenceMessage {
-        OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1"),
-            verdict: OperatorStatusConvergenceVerdict::InternallyConverged,
-            ..merge_ready_convergence()
-        }
-    }
-
-    /// The same clean evidence beneath the unconverged verdict, which the
-    /// durable side pairs with no base branch at all.
-    fn not_converged_convergence() -> OperatorStatusPullRequestConvergenceMessage {
-        OperatorStatusPullRequestConvergenceMessage {
-            verdict: OperatorStatusConvergenceVerdict::NotConverged,
-            ..merge_ready_convergence()
-        }
-    }
-
-    #[track_caller]
-    fn assert_convergence_admitted(item: OperatorStatusPullRequestConvergenceMessage) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(item),
-            ))),
-        );
-        assert!(frame.is_ok(), "convergence row must be admitted: {frame:?}");
-    }
-
-    #[track_caller]
-    fn assert_convergence_rejected(item: OperatorStatusPullRequestConvergenceMessage) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(item),
-            ))),
-        );
-        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
-    }
-
-    /// A convergence row's verdict is settled by the evidence beside it. The
-    /// durable `repo_watch_convergence_verdict_matches_evidence` constraint
-    /// makes the unconverged verdict exactly the carried-blocker case, so
-    /// either converged verdict is admitted only beside wholly clean evidence:
-    /// no unresolved thread, no non-green check, a mergeable provider state, at
-    /// least one gating check, and no requested change.
-    #[test]
-    fn operator_status_admits_a_converged_verdict_beside_clean_evidence() {
-        assert_convergence_admitted(merge_ready_convergence());
-        assert_convergence_admitted(internally_converged_convergence());
-    }
-
-    /// One rejection per contradiction class the wire carries: an empty gating
-    /// inventory, an unresolved thread, a non-green check, each unmergeable
-    /// provider state, and a requested change.
-    #[test]
-    fn operator_status_rejects_a_merge_ready_verdict_beside_each_contradiction() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            gating_check_count: CanonicalU64::new(0),
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            unresolved_thread_count: CanonicalU64::new(1),
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            non_green_gating_checks: vec![String::from("rust-checks")],
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Conflicting,
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Unknown,
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::ChangesRequested,
-            ..merge_ready_convergence()
-        });
-    }
-
-    /// The same contradiction classes refuse the other converged verdict, which
-    /// the durable evidence constraint treats identically.
-    #[test]
-    fn operator_status_rejects_an_internally_converged_verdict_beside_each_contradiction() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            gating_check_count: CanonicalU64::new(0),
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            unresolved_thread_count: CanonicalU64::new(1),
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            non_green_gating_checks: vec![String::from("rust-checks")],
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Conflicting,
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Unknown,
-            ..internally_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::ChangesRequested,
-            ..internally_converged_convergence()
-        });
-    }
-
-    /// A review still awaiting its first decision blocks neither converged
-    /// verdict, since only a requested change is a durable blocker.
-    #[test]
-    fn operator_status_admits_a_converged_verdict_beside_an_undecided_review() {
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::None,
-            ..merge_ready_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::ReviewRequired,
-            ..merge_ready_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::None,
-            ..internally_converged_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            review_decision: OperatorStatusReviewDecision::ReviewRequired,
-            ..internally_converged_convergence()
-        });
-    }
-
-    /// The unconverged verdict carries its own blockers freely and stays
-    /// admissible beside wholly clean evidence, because the unsettled provider
-    /// snapshot that alone justifies the latter never crosses this wire.
-    #[test]
-    fn operator_status_admits_an_unconverged_verdict_beside_any_carried_evidence() {
-        assert_convergence_admitted(not_converged_convergence());
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            mergeable_state: OperatorStatusMergeableState::Conflicting,
-            review_decision: OperatorStatusReviewDecision::ChangesRequested,
-            unresolved_thread_count: CanonicalU64::new(3),
-            non_green_gating_checks: vec![String::from("rust-checks")],
-            ..not_converged_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            gating_check_count: CanonicalU64::new(0),
-            ..not_converged_convergence()
-        });
-    }
-
-    /// Two durable constraints sit beside the evidence constraint on the same
-    /// assessment row, and the status projection reads the verdict and the base
-    /// branch from that one row: a merge-ready verdict is settled only against
-    /// `main`, an internally-converged verdict only against another branch. The
-    /// pair is what separates the two converged verdicts, so each is refused on
-    /// the other's branch even beside wholly clean evidence.
-    #[test]
-    fn operator_status_binds_each_converged_verdict_to_its_base_branch() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1"),
-            ..merge_ready_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("main"),
-            ..internally_converged_convergence()
-        });
-
-        // The unconverged verdict is settled without consulting the base
-        // branch, so it is admitted on either one.
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("main"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1"),
-            ..not_converged_convergence()
-        });
-
-        // A seal is retained from the assessment that earned it and outlives
-        // later ones, so a pull request retargeted after it was sealed carries
-        // that merge-ready seal beside a branch no merge-ready verdict could be
-        // settled against. The seal therefore takes no base-branch pairing.
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1"),
-            seal: Some(OperatorStatusConvergenceSeal::MergeReady),
-            ..not_converged_convergence()
-        });
-    }
-
-    /// The base branch is a git ref name on the wire, so the grammar the
-    /// `BranchName` constructor and the durable `repo_watch_branch_is_valid`
-    /// check share is mirrored here rather than a bare length bound.
-    #[test]
-    fn operator_status_rejects_a_convergence_base_branch_outside_the_ref_grammar() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from(".."),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release branch"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("-release"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/.hidden"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/1.lock"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release@{1}"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release^1"),
-            ..not_converged_convergence()
-        });
-
-        // A slashed, dotted, and hyphenated name is an ordinary ref name.
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            base_branch: String::from("release/v1.2-rc"),
-            ..not_converged_convergence()
-        });
-    }
-
-    /// A convergence row's repository is a canonical `namespace/name` slug on the
-    /// wire, so the grammar the `RepositorySlug` constructor and the durable
-    /// `repo_watch_repository_is_valid` check share is mirrored here. Both
-    /// producers lowercase what they admit, so an uppercase spelling is refused
-    /// with the malformed ones.
-    #[test]
-    fn operator_status_rejects_a_repository_outside_the_slug_grammar() {
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("not-a-slug"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/repo/extra"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("/repo"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/.."),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("example/re po"),
-            ..not_converged_convergence()
-        });
-        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("Example/Repo"),
-            ..not_converged_convergence()
-        });
-
-        // Dots, hyphens, and underscores spell an ordinary slug on both sides.
-        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
-            repository: String::from("ex-am_ple/re.po-1"),
-            ..not_converged_convergence()
-        });
-    }
-
-    /// One held slot whose pull-request origin, singleton scope, and singleton
-    /// axes all name the same pull request in the same repository, which is the
-    /// only identity the projection can produce for a pull-request-scoped hold.
-    fn held_slot_row() -> OperatorStatusHeldSlotMessage {
-        OperatorStatusHeldSlotMessage {
-            dispatch_id: uuid(2),
-            repository: String::from("example/repo"),
-            origin: OperatorStatusHeldSlotOrigin::PullRequest {
-                pull_request_number: CanonicalU64::new(41),
-            },
-            rule_id: String::from("review"),
-            rule_version: CanonicalU64::new(1),
-            singleton_scope: OperatorStatusSingletonScope::PullRequest,
-            singleton_repository: Some(String::from("example/repo")),
-            singleton_pull_request_number: Some(CanonicalU64::new(41)),
-            singleton_stack_root_pull_request_number: None,
-            held_for_seconds: CanonicalU64::new(90),
-            session_ids: vec![uuid(3)],
-            blockers: Vec::new(),
-        }
-    }
-
-    #[track_caller]
-    fn assert_held_slot_admitted(item: OperatorStatusHeldSlotMessage) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
-                item,
-            )))),
-        );
-        assert!(frame.is_ok(), "held-slot row must be admitted: {frame:?}");
-    }
-
-    #[track_caller]
-    fn assert_held_slot_rejected(item: OperatorStatusHeldSlotMessage) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
-                item,
-            )))),
-        );
-        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
-    }
-
-    /// One obligation owed by a rule-scoped singleton, opened by a single
-    /// matched event and still waiting behind nothing in particular.
-    fn queued_obligation_row() -> OperatorStatusQueuedObligationMessage {
-        OperatorStatusQueuedObligationMessage {
-            obligation_id: uuid(4),
-            repository: String::from("example/repo"),
-            rule_id: String::from("review"),
-            rule_version: CanonicalU64::new(1),
-            singleton_scope: OperatorStatusSingletonScope::Rule,
-            singleton_repository: None,
-            singleton_pull_request_number: None,
-            singleton_stack_root_pull_request_number: None,
-            first_event_id: uuid(5),
-            latest_event_id: uuid(5),
-            matched_event_count: CanonicalU64::new(1),
-            waiting_for_seconds: CanonicalU64::new(45),
-            occupying_dispatch_id: None,
-            occupying_session_ids: Vec::new(),
-            cooldown_remaining_seconds: None,
-            cooldown_never_eligible: false,
-            ready: false,
-        }
-    }
-
-    #[track_caller]
-    fn assert_obligation_admitted(item: OperatorStatusQueuedObligationMessage) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
-                Box::new(item),
-            ))),
-        );
-        assert!(frame.is_ok(), "obligation row must be admitted: {frame:?}");
-    }
-
-    #[track_caller]
-    fn assert_obligation_rejected(item: OperatorStatusQueuedObligationMessage) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
-                Box::new(item),
-            ))),
-        );
-        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
-    }
-
-    /// One stale blocking review whose planned clearance is still unsettled.
-    fn stale_review_clearance_row() -> OperatorStatusPendingStaleReviewClearanceMessage {
-        OperatorStatusPendingStaleReviewClearanceMessage {
-            repository: String::from("example/repo"),
-            pull_request_number: CanonicalU64::new(41),
-            current_head_sha: String::from("1111111111111111111111111111111111111111"),
-            review_node_id: String::from("PRR_node"),
-            reviewer: String::from("reviewer"),
-            reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
-            pending_for_seconds: CanonicalU64::new(8),
-        }
-    }
-
-    #[track_caller]
-    fn assert_stale_review_clearance_admitted(
-        item: OperatorStatusPendingStaleReviewClearanceMessage,
-    ) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
             ServerMessage::OperatorStatus(Box::new(
-                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(item)),
+                OperatorStatusMessage::LifecycleDeadlineViolation(Box::new(
+                    OperatorStatusLifecycleDeadlineViolationMessage {
+                        session_id: CanonicalUuid::from_uuid(uuid::Uuid::from_u128(0x2a)),
+                        state: OperatorStatusLifecycleState::Parked,
+                        deadline_missing: true,
+                        expired_for_seconds: Some(CanonicalU64::new(90)),
+                    },
+                )),
             )),
         );
-        assert!(
-            frame.is_ok(),
-            "stale-review clearance row must be admitted: {frame:?}"
-        );
-    }
 
-    #[track_caller]
-    fn assert_stale_review_clearance_rejected(
-        item: OperatorStatusPendingStaleReviewClearanceMessage,
-    ) {
-        let frame = ServerFrame::try_new(
-            request(1).expect("a valid request identity"),
-            ServerMessage::OperatorStatus(Box::new(
-                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(item)),
-            )),
-        );
-        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
-    }
-
-    /// The held-slot projection joins each dispatch batch to the very event it
-    /// was admitted from and reads the origin pull request off that row, while
-    /// the batch's singleton was keyed from the same event. A pull-request
-    /// singleton therefore names the very pull request its origin names, and a
-    /// row naming two different ones is an identity persistence cannot hold.
-    ///
-    /// A stack singleton names the root of the open component the origin
-    /// belongs to, which is a different pull request whenever the origin is not
-    /// itself that root, so the stack axis takes no such equality.
-    #[test]
-    fn operator_status_binds_a_held_pull_request_singleton_to_its_origin() {
-        assert_held_slot_admitted(held_slot_row());
-        assert_held_slot_rejected(OperatorStatusHeldSlotMessage {
-            singleton_pull_request_number: Some(CanonicalU64::new(42)),
-            ..held_slot_row()
-        });
-
-        assert_held_slot_admitted(OperatorStatusHeldSlotMessage {
-            singleton_scope: OperatorStatusSingletonScope::Stack,
-            singleton_pull_request_number: None,
-            singleton_stack_root_pull_request_number: Some(CanonicalU64::new(7)),
-            ..held_slot_row()
-        });
-    }
-
-    /// Every repository-keyed singleton is keyed from the repository of the
-    /// very event whose row carries it, and an obligation coalesces only across
-    /// events sharing its singleton key, so a carried singleton repository is
-    /// the row's own repository and never an independent slug.
-    #[test]
-    fn operator_status_binds_a_singleton_repository_to_its_row_repository() {
-        assert_held_slot_rejected(OperatorStatusHeldSlotMessage {
-            singleton_repository: Some(String::from("other/repo")),
-            ..held_slot_row()
-        });
-        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
-            singleton_scope: OperatorStatusSingletonScope::Repo,
-            singleton_repository: Some(String::from("other/repo")),
-            ..queued_obligation_row()
-        });
-        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
-            singleton_scope: OperatorStatusSingletonScope::Repo,
-            singleton_repository: Some(String::from("example/repo")),
-            ..queued_obligation_row()
-        });
-
-        // A rule-scoped obligation legitimately spans repositories and carries
-        // no singleton repository at all, so its own repository stands alone.
-        assert_obligation_admitted(queued_obligation_row());
-    }
-
-    /// Persistence opens an obligation naming one evaluated event as both its
-    /// first and its latest with a matched count of one, and every later
-    /// coalesced evaluation replaces the latest with a distinct event and
-    /// increments the count. The count therefore stands at one exactly while
-    /// the two endpoints are the same event.
-    #[test]
-    fn operator_status_binds_the_matched_event_count_to_its_endpoints() {
-        assert_obligation_admitted(queued_obligation_row());
-        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
-            latest_event_id: uuid(6),
-            ..queued_obligation_row()
-        });
-        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
-            latest_event_id: uuid(6),
-            matched_event_count: CanonicalU64::new(2),
-            ..queued_obligation_row()
-        });
-        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
-            matched_event_count: CanonicalU64::new(2),
-            ..queued_obligation_row()
-        });
-        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
-            matched_event_count: CanonicalU64::new(0),
-            ..queued_obligation_row()
-        });
-    }
-
-    /// The projection reports a remaining cooldown only while the eligibility
-    /// instant is still ahead of the read, and rounds that strictly positive
-    /// interval up, so the smallest value it can carry is one second. A zero
-    /// names a cooldown that has already lapsed while still claiming to
-    /// withhold the obligation, and an infinite eligibility is carried as the
-    /// never-eligible flag rather than as any number at all.
-    #[test]
-    fn operator_status_rejects_a_zero_remaining_cooldown() {
-        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
-            cooldown_remaining_seconds: Some(CanonicalU64::new(0)),
-            ..queued_obligation_row()
-        });
-        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
-            cooldown_remaining_seconds: Some(CanonicalU64::new(1)),
-            ..queued_obligation_row()
-        });
-        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
-            cooldown_remaining_seconds: None,
-            cooldown_never_eligible: true,
-            ..queued_obligation_row()
-        });
-    }
-
-    /// A rule identity is the operator's own spelling, admitted by the
-    /// `RepoWatchRuleId` constructor and the durable `repo_watch_rule_id_is_valid`
-    /// check as ASCII letters, digits, hyphens, underscores, and dots. Unlike a
-    /// slug or a login it is never case-normalized, so both cases are admitted.
-    #[test]
-    fn operator_status_rejects_a_rule_id_outside_the_identity_grammar() {
-        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
-            rule_id: String::from("bad rule"),
-            ..queued_obligation_row()
-        });
-        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
-            rule_id: String::from("rule/one"),
-            ..queued_obligation_row()
-        });
-        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
-            rule_id: String::from("rule:one"),
-            ..queued_obligation_row()
-        });
-        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
-            rule_id: String::from("Review.rule-1_v2"),
-            ..queued_obligation_row()
-        });
-    }
-
-    /// A reviewer login is admitted by the `RepoWatchAuthorLogin` constructor
-    /// and the durable `repo_watch_login_is_valid` check: an optional App-bot
-    /// suffix is set aside, and the base left behind is nonempty, begins and
-    /// ends with something other than a hyphen, carries no doubled hyphen, and
-    /// spells itself in lowercase letters, digits, hyphens, and underscores.
-    #[test]
-    fn operator_status_rejects_a_reviewer_outside_the_login_grammar() {
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("-bot"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("bot-"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("re--viewer"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("Reviewer"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("rev iewer"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("[bot]"),
-            ..stale_review_clearance_row()
-        });
-
-        assert_stale_review_clearance_admitted(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("rev_iewer-1"),
-            ..stale_review_clearance_row()
-        });
-        assert_stale_review_clearance_admitted(OperatorStatusPendingStaleReviewClearanceMessage {
-            reviewer: String::from("dependabot[bot]"),
-            ..stale_review_clearance_row()
-        });
-    }
-
-    /// A held slot's branch origin is a git ref name on the same grammar the
-    /// convergence row's base branch takes, so a malformed spelling is refused
-    /// there too rather than passing a bare length bound.
-    #[test]
-    fn operator_status_rejects_a_held_slot_branch_outside_the_ref_grammar() {
-        assert_held_slot_rejected(OperatorStatusHeldSlotMessage {
-            origin: OperatorStatusHeldSlotOrigin::Branch {
-                branch: String::from("feature branch"),
-            },
-            singleton_scope: OperatorStatusSingletonScope::Rule,
-            singleton_repository: None,
-            singleton_pull_request_number: None,
-            ..held_slot_row()
-        });
-        assert_held_slot_rejected(OperatorStatusHeldSlotMessage {
-            origin: OperatorStatusHeldSlotOrigin::Branch {
-                branch: String::from("feature/.hidden"),
-            },
-            singleton_scope: OperatorStatusSingletonScope::Rule,
-            singleton_repository: None,
-            singleton_pull_request_number: None,
-            ..held_slot_row()
-        });
-        assert_held_slot_admitted(OperatorStatusHeldSlotMessage {
-            origin: OperatorStatusHeldSlotOrigin::Branch {
-                branch: String::from("feature/v1.2-rc"),
-            },
-            singleton_scope: OperatorStatusSingletonScope::Rule,
-            singleton_repository: None,
-            singleton_pull_request_number: None,
-            ..held_slot_row()
-        });
-    }
-
-    #[test]
-    fn maximum_operator_status_convergence_inventory_fits_one_frame()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let maximum_check_name = "\u{1}".repeat(256);
-        let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::One,
-            RequestId::try_new(u64::MAX)?,
-            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
-                Box::new(OperatorStatusPullRequestConvergenceMessage {
-                    repository: String::from("example/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    head_sha: String::from("1111111111111111111111111111111111111111"),
-                    base_branch: String::from("main"),
-                    base_revision: String::from("2222222222222222222222222222222222222222"),
-                    mergeable_state: OperatorStatusMergeableState::Mergeable,
-                    review_decision: OperatorStatusReviewDecision::ChangesRequested,
-                    unresolved_thread_count: CanonicalU64::new(10_000),
-                    gating_check_count: CanonicalU64::new(10_000),
-                    non_green_gating_checks: vec![maximum_check_name; 10_000],
-                    verdict: OperatorStatusConvergenceVerdict::NotConverged,
-                    seal: None,
-                    assessed_seconds_ago: CanonicalU64::new(u64::MAX),
-                }),
-            ))),
-        )?;
-
-        let encoded = encode_server_line(&frame)?;
-        assert!(encoded.len() <= super::MAX_FRAME_BYTES);
-        assert_eq!(decode_server_line(&encoded)?, frame);
+        assert!(matches!(
+            contradictory_deadline,
+            Err(FrameValidationError::OperatorStatusShape)
+        ));
         Ok(())
     }
 
+    /// A digit-shaped value that names no day is not a week label.
     #[test]
-    fn inv033_goal_requests_and_history_round_trip_in_the_single_vocabulary()
+    fn operator_status_rejects_a_week_label_that_names_no_day() {
+        assert!(operator_status_calendar_date_is_valid("2026-08-31"));
+        assert!(operator_status_calendar_date_is_valid("2024-02-29"));
+        assert!(!operator_status_calendar_date_is_valid("2026-99-99"));
+        assert!(!operator_status_calendar_date_is_valid("2026-02-29"));
+        assert!(!operator_status_calendar_date_is_valid("2026-8-31"));
+        assert!(!operator_status_calendar_date_is_valid("+026-08-31"));
+        assert!(!operator_status_calendar_date_is_valid("2026-+8-31"));
+        assert!(!operator_status_calendar_date_is_valid(
+            "2026-08-31T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn goal_requests_and_history_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
@@ -11268,6 +7952,71 @@ mod tests {
                 statement: String::from("ship clarified goal mode"),
             },
             r#"{"type":"supersede_goal","command_id":"00000000-0000-0000-0000-000000000007","session_id":"00000000-0000-0000-0000-000000000003","statement":"ship clarified goal mode"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::StopSession {
+                command_id: command(10)?,
+                session_id: uuid(3),
+                sticky: true,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+            r#"{"type":"stop_session","command_id":"00000000-0000-0000-0000-00000000000a","session_id":"00000000-0000-0000-0000-000000000003","sticky":true,"descendant_scope":"parent_alone"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::ReleaseStart {
+                command_id: command(14)?,
+                session_id: uuid(3),
+            },
+            r#"{"type":"release_start","command_id":"00000000-0000-0000-0000-00000000000e","session_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::CloseSessionFailed {
+                command_id: command(11)?,
+                session_id: uuid(3),
+                cause: None,
+            },
+            r#"{"type":"close_session_failed","command_id":"00000000-0000-0000-0000-00000000000b","session_id":"00000000-0000-0000-0000-000000000003","cause":null}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::AdoptSession {
+                command_id: command(12)?,
+                session_id: uuid(3),
+                finish_condition: Some(super::FinishCondition::Declared {
+                    statement: String::from("the branch is green"),
+                }),
+            },
+            r#"{"type":"adopt_session","command_id":"00000000-0000-0000-0000-00000000000c","session_id":"00000000-0000-0000-0000-000000000003","finish_condition":{"kind":"declared","statement":"the branch is green"}}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(9)?,
+            ClientRequest::AdoptSession {
+                command_id: command(13)?,
+                session_id: uuid(3),
+                finish_condition: Some(super::FinishCondition::ExternalGate),
+            },
+            r#"{"type":"adopt_session","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003","finish_condition":{"kind":"external_gate"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(9)?,
+            ServerMessage::SessionLifecycleCommandApplied {
+                session_id: uuid(3),
+                effect: SessionLifecycleEffect::StartReleased {},
+            },
+            r#"{"type":"session_lifecycle_command_applied","session_id":"00000000-0000-0000-0000-000000000003","effect":{"type":"start_released"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(9)?,
+            ServerMessage::SessionLifecycleCommandApplied {
+                session_id: uuid(3),
+                effect: SessionLifecycleEffect::ClosurePending {
+                    live_turn_id: uuid(4),
+                },
+            },
+            r#"{"type":"session_lifecycle_command_applied","session_id":"00000000-0000-0000-0000-000000000003","effect":{"type":"closure_pending","live_turn_id":"00000000-0000-0000-0000-000000000004"}}"#,
         )?;
         assert_server_message_round_trip(
             request(8)?,
@@ -11345,7 +8094,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_split_goal_projection_fits_maximally_escaped_text_frames()
+    fn split_goal_projection_fits_maximally_escaped_text_frames()
     -> Result<(), Box<dyn std::error::Error>> {
         let text = "\u{1}".repeat(MAX_CONTENT_FRAGMENT_BYTES);
         let start = ServerFrame::try_new(
@@ -11376,7 +8125,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_goal_history_rejects_model_provenance_for_execution_failure() {
+    fn goal_history_rejects_model_provenance_for_execution_failure() {
         let mismatched = ServerMessage::GoalHistoryItem {
             event_ordinal: CanonicalU64::new(2),
             generation: CanonicalU64::new(1),
@@ -11401,8 +8150,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_client_round_trip_preserves_closed_request_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn client_round_trip_preserves_closed_request_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let frame = ClientFrame::try_new(
             request(u64::MAX)?,
             ClientRequest::SubmitInput {
@@ -11433,11 +8182,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-012 / INV-060: multipart request encoding preserves part order and
+    /// multipart request encoding preserves part order and
     /// every attachment metadata field in the one canonical array shape.
     #[test]
-    fn inv012_inv060_multipart_input_wire_is_ordered_and_exact()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn multipart_input_wire_is_ordered_and_exact() -> Result<(), Box<dyn std::error::Error>> {
         let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
             .parse::<CanonicalBlobDigest>()?;
         let content = UserInputContent::from_parts(vec![
@@ -11491,9 +8239,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-012: multipart decoding stops at the public retained-parts bound.
+    /// multipart decoding stops at the public retained-parts bound.
     #[test]
-    fn inv012_multipart_deserialization_stops_after_the_parts_bound()
+    fn multipart_deserialization_stops_after_the_parts_bound()
     -> Result<(), Box<dyn std::error::Error>> {
         let oversized = vec![
             UserInputPart::Text {
@@ -11534,10 +8282,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-012 / INV-060: attachment display filenames are required-nullable
+    /// attachment display filenames are required-nullable
     /// in both directions of the version-one wire.
     #[test]
-    fn inv012_inv060_attachment_requires_display_filename_member() {
+    fn attachment_requires_display_filename_member() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}],"expected_defaults_version":"1","model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}}}"#,
         );
@@ -11547,7 +8295,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_transcript_user_entry_round_trips_ordered_multipart_content()
+    fn transcript_user_entry_round_trips_ordered_multipart_content()
     -> Result<(), Box<dyn std::error::Error>> {
         let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
             .parse::<CanonicalBlobDigest>()?;
@@ -11580,7 +8328,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_transcript_user_entry_rejects_malformed_multipart_content() {
+    fn transcript_user_entry_rejects_malformed_multipart_content() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_user_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","accepted_input_id":"00000000-0000-0000-0000-000000000003","turn_id":"00000000-0000-0000-0000-000000000004","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}]}}"#,
         );
@@ -11594,7 +8342,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_read_transcript_round_trips_in_the_single_vocabulary()
+    fn read_transcript_round_trips_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -11612,7 +8360,28 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_text_entries_round_trip_in_the_single_vocabulary()
+    fn inv033_provider_compaction_projects_only_a_non_text_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(1),
+            entry_id: uuid(2),
+            entry: TranscriptEntry::ProviderCompaction {
+                turn_id: uuid(3),
+                model_call_id: uuid(4),
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(8)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","entry":{"type":"provider_compaction","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000004"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn imported_text_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let imported_text = ServerMessage::TranscriptTextEntry {
             entry_index: CanonicalU64::new(0),
@@ -11637,7 +8406,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_conservative_entries_round_trip_in_the_single_vocabulary()
+    fn imported_conservative_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let imported_conservative = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(1),
@@ -11666,7 +8435,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegated_task_entries_round_trip_in_the_single_vocabulary()
+    fn delegated_task_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(0),
@@ -11689,7 +8458,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_message_entries_round_trip_in_the_single_vocabulary()
+    fn delegation_message_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(1),
@@ -11715,7 +8484,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_foreground_delegation_result_entries_round_trip_in_the_single_vocabulary()
+    fn foreground_delegation_result_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(2),
@@ -11746,7 +8515,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_background_delegation_result_entries_round_trip_in_the_single_vocabulary()
+    fn background_delegation_result_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(3),
@@ -11857,7 +8626,7 @@ mod tests {
         // stopped/cancelled outcome. Crossed pairs such as
         // stopped/parent_cancelled are valid under a bound relationship's own
         // termination policy and are covered by
-        // `inv033_delegation_terminal_turn_state_round_trips_crossed_parent_policy`;
+        // `delegation_terminal_turn_state_round_trips_crossed_parent_policy`;
         // these two remain inadmissible on either half.
         assert_delegation_terminal_state_rejected("stopped", "child_completed");
         assert_delegation_terminal_state_rejected("already_terminal", "parent_cancelled");
@@ -11934,19 +8703,19 @@ mod tests {
         assert!(rejected.to_string().contains("tool_attempt_id"));
     }
 
-    /// INV-044: runner-recovery wire state preserves the positive placement
+    /// runner-recovery wire state preserves the positive placement
     /// revision required by its relational source.
     #[test]
-    fn inv044_runner_recovery_turn_state_rejects_zero_placement_revision() {
+    fn runner_recovery_turn_state_rejects_zero_placement_revision() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000002","acceptance_position":"1","model_settings":null,"state":{"type":"active_awaiting_runner_recovery","runner_id":"00000000-0000-0000-0000-000000000003","placement_revision":"0","tool_attempt_id":null}}}"#,
         );
     }
 
-    /// INV-044: the public state type cannot be inhabited with the zero
+    /// the public state type cannot be inhabited with the zero
     /// placement revision rejected by its enclosing frame.
     #[test]
-    fn inv044_runner_recovery_turn_state_direct_decode_rejects_zero_revision() {
+    fn runner_recovery_turn_state_direct_decode_rejects_zero_revision() {
         let rejected = serde_json::from_value::<TurnState>(serde_json::json!({
             "type": "active_awaiting_runner_recovery",
             "runner_id": "00000000-0000-0000-0000-000000000003",
@@ -11959,7 +8728,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_terminal_turn_state_round_trips_parent_authority()
+    fn delegation_terminal_turn_state_round_trips_parent_authority()
     -> Result<(), Box<dyn std::error::Error>> {
         let state = TurnState::DelegationTerminated {
             spawning_request_id: uuid(4),
@@ -11996,7 +8765,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_terminal_turn_state_round_trips_crossed_parent_policy()
+    fn delegation_terminal_turn_state_round_trips_crossed_parent_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         // A bound relationship maps the parent verb through its own policy, so
         // a parent cancellation may terminalize a child with `stop` and a
@@ -12023,42 +8792,42 @@ mod tests {
     }
 
     #[test]
-    fn inv033_unknown_request_fields_fail_explicitly() {
+    fn unknown_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions","extra":true}}"#,
         );
     }
 
     #[test]
-    fn inv033_missing_required_request_fields_fail_explicitly() {
+    fn missing_required_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"read_transcript"}}"#,
         );
     }
 
     #[test]
-    fn inv033_wrong_typed_request_fields_fail_explicitly() {
+    fn wrong_typed_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":1,"request":{"type":"list_sessions"}}"#,
         );
     }
 
     #[test]
-    fn inv033_unknown_tagged_request_variants_fail_explicitly() {
+    fn unknown_tagged_request_variants_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"future_request"}}"#,
         );
     }
 
     #[test]
-    fn inv033_unknown_top_level_fields_fail_explicitly() {
+    fn unknown_top_level_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions"},"extra":true}"#,
         );
     }
 
     #[test]
-    fn inv033_unsupported_version_precedes_payload_decoding() {
+    fn unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
         assert_unsupported_version("2");
         assert_unsupported_version("18446744073709551616");
@@ -12068,7 +8837,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_unsupported_version_is_classified_at_the_container_depth_limit() {
+    fn unsupported_version_is_classified_at_the_container_depth_limit() {
         let future = unsupported_version_with_nested_object_payload(MAX_JSON_CONTAINER_DEPTH - 1);
         let error = decode_client_line(&line(&future))
             .expect_err("the maximum admitted depth reaches version classification");
@@ -12077,7 +8846,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_container_depth_beyond_the_limit_is_malformed() {
+    fn container_depth_beyond_the_limit_is_malformed() {
         let future = unsupported_version_with_nested_object_payload(MAX_JSON_CONTAINER_DEPTH);
         let error =
             decode_client_line(&line(&future)).expect_err("excessive nesting must be rejected");
@@ -12086,7 +8855,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_nested_duplicates_are_malformed_before_unsupported_version() {
+    fn nested_duplicates_are_malformed_before_unsupported_version() {
         let error = decode_client_line(&line(
             r#"{"version":1,"request_id":"9","request":{"future":1,"future":2}}"#,
         ))
@@ -12096,7 +8865,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_duplicate_top_level_members_are_malformed_before_classification() {
+    fn duplicate_top_level_members_are_malformed_before_classification() {
         let duplicate_version = decode_client_line(&line(
             r#"{"version":1,"version":1,"request_id":"9","request":{"type":"list_sessions"}}"#,
         ))
@@ -12187,7 +8956,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_nested_unit_shapes_reject_unknown_members() {
+    fn nested_unit_shapes_reject_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"sessions_start","extra":true}}"#,
         );
@@ -12200,42 +8969,42 @@ mod tests {
     }
 
     #[test]
-    fn inv033_active_running_requires_current_model_call_member() {
+    fn active_running_requires_current_model_call_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000002"}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_shape_requires_nullable_attempt_member() {
+    fn failed_terminal_shape_requires_nullable_attempt_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_model_call":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_shape_requires_nullable_call_member() {
+    fn failed_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_call_requires_an_attempt() {
+    fn failed_terminal_call_requires_an_attempt() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null,"terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000003","disposition":"known_failed"}}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_call_accepts_only_failure_dispositions() {
+    fn failed_terminal_call_accepts_only_failure_dispositions() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"completed"}}}}"#,
         );
     }
 
     #[test]
-    fn inv033_failed_terminal_call_rejects_unknown_members() {
+    fn failed_terminal_call_rejects_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","extra":true}}}}"#,
         );
@@ -12351,36 +9120,36 @@ mod tests {
     }
 
     #[test]
-    fn inv033_cancelled_terminal_shape_requires_nullable_call_member() {
+    fn cancelled_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003"}}}"#,
         );
     }
 
     #[test]
-    fn inv033_turn_cancelled_event_rejects_unknown_members() {
+    fn turn_cancelled_event_rejects_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"turn_cancelled","turn_id":"00000000-0000-0000-0000-000000000002","cancellation_entry_id":"00000000-0000-0000-0000-000000000003","terminal_frontier_id":"00000000-0000-0000-0000-000000000004","extra":true}}}"#,
         );
     }
 
     #[test]
-    fn inv033_cancellation_requested_state_rejects_unknown_members() {
+    fn cancellation_requested_state_rejects_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","state":{"type":"cancellation_requested","extra":true}}}}"#,
         );
     }
 
     #[test]
-    fn inv033_nested_terminal_duplicate_members_are_rejected() {
+    fn nested_terminal_duplicate_members_are_rejected() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":null,"terminal_model_call":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_in_memory_failed_terminal_call_requires_an_attempt()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn in_memory_failed_terminal_call_requires_an_attempt() -> Result<(), Box<dyn std::error::Error>>
+    {
         let invalid = ServerFrame::try_new(
             request(1)?,
             ServerMessage::TranscriptTurn {
@@ -12403,7 +9172,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_canonical_decimal_spellings_are_required() {
+    fn canonical_decimal_spellings_are_required() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"01","request":{"type":"list_sessions"}}"#,
         );
@@ -12426,20 +9195,20 @@ mod tests {
     }
 
     #[test]
-    fn inv033_canonical_uuid_spellings_are_required() {
+    fn canonical_uuid_spellings_are_required() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"read_transcript","session_id":"00000000-0000-0000-0000-00000000000A"}}"#,
         );
     }
 
     #[test]
-    fn inv012_command_sentinels_are_rejected() {
+    fn command_sentinels_are_rejected() {
         assert_command_sentinel_rejected("00000000-0000-0000-0000-000000000000");
         assert_command_sentinel_rejected("ffffffff-ffff-ffff-ffff-ffffffffffff");
     }
 
     #[test]
-    fn inv033_zero_client_request_id_is_rejected() {
+    fn zero_client_request_id_is_rejected() {
         assert!(
             decode_client_line(&line(
                 r#"{"version":1,"request_id":"0","request":{"type":"list_sessions"}}"#
@@ -12449,8 +9218,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_rejection_detail_shape_is_closed_and_code_bound()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn rejection_detail_shape_is_closed_and_code_bound() -> Result<(), Box<dyn std::error::Error>> {
         assert!(
             ServerFrame::try_new(
                 request(1)?,
@@ -12494,8 +9262,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_commit_ambiguity_has_one_stable_error_code() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn commit_ambiguity_has_one_stable_error_code() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new(
             request(1)?,
             ServerMessage::Error {
@@ -12515,8 +9282,7 @@ mod tests {
     }
 
     #[test]
-    fn inv060_publication_ambiguity_has_one_stable_error_code()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn publication_ambiguity_has_one_stable_error_code() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new(
             request(1)?,
             ServerMessage::Error {
@@ -12536,7 +9302,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_uncorrelated_identity_is_reserved_for_server_errors()
+    fn uncorrelated_identity_is_reserved_for_server_errors()
     -> Result<(), Box<dyn std::error::Error>> {
         let error = ServerFrame::try_new(
             RequestId::uncorrelated(),
@@ -12609,7 +9375,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_fragment_bound_keeps_worst_case_json_below_frame_cap()
+    fn fragment_bound_keeps_worst_case_json_below_frame_cap()
     -> Result<(), Box<dyn std::error::Error>> {
         let fragment = ContentFragment::try_new("\u{1}".repeat(MAX_CONTENT_FRAGMENT_BYTES))?;
         let frame = ServerFrame::try_new(
@@ -12628,14 +9394,14 @@ mod tests {
     }
 
     #[test]
-    fn s24_content_fragmentation_preserves_empty_text_exactly() {
+    fn content_fragmentation_preserves_empty_text_exactly() {
         let empty = super::content_fragments("").collect::<Vec<_>>();
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0].as_str(), "");
     }
 
     #[test]
-    fn s24_content_fragmentation_preserves_multibyte_boundaries_exactly() {
+    fn content_fragmentation_preserves_multibyte_boundaries_exactly() {
         let text = format!(
             "{}\u{1f980}tail",
             "a".repeat(MAX_CONTENT_FRAGMENT_BYTES - 1)
@@ -12654,8 +9420,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_oversized_outgoing_frame_fails_explicitly() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn oversized_outgoing_frame_fails_explicitly() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new(
             request(1)?,
             ServerMessage::Error {
@@ -12672,7 +9437,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_exact_newline_framing_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    fn exact_newline_framing_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new(request(1)?, ClientRequest::ListSessions {})?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(encoded.last(), Some(&b'\n'));
@@ -12695,7 +9460,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_oversized_complete_frame_preserves_recoverable_request_id() {
+    fn oversized_complete_frame_preserves_recoverable_request_id() {
         let oversized =
             padded_oversized_client_frame(r#""request_id":"9""#, super::MAX_FRAME_BYTES);
         let error = decode_client_line(&oversized)
@@ -12706,7 +9471,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_oversized_duplicate_request_identity_is_uncorrelated() {
+    fn oversized_duplicate_request_identity_is_uncorrelated() {
         let oversized = padded_oversized_client_frame(
             r#""request_id":"9","request_id":"10""#,
             super::MAX_FRAME_BYTES,
@@ -12719,7 +9484,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_oversized_noncanonical_request_identity_is_uncorrelated() {
+    fn oversized_noncanonical_request_identity_is_uncorrelated() {
         let oversized =
             padded_oversized_client_frame(r#""request_id":"09""#, super::MAX_FRAME_BYTES);
         let error =
@@ -12730,7 +9495,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_request_identity_recovery_stops_at_the_frame_cap() {
+    fn request_identity_recovery_stops_at_the_frame_cap() {
         let far_oversized =
             padded_oversized_client_frame(r#""request_id":"9""#, super::MAX_FRAME_BYTES * 2);
         let error = decode_client_line(&far_oversized)
@@ -12741,7 +9506,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_bounded_client_request_identity_recovery_matches_oversized_decode() {
+    fn bounded_client_request_identity_recovery_matches_oversized_decode() {
         let oversized =
             padded_oversized_client_frame(r#""request_id":"9""#, super::MAX_FRAME_BYTES);
         let content = &oversized[..oversized.len() - 1];
@@ -12754,7 +9519,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_all_client_request_variants_encode_with_current_version()
+    fn all_client_request_variants_encode_with_current_version()
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelSelection::Direct {
             selection_id: uuid(3),
@@ -12767,6 +9532,7 @@ mod tests {
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: super::SessionPlacement::Pathless {},
+                lifecycle: SessionLifecycleMembers::default(),
             },
         )?;
         assert_client_request_current_version(request(2)?, ClientRequest::ListSessions {})?;
@@ -12806,8 +9572,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_list_request_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_list_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
             ClientRequest::ListSessionMetadata {
@@ -12822,8 +9587,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_read_request_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_read_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(2)?,
             ClientRequest::ReadSessionMetadata {
@@ -12834,7 +9598,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_replacement_request_has_an_exact_closed_shape()
+    fn metadata_replacement_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(3)?,
@@ -12847,9 +9611,9 @@ mod tests {
         )
     }
 
-    /// INV-033: the unified listing request has one exact closed shape.
+    /// the unified listing request has one exact closed shape.
     #[test]
-    fn inv033_list_conversations_request_has_an_exact_closed_shape()
+    fn list_conversations_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ListConversations {
@@ -12880,10 +9644,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the nullable filter and cursor members are required, the
+    /// the nullable filter and cursor members are required, the
     /// origin filter is a closed set, and the cursor rejects unknown members.
     #[test]
-    fn inv033_list_conversations_members_are_required_and_closed() {
+    fn list_conversations_members_are_required_and_closed() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
@@ -12898,10 +9662,10 @@ mod tests {
         );
     }
 
-    /// INV-033: structurally invalid title filters reject a listing request
+    /// structurally invalid title filters reject a listing request
     /// before application construction.
     #[test]
-    fn inv033_list_conversations_validates_title_filter_shape() {
+    fn list_conversations_validates_title_filter_shape() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":"","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
@@ -12921,10 +9685,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the three unified page messages keep their exact closed
+    /// the three unified page messages keep their exact closed
     /// shapes across round trips.
     #[test]
-    fn inv033_conversation_page_messages_have_exact_closed_shapes()
+    fn conversation_page_messages_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -12989,9 +9753,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a page end never names a cursor for an empty page.
+    /// a page end never names a cursor for an empty page.
     #[test]
-    fn inv033_conversation_page_end_rejects_cursor_for_empty_page() {
+    fn conversation_page_end_rejects_cursor_for_empty_page() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"0","next_after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000001"}}}"#,
         );
@@ -13005,10 +9769,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a native summary title follows the metadata title rules and
+    /// a native summary title follows the metadata title rules and
     /// an imported summary restates the derived display-title shape.
     #[test]
-    fn inv033_conversation_summary_shapes_are_validated() {
+    fn conversation_summary_shapes_are_validated() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":"","archived":false,"defaults_version":"1"}}}"#,
         );
@@ -13026,9 +9790,9 @@ mod tests {
         );
     }
 
-    /// INV-033: imported title length is deployment policy, not wire grammar.
+    /// imported title length is deployment policy, not wire grammar.
     #[test]
-    fn inv033_conversation_summary_admits_structurally_valid_long_imported_title()
+    fn conversation_summary_admits_structurally_valid_long_imported_title()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::ConversationSummary {
             conversation: ConversationSummary::ImportedConversation {
@@ -13043,8 +9807,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_import_request_preserves_exact_bytes_and_format()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn import_request_preserves_exact_bytes_and_format() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ImportConversation {
             format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
@@ -13063,11 +9826,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: chunked import has one exact closed begin/append/commit/abort
+    /// chunked import has one exact closed begin/append/commit/abort
     /// request vocabulary.
     #[test]
-    fn inv033_chunked_import_requests_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn chunked_import_requests_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let begin = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -13121,11 +9884,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: every maximum-sized append still fits the unchanged complete
+    /// every maximum-sized append still fits the unchanged complete
     /// frame bound, while a larger raw chunk is invalid before encoding.
     #[test]
-    fn inv033_import_append_respects_the_existing_frame_bound()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn import_append_respects_the_existing_frame_bound() -> Result<(), Box<dyn std::error::Error>> {
         let maximum = ClientRequest::AppendConversationImport {
             chunk: ConversationImportSource::new(vec![
                 b'x';
@@ -13153,10 +9915,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: chunked-import transport acknowledgements have exact closed
+    /// chunked-import transport acknowledgements have exact closed
     /// shapes; commit deliberately keeps the existing terminal receipts.
     #[test]
-    fn inv033_chunked_import_acknowledgements_have_exact_closed_shapes()
+    fn chunked_import_acknowledgements_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -13190,11 +9952,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: blob upload requests carry one exact tagged digest, positive
+    /// blob upload requests carry one exact tagged digest, positive
     /// length, and canonical bounded chunk without an implicit blob class.
     #[test]
-    fn inv060_blob_upload_requests_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_upload_requests_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let begin = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -13262,10 +10023,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: one maximum decoded blob chunk fits the frame cap, while an
+    /// one maximum decoded blob chunk fits the frame cap, while an
     /// empty or one-byte-larger append is rejected before encoding.
     #[test]
-    fn inv060_blob_upload_chunk_bound_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_upload_chunk_bound_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
         let maximum = ClientRequest::AppendBlobUpload {
             chunk: BlobChunk::new(vec![b'x'; super::MAX_BLOB_CHUNK_BYTES]),
         };
@@ -13293,10 +10054,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: upload lifecycle receipts echo the exact verified identity and
+    /// upload lifecycle receipts echo the exact verified identity and
     /// positive cumulative sizes.
     #[test]
-    fn inv060_blob_upload_acknowledgements_have_exact_closed_shapes()
+    fn blob_upload_acknowledgements_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         assert_server_message_round_trip(
@@ -13344,11 +10105,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: bulk-ingest ownership and every upload lifecycle failure use
+    /// bulk-ingest ownership and every upload lifecycle failure use
     /// one exhaustive content-silent invalid-request vocabulary.
     #[test]
-    fn inv060_blob_upload_refusals_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_upload_refusals_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let expected_digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let actual_digest = CanonicalBlobDigest::from_bytes([0xcd; 32]);
         assert_server_message_round_trip(
@@ -13438,10 +10198,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a direct metadata read has exact closed request and response
+    /// a direct metadata read has exact closed request and response
     /// shapes with canonical decimal facts.
     #[test]
-    fn inv060_blob_metadata_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_metadata_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let metadata = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -13471,10 +10231,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a direct range read has exact closed request and response
+    /// a direct range read has exact closed request and response
     /// shapes with canonical decimal bounds.
     #[test]
-    fn inv060_blob_range_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_range_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let offset = 7_u64;
         let length = 2_u64;
@@ -13512,11 +10272,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a successful range response must represent its exact
+    /// a successful range response must represent its exact
     /// half-open byte range.
     #[test]
-    fn inv060_blob_range_response_rejects_overflowing_end() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn blob_range_response_rejects_overflowing_end() -> Result<(), Box<dyn std::error::Error>> {
         let result = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -13531,11 +10290,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: invalid direct range lengths remain decodable so the daemon
+    /// invalid direct range lengths remain decodable so the daemon
     /// can return the contracted typed invalid-request response.
     #[test]
-    fn inv060_blob_read_length_bound_reaches_request_handling()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_read_length_bound_reaches_request_handling() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let zero = ClientRequest::ReadBlobChunk {
             digest,
@@ -13567,11 +10325,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: an exact maximum direct range response remains inside the
+    /// an exact maximum direct range response remains inside the
     /// unchanged frame ceiling.
     #[test]
-    fn inv060_maximum_blob_read_response_fits_one_frame() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn maximum_blob_read_response_fits_one_frame() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let maximum = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -13587,9 +10344,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: an out-of-bounds read is one typed invalid request.
+    /// an out-of-bounds read is one typed invalid request.
     #[test]
-    fn inv060_blob_read_out_of_bounds_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_read_out_of_bounds_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -13606,9 +10363,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: exhausting absent replicas has a content-silent missing code.
+    /// exhausting absent replicas has a content-silent missing code.
     #[test]
-    fn inv060_blob_missing_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_missing_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -13621,10 +10378,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: exhausting corrupt replicas has a content-silent corruption
+    /// exhausting corrupt replicas has a content-silent corruption
     /// code.
     #[test]
-    fn inv060_blob_corrupt_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
+    fn blob_corrupt_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -13637,10 +10394,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a size-exceeded refusal cannot claim the impossible zero
+    /// a size-exceeded refusal cannot claim the impossible zero
     /// expected length that begin-upload admission rejects.
     #[test]
-    fn inv060_blob_upload_size_exceeded_rejects_zero_expected_length()
+    fn blob_upload_size_exceeded_rejects_zero_expected_length()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::Error {
             code: ErrorCode::InvalidRequest,
@@ -13658,10 +10415,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: a length-mismatch refusal cannot claim the impossible zero
+    /// a length-mismatch refusal cannot claim the impossible zero
     /// expected length that begin-upload admission rejects.
     #[test]
-    fn inv060_blob_upload_length_mismatch_rejects_zero_expected_length()
+    fn blob_upload_length_mismatch_rejects_zero_expected_length()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::Error {
             code: ErrorCode::InvalidRequest,
@@ -13679,10 +10436,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: import-invalid-request evidence names exact sizes and only the
+    /// import-invalid-request evidence names exact sizes and only the
     /// content-silent converter class plus record ordinal.
     #[test]
-    fn inv033_conversation_import_rejection_evidence_has_exact_closed_shapes()
+    fn conversation_import_rejection_evidence_has_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -13799,9 +10556,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: imported-frontier creation has one exact closed request shape.
+    /// imported-frontier creation has one exact closed request shape.
     #[test]
-    fn inv033_imported_frontier_creation_has_an_exact_closed_shape()
+    fn imported_frontier_creation_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::CreateSessionFromImportedFrontier {
@@ -13827,7 +10584,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_frontier_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn imported_frontier_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -13849,10 +10606,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: model-call usage has one exact closed shape.
+    /// model-call usage has one exact closed shape.
     #[test]
-    fn inv033_model_call_usage_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn model_call_usage_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let message = ServerMessage::TranscriptModelCallUsage {
             model_call_index: CanonicalU64::new(0),
@@ -13921,7 +10677,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_frontier_rejects_zero_position() -> Result<(), Box<dyn std::error::Error>> {
+    fn imported_frontier_rejects_zero_position() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(2)?,
@@ -13942,7 +10698,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_conversation_read_has_an_exact_closed_shape()
+    fn imported_conversation_read_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ReadImportedConversation {
@@ -13960,10 +10716,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: an imported-conversation entry carries its position, exact
+    /// an imported-conversation entry carries its position, exact
     /// attestation, content kind, and bounded preview in one closed shape.
     #[test]
-    fn inv033_imported_conversation_entry_has_an_exact_closed_shape()
+    fn imported_conversation_entry_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::ImportedConversationEntry {
             position: CanonicalU64::new(2),
@@ -13988,7 +10744,7 @@ mod tests {
     /// An entry whose content carries no exact attested text states that
     /// absence as an explicit null rather than an empty preview.
     #[test]
-    fn inv033_imported_conversation_entry_states_an_absent_preview_as_null()
+    fn imported_conversation_entry_states_an_absent_preview_as_null()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14011,8 +10767,8 @@ mod tests {
     /// An imported-conversation entry position is one-based, so zero is not a
     /// selectable ordinal on the wire.
     #[test]
-    fn inv033_imported_conversation_entry_rejects_zero_position()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn imported_conversation_entry_rejects_zero_position() -> Result<(), Box<dyn std::error::Error>>
+    {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14092,8 +10848,8 @@ mod tests {
     /// A truncation marker over an empty preview contradicts the scalar cut,
     /// which always keeps at least one scalar of nonempty text.
     #[test]
-    fn inv033_imported_text_preview_rejects_truncated_empty_text()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn imported_text_preview_rejects_truncated_empty_text() -> Result<(), Box<dyn std::error::Error>>
+    {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14117,7 +10873,7 @@ mod tests {
     /// kind that has no such text is a contradictory frame rather than extra
     /// information the client may present.
     #[test]
-    fn inv033_imported_conversation_entry_rejects_a_preview_on_nontext_content()
+    fn imported_conversation_entry_rejects_a_preview_on_nontext_content()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14141,7 +10897,7 @@ mod tests {
     /// A requested ordinal inside the stated range contradicts the rejection
     /// carrying it, so the frame is refused rather than rendered.
     #[test]
-    fn inv033_imported_range_rejection_refuses_a_selectable_requested_position()
+    fn imported_range_rejection_refuses_a_selectable_requested_position()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14166,7 +10922,7 @@ mod tests {
     /// An imported conversation is nonempty, so a zero selectable bound cannot
     /// describe one.
     #[test]
-    fn inv033_imported_range_rejection_refuses_an_empty_selectable_range()
+    fn imported_range_rejection_refuses_an_empty_selectable_range()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14188,10 +10944,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: an out-of-range imported position is a rejection naming the
+    /// an out-of-range imported position is a rejection naming the
     /// conversation's selectable range, never the absent-session `not_found`.
     #[test]
-    fn inv033_names_the_imported_position_range() -> Result<(), Box<dyn std::error::Error>> {
+    fn names_the_imported_position_range() -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::Error {
             code: ErrorCode::Rejected,
             message: String::from("the command was rejected by current durable state"),
@@ -14212,10 +10968,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: an absent imported conversation names an imported conversation
+    /// an absent imported conversation names an imported conversation
     /// as the missing target.
     #[test]
-    fn inv033_names_the_absent_imported_conversation() -> Result<(), Box<dyn std::error::Error>> {
+    fn names_the_absent_imported_conversation() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14238,7 +10994,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_submit_request_round_trips_in_the_single_vocabulary()
+    fn submit_request_round_trips_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14260,7 +11016,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_turn_control_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn turn_control_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -14281,10 +11037,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: reconciliation has one exact closed request shape.
+    /// reconciliation has one exact closed request shape.
     #[test]
-    fn inv033_reconcile_turn_request_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn reconcile_turn_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let request_id = request(1)?;
         let request_value = ClientRequest::ReconcileTurn {
             command_id: command(4)?,
@@ -14314,10 +11070,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the reconciliation refusal and the stale-target rejection carry
+    /// the reconciliation refusal and the stale-target rejection carry
     /// their exact closed wire shapes.
     #[test]
-    fn inv033_reconciliation_rejection_details_have_exact_closed_shapes()
+    fn reconciliation_rejection_details_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -14359,7 +11115,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_import_source_requires_canonical_padded_base64() {
+    fn import_source_requires_canonical_padded_base64() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA"}}"#,
         );
@@ -14372,7 +11128,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_submit_exchange_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn submit_exchange_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14404,9 +11160,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the cursorless provider-text message round trips exactly.
+    /// the cursorless provider-text message round trips exactly.
     #[test]
-    fn inv033_provider_text_message_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn provider_text_message_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -14429,10 +11185,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: review target registration has one exact closed shape.
+    /// review target registration has one exact closed shape.
     #[test]
-    fn inv033_review_target_exchange_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn review_target_exchange_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let request_id = request(1)?;
         let request_value = ClientRequest::CreateReviewTarget {
             command_id: command(2)?,
@@ -14966,8 +11722,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inv046_adds_forward_only_defaults_replacement()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn adds_forward_only_defaults_replacement() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(6)?;
         let request_value = ClientRequest::ReplaceSessionDefaults {
             command_id: command(1)?,
@@ -15045,8 +11800,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inv046_adds_the_bounded_session_system_prompt()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn adds_the_bounded_session_system_prompt() -> Result<(), Box<dyn std::error::Error>> {
         // The system-prompt member is required.
         // Every admitted frame must carry the member explicitly.
         assert_client_malformed(
@@ -15078,6 +11832,7 @@ mod tests {
                 "exact prompt text".to_owned(),
             )?)),
             placement: super::SessionPlacement::Pathless {},
+            lifecycle: SessionLifecycleMembers::default(),
         };
         let frame = ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, create)?;
         let encoded = encode_client_line(&frame)?;
@@ -15101,6 +11856,7 @@ mod tests {
             model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(None),
             placement: super::SessionPlacement::Pathless {},
+            lifecycle: SessionLifecycleMembers::default(),
         };
         let promptless_frame =
             ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, promptless_create)?;
@@ -15251,9 +12007,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: prompt text enforces structural content rules only.
+    /// prompt text enforces structural content rules only.
     #[test]
-    fn inv033_system_prompt_text_rejects_empty_and_nul_content() {
+    fn system_prompt_text_rejects_empty_and_nul_content() {
         let admitted = SystemPromptText::try_new(String::from("exact √ prompt"))
             .expect("structurally valid text is admitted");
         assert_eq!(admitted.as_str(), "exact √ prompt");
@@ -15261,10 +12017,9 @@ mod tests {
         assert!(SystemPromptText::try_new("a\u{0}b".to_owned()).is_err());
     }
 
-    /// INV-033: deployment limits use one closed required nullable wire shape.
+    /// deployment limits use one closed required nullable wire shape.
     #[test]
-    fn inv033_deployment_limits_have_exact_closed_wire_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn deployment_limits_have_exact_closed_wire_shapes() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
             ClientRequest::ReadDeploymentLimits {},
@@ -15285,10 +12040,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033 / INV-047: template frames have exact closed shapes.
+    /// template frames have exact closed shapes.
     #[test]
-    fn inv033_inv047_template_frames_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn template_frames_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let create = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
@@ -15296,6 +12050,7 @@ mod tests {
                 command_id: command(2)?,
                 template_name: "reviewer".to_owned(),
                 placement: super::SessionPlacement::Pathless {},
+                lifecycle: SessionLifecycleMembers::default(),
             },
         )?;
         let encoded_create = encode_client_line(&create)?;
@@ -15358,6 +12113,7 @@ mod tests {
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: root.clone(),
+                lifecycle: SessionLifecycleMembers::default(),
             },
         )?;
         assert_eq!(
@@ -15384,7 +12140,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_placement_constructor_rejects_paths_over_the_structural_byte_bound() {
+    fn session_placement_constructor_rejects_paths_over_the_structural_byte_bound() {
         let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
         let frame_sized_empty_segments = ".".repeat(super::MAX_FRAME_BYTES - 1);
 
@@ -15396,7 +12152,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_placement_frames_admit_the_complete_structural_range() {
+    fn session_placement_frames_admit_the_complete_structural_range() {
         let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
         let frame = format!(
             r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"model_settings":{{"reasoning_level":{{"kind":"inherit"}},"fast_mode":{{"kind":"inherit"}},"service_tier":{{"kind":"inherit"}}}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{maximum_structural_path}"}}}}}}
@@ -15426,7 +12182,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_placement_rejection_versions_are_coherent() {
+    fn session_placement_rejection_versions_are_coherent() {
         assert_placement_version_mismatch_rejected(0, 2);
         assert_placement_version_mismatch_rejected(1, 0);
         assert_placement_version_mismatch_rejected(2, 2);
@@ -15454,9 +12210,9 @@ mod tests {
         assert!(valid.is_ok());
     }
 
-    /// INV-033: invalid template names or versions cannot enter admitted frames.
+    /// invalid template names or versions cannot enter admitted frames.
     #[test]
-    fn inv033_template_frames_require_valid_values() -> Result<(), Box<dyn std::error::Error>> {
+    fn template_frames_require_valid_values() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"Reviewer"}}"#,
         );
@@ -15475,9 +12231,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a frame at the single version is admitted unchanged.
+    /// a frame at the single version is admitted unchanged.
     #[test]
-    fn inv033_single_protocol_version_is_admitted() -> Result<(), Box<dyn std::error::Error>> {
+    fn single_protocol_version_is_admitted() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new(request(1)?, ClientRequest::ListSessions {})?;
         let encoded = encode_client_line(&frame)?;
 
@@ -15486,25 +12242,24 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the integer immediately below the single version is refused.
+    /// the integer immediately below the single version is refused.
     #[test]
-    fn inv033_version_below_single_version_is_refused() {
+    fn version_below_single_version_is_refused() {
         assert_unsupported_version("0");
     }
 
-    /// INV-033: closed-enum decoding refuses an unknown version member.
+    /// closed-enum decoding refuses an unknown version member.
     #[test]
-    fn inv033_unknown_protocol_version_member_is_refused() {
+    fn unknown_protocol_version_member_is_refused() {
         let error = serde_json::from_str::<ProtocolVersion>("2")
             .expect_err("an unknown protocol version must be refused");
 
         assert!(error.to_string().contains("frame version is unsupported"));
     }
 
-    /// INV-033: the model-alias catalog has exact closed shapes.
+    /// the model-alias catalog has exact closed shapes.
     #[test]
-    fn inv033_model_alias_catalog_has_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn model_alias_catalog_has_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -15544,8 +12299,7 @@ mod tests {
     /// fence, statement, and first input — in one closed shape, and its
     /// receipt names the created session and the fence record.
     #[test]
-    fn inv033_commission_session_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn commission_session_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
             ClientRequest::CommissionSession {
@@ -15670,8 +12424,7 @@ mod tests {
 
     /// request shape, and a requested semantic position must be nonzero.
     #[test]
-    fn inv033_compaction_request_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn compaction_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let compact = ClientRequest::CompactSession {
             command_id: command(1)?,
             session_id: uuid(2),
@@ -15705,8 +12458,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_import_outcomes_have_distinct_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn import_outcomes_have_distinct_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::ConversationImportInserted {
@@ -15726,8 +12478,7 @@ mod tests {
 
     /// its exact closed shape across one encode/decode round trip.
     #[test]
-    fn inv033_stop_turn_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn stop_turn_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::StopTurn {
             command_id: command(4)?,
@@ -15759,9 +12510,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: tool decisions keep exact wire forms across one round trip.
+    /// tool decisions keep exact wire forms across one round trip.
     #[test]
-    fn inv033_decide_tool_request_has_exact_closed_decision_shapes()
+    fn decide_tool_request_has_exact_closed_decision_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let approval = ClientRequest::DecideToolRequest {
             command_id: command(4)?,
@@ -15815,8 +12566,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_user_approve_event_round_trips()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn tool_approval_user_approve_event_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(3)?,
             ServerMessage::SessionEvent {
@@ -15837,7 +12587,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_user_deny_event_round_trips_with_reason()
+    fn tool_approval_user_deny_event_round_trips_with_reason()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(15)?,
@@ -15861,7 +12611,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_deny_event_round_trips_null_reason_for_empty_derivation()
+    fn tool_approval_delegate_deny_event_round_trips_null_reason_for_empty_derivation()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
@@ -15884,7 +12634,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_transcript_tool_approval_round_trips_historical_delegate_provenance()
+    fn transcript_tool_approval_round_trips_historical_delegate_provenance()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(16)?,
@@ -15913,22 +12663,22 @@ mod tests {
     }
 
     #[test]
-    fn inv033_transcript_tool_approval_rejects_explicit_null() {
+    fn transcript_tool_approval_rejects_explicit_null() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"16","message":{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_tool_approval_user_decider_rejects_delegate_rationale() {
+    fn tool_approval_user_decider_rejects_delegate_rationale() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
         );
     }
 
-    /// INV-033: the override request carries its exact closed wire shape.
+    /// the override request carries its exact closed wire shape.
     #[test]
-    fn inv033_override_denied_tool_request_has_exact_closed_shape()
+    fn override_denied_tool_request_has_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let override_request = ClientRequest::OverrideDeniedToolRequest {
             command_id: command(4)?,
@@ -15953,11 +12703,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the override receipt and every override rejection carry their
+    /// the override receipt and every override rejection carry their
     /// exact closed wire shapes.
     #[test]
-    fn inv033_override_denial_responses_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn override_denial_responses_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::ToolDenialOverridden {
@@ -16001,8 +12751,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_user_override_event_round_trips()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn tool_approval_user_override_event_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(5)?,
             ServerMessage::SessionEvent {
@@ -16026,7 +12775,7 @@ mod tests {
     /// A user-override decider is approve-only and carries no rationale: a
     /// denial or a rationale under that decider is a malformed frame.
     #[test]
-    fn inv033_tool_approval_user_override_decider_is_approve_only() {
+    fn tool_approval_user_override_decider_is_approve_only() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":null}}}"#,
         );
@@ -16036,14 +12785,14 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_decider_requires_rationale() {
+    fn tool_approval_delegate_decider_requires_rationale() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":null}}}"#,
         );
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_deny_event_round_trips_with_derived_reason()
+    fn tool_approval_delegate_deny_event_round_trips_with_derived_reason()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
@@ -16068,14 +12817,14 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_denial_rejects_underived_reason() {
+    fn tool_approval_delegate_denial_rejects_underived_reason() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"forged user reason"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"bounded rationale"}}}"#,
         );
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_rationale_rejects_oversize() {
+    fn tool_approval_delegate_rationale_rejects_oversize() {
         const RATIONALE_FILLER: &str = "x";
         let oversized_rationale =
             RATIONALE_FILLER.repeat(ToolDecisionRationale::MAX_UTF8_BYTES + 1);
@@ -16089,10 +12838,9 @@ mod tests {
         assert_server_malformed(&oversized_frame);
     }
 
-    /// INV-033: every stop rejection carries its exact closed wire shape.
+    /// every stop rejection carries its exact closed wire shape.
     #[test]
-    fn inv033_stop_rejection_details_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn stop_rejection_details_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -16147,10 +12895,10 @@ mod tests {
         )
     }
 
-    /// INV-033: the decision receipt and every decision rejection carry their
+    /// the decision receipt and every decision rejection carry their
     #[test]
-    fn inv033_tool_decision_responses_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn tool_decision_responses_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let approval_receipt = ServerMessage::ToolRequestDecided {
             tool_request_id: uuid(7),
             decision: ToolDecision::Approve {},
@@ -16219,28 +12967,28 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_list_requires_title_query_member() {
+    fn metadata_list_requires_title_query_member() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"include_archived":false,"page_size":"50","after_session_id":null}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_list_requires_cursor_member() {
+    fn metadata_list_requires_cursor_member() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"50"}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_list_rejects_duplicate_required_tags() {
+    fn metadata_list_rejects_duplicate_required_tags() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":["same","same"],"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_list_rejects_empty_title_query() {
+    fn metadata_list_rejects_empty_title_query() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":"","include_archived":false,"page_size":"50","after_session_id":null}}"#,
         );
@@ -16258,35 +13006,35 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_replacement_rejects_empty_title() {
+    fn metadata_replacement_rejects_empty_title() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":"","tags":[],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_replacement_requires_title_member() {
+    fn metadata_replacement_requires_title_member() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"tags":[],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_replacement_rejects_duplicate_tags() {
+    fn metadata_replacement_rejects_duplicate_tags() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":["same","same"],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_duplicate_metadata_attribute_member_is_malformed() {
+    fn duplicate_metadata_attribute_member_is_malformed() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":[],"attributes":{"same":"first","\u0073ame":"second"},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_required_tag_deserializer_has_no_deployment_policy()
+    fn metadata_required_tag_deserializer_has_no_deployment_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         let required_tags = serde_json::to_string(&numbered_metadata_strings(3))?;
         let json = format!(
@@ -16297,7 +13045,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_tag_deserializer_has_no_deployment_policy()
+    fn metadata_summary_tag_deserializer_has_no_deployment_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut tags = numbered_metadata_strings(3);
         tags.sort();
@@ -16342,13 +13090,13 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the last-writer actor projects every agency durable metadata can
+    /// the last-writer actor projects every agency durable metadata can
     /// record. The domain projection this pins is total by type, so a later
     /// agency reaches the wire only through a variant added here.
     #[test]
-    fn inv033_metadata_writer_actor_round_trips_every_agency()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_writer_actor_round_trips_every_agency() -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_actor_round_trips(MetadataActor::User {}, r#"{"type":"user"}"#)?;
+        assert_metadata_actor_round_trips(MetadataActor::Core {}, r#"{"type":"core"}"#)?;
         assert_metadata_actor_round_trips(
             MetadataActor::Model { turn_id: uuid(2) },
             r#"{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}"#,
@@ -16363,10 +13111,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the actor vocabulary stays closed — an unadmitted spelling and a
+    /// the actor vocabulary stays closed — an unadmitted spelling and a
     /// variant carrying the wrong reference are both malformed frames.
     #[test]
-    fn inv033_metadata_writer_actor_rejects_unadmitted_shapes() {
+    fn metadata_writer_actor_rejects_unadmitted_shapes() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"operator"}}}}"#,
         );
@@ -16379,7 +13127,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_capacity_matches_domain_and_frame_headroom()
+    fn metadata_capacity_matches_domain_and_frame_headroom()
     -> Result<(), Box<dyn std::error::Error>> {
         let exact = SessionMetadata::try_new(
             Some("\u{1}".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES)),
@@ -16454,7 +13202,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_filter_capacity_is_enforced_before_mapping()
+    fn metadata_filter_capacity_is_enforced_before_mapping()
     -> Result<(), Box<dyn std::error::Error>> {
         let exact = ClientRequest::ListSessionMetadata {
             required_tags: Vec::new(),
@@ -16493,8 +13241,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_enforces_aggregate_utf8_capacity()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_summary_enforces_aggregate_utf8_capacity() -> Result<(), Box<dyn std::error::Error>>
+    {
         let individually_valid_but_oversized = ServerMessage::SessionMetadataSummary {
             session_id: uuid(1),
             defaults_version: CanonicalU64::new(1),
@@ -16523,35 +13271,35 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_requires_nullable_title_member() {
+    fn metadata_summary_requires_nullable_title_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"tags":[],"archived":false,"last_writer":null}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_summary_requires_nullable_last_writer_member() {
+    fn metadata_summary_requires_nullable_last_writer_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"title":null,"tags":[],"archived":false}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_page_end_requires_nullable_cursor_member() {
+    fn metadata_page_end_requires_nullable_cursor_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_page_end","session_count":"0"}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_point_read_requires_nullable_last_writer_member() {
+    fn metadata_point_read_requires_nullable_last_writer_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
-    fn inv033_metadata_point_read_requires_nullable_title_member() {
+    fn metadata_point_read_requires_nullable_title_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"tags":[],"attributes":{},"archived":false},"last_writer":null}}"#,
         );
@@ -16569,7 +13317,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_rejects_unsorted_tags() -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_summary_rejects_unsorted_tags() -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_message_rejected(ServerMessage::SessionMetadataSummary {
             session_id: uuid(1),
             defaults_version: CanonicalU64::new(1),
@@ -16588,7 +13336,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_rejects_unwritten_nondefault_content()
+    fn metadata_summary_rejects_unwritten_nondefault_content()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_message_rejected(ServerMessage::SessionMetadataSummary {
             session_id: uuid(1),
@@ -16605,7 +13353,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_read_rejects_written_content_without_a_writer()
+    fn metadata_read_rejects_written_content_without_a_writer()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_metadata_message_rejected(ServerMessage::SessionMetadata {
             session_id: uuid(1),
@@ -16615,8 +13363,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_page_rejects_a_cursor_after_an_empty_page()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn metadata_page_rejects_a_cursor_after_an_empty_page() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_metadata_message_rejected(ServerMessage::SessionMetadataPageEnd {
             session_count: CanonicalU64::new(0),
             next_after_session_id: Some(uuid(1)),
@@ -16637,8 +13385,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_single_vocabulary_admits_reconciliation_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn single_vocabulary_admits_reconciliation_shapes() -> Result<(), Box<dyn std::error::Error>> {
         let model_reconciliation = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
             acceptance_position: CanonicalU64::new(1),
@@ -16700,11 +13447,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033 / INV-048: queued goal retirement has one exact closed wire
+    /// queued goal retirement has one exact closed wire
     /// shape and round-trips its immutable turn identity.
     #[test]
-    fn inv033_inv048_goal_turn_retired_event_round_trips() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn goal_turn_retired_event_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::SessionEvent {
             cursor: CanonicalU64::new(1),
             session_id: uuid(1),
@@ -16726,7 +13472,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_client_requests_round_trip_their_closed_shapes()
+    fn delegation_client_requests_round_trip_their_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         const SPAWN_FRAME_REQUEST: u64 = 34;
         const AWAIT_FRAME_REQUEST: u64 = 35;
@@ -16773,7 +13519,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_receipts_round_trip_result_and_delivery_correlation()
+    fn delegation_receipts_round_trip_result_and_delivery_correlation()
     -> Result<(), Box<dyn std::error::Error>> {
         const SPAWN_RECEIPT_REQUEST: u64 = 37;
         const AWAIT_RECEIPT_REQUEST: u64 = 38;
@@ -16830,7 +13576,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_request_rejections_round_trip_closed_evidence()
+    fn delegation_request_rejections_round_trip_closed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         const NOT_EXECUTABLE_FRAME_REQUEST: u64 = 41;
         const ORDINAL_EXHAUSTED_FRAME_REQUEST: u64 = 42;
@@ -16899,7 +13645,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delivery_sequence_exhaustion_round_trips_closed_evidence()
+    fn delivery_sequence_exhaustion_round_trips_closed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         const FRAME_REQUEST: u64 = 51;
         let ids = delegation_wire_identities();
@@ -16926,7 +13672,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_message_identity_collision_round_trips_closed_evidence()
+    fn message_identity_collision_round_trips_closed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         const FRAME_REQUEST: u64 = 54;
         let ids = delegation_wire_identities();
@@ -16951,7 +13697,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delivery_sequence_exhaustion_rejects_a_nonterminal_counter()
+    fn delivery_sequence_exhaustion_rejects_a_nonterminal_counter()
     -> Result<(), Box<dyn std::error::Error>> {
         const FRAME_REQUEST: u64 = 52;
         let ids = delegation_wire_identities();
@@ -16974,7 +13720,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_request_content_validation_is_left_to_application_input()
+    fn delegation_request_content_validation_is_left_to_application_input()
     -> Result<(), Box<dyn std::error::Error>> {
         const EMPTY_TASK_FRAME_REQUEST: u64 = 43;
         const NUL_MESSAGE_FRAME_REQUEST: u64 = 44;
@@ -17027,7 +13773,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_parent_caused_child_results_keep_policy_action_separate_from_parent_reason()
+    fn parent_caused_child_results_keep_policy_action_separate_from_parent_reason()
     -> Result<(), Box<dyn std::error::Error>> {
         const STOPPED_BY_CANCEL_FRAME_REQUEST: u64 = 46;
         const CANCELLED_BY_STOP_FRAME_REQUEST: u64 = 47;
@@ -17079,7 +13825,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_child_result_rejects_repeated_spawn_and_await_request_identity()
+    fn child_result_rejects_repeated_spawn_and_await_request_identity()
     -> Result<(), Box<dyn std::error::Error>> {
         const REPEATED_REQUEST_FRAME_REQUEST: u64 = 48;
         let ids = delegation_wire_identities();
@@ -17104,8 +13850,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_message_receipt_rejects_zero_delivery_sequence()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn message_receipt_rejects_zero_delivery_sequence() -> Result<(), Box<dyn std::error::Error>> {
         const ZERO_DELIVERY_FRAME_REQUEST: u64 = 49;
         let ids = delegation_wire_identities();
         let zero_delivery = ServerFrame::try_new(
@@ -17124,8 +13869,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_await_registration_rejects_foreground_mode() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn await_registration_rejects_foreground_mode() -> Result<(), Box<dyn std::error::Error>> {
         const FOREGROUND_REGISTRATION_FRAME_REQUEST: u64 = 50;
         let ids = delegation_wire_identities();
         let foreground_registration = ServerFrame::try_new(
@@ -17145,8 +13889,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_message_receipt_rejects_the_reserved_spawn_ordinal()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn message_receipt_rejects_the_reserved_spawn_ordinal() -> Result<(), Box<dyn std::error::Error>>
+    {
         const FRAME_REQUEST: u64 = 53;
         let ids = delegation_wire_identities();
         let receipt = ServerFrame::try_new(
@@ -17462,8 +14206,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inherits_imported_transcript_and_tool_event_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inherits_imported_transcript_and_tool_event_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let imported = ServerMessage::TranscriptTextEntry {
             entry_index: CanonicalU64::new(0),
             source_session_id: uuid(1),
@@ -17501,17 +14245,17 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: an explicit null is not a member of the closed delivery vocabulary.
+    /// an explicit null is not a member of the closed delivery vocabulary.
     #[test]
-    fn inv033_submit_delivery_rejects_explicit_null() {
+    fn submit_delivery_rejects_explicit_null() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":"content","expected_defaults_version":"1","delivery":null}}"#,
         );
     }
 
-    /// INV-033: steering has one exact closed shape.
+    /// steering has one exact closed shape.
     #[test]
-    fn inv033_steering_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
+    fn steering_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let steering_request = ClientRequest::SubmitInput {
             command_id: command(1)?,
             session_id: uuid(2),
@@ -17546,9 +14290,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: queueing carries its exact active-turn and defaults guards.
+    /// queueing carries its exact active-turn and defaults guards.
     #[test]
-    fn inv033_queueing_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
+    fn queueing_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let queue_frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(2)?,
@@ -17585,10 +14329,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: explicit start-when-idle has one closed shape.
+    /// explicit start-when-idle has one closed shape.
     #[test]
-    fn inv033_explicit_start_when_idle_has_a_closed_shape() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn explicit_start_when_idle_has_a_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(3)?,
@@ -17621,11 +14364,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: configured start and queue treatments reject a missing
+    /// configured start and queue treatments reject a missing
     /// defaults guard before encoding.
     #[test]
-    fn inv033_configured_delivery_rejects_missing_defaults()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn configured_delivery_rejects_missing_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let start = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(4)?,
@@ -17658,10 +14400,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: configuration-free steering rejects an independently supplied
+    /// configuration-free steering rejects an independently supplied
     /// defaults version before encoding.
     #[test]
-    fn inv033_steering_rejects_independent_defaults_configuration()
+    fn steering_rejects_independent_defaults_configuration()
     -> Result<(), Box<dyn std::error::Error>> {
         let invalid = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
@@ -17697,10 +14439,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: steering against an already-stopping turn carries the exact
+    /// steering against an already-stopping turn carries the exact
     #[test]
-    fn inv033_stopping_steering_rejection_has_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn stopping_steering_rejection_has_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_server_message_round_trip(
             request(4)?,
             ServerMessage::Error {
@@ -17718,8 +14460,7 @@ mod tests {
 
     /// its accepted input, position, and exact source turn.
     #[test]
-    fn inv033_steering_receipt_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn steering_receipt_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let steering_response = ServerMessage::SteeringSubmitted {
             session_id: uuid(2),
             accepted_input_id: uuid(6),
@@ -17765,8 +14506,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_server_message_family_has_exact_closed_wire_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn server_message_family_has_exact_closed_wire_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::SessionCreated {
@@ -18410,11 +15151,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-032 / INV-053: a late follower's authoritative turn projection
+    /// a late follower's authoritative turn projection
     /// carries the same complete frozen settings evidence as the durable event.
     #[test]
-    fn inv032_inv053_transcript_turn_round_trips_frozen_settings()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn transcript_turn_round_trips_frozen_settings() -> Result<(), Box<dyn std::error::Error>> {
         let settings = settings_snapshot_fixture();
         let message = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
@@ -18444,10 +15184,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-012: queued user content is validated before a server frame can be
+    /// queued user content is validated before a server frame can be
     /// encoded, including when no model-settings snapshot is present.
     #[test]
-    fn inv012_transcript_turn_rejects_invalid_queued_content_before_encoding() {
+    fn transcript_turn_rejects_invalid_queued_content_before_encoding() {
         let result = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
             ServerMessage::TranscriptTurn {
@@ -18464,10 +15204,10 @@ mod tests {
         assert_eq!(result, Err(FrameValidationError::UserContentShape));
     }
 
-    /// INV-033: queued turn settings evidence belongs to the accepted input
+    /// queued turn settings evidence belongs to the accepted input
     /// named by the authoritative queued state.
     #[test]
-    fn inv033_transcript_turn_rejects_settings_for_another_queued_input() {
+    fn transcript_turn_rejects_settings_for_another_queued_input() {
         let settings = settings_snapshot_fixture();
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
@@ -18498,10 +15238,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: terminal turn settings evidence belongs to the turn named by
+    /// terminal turn settings evidence belongs to the turn named by
     /// the authoritative transcript projection.
     #[test]
-    fn inv033_transcript_turn_rejects_settings_for_another_terminal_turn() {
+    fn transcript_turn_rejects_settings_for_another_terminal_turn() {
         let settings = settings_snapshot_fixture();
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
@@ -18533,18 +15273,18 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: required-nullable turn settings cannot be omitted.
+    /// required-nullable turn settings cannot be omitted.
     #[test]
-    fn inv033_transcript_turn_requires_model_settings_member() {
+    fn transcript_turn_requires_model_settings_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"text","text":"queued request"}]}}}"#,
         );
     }
 
-    /// INV-033: complete settings snapshots cannot contradict their retained
+    /// complete settings snapshots cannot contradict their retained
     /// precedence provenance.
     #[test]
-    fn inv033_model_settings_snapshot_rejects_inconsistent_effective_values() {
+    fn model_settings_snapshot_rejects_inconsistent_effective_values() {
         let mut model_settings = session_settings_snapshot_fixture();
         model_settings.effective.reasoning_level = Some(ReasoningLevel::Low);
         let error = ServerFrame::try_new(
@@ -18559,10 +15299,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: only the exact all-inherit provider-default snapshot is
+    /// only the exact all-inherit provider-default snapshot is
     /// model-independent.
     #[test]
-    fn inv033_nondefault_settings_snapshot_requires_validation_identity() {
+    fn nondefault_settings_snapshot_requires_validation_identity() {
         let mut model_settings = session_settings_snapshot_fixture();
         model_settings.validated_for_selection_id = None;
 
@@ -18578,9 +15318,9 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: durable defaults snapshots cannot retain a per-call layer.
+    /// durable defaults snapshots cannot retain a per-call layer.
     #[test]
-    fn inv033_defaults_snapshot_rejects_per_call_settings() {
+    fn defaults_snapshot_rejects_per_call_settings() {
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
             ServerMessage::SessionCreated {
@@ -18593,10 +15333,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: the separately reported per-call contribution must equal the
+    /// the separately reported per-call contribution must equal the
     /// retained precedence layer.
     #[test]
-    fn inv033_turn_settings_event_rejects_crosswired_per_call_override() {
+    fn turn_settings_event_rejects_crosswired_per_call_override() {
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
             ServerMessage::SessionEvent {
@@ -18622,9 +15362,9 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: adjustments require a distinct prior direct validation identity.
+    /// adjustments require a distinct prior direct validation identity.
     #[test]
-    fn inv033_turn_settings_event_rejects_unchanged_adjustment_source() {
+    fn turn_settings_event_rejects_unchanged_adjustment_source() {
         let mut settings = settings_snapshot_fixture();
         settings.precedence.session = settings.precedence.per_call;
         settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
@@ -18658,10 +15398,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: a distinct prior direct selection authenticates automatic
+    /// a distinct prior direct selection authenticates automatic
     /// model-change adjustment evidence for the frozen turn.
     #[test]
-    fn inv033_turn_settings_event_accepts_distinct_adjustment_source() {
+    fn turn_settings_event_accepts_distinct_adjustment_source() {
         let mut settings = settings_snapshot_fixture();
         settings.precedence.session = settings.precedence.per_call;
         settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
@@ -18694,10 +15434,10 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// INV-033: caller and adjustment evidence must derive the exact installed
+    /// caller and adjustment evidence must derive the exact installed
     /// defaults snapshot.
     #[test]
-    fn inv033_settings_change_event_rejects_unrelated_installed_snapshot() {
+    fn settings_change_event_rejects_unrelated_installed_snapshot() {
         let prior_settings = provider_default_settings_snapshot_fixture();
         let installed_settings = session_settings_snapshot_fixture();
         let model = ModelSelection::Direct {
@@ -18727,10 +15467,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: an automatic model-change adjustment cannot rewrite a value
+    /// an automatic model-change adjustment cannot rewrite a value
     /// explicitly supplied by the caller of that same defaults replacement.
     #[test]
-    fn inv033_settings_change_rejects_adjustment_to_caller_explicit_value() {
+    fn settings_change_rejects_adjustment_to_caller_explicit_value() {
         let prior_settings = provider_default_settings_snapshot_fixture();
         let mut installed_settings = provider_default_settings_snapshot_fixture();
         installed_settings.precedence.session.reasoning_level =
@@ -18774,10 +15514,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: defaults reads bind a direct model to the snapshot validation
+    /// defaults reads bind a direct model to the snapshot validation
     /// identity.
     #[test]
-    fn inv033_defaults_read_rejects_crosswired_direct_settings() {
+    fn defaults_read_rejects_crosswired_direct_settings() {
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
             ServerMessage::SessionDefaults {
@@ -18796,10 +15536,10 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-012 / INV-033: settings-change events reject both reserved command
+    /// settings-change events reject both reserved command
     /// identities during wire decoding.
     #[test]
-    fn inv012_inv033_settings_change_event_rejects_command_sentinels() {
+    fn settings_change_event_rejects_command_sentinels() {
         let nil = format!(
             "{{\"version\":1,\"request_id\":\"1\",\"message\":{{\"type\":\"session_event\",\"cursor\":\"1\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"event\":{{\"type\":\"session_model_settings_changed\",\"command_id\":\"00000000-0000-0000-0000-000000000000\",\"prior_defaults_version\":\"1\",\"installed_defaults_version\":\"2\",\"prior_model\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"installed_model\":{{\"kind\":\"alias\",\"alias_id\":\"00000000-0000-0000-0000-000000000005\"}},\"prior_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"installed_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"caller_override\":{{\"reasoning_level\":{{\"kind\":\"inherit\"}},\"fast_mode\":{{\"kind\":\"inherit\"}},\"service_tier\":{{\"kind\":\"inherit\"}}}},\"adjustments\":[]}}}}}}"
         );
@@ -18819,10 +15559,10 @@ mod tests {
         );
     }
 
-    /// INV-033: steering inherits its source turn and cannot carry an
+    /// steering inherits its source turn and cannot carry an
     /// independent settings contribution.
     #[test]
-    fn inv033_steering_rejects_a_model_settings_override() {
+    fn steering_rejects_a_model_settings_override() {
         let mut model_settings = ModelSettingsOverlay::inherit_all();
         model_settings.reasoning_level = SettingOverlay::Value(ReasoningLevel::High);
         let error = ClientFrame::try_new(
@@ -19082,7 +15822,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inv044_runner_placed_session_summary_round_trips_complete_projection()
+    fn runner_placed_session_summary_round_trips_complete_projection()
     -> Result<(), Box<dyn std::error::Error>> {
         let runner = RunnerProjection::try_new(
             RunnerProjectionSelector::CapabilityClass {
@@ -19119,7 +15859,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_summary_rejects_an_omitted_required_nullable_runner() {
+    fn session_summary_rejects_an_omitted_required_nullable_runner() {
         let encoded = br#"{"version":1,"request_id":"1","message":{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000003"},"placement_version":"1","placement":{"kind":"pathless"}}}
 "#;
 

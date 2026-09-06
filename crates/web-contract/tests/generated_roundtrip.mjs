@@ -12,13 +12,98 @@ import {
   decodeWebImportListPage,
   decodeWebSearchPage,
   decodeWebSessionCatalogSnapshot,
+  decodeWebSessionLiveSnapshot,
+  decodeWebSessionLiveStreamEvent,
   decodeWebSessionTimelineDescriptor,
+  decodeWebSessionTimelineDetailPage,
   decodeWebSessionTimelineWindow,
   decodeWebUsageCallPage,
   decodeWebUsageSummary,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
+
+function userInputDetailPage() {
+  return {
+    session_id: "00000000-0000-0000-0000-000000000991",
+    items: [
+      {
+        address: { event_sequence: "7" },
+        kind: "input_accepted",
+        body: {
+          type: "user_input",
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          text: {
+            text: "abc",
+            offset_bytes: "0",
+            total_bytes: "3",
+            continuation: null,
+          },
+          attachments: [],
+        },
+        projected_body_bytes: 131,
+      },
+    ],
+    projected_body_bytes: 131,
+    continuation: null,
+  };
+}
+
+function modelCallDetailPage() {
+  return {
+    session_id: "00000000-0000-0000-0000-000000000991",
+    items: [
+      {
+        address: { event_sequence: "8" },
+        kind: "model_call_transition",
+        body: {
+          type: "model_call",
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          model_call_id: "00000000-0000-0000-0000-000000000993",
+          state: { type: "prepared" },
+          model_identity_id: "00000000-0000-0000-0000-000000000994",
+          request_context_items: "0",
+          response: null,
+          usage: {
+            input_tokens: null,
+            output_tokens: null,
+            cache_creation_input_tokens: null,
+            cache_read_input_tokens: null,
+          },
+          provider_failure_cause: null,
+        },
+        projected_body_bytes: 128,
+      },
+    ],
+    projected_body_bytes: 128,
+    continuation: null,
+  };
+}
+
+function turnLifecycleDetailPage() {
+  return {
+    session_id: "00000000-0000-0000-0000-000000000991",
+    items: [
+      {
+        address: { event_sequence: "9" },
+        kind: "turn_completed",
+        body: {
+          type: "turn_lifecycle",
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          lifecycle: "terminalized",
+          cause_code: "completed",
+        },
+        projected_body_bytes: 128,
+      },
+    ],
+    projected_body_bytes: 128,
+    continuation: null,
+  };
+}
+
+function thirtyThreeQueuedTurnIds() {
+  return Array.from({ length: 33 }, (_, index) => `${index}`);
+}
 
 function searchPage() {
   return {
@@ -114,6 +199,7 @@ test("generated bootstrap decoder rejects another contract version", () => {
         contract: { name: "signalbox.web-http", version: "999" },
         capabilities: {
           bounded_json: true,
+          bounded_session_timeline_detail: true,
           bounded_lexical_search: true,
           bounded_usage_cost: true,
           same_origin_json_mutations: true,
@@ -124,15 +210,19 @@ test("generated bootstrap decoder rejects another contract version", () => {
           import_discovery: true,
           imported_continuations: true,
           bounded_session_timeline: true,
+          bounded_session_live: true,
         },
         limits: {
           max_json_body_bytes: 65536,
           max_ndjson_item_bytes: 65536,
+          max_timeline_detail_items: 128,
+          max_timeline_detail_bytes: 65536,
           max_search_page_items: 100,
           max_search_query_bytes: 512,
           max_search_snippet_bytes: 512,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
+          max_session_live_queued_turns: 32,
           max_usage_aggregate_groups: 256,
           max_usage_call_page_items: 100,
         },
@@ -150,6 +240,8 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
           bounded_json: true,
           bounded_lexical_search: true,
           bounded_session_timeline: true,
+          bounded_session_timeline_detail: true,
+          bounded_session_live: true,
           bounded_usage_cost: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
@@ -165,8 +257,11 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
           max_search_page_items: 100,
           max_search_query_bytes: 512,
           max_search_snippet_bytes: 512,
+          max_timeline_detail_items: 128,
+          max_timeline_detail_bytes: 65536,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
+          max_session_live_queued_turns: 32,
           max_usage_aggregate_groups: 256,
           max_usage_call_page_items: 100,
         },
@@ -1187,6 +1282,8 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
           import_discovery: true,
           imported_continuations: true,
           bounded_session_timeline: true,
+          bounded_session_timeline_detail: true,
+          bounded_session_live: true,
         },
         limits: {
           max_json_body_bytes: 1,
@@ -1194,14 +1291,361 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
           max_search_page_items: 100,
           max_search_query_bytes: 512,
           max_search_snippet_bytes: 512,
+          max_timeline_detail_items: 128,
+          max_timeline_detail_bytes: 65536,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
+          max_session_live_queued_turns: 32,
           max_usage_aggregate_groups: 256,
           max_usage_call_page_items: 100,
         },
       }),
     /incompatible web contract/,
   );
+});
+
+test("generated live decoder bounds retained queued turns", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "33",
+        queued_turn_ids: thirtyThreeQueuedTurnIds(),
+        reconciliation: null,
+        runner: null,
+      }),
+    /at most 32 items/,
+  );
+});
+
+test("generated live decoder requires a positive observation cursor", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "0",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /matching/,
+  );
+});
+
+test("generated live decoder correlates queued preview with its count", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: ["00000000-0000-0000-0000-000000000992"],
+        reconciliation: null,
+        runner: null,
+      }),
+    /exactly 0 IDs for queued_turn_count/,
+  );
+});
+
+test("generated live decoder rejects duplicate queued turn identities", () => {
+  const duplicate = "00000000-0000-0000-0000-000000000992";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "2",
+        queued_turn_ids: [duplicate, duplicate],
+        reconciliation: null,
+        runner: null,
+      }),
+    /unique turn IDs/,
+  );
+});
+
+test("generated live decoder rejects queued identities occupying current state", () => {
+  const occupiedTurn = "00000000-0000-0000-0000-000000000992";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: occupiedTurn,
+          state: { kind: "running", model_call_id: null },
+        },
+        queued_turn_count: "1",
+        queued_turn_ids: [occupiedTurn],
+        reconciliation: null,
+        runner: null,
+      }),
+    /disjoint from active and reconciliation turn IDs/,
+  );
+});
+
+test("generated live decoder validates identities", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "not-a-uuid",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /matching/,
+  );
+});
+
+test("generated live decoder rejects simultaneous active and reconciliation states", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: { kind: "running", model_call_id: null },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: {
+          kind: "model_call",
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          model_call_id: "00000000-0000-0000-0000-000000000993",
+        },
+        runner: null,
+      }),
+    /absent while an active turn is present/,
+  );
+});
+
+test("generated live decoder requires explicit nullable state fields", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+      }),
+    /must be present/,
+  );
+  const explicit = decodeWebSessionLiveSnapshot({
+    session_id: "00000000-0000-0000-0000-000000000991",
+    observed_through: "7",
+    active: null,
+    queued_turn_count: "0",
+    queued_turn_ids: [],
+    reconciliation: null,
+    runner: null,
+  });
+  assert.equal(explicit.active, null);
+  assert.equal(explicit.reconciliation, null);
+  assert.equal(explicit.runner, null);
+});
+
+test("generated live decoder requires an explicit running model call", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: { kind: "running" },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /one recognized variant/,
+  );
+  const idle = decodeWebSessionLiveSnapshot({
+    session_id: "00000000-0000-0000-0000-000000000991",
+    observed_through: "7",
+    active: {
+      turn_id: "00000000-0000-0000-0000-000000000992",
+      state: { kind: "running", model_call_id: null },
+    },
+    queued_turn_count: "0",
+    queued_turn_ids: [],
+    reconciliation: null,
+    runner: null,
+  });
+  assert.equal(idle.active.state.model_call_id, null);
+});
+
+test("generated live decoder rejects malformed runner correlations", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: { state: "pinned", placement_revision: "1" },
+      }),
+    /one recognized variant/,
+  );
+});
+
+test("generated live decoder requires positive placement revisions", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: { state: "unpinned", placement_revision: "0" },
+      }),
+    /one recognized variant/,
+  );
+});
+
+test("generated live decoder rejects self-referential child waits", () => {
+  const sessionId = "00000000-0000-0000-0000-000000000991";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: sessionId,
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: {
+            kind: "awaiting_child",
+            tool_request_id: "00000000-0000-0000-0000-000000000993",
+            child_session_id: sessionId,
+          },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /different from the parent session ID/,
+  );
+});
+
+test("generated live decoder correlates runner recovery with placement", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: {
+            kind: "awaiting_runner_recovery",
+            runner_id: "00000000-0000-0000-0000-000000000993",
+            placement_revision: "4",
+          },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: {
+          state: "runner_lost",
+          runner_id: "00000000-0000-0000-0000-000000000994",
+          placement_revision: "4",
+        },
+      }),
+    /runner placement required by awaiting_runner_recovery/,
+  );
+});
+
+test("generated live stream decoder rejects variant-only extra fields", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "draft",
+        cursor: "8",
+      }),
+    /one recognized variant/,
+  );
+});
+
+test("generated live stream decoder correlates durable cursor and address", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "durable",
+        cursor: "8",
+        address: { event_sequence: "9" },
+        event_kind: "turn_activated",
+      }),
+    /equal to cursor/,
+  );
+});
+
+test("generated live stream decoder bounds provider text fragments", () => {
+  const admitted = decodeWebSessionLiveStreamEvent({
+    kind: "provider_text_delta",
+    turn_id: "00000000-0000-0000-0000-000000000992",
+    model_call_id: "00000000-0000-0000-0000-000000000993",
+    part_index: 0,
+    content: "x".repeat(8192),
+  });
+  assert.equal(admitted.content.length, 8192);
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "x".repeat(8193),
+      }),
+    /at most 8192 UTF-8 bytes/,
+  );
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "\u{20AC}".repeat(2731),
+      }),
+    /at most 8192 UTF-8 bytes/,
+  );
+});
+
+test("generated live stream decoder requires a positive resynchronization cursor", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "resync_required",
+        cursor: "0",
+      }),
+    /one recognized variant/,
+  );
+  const resync = decodeWebSessionLiveStreamEvent({
+    kind: "resync_required",
+    cursor: "7",
+  });
+  assert.equal(resync.cursor, "7");
 });
 
 test("generated error decoder preserves the transport application boundary", () => {
@@ -1236,6 +1680,7 @@ function attentionSummary(overrides = {}) {
     goal_block: null,
     judge: { actionable: "0", completed: "0", escalated: "0", failed: "0" },
     last_activity: { unix_milliseconds: "0", kind: "session" },
+    lifecycle_state: "terminal",
     ...overrides,
   };
 }
@@ -1522,6 +1967,399 @@ test("generated timeline decoder rejects an address beyond u64", () => {
         continuation_after: null,
       }),
     /unsigned 64-bit integer/,
+  );
+});
+
+test("generated detail decoder rejects contradictory event semantics", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "turn_failed";
+
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /input_accepted/);
+});
+
+test("generated detail decoder rejects invalid excerpt arithmetic", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.offset_bytes = "10";
+  page.items[0].body.text.total_bytes = "5";
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /declared byte range/,
+  );
+});
+
+test("generated detail decoder requires the exact excerpt continuation", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.total_bytes = "6";
+  page.items[0].body.text.continuation = {
+    address: { event_sequence: "7" },
+    field: "input_text",
+    member_index: 0,
+    offset_bytes: "4",
+  };
+  page.continuation = {
+    type: "more_body",
+    body: page.items[0].body.text.continuation,
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /immediately after the excerpt/,
+  );
+});
+
+test("generated detail decoder rejects oversized arrays before their members", () => {
+  const page = userInputDetailPage();
+  page.items = Array.from({ length: 129 }, () => null);
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /at most 128 items/,
+  );
+});
+
+test("generated detail decoder rejects an invalid turn identity", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.turn_id = "not-a-uuid";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects an invalid model-call identity", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.model_call_id = "not-a-uuid";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects an invalid model identity", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.model_identity_id = "not-a-uuid";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects an invalid page session identity", () => {
+  const page = userInputDetailPage();
+  page.session_id = "not-a-uuid";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /matching/);
+});
+
+test("generated detail decoder rejects invalid blob identities", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = [
+    { blob_id: "not-a-digest", length_bytes: "1", media_type: null },
+  ];
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder bounds attachments before decoding members", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = Array.from({ length: 257 }, () => null);
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects responses on nonterminal calls", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.response = {
+    text: "x",
+    offset_bytes: "0",
+    total_bytes: "1",
+    continuation: null,
+  };
+  page.items[0].projected_body_bytes = 129;
+  page.projected_body_bytes = 129;
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /terminal evidence only/,
+  );
+});
+
+test("generated detail decoder rejects usage on nonterminal calls", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.usage.input_tokens = "1";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /terminal evidence only/,
+  );
+});
+
+test("generated detail decoder rejects failure causes on nonterminal calls", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.provider_failure_cause = "rate_limited";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /terminal evidence only/,
+  );
+});
+
+test("generated detail decoder rejects an unknown provider failure cause", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = {
+    type: "terminal",
+    disposition: "known_failed",
+  };
+  page.items[0].body.provider_failure_cause = "invented";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder accepts a cause-less known failure", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = {
+    type: "terminal",
+    disposition: "known_failed",
+  };
+  const decoded = decodeWebSessionTimelineDetailPage(page);
+  assert.equal(
+    decoded.items[0].body.state.disposition,
+    page.items[0].body.state.disposition,
+  );
+  assert.equal(
+    decoded.items[0].body.provider_failure_cause,
+    page.items[0].body.provider_failure_cause,
+  );
+});
+
+test("generated detail decoder rejects a failure cause on another disposition", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = { type: "terminal", disposition: "completed" };
+  page.items[0].body.provider_failure_cause = "rate_limited";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /present only for a known_failed/,
+  );
+});
+
+test("generated detail decoder bounds attachment media types", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = [
+    {
+      blob_id: `sha256:${"a".repeat(64)}`,
+      length_bytes: "1",
+      media_type: `application/${"x".repeat(256)}`,
+    },
+  ];
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder correlates lifecycle causes with event kinds", () => {
+  const page = turnLifecycleDetailPage();
+  page.items[0].body.cause_code = "failed";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /the cause for turn_completed/,
+  );
+});
+
+test("generated detail decoder rejects a nonzero input member index", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.total_bytes = "6";
+  page.items[0].body.text.continuation = {
+    address: { event_sequence: "7" },
+    field: "input_text",
+    member_index: 1,
+    offset_bytes: "3",
+  };
+  page.continuation = {
+    type: "more_body",
+    body: page.items[0].body.text.continuation,
+  };
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /zero for a singular body field/,
+  );
+});
+
+test("generated detail decoder rejects a nonzero response member index", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = { type: "terminal", disposition: "completed" };
+  page.items[0].body.response = {
+    text: "abc",
+    offset_bytes: "0",
+    total_bytes: "6",
+    continuation: {
+      address: { event_sequence: "8" },
+      field: "model_response",
+      member_index: 1,
+      offset_bytes: "3",
+    },
+  };
+  page.items[0].projected_body_bytes = 131;
+  page.projected_body_bytes = 131;
+  page.continuation = {
+    type: "more_body",
+    body: page.items[0].body.response.continuation,
+  };
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /zero for a singular body field/,
+  );
+});
+
+test("generated detail decoder rejects projected byte mismatches", () => {
+  const page = userInputDetailPage();
+  page.projected_body_bytes = 130;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /the computed 131 bytes/,
+  );
+});
+
+test("generated detail decoder enforces the projected byte ceiling", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.text = "x".repeat(65536);
+  page.items[0].body.text.total_bytes = "65536";
+  page.items[0].projected_body_bytes = 65664;
+  page.projected_body_bytes = 65664;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /at most 65536 bytes/,
+  );
+});
+
+test("generated detail decoder rejects non-monotonic addresses", () => {
+  const page = userInputDetailPage();
+  page.items.push({
+    ...structuredClone(page.items[0]),
+    address: { event_sequence: "7" },
+  });
+  page.projected_body_bytes = 262;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /strictly increasing/,
+  );
+});
+
+test("generated detail decoder bounds excerpt text before byte accounting", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.text = "x".repeat(65537);
+  page.items[0].body.text.total_bytes = "65537";
+  page.items[0].projected_body_bytes = 65665;
+  page.projected_body_bytes = 65665;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder requires a continued body to end the page", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.total_bytes = "6";
+  page.items[0].body.text.continuation = {
+    address: { event_sequence: "7" },
+    field: "input_text",
+    member_index: 0,
+    offset_bytes: "3",
+  };
+  page.items.push({
+    address: { event_sequence: "8" },
+    kind: "session_created",
+    body: { type: "event_fact", kind: "session_created" },
+    projected_body_bytes: 128,
+  });
+  page.projected_body_bytes = 259;
+  page.continuation = {
+    type: "more_body",
+    body: page.items[0].body.text.continuation,
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /absent after a continued body/,
+  );
+});
+
+test("generated detail decoder rejects a continuation on an empty page", () => {
+  const page = userInputDetailPage();
+  page.items = [];
+  page.projected_body_bytes = 0;
+  page.continuation = {
+    type: "more_at",
+    address: { event_sequence: "9" },
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /absent on an empty page/,
+  );
+});
+
+test("generated detail decoder rejects a response on a non-completed disposition", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = { type: "terminal", disposition: "refused" };
+  page.items[0].body.response = {
+    text: "x",
+    offset_bytes: "0",
+    total_bytes: "1",
+    continuation: null,
+  };
+  page.items[0].projected_body_bytes = 129;
+  page.projected_body_bytes = 129;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /present only for a completed terminal model call/,
+  );
+});
+
+test("generated detail decoder rejects a non-ASCII attachment media type", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = [
+    {
+      blob_id: `sha256:${"a".repeat(64)}`,
+      length_bytes: "1",
+      media_type: "application/café",
+    },
+  ];
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects usage on a cancelled disposition", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = { type: "terminal", disposition: "cancelled" };
+  page.items[0].body.usage.input_tokens = "1";
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /unreported for a cancelled terminal model call/,
+  );
+});
+
+test("generated detail decoder requires more-at to advance", () => {
+  const page = userInputDetailPage();
+  page.continuation = {
+    type: "more_at",
+    address: { event_sequence: "7" },
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /after the final returned item/,
   );
 });
 

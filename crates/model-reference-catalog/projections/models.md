@@ -19,6 +19,7 @@ unknown, not unsupported.
 | Anthropic | `anthropic:claude-4-family` | - | family | - | unknown |
 | Anthropic | `anthropic:claude-5-family` | - | family | - | unknown |
 | Anthropic | `anthropic:claude-fable-5` | `claude-fable-5` | pinned_release | `anthropic:claude-5-family` | unknown |
+| Anthropic | `anthropic:claude-fable-5-1` | `claude-fable-5-1` | pinned_release | `anthropic:claude-5-family` | unknown |
 | Anthropic | `anthropic:claude-haiku-4-5` | `claude-haiku-4-5` | rolling_alias | `anthropic:claude-4-family` | unknown |
 | Anthropic | `anthropic:claude-haiku-4-5-20251001` | `claude-haiku-4-5-20251001` | dated_snapshot | `anthropic:claude-4-family` | unknown |
 | Anthropic | `anthropic:claude-opus-4-20250514` | `claude-opus-4-20250514` | dated_snapshot | `anthropic:claude-4-family` | unknown |
@@ -75,6 +76,8 @@ unknown, not unsupported.
 | OpenAI | `openai:gpt-5.6-luna` | `gpt-5.6-luna` | pinned_release | `openai:gpt-5.6-family` | unknown |
 | OpenAI | `openai:gpt-5.6-sol` | `gpt-5.6-sol` | pinned_release | `openai:gpt-5.6-family` | unknown |
 | OpenAI | `openai:gpt-5.6-terra` | `gpt-5.6-terra` | pinned_release | `openai:gpt-5.6-family` | unknown |
+| OpenAI | `openai:gpt-6-astra` | `gpt-6-astra` | pinned_release | `openai:gpt-6-family` | +text_and_image_input, +reasoning, +agentic_coding |
+| OpenAI | `openai:gpt-6-family` | - | family | - | unknown |
 | OpenAI | `openai:o-series-family` | - | family | - | unknown |
 | OpenAI | `openai:o1` | `o1` | rolling_alias | `openai:o-series-family` | unknown |
 | OpenAI | `openai:o1-2024-12-17` | `o1-2024-12-17` | dated_snapshot | `openai:o-series-family` | unknown |

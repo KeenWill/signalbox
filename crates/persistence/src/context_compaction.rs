@@ -1,6 +1,6 @@
 //! Durable explicit context-compaction command and call lifecycle.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -54,6 +54,7 @@ pub struct PrepareContextCompactionRequest {
     pub result_frontier: ContextFrontierId,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact durable facts committed before provider preparation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedContextCompaction {
@@ -64,22 +65,31 @@ pub struct PreparedContextCompaction {
     call: ModelCallId,
     selection: DirectModelSelection,
     target: ResolvedProviderTarget,
+    /// Returns the pinned non-secret credential reference.
+    #[get(str)]
     credential_reference: String,
     source_frontier: ContextFrontierId,
     first_position: u64,
     through_position: u64,
     first: SemanticTranscriptEntryRef,
     through: SemanticTranscriptEntryRef,
+    /// Returns the exact model-visible range supplied to the summary call.
+    #[get(unbox)]
     summarized_entries: Box<[SemanticTranscriptEntryRef]>,
+    /// Returns each summarized entry's one-based physical frontier position.
+    #[get(unbox)]
     summarized_positions: Box<[u64]>,
     summary_entry: SemanticTranscriptEntryId,
     result_frontier: ContextFrontierId,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Read-only model-visible inventory used to choose an automatic boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutomaticContextCompactionPreview {
     source_frontier: ContextFrontierId,
+    /// Returns projected members in model-visible order.
+    #[get(unbox)]
     members: Box<[AutomaticContextCompactionPreviewMember]>,
 }
 
@@ -88,36 +98,21 @@ impl AutomaticContextCompactionPreview {
     pub const fn source_frontier(&self) -> ContextFrontierId {
         self.source_frontier
     }
-
-    /// Returns projected members in model-visible order.
-    pub fn members(&self) -> &[AutomaticContextCompactionPreviewMember] {
-        &self.members
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One projected entry and whether it closes every preceding tool exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AutomaticContextCompactionPreviewMember {
-    position: u64,
-    reference: SemanticTranscriptEntryRef,
-    safe_boundary: bool,
-}
-
-impl AutomaticContextCompactionPreviewMember {
     /// Returns the entry's one-based physical frontier position.
-    pub const fn position(self) -> u64 {
-        self.position
-    }
-
+    #[get(copy)]
+    position: u64,
     /// Returns the exact semantic entry reference.
-    pub const fn reference(self) -> SemanticTranscriptEntryRef {
-        self.reference
-    }
-
+    #[get(copy)]
+    reference: SemanticTranscriptEntryRef,
     /// Reports whether a summary through this entry closes all tool exchanges.
-    pub const fn is_safe_boundary(self) -> bool {
-        self.safe_boundary
-    }
+    #[get(copy, as = "is_safe_boundary")]
+    safe_boundary: bool,
 }
 
 impl PreparedContextCompaction {
@@ -149,10 +144,7 @@ impl PreparedContextCompaction {
     pub const fn target(&self) -> ResolvedProviderTarget {
         self.target
     }
-    /// Returns the pinned non-secret credential reference.
-    pub fn credential_reference(&self) -> &str {
-        &self.credential_reference
-    }
+
     /// Returns the complete source-frontier identity.
     pub const fn source_frontier(&self) -> ContextFrontierId {
         self.source_frontier
@@ -173,14 +165,7 @@ impl PreparedContextCompaction {
     pub const fn through(&self) -> SemanticTranscriptEntryRef {
         self.through
     }
-    /// Returns the exact model-visible range supplied to the summary call.
-    pub fn summarized_entries(&self) -> &[SemanticTranscriptEntryRef] {
-        &self.summarized_entries
-    }
-    /// Returns each summarized entry's one-based physical frontier position.
-    pub fn summarized_positions(&self) -> &[u64] {
-        &self.summarized_positions
-    }
+
     /// Returns the fresh summary-entry identity.
     pub const fn summary_entry(&self) -> SemanticTranscriptEntryId {
         self.summary_entry
@@ -392,7 +377,8 @@ impl ContextCompactionRepository {
         }
         let rows = sqlx::query(
             "UPDATE context_compaction_model_call
-                SET state_kind = 'in_flight'
+                SET state_kind = 'in_flight',
+                    in_flight_at = statement_timestamp()
               WHERE model_call_id = $1
                 AND session_id = $2
                 AND state_kind = 'prepared'",
@@ -455,18 +441,13 @@ impl ContextCompactionRepository {
                 ContextCompactionCorruption::Inconsistent("compaction completion state").into(),
             );
         }
-        let source_count: Decimal = sqlx::query_scalar(
-            "SELECT member_count
-               FROM context_frontier
-              WHERE owning_session_id = $1
-                AND context_frontier_id = $2
-              FOR SHARE",
-        )
-        .bind(session_id_to_uuid(prepared.session))
-        .bind(prepared.source_frontier.into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(ContextCompactionCorruption::Missing("source frontier"))?;
+        let source_count: Decimal =
+            sqlx::query_scalar(crate::lock_inventory::CONTEXT_COMPACTION_SOURCE_FRONTIER)
+                .bind(session_id_to_uuid(prepared.session))
+                .bind(prepared.source_frontier.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ContextCompactionCorruption::Missing("source frontier"))?;
         let source_count = decode_u64(source_count, "source frontier member count")?;
         let result_count =
             source_count
@@ -477,6 +458,7 @@ impl ContextCompactionRepository {
         let call_rows = sqlx::query(
             "UPDATE context_compaction_model_call
                 SET state_kind = 'terminal',
+                    terminal_at = statement_timestamp(),
                     terminal_disposition_kind = 'completed',
                     input_tokens = $1,
                     output_tokens = $2,
@@ -673,7 +655,8 @@ impl ContextCompactionRepository {
         }
         let call_rows = sqlx::query(
             "UPDATE context_compaction_model_call
-                SET state_kind = 'terminal', terminal_disposition_kind = $1,
+                SET state_kind = 'terminal', terminal_at = statement_timestamp(),
+                    terminal_disposition_kind = $1,
                     input_tokens = $2, output_tokens = $3,
                     cache_creation_input_tokens = $4,
                     cache_read_input_tokens = $5
@@ -930,14 +913,22 @@ async fn prepare_in_transaction(
     // saw the winner raised a raw uniqueness violation instead of losing the
     // claim. An unnamed arbiter covers every unique index on the row, which is
     // what every other durable command claim in this crate already does.
+    let issuer = crate::command_registry::issuer_columns(if request.automatic_for_turn.is_some() {
+        signalbox_domain::CommandPrincipal::Core
+    } else {
+        signalbox_domain::CommandPrincipal::Operator
+    });
     let claimed = sqlx::query(
         "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, 1, clock_timestamp())
+            (command_id, command_kind, storage_version, claimed_at,
+             issuer_kind, issuer_module)
+         VALUES ($1, $2, 1, clock_timestamp(), $3, $4)
          ON CONFLICT DO NOTHING",
     )
     .bind(request.command.into_uuid())
     .bind(COMMAND_KIND)
+    .bind(issuer.0)
+    .bind(issuer.1)
     .execute(&mut **transaction)
     .await?
     .rows_affected();
@@ -1528,43 +1519,47 @@ fn require_single(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Committed storage facts could not form one exact compaction lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextCompactionCorruption {
+    #[error("context compaction storage is inconsistent")]
     /// Required durable fact was absent.
     Missing(&'static str),
+    #[error("context compaction storage is inconsistent")]
     /// Stored ordinal was outside the admitted u64 range.
     InvalidOrdinal(&'static str),
+    #[error("context compaction storage is inconsistent")]
     /// Related lifecycle facts disagreed.
     Inconsistent(&'static str),
+    #[error("context compaction storage is inconsistent")]
     /// Stored command result discriminator is unknown.
     UnsupportedResult(String),
+    #[error("context compaction storage is inconsistent")]
     /// Stored user-global command-kind discriminator is unknown.
     UnsupportedCommandKind(String),
+    #[error("context compaction storage is inconsistent")]
     /// Summary text did not satisfy the semantic entry scalar.
     InvalidSummary,
 }
 
-impl fmt::Display for ContextCompactionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("context compaction storage is inconsistent")
-    }
-}
-
-impl Error for ContextCompactionCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, collision, or fail-closed corruption from compaction persistence.
 #[derive(Debug)]
 pub enum ContextCompactionRepositoryError {
+    #[error("context compaction persistence failed")]
     /// Database operation failed before an ambiguous commit boundary.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("context compaction persistence failed")]
     /// Commit outcome could not be proven.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("context compaction persistence failed")]
     /// A daemon-minted call or result identity collided globally and may be
     /// reminted.
     IdentityCollision,
+    #[error("context compaction persistence failed")]
     /// Durable rows contradicted the closed lifecycle.
-    Corruption(ContextCompactionCorruption),
+    Corruption(#[source] ContextCompactionCorruption),
 }
 
 impl ContextCompactionRepositoryError {
@@ -1573,22 +1568,6 @@ impl ContextCompactionRepositoryError {
             Self::CommitAmbiguous(error)
         } else {
             Self::Database(error)
-        }
-    }
-}
-
-impl fmt::Display for ContextCompactionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("context compaction persistence failed")
-    }
-}
-
-impl Error for ContextCompactionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision => None,
         }
     }
 }
@@ -1658,10 +1637,10 @@ mod tests {
         }
     }
 
-    /// INV-015: successor compaction selection follows model-visible order even
+    /// successor compaction selection follows model-visible order even
     /// when the retained suffix physically precedes the predecessor summary.
     #[test]
-    fn inv015_successor_boundary_uses_projected_order() {
+    fn successor_boundary_uses_projected_order() {
         let first = entry(0x7001);
         let root_through = entry(0x7002);
         let retained_suffix = entry(0x7003);
@@ -1681,10 +1660,10 @@ mod tests {
         assert_eq!(latest_safe_boundary(&visible), Some(1));
     }
 
-    /// INV-015: a successor summary can replace a boundary whose physical
+    /// a successor summary can replace a boundary whose physical
     /// position precedes the summary that begins its visible range.
     #[test]
-    fn inv015_successor_summary_projects_over_physical_reversal() {
+    fn successor_summary_projects_over_physical_reversal() {
         let first = entry(0x7011);
         let root_through = entry(0x7012);
         let retained_suffix = entry(0x7013);

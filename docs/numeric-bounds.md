@@ -11,16 +11,13 @@ to bound or size a fixture.
 The live-line merge adds one model-exchange policy to the original audit and the
 automatic-resume lifetime ceiling one goal policy; the liveness watchdog's
 single recovery-attempt constant now answers to two configured policies because
-its two consumers need different ceilings. The 121 rows partition as 35 guards,
-8 derived bounds, 65 configuration policies, 9 representation facts, and 4 test
+its two consumers need different ceilings. The 127 rows partition as 36 guards,
+8 derived bounds, 69 configuration policies, 10 representation facts, and 4 test
 fixtures. Source locations are maintained with the implementation slices that
 move or delete declarations.
 
-The numeric-bound gate accepts only structural guards, values mechanically
-derived from guards, representation facts, and test fixtures from this
-classified set. Exact pre-existing daemon and persistence candidates omitted
-from the commissioned audit remain outside the blocking set; any newly named
-bound in either root fails closed.
+The inventory distinguishes structural guards, values mechanically derived from
+guards, representation facts, test fixtures, and deployment configuration.
 
 ## Guards and derived bounds
 
@@ -40,7 +37,7 @@ bound in either root fails closed.
 | `crates/process-protocol/src/lib.rs:121`                       | `MAX_REVIEW_ORCHESTRATION_MEMBERS`          | guard   | A review request exhausting wire-frame memory.                                                  |
 | `crates/process-protocol/src/lib.rs:5902`                      | `MAX_UTF8_BYTES`                            | guard   | Mirrors the domain runner-working-directory wire grammar.                                       |
 | `apps/signalboxd/src/convergence_sweep_runtime.rs:47`          | `MAX_RESPONSE_BYTES`                        | guard   | One buffered provider response exhausting process memory.                                       |
-| `apps/signalboxd/src/convergence_sweep_runtime.rs:57`          | `MAX_CREDENTIAL_BYTES`                      | guard   | Credential input exhausting secret-material memory.                                             |
+| `apps/signalboxd/src/convergence_sweep_runtime.rs:57`          | `MAX_CREDENTIAL_BYTES`                      | guard   | Credential material reaching a provider request past the accepted size.                         |
 | `apps/signalboxd/src/turn_liveness_runtime.rs:108`             | `QUIESCENT_ROTATION_PAGE_CEILING`           | guard   | A non-converging quiescent-rotation scan loop.                                                  |
 | `apps/signalboxd/src/goal_mode.rs:95`                          | `AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES`   | guard   | Retrying forever against a dead database.                                                       |
 | `crates/model-runtime/src/provider_json.rs:11`                 | `PROVIDER_JSON_NESTING_LIMIT`               | guard   | Pathological provider-JSON nesting exhausting the stack.                                        |
@@ -69,12 +66,12 @@ bound in either root fails closed.
 | `crates/tools-code-host/src/code_host/arguments.rs:15`         | `MAX_OPAQUE_ID_BYTES`                       | guard   | The tool grammar advertises accepting opaque identifiers only to this length.                   |
 | `crates/tools-code-host/src/code_host/arguments.rs:17`         | `MAX_CURSOR_BYTES`                          | guard   | The tool grammar advertises accepting pagination cursors only to this length.                   |
 | `crates/tools-code-host/src/code_host/repository_result.rs:15` | `MAX_REPOSITORY_FILE_SCAN_BYTES`            | guard   | One ranged repository-file read exhausting process memory.                                      |
+| `crates/persistence/src/lifecycle_metrics.rs:22`               | `MAX_REPORTED_WEEKS`                        | guard   | Weeks accrue forever, so one metric report exhausting wire-frame memory.                        |
 
 ## Required configuration policies
 
 | Source                               | Constant                                          | Tier   | Required field replacing the constant                                                |
 | ------------------------------------ | ------------------------------------------------- | ------ | ------------------------------------------------------------------------------------ |
-| `config/signalboxd.example.toml:24`  | `REPOSITORY_RECONCILIATION_QUANTUM`               | config | `numeric_bounds.repository_reconciliation_quantum`                                   |
 | `config/signalboxd.example.toml:26`  | `MAX_CONCURRENT_SNAPSHOT_READERS`                 | config | `numeric_bounds.max_concurrent_snapshot_readers`                                     |
 | `config/signalboxd.example.toml:28`  | `MAX_BLOB_REPLICA_COUNT`                          | config | `numeric_bounds.max_blob_replica_count`                                              |
 | `config/signalboxd.example.toml:30`  | `MAX_SESSION_METADATA_TAGS`                       | config | `numeric_bounds.max_session_metadata_tags`                                           |
@@ -121,24 +118,29 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml:108` | `MAX_METADATA_PAGE_SIZE`                          | config | `numeric_bounds.max_metadata_page_size` learned over the daemon connection.          |
 | `config/signalboxd.example.toml:110` | `MAX_REVIEW_FINDINGS_PER_RUN`                     | config | `numeric_bounds.max_review_findings_per_run` learned over the daemon connection.     |
 | `config/signalboxd.example.toml:112` | `MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN`              | config | `numeric_bounds.max_automatic_tool_rounds_per_turn`                                  |
-| `config/signalboxd.example.toml:114` | `MAX_REQUIRED_TAGS`                               | config | `numeric_bounds.max_required_tags`                                                   |
-| `config/signalboxd.example.toml:104` | `MAX_CONTENT_UTF8_BYTES`                          | config | `numeric_bounds.max_message_utf8_bytes`                                              |
-| `config/signalboxd.example.toml:116` | `BASELINE_RECONCILIATION_SWEEP_INTERVAL`          | config | `numeric_bounds.reconciliation_sweep_interval`                                       |
-| `config/signalboxd.example.toml:118` | `BASELINE_NUDGE_BUFFER_CAPACITY`                  | config | `numeric_bounds.nudge_buffer_capacity`                                               |
-| `config/signalboxd.example.toml:120` | `SCHEDULER_PASS_ADMISSION_CAP`                    | config | `numeric_bounds.scheduler_pass_admission_cap`                                        |
-| `config/signalboxd.example.toml:122` | `SCHEDULER_PASS_OCCUPANCY_BOUND`                  | config | `numeric_bounds.scheduler_pass_occupancy_bound`                                      |
-| `config/signalboxd.example.toml:124` | `MAX_NATIVE_MESSAGE_BYTES`                        | config | `numeric_bounds.max_native_message_bytes`                                            |
-| `config/signalboxd.example.toml:126` | `TERMINALIZATION_LOCK_WAIT`                       | config | `numeric_bounds.terminalization_lock_wait`                                           |
-| `config/signalboxd.example.toml:128` | `TERMINALIZATION_ACQUIRE_WAIT`                    | config | `numeric_bounds.terminalization_acquire_wait`                                        |
-| `config/signalboxd.example.toml:130` | `TERMINALIZATION_WRITE_LOCK_WAIT`                 | config | `numeric_bounds.terminalization_write_lock_wait`                                     |
-| `config/signalboxd.example.toml:132` | `DISPOSABLE_POSTGRES_STATE_CEILING_BYTES`         | config | `numeric_bounds.disposable_postgres_state_ceiling_bytes`                             |
-| `config/signalboxd.example.toml:134` | `DIAGNOSTIC_MODEL_IDENTITY_LIMIT`                 | config | `numeric_bounds.diagnostic_model_identity_limit`                                     |
-| `config/signalboxd.example.toml:136` | `DEFAULT_TIMEOUT`                                 | config | `numeric_bounds.code_host_request_timeout`                                           |
-| `config/signalboxd.example.toml:138` | `MAX_JOB_LOG_BYTES`                               | config | `numeric_bounds.max_job_log_bytes`                                                   |
-| `config/signalboxd.example.toml:140` | `MAX_STACK_COMPARISONS_IN_FLIGHT`                 | config | `numeric_bounds.max_stack_comparisons_in_flight`                                     |
-| `config/signalboxd.example.toml:142` | `MAX_RESULT_TEXT_BYTES`                           | config | `numeric_bounds.max_code_host_result_text_bytes`                                     |
-| `config/signalboxd.example.toml:144` | `MAX_RESULT_ITEMS`                                | config | `numeric_bounds.max_code_host_result_items`                                          |
-| `config/signalboxd.example.toml:146` | `MAX_REPOSITORY_FILE_CONTENT_BYTES`               | config | `numeric_bounds.max_repository_file_content_bytes`                                   |
+| `config/signalboxd.example.toml:128` | `MAX_SAME_CREDENTIAL_ATTEMPTS_PER_TURN`           | config | `numeric_bounds.max_same_credential_attempts_per_turn`                               |
+| `config/signalboxd.example.toml:130` | `MAX_REQUIRED_TAGS`                               | config | `numeric_bounds.max_required_tags`                                                   |
+| `config/signalboxd.example.toml:118` | `MAX_CONTENT_UTF8_BYTES`                          | config | `numeric_bounds.max_message_utf8_bytes`                                              |
+| `config/signalboxd.example.toml:132` | `BASELINE_RECONCILIATION_SWEEP_INTERVAL`          | config | `numeric_bounds.reconciliation_sweep_interval`                                       |
+| `config/signalboxd.example.toml:134` | `BASELINE_NUDGE_BUFFER_CAPACITY`                  | config | `numeric_bounds.nudge_buffer_capacity`                                               |
+| `config/signalboxd.example.toml:136` | `SCHEDULER_PASS_ADMISSION_CAP`                    | config | `numeric_bounds.scheduler_pass_admission_cap`                                        |
+| `config/signalboxd.example.toml:138` | `SCHEDULER_PASS_OCCUPANCY_BOUND`                  | config | `numeric_bounds.scheduler_pass_occupancy_bound`                                      |
+| `config/signalboxd.example.toml:140` | `MAX_NATIVE_MESSAGE_BYTES`                        | config | `numeric_bounds.max_native_message_bytes`                                            |
+| `config/signalboxd.example.toml:142` | `TERMINALIZATION_LOCK_WAIT`                       | config | `numeric_bounds.terminalization_lock_wait`                                           |
+| `config/signalboxd.example.toml:144` | `TERMINALIZATION_ACQUIRE_WAIT`                    | config | `numeric_bounds.terminalization_acquire_wait`                                        |
+| `config/signalboxd.example.toml:146` | `TERMINALIZATION_WRITE_LOCK_WAIT`                 | config | `numeric_bounds.terminalization_write_lock_wait`                                     |
+| `config/signalboxd.example.toml:148` | `DISPOSABLE_POSTGRES_STATE_CEILING_BYTES`         | config | `numeric_bounds.disposable_postgres_state_ceiling_bytes`                             |
+| `config/signalboxd.example.toml:150` | `DIAGNOSTIC_MODEL_IDENTITY_LIMIT`                 | config | `numeric_bounds.diagnostic_model_identity_limit`                                     |
+| `config/signalboxd.example.toml:152` | `DEFAULT_TIMEOUT`                                 | config | `numeric_bounds.code_host_request_timeout`                                           |
+| `config/signalboxd.example.toml:154` | `MAX_JOB_LOG_BYTES`                               | config | `numeric_bounds.max_job_log_bytes`                                                   |
+| `config/signalboxd.example.toml:156` | `MAX_STACK_COMPARISONS_IN_FLIGHT`                 | config | `numeric_bounds.max_stack_comparisons_in_flight`                                     |
+| `config/signalboxd.example.toml:158` | `MAX_RESULT_TEXT_BYTES`                           | config | `numeric_bounds.max_code_host_result_text_bytes`                                     |
+| `config/signalboxd.example.toml:160` | `MAX_RESULT_ITEMS`                                | config | `numeric_bounds.max_code_host_result_items`                                          |
+| `config/signalboxd.example.toml:162` | `MAX_REPOSITORY_FILE_CONTENT_BYTES`               | config | `numeric_bounds.max_repository_file_content_bytes`                                   |
+| `config/signalboxd.example.toml`     | `SESSION_ADMISSION_DEADLINE`                      | config | `numeric_bounds.session_admission_deadline`                                          |
+| `config/signalboxd.example.toml`     | `SESSION_ACTIVE_STALL_DEADLINE`                   | config | `numeric_bounds.session_active_stall_deadline`                                       |
+| `config/signalboxd.example.toml`     | `SESSION_WAITING_DEADLINE`                        | config | `numeric_bounds.session_waiting_deadline`                                            |
+| `config/signalboxd.example.toml`     | `SESSION_LIFECYCLE_METRIC_SCAN_INTERVAL`          | config | `numeric_bounds.session_lifecycle_metric_scan_interval`                              |
 
 ## Representation facts
 
@@ -153,6 +155,7 @@ bound in either root fails closed.
 | `crates/tools-code-host/src/code_host/github.rs:84`            | `MAX_CHANGED_FILE_PAGES`                        | not-a-bound | Fixed provider exposure divided by its fixed page size. |
 | `crates/tools-code-host/src/code_host/repository_result.rs:21` | `MAX_OBSERVED_DIRECTORY_ENTRIES`                | not-a-bound | Fixed provider contents-endpoint exposure.              |
 | `crates/tools-code-host/src/code_host/repository_result.rs:23` | `MAX_UTF8_BOUNDARY_DISCARD_BYTES`               | not-a-bound | Fixed maximum UTF-8 continuation width.                 |
+| `crates/persistence/src/lifecycle_metrics.rs:26`               | `PARTS_PER_MILLION`                             | not-a-bound | Fixed-point scale the rates are reported in.            |
 
 ## Test fixtures
 

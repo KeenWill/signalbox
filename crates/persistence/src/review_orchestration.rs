@@ -4,8 +4,6 @@
 //! run, pass, finding, event, and external-link values are always reconstructed
 //! through [`ReviewWorkflowStore`].
 
-use std::{error::Error, fmt};
-
 use signalbox_application::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
     ReviewDurableSealOutcome, ReviewImportOutcome, ReviewImportedContextEvidence,
@@ -764,15 +762,21 @@ impl PostgresReviewOrchestrationStore {
         let mut inspection = inspect_command(&mut transaction, command).await?;
         let mut fresh = false;
         if matches!(inspection, CommandInspection::New) {
+            let issuer = crate::command_registry::issuer_columns(
+                signalbox_domain::CommandPrincipal::Operator,
+            );
             let inserted = sqlx::query(
                 "INSERT INTO durable_command
-                    (command_id, command_kind, storage_version, claimed_at)
-                 VALUES ($1, $2, $3, transaction_timestamp())
+                    (command_id, command_kind, storage_version, claimed_at,
+                     issuer_kind, issuer_module)
+                 VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
                  ON CONFLICT DO NOTHING",
             )
             .bind(durable_command_id_to_uuid(command.command_id))
             .bind(REVIEW_ORCHESTRATION_KIND)
             .bind(STORAGE_VERSION)
+            .bind(issuer.0)
+            .bind(issuer.1)
             .execute(&mut *transaction)
             .await?
             .rows_affected()
@@ -2745,45 +2749,18 @@ fn ordinal_i32(value: usize) -> Result<i32, ReviewOrchestrationStoreError> {
     i32::try_from(value).map_err(|_| corruption("orchestration inventory is too large"))
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL or fail-closed reconstruction failure.
 #[derive(Debug)]
 pub enum ReviewOrchestrationStoreError {
-    Database(sqlx::Error),
-    CommitAmbiguous(sqlx::Error),
-    Workflow(ReviewWorkflowStoreError),
+    #[error("review orchestration database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("review orchestration commit is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("review orchestration canonical evidence failed: {field_0}")]
+    Workflow(#[source] ReviewWorkflowStoreError),
+    #[error("review orchestration durable facts are corrupt: {field_0}")]
     Corruption(&'static str),
-}
-
-impl fmt::Display for ReviewOrchestrationStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "review orchestration database failure: {error}")
-            }
-            Self::CommitAmbiguous(error) => write!(
-                formatter,
-                "review orchestration commit is ambiguous: {error}"
-            ),
-            Self::Workflow(error) => write!(
-                formatter,
-                "review orchestration canonical evidence failed: {error}"
-            ),
-            Self::Corruption(detail) => write!(
-                formatter,
-                "review orchestration durable facts are corrupt: {detail}"
-            ),
-        }
-    }
-}
-
-impl Error for ReviewOrchestrationStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Workflow(error) => Some(error),
-            Self::Corruption(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for ReviewOrchestrationStoreError {
@@ -2811,8 +2788,8 @@ mod tests {
     /// projection inside one `REPEATABLE READ` transaction. Handed a connection
     /// checked straight out of the pool instead, those same helpers run each of
     /// their statements as a separate `READ COMMITTED` autocommit statement.
-    /// That silently drops the per-loader coherence the standalone entry points
-    /// used to inherit from `ReviewWorkflowStore`'s own transactions — a
+    /// That silently drops the per-loader coherence `ReviewWorkflowStore`'s own
+    /// transactions provide — a
     /// multi-statement external-link or pass load could then straddle a
     /// concurrent commit and return exactly the torn external-link projection
     /// that `docs/spec/review-workflows.md` rules out.
