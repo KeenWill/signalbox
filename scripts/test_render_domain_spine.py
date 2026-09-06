@@ -338,6 +338,15 @@ pub struct Token;
         self.assertEqual(set(files), {'example.md', 'README.md'})
         self.assertIn('pub struct Record<T>', files['example.md'])
 
+    def test_external_reexport_uses_the_export_name_when_item_name_is_null(self):
+        document = fixture()
+        export = document['index']['30']
+        export['name'] = None
+        export['inner']['use'].update(source='external::Value', name='Alias', id=100)
+        files = Renderer(document).files('sample')
+        self.assertIn('## Alias\n\n```rust\npub use external::Value as Alias;\n```',
+                      files['example.md'])
+
     def test_generic_constraints_and_external_paths_are_preserved(self):
         document = fixture()
         renderer = Renderer(document)
