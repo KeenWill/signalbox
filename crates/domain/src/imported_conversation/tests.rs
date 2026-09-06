@@ -62,7 +62,7 @@ fn nested_array(container_count: usize) -> ImportedStructuredValue {
 }
 
 #[test]
-fn s28_codex_reprojection_rejects_non_string_named_tool_input() {
+fn codex_reprojection_rejects_non_string_named_tool_input() {
     let normalized = object_with_members(vec![
         (
             "type",
@@ -115,10 +115,10 @@ fn assert_codex_payload_projects_one_entry_attesting_no_speaker(
     );
 }
 
-/// S28: the Codex reprojection maps a `tool_search_call`'s exact
+/// the Codex reprojection maps a `tool_search_call`'s exact
 /// `arguments` value as tool input and fabricates no tool name for it.
 #[test]
-fn s28_codex_reprojection_maps_tool_search_call_arguments_without_a_name() {
+fn codex_reprojection_maps_tool_search_call_arguments_without_a_name() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
         object_with_members(vec![
             (
@@ -146,10 +146,10 @@ fn s28_codex_reprojection_maps_tool_search_call_arguments_without_a_name() {
     );
 }
 
-/// S28: the Codex reprojection maps a `local_shell_call`'s exact
+/// the Codex reprojection maps a `local_shell_call`'s exact
 /// `action` value as tool input and fabricates no tool name for it.
 #[test]
-fn s28_codex_reprojection_maps_local_shell_call_action_without_a_name() {
+fn codex_reprojection_maps_local_shell_call_action_without_a_name() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
         object_with_members(vec![
             (
@@ -177,11 +177,11 @@ fn s28_codex_reprojection_maps_local_shell_call_action_without_a_name() {
     );
 }
 
-/// S28: the Codex reprojection takes a web-search call's identity
+/// the Codex reprojection takes a web-search call's identity
 /// from the item `id`; the payload also states a competing `call_id` the
 /// mapping must not read.
 #[test]
-fn s28_codex_reprojection_maps_web_search_item_id_as_call_identity() {
+fn codex_reprojection_maps_web_search_item_id_as_call_identity() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
         object_with_members(vec![
             (
@@ -210,10 +210,10 @@ fn s28_codex_reprojection_maps_web_search_item_id_as_call_identity() {
     );
 }
 
-/// S28: the Codex reprojection reads a custom tool call's payload
+/// the Codex reprojection reads a custom tool call's payload
 /// from `input` while retaining its exact attested name.
 #[test]
-fn s28_codex_reprojection_maps_custom_tool_call_input_field() {
+fn codex_reprojection_maps_custom_tool_call_input_field() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
         object_with_members(vec![
             (
@@ -241,11 +241,11 @@ fn s28_codex_reprojection_maps_custom_tool_call_input_field() {
     );
 }
 
-/// S28: the Codex reprojection maps a
+/// the Codex reprojection maps a
 /// `custom_tool_call_output`'s exact `call_id` and string `output` as an
 /// exact-text result without fabricating an error attestation.
 #[test]
-fn s28_codex_reprojection_maps_custom_tool_call_output_as_exact_text_result() {
+fn codex_reprojection_maps_custom_tool_call_output_as_exact_text_result() {
     let source_call_id = text("call-custom");
     let output = text("applied");
 
@@ -269,11 +269,11 @@ fn s28_codex_reprojection_maps_custom_tool_call_output_as_exact_text_result() {
     );
 }
 
-/// S28: the Codex reprojection emits one ordered source result
+/// the Codex reprojection emits one ordered source result
 /// block per tool-search element, retaining an object element's exact type
 /// attestation and leaving a non-object element unattested.
 #[test]
-fn s28_codex_reprojection_maps_tool_search_output_as_ordered_blocks() {
+fn codex_reprojection_maps_tool_search_output_as_ordered_blocks() {
     assert_codex_payload_projects_one_entry_attesting_no_speaker(
         object_with_members(vec![
             (
@@ -313,30 +313,30 @@ fn s28_codex_reprojection_maps_tool_search_output_as_ordered_blocks() {
     );
 }
 
-/// S28: cloning an unvalidated source value is
+/// cloning an unvalidated source value is
 /// stack-safe before typed depth rejection.
 #[test]
-fn s28_unvalidated_structured_clone_is_stack_safe() {
+fn unvalidated_structured_clone_is_stack_safe() {
     let value = nested_array(32_768);
     let cloned = value.clone();
 
     drop(cloned);
 }
 
-/// S28: structural equality for unvalidated source
+/// structural equality for unvalidated source
 /// values is stack-safe before typed depth rejection.
 #[test]
-fn s28_unvalidated_structured_equality_is_stack_safe() {
+fn unvalidated_structured_equality_is_stack_safe() {
     let value = nested_array(32_768);
 
     assert_eq!(value, nested_array(32_768));
     assert_ne!(value, nested_array(32_767));
 }
 
-/// S28: formatting an unvalidated source value is
+/// formatting an unvalidated source value is
 /// stack-safe before typed depth rejection.
 #[test]
-fn s28_unvalidated_structured_debug_is_stack_safe() {
+fn unvalidated_structured_debug_is_stack_safe() {
     let value = nested_array(32_768);
 
     let rendered = format!("{value:?}");
@@ -344,10 +344,10 @@ fn s28_unvalidated_structured_debug_is_stack_safe() {
     assert!(rendered.ends_with("])])"));
 }
 
-/// S28: hashing an unvalidated source value is
+/// hashing an unvalidated source value is
 /// stack-safe before typed depth rejection.
 #[test]
-fn s28_unvalidated_structured_hash_is_stack_safe() {
+fn unvalidated_structured_hash_is_stack_safe() {
     let value = nested_array(32_768);
     let equal = nested_array(32_768);
 
@@ -1127,10 +1127,10 @@ fn raw_record_entry_count_must_match_its_normalized_projection() {
     );
 }
 
-/// S28: converter version 1 retains its original closed block
+/// converter version 1 retains its original closed block
 /// interpretation while version 2 admits source-defined message blocks.
 #[test]
-fn s28_converter_versions_do_not_reinterpret_source_blocks() {
+fn converter_versions_do_not_reinterpret_source_blocks() {
     let owner = conversation(1);
     let raw = ImportedRawSourceRecord::from_converted(
         br#"{"type":"assistant","message":{"content":[{"type":"future-kind"}]}}"#.to_vec(),
@@ -1182,10 +1182,10 @@ fn s28_converter_versions_do_not_reinterpret_source_blocks() {
     );
 }
 
-/// S28: the version boundary also preserves the original closed
+/// the version boundary also preserves the original closed
 /// tool-result block vocabulary.
 #[test]
-fn s28_converter_versions_do_not_reinterpret_result_blocks() {
+fn converter_versions_do_not_reinterpret_result_blocks() {
     let owner = conversation(1);
     let raw = ImportedRawSourceRecord::from_converted(
         br#"{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"future-result"}]}]}}"#.to_vec(),
@@ -1286,10 +1286,10 @@ fn complete_normalized_record_rejects_129_containers() {
     );
 }
 
-/// S28: stored structured depth is checked iteratively
+/// stored structured depth is checked iteratively
 /// before any recursive conversion-digest traversal.
 #[test]
-fn s28_checks_raw_depth_before_recursive_conversion_digest() {
+fn checks_raw_depth_before_recursive_conversion_digest() {
     let owner = conversation(1);
     let bytes = br#"{"type":"system","nested":[]}"#.to_vec();
     let stored_hash = ImportedRawRecordHash::digest(&bytes);
@@ -1330,10 +1330,10 @@ fn s28_checks_raw_depth_before_recursive_conversion_digest() {
     );
 }
 
-/// S28: conversion digesting and rejection remain
+/// conversion digesting and rejection remain
 /// stack-safe for excessive caller-supplied structured depth.
 #[test]
-fn s28_converted_raw_depth_fails_closed_and_drops_safely() {
+fn converted_raw_depth_fails_closed_and_drops_safely() {
     let owner = conversation(1);
     let raw = ImportedRawSourceRecord::from_converted(
         br#"{"type":"system","nested":[]}"#.to_vec(),

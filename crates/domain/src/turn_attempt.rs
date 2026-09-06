@@ -819,7 +819,7 @@ mod tests {
         );
     }
 
-    /// S07: Running accepts either singleton stop; stopped
+    /// Running accepts either singleton stop; stopped
     /// values replay/union compatible causes; Prepared accepts neither.
     #[test]
     fn stop_request_transition_matrix_preserves_complete_causes() {
@@ -896,7 +896,7 @@ mod tests {
         );
     }
 
-    /// S03 / S04 / S07: Prepared accepts exactly
+    /// Prepared accepts exactly
     /// the restricted unsent and startup terminal branches from
     /// docs/spec/turn-lifecycle-and-scheduling.md.
     #[test]
@@ -1015,7 +1015,7 @@ mod tests {
         .assert_eq(&table(&rows));
     }
 
-    /// S02 / S04 / S06 / S07 / S10 / S23: Running may
+    /// Running may
     /// enter every type-valid terminal branch once slice 5 establishes guards.
     #[test]
     fn running_accepts_every_type_valid_terminal_value() {
@@ -1211,7 +1211,7 @@ mod tests {
         );
     }
 
-    /// S04 / S07 / S23: CancellationOnly ends
+    /// CancellationOnly ends
     /// only as AfterCancellation with its exact proof and any honest result.
     #[test]
     fn cancellation_stopped_terminal_matrix_is_complete() {
@@ -1365,7 +1365,7 @@ mod tests {
         .assert_eq(&table(&rows));
     }
 
-    /// S04 / S06 / S21 / S23: FatalMismatch ends only as
+    /// FatalMismatch ends only as
     /// AfterFatalMismatch with the exact complete cause value.
     #[test]
     fn fatal_stopped_terminal_matrix_is_complete() {
@@ -1635,7 +1635,7 @@ mod tests {
         assert!(!causes.contains(failure(3)));
     }
 
-    /// S07: fatal failure and applied interrupt addition is
+    /// fatal failure and applied interrupt addition is
     /// idempotent and event-order independent without losing either fact.
     #[test]
     fn stop_union_is_idempotent_and_event_order_independent() {
@@ -1753,7 +1753,6 @@ mod tests {
         );
     }
 
-    /// S04 / S06 / S07 / S10 / S23:
     /// each terminal family retains its exact typed cause and disposition.
     #[test]
     fn every_allowed_terminal_disposition_stays_in_its_typed_family() {
@@ -1923,7 +1922,7 @@ mod tests {
         ));
     }
 
-    /// S04: startup loss retains the terminal family matching the
+    /// startup loss retains the terminal family matching the
     /// complete recovered stop causes.
     #[test]
     fn lost_is_representable_in_all_three_matching_terminal_families() {
