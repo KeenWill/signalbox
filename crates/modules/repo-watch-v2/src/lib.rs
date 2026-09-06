@@ -89,6 +89,15 @@ pub struct PullRequestState<'a> {
     pub observed_at: OffsetDateTime,
 }
 
+/// Complete current provider projection committed with one frontier candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryProjection<'a> {
+    /// Repository-level provider state.
+    pub repository: RepositoryState<'a>,
+    /// Complete current pull-request projection for the repository.
+    pub pull_requests: Vec<PullRequestState<'a>>,
+}
+
 /// Authenticated webhook intake retained until its caller-selected expiry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookDelivery<'a> {
@@ -159,6 +168,17 @@ pub enum FrontierEventAdmission {
     ConflictingReuse,
     /// A newer frontier entry already committed for this repository.
     Stale,
+}
+
+/// Result of idempotently releasing one frontier stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrontierReleaseAdmission {
+    /// The stream was removed at this generation.
+    Released { generation: u64 },
+    /// The same release already committed at this generation.
+    Replayed { generation: u64 },
+    /// The stream is absent and the latest frontier mutation was not its release.
+    Absent,
 }
 
 /// Result of activating one configured rule revision.
@@ -282,6 +302,49 @@ impl PlannedCommand {
     }
 }
 
+/// Retained origin of the create action that produced one session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedDispatchAction {
+    dispatch: RepoWatchDispatchId,
+    action_ordinal: NonZeroU64,
+    repository: RepositorySlug,
+    rule_id: RepoWatchRuleId,
+    rule_revision: RepoWatchRuleVersion,
+    event_id: signalbox_ownership_seam::RepoWatchEventId,
+}
+
+impl RetainedDispatchAction {
+    /// Returns the committed dispatch reference.
+    pub const fn dispatch(&self) -> RepoWatchDispatchId {
+        self.dispatch
+    }
+
+    /// Returns the originating action ordinal.
+    pub const fn action_ordinal(&self) -> NonZeroU64 {
+        self.action_ordinal
+    }
+
+    /// Returns the retained repository identity.
+    pub const fn repository(&self) -> &RepositorySlug {
+        &self.repository
+    }
+
+    /// Returns the retained rule identity.
+    pub const fn rule_id(&self) -> &RepoWatchRuleId {
+        &self.rule_id
+    }
+
+    /// Returns the retained rule revision.
+    pub const fn rule_revision(&self) -> RepoWatchRuleVersion {
+        self.rule_revision
+    }
+
+    /// Returns the retained triggering event identity.
+    pub const fn event_id(&self) -> signalbox_ownership_seam::RepoWatchEventId {
+        self.event_id
+    }
+}
+
 /// Core-owned factory for the resolved create-session payload.
 pub trait CreateSessionCommandFactory {
     /// Infrastructure or template-resolution failure.
@@ -395,6 +458,8 @@ pub enum StoreError {
     InvalidFrontierGeneration,
     /// A fact in a frontier commit belongs to another repository.
     EventRepositoryMismatch,
+    /// A pull-request projection belongs to another repository.
+    ProjectionRepositoryMismatch,
     /// The checked rule exposed too many identity fields for the durable inventory.
     InvalidRuleFieldInventory,
     /// Planned commands do not form one complete ordered rule/event batch.
@@ -418,6 +483,9 @@ impl fmt::Display for StoreError {
             Self::EventRepositoryMismatch => {
                 "repository-watch event does not belong to the frontier repository"
             }
+            Self::ProjectionRepositoryMismatch => {
+                "repository-watch projection does not belong to the frontier repository"
+            }
             Self::InvalidRuleFieldInventory => {
                 "repository-watch rule identity-field inventory is too large"
             }
@@ -438,6 +506,7 @@ impl Error for StoreError {
             | Self::InvalidEventRetention
             | Self::InvalidFrontierGeneration
             | Self::EventRepositoryMismatch
+            | Self::ProjectionRepositoryMismatch
             | Self::InvalidRuleFieldInventory
             | Self::InvalidDispatchBatch
             | Self::InvalidRetainedCommand => None,
@@ -461,66 +530,6 @@ impl RepoWatchStore {
     /// Uses a pool already confined to the repository-watch role and schema.
     pub const fn new(module_pool: PgPool) -> Self {
         Self { pool: module_pool }
-    }
-
-    /// Replaces one repository's current provider projection.
-    pub async fn upsert_repository(&self, state: RepositoryState<'_>) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO repository_state
-                (repository, default_branch, default_head_sha, observed_at, updated_at)
-             VALUES ($1, $2, $3, $4, statement_timestamp())
-             ON CONFLICT (repository) DO UPDATE
-             SET default_branch = EXCLUDED.default_branch,
-                 default_head_sha = EXCLUDED.default_head_sha,
-                 observed_at = EXCLUDED.observed_at,
-                 updated_at = statement_timestamp()",
-        )
-        .bind(state.repository.as_str())
-        .bind(state.default_branch.as_str())
-        .bind(state.default_head.as_str())
-        .bind(state.observed_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Replaces one pull request's normalized current provider projection.
-    pub async fn upsert_pull_request(&self, state: PullRequestState<'_>) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO pr_state
-                (repository, pull_request_number, lifecycle, head_sha,
-                 head_repository, head_branch, base_branch, title, body, draft,
-                 author, observed_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                     statement_timestamp())
-             ON CONFLICT (repository, pull_request_number) DO UPDATE
-             SET lifecycle = EXCLUDED.lifecycle,
-                 head_sha = EXCLUDED.head_sha,
-                 head_repository = EXCLUDED.head_repository,
-                 head_branch = EXCLUDED.head_branch,
-                 base_branch = EXCLUDED.base_branch,
-                 title = EXCLUDED.title,
-                 body = EXCLUDED.body,
-                 draft = EXCLUDED.draft,
-                 author = EXCLUDED.author,
-                 observed_at = EXCLUDED.observed_at,
-                 updated_at = statement_timestamp()",
-        )
-        .bind(state.repository.as_str())
-        .bind(Decimal::from(state.number.get()))
-        .bind(state.lifecycle.storage())
-        .bind(state.head.as_str())
-        .bind(state.head_repository.as_str())
-        .bind(state.head_branch.as_str())
-        .bind(state.base_branch.as_str())
-        .bind(state.title.as_str())
-        .bind(state.body.as_str())
-        .bind(state.draft)
-        .bind(state.author.map(RepoWatchAuthorLogin::as_str))
-        .bind(state.observed_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     /// Atomically admits the delivery metadata, body, and pending disposition.
@@ -648,7 +657,7 @@ impl RepoWatchStore {
     /// Atomically commits a complete frontier candidate and its ordered facts.
     pub async fn commit_frontier_candidate(
         &self,
-        repository: &RepositorySlug,
+        projection: &RepositoryProjection<'_>,
         expected_generation: u64,
         frontier: &RepoWatchEventIdentityFrontierV1,
         events: &[RepoWatchEventOccurrenceV1],
@@ -658,13 +667,25 @@ impl RepoWatchStore {
         if retain_until <= recorded_at {
             return Err(StoreError::InvalidEventRetention);
         }
+        let repository_state = &projection.repository;
+        let pull_request_states = projection.pull_requests.as_slice();
+        let repository = repository_state.repository;
+        if pull_request_states
+            .iter()
+            .any(|state| state.repository != repository)
+        {
+            return Err(StoreError::ProjectionRepositoryMismatch);
+        }
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
+        upsert_repository(&mut transaction, repository_state).await?;
+        replace_pull_requests(&mut transaction, repository, pull_request_states).await?;
         let frontier = frontier.entries().collect::<Vec<_>>();
-        let candidate_identity = frontier_candidate_identity(&frontier, events);
+        let candidate_identity =
+            frontier_candidate_identity(repository_state, pull_request_states, &frontier, events);
         let current_generation: Decimal = sqlx::query_scalar(
             "SELECT frontier_generation FROM repository_state
               WHERE repository = $1 FOR UPDATE",
@@ -749,10 +770,11 @@ impl RepoWatchStore {
         .fetch_one(&mut *transaction)
         .await?;
         if unchanged {
-            transaction.rollback().await?;
             return if events.is_empty() {
+                transaction.commit().await?;
                 Ok(FrontierEventAdmission::Unchanged)
             } else {
+                transaction.rollback().await?;
                 Ok(FrontierEventAdmission::ConflictingReuse)
             };
         }
@@ -826,7 +848,7 @@ impl RepoWatchStore {
         &self,
         repository: &RepositorySlug,
         stream_identity: &[u8; 32],
-    ) -> Result<bool, StoreError> {
+    ) -> Result<FrontierReleaseAdmission, StoreError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
             .bind(repository.as_str())
@@ -841,27 +863,50 @@ impl RepoWatchStore {
         .execute(&mut *transaction)
         .await?;
         if deleted.rows_affected() == 0 {
+            let replay: Option<(Decimal, bool)> = sqlx::query_as(
+                "SELECT frontier_generation,
+                        COALESCE(last_frontier_commit_digest = sha256($2), false)
+                   FROM repository_state
+                  WHERE repository = $1
+                  FOR UPDATE",
+            )
+            .bind(repository.as_str())
+            .bind(frontier_release_identity(stream_identity))
+            .fetch_optional(&mut *transaction)
+            .await?;
             transaction.rollback().await?;
-            return Ok(false);
+            return match replay {
+                Some((generation, true)) => Ok(FrontierReleaseAdmission::Replayed {
+                    generation: generation
+                        .to_u64()
+                        .ok_or(StoreError::InvalidFrontierGeneration)?,
+                }),
+                Some((_, false)) | None => Ok(FrontierReleaseAdmission::Absent),
+            };
         }
-        let advanced = sqlx::query(
+        let generation: Option<Decimal> = sqlx::query_scalar(
             "UPDATE repository_state
                 SET frontier_generation = frontier_generation + 1,
                     last_frontier_commit_digest = sha256($3),
                     updated_at = statement_timestamp()
-              WHERE repository = $1 AND frontier_generation < $2",
+              WHERE repository = $1 AND frontier_generation < $2
+              RETURNING frontier_generation",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(u64::MAX))
         .bind(frontier_release_identity(stream_identity))
-        .execute(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await?;
-        if advanced.rows_affected() != 1 {
+        let Some(generation) = generation else {
             transaction.rollback().await?;
             return Err(StoreError::InvalidFrontierGeneration);
-        }
+        };
         transaction.commit().await?;
-        Ok(true)
+        Ok(FrontierReleaseAdmission::Released {
+            generation: generation
+                .to_u64()
+                .ok_or(StoreError::InvalidFrontierGeneration)?,
+        })
     }
 
     /// Activates one checked rule revision without retaining configuration text.
@@ -1029,11 +1074,133 @@ impl RepoWatchStore {
     }
 }
 
+async fn upsert_repository(
+    transaction: &mut Transaction<'_, Postgres>,
+    state: &RepositoryState<'_>,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO repository_state
+            (repository, default_branch, default_head_sha, observed_at, updated_at)
+         VALUES ($1, $2, $3, $4, statement_timestamp())
+         ON CONFLICT (repository) DO UPDATE
+         SET default_branch = EXCLUDED.default_branch,
+             default_head_sha = EXCLUDED.default_head_sha,
+             observed_at = EXCLUDED.observed_at,
+             updated_at = statement_timestamp()",
+    )
+    .bind(state.repository.as_str())
+    .bind(state.default_branch.as_str())
+    .bind(state.default_head.as_str())
+    .bind(state.observed_at)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn replace_pull_requests(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    states: &[PullRequestState<'_>],
+) -> Result<(), StoreError> {
+    let retained_numbers = states
+        .iter()
+        .map(|state| Decimal::from(state.number.get()))
+        .collect::<Vec<_>>();
+    sqlx::query(
+        "DELETE FROM pr_state
+          WHERE repository = $1
+            AND NOT (pull_request_number = ANY($2::numeric[]))",
+    )
+    .bind(repository.as_str())
+    .bind(&retained_numbers)
+    .execute(&mut **transaction)
+    .await?;
+    for state in states {
+        sqlx::query(
+            "INSERT INTO pr_state
+                (repository, pull_request_number, lifecycle, head_sha,
+                 head_repository, head_branch, base_branch, title, body, draft,
+                 author, observed_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                     statement_timestamp())
+             ON CONFLICT (repository, pull_request_number) DO UPDATE
+             SET lifecycle = EXCLUDED.lifecycle,
+                 head_sha = EXCLUDED.head_sha,
+                 head_repository = EXCLUDED.head_repository,
+                 head_branch = EXCLUDED.head_branch,
+                 base_branch = EXCLUDED.base_branch,
+                 title = EXCLUDED.title,
+                 body = EXCLUDED.body,
+                 draft = EXCLUDED.draft,
+                 author = EXCLUDED.author,
+                 observed_at = EXCLUDED.observed_at,
+                 updated_at = statement_timestamp()",
+        )
+        .bind(state.repository.as_str())
+        .bind(Decimal::from(state.number.get()))
+        .bind(state.lifecycle.storage())
+        .bind(state.head.as_str())
+        .bind(state.head_repository.as_str())
+        .bind(state.head_branch.as_str())
+        .bind(state.base_branch.as_str())
+        .bind(state.title.as_str())
+        .bind(state.body.as_str())
+        .bind(state.draft)
+        .bind(state.author.map(RepoWatchAuthorLogin::as_str))
+        .bind(state.observed_at)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
 fn frontier_candidate_identity(
+    repository_state: &RepositoryState<'_>,
+    pull_request_states: &[PullRequestState<'_>],
     frontier: &[signalbox_ownership_seam::RepoWatchEventIdentityFrontierEntryV1],
     events: &[RepoWatchEventOccurrenceV1],
 ) -> Vec<u8> {
     let mut identity = b"signalbox-repo-watch-frontier-commit-v1".to_vec();
+    push_identity_field(
+        &mut identity,
+        repository_state.repository.as_str().as_bytes(),
+    );
+    push_identity_field(
+        &mut identity,
+        repository_state.default_branch.as_str().as_bytes(),
+    );
+    push_identity_field(
+        &mut identity,
+        repository_state.default_head.as_str().as_bytes(),
+    );
+    identity.extend_from_slice(
+        &repository_state
+            .observed_at
+            .unix_timestamp_nanos()
+            .to_be_bytes(),
+    );
+    let mut pull_request_states = pull_request_states.iter().collect::<Vec<_>>();
+    pull_request_states.sort_by_key(|state| state.number);
+    for state in pull_request_states {
+        identity.push(b'P');
+        identity.extend_from_slice(&state.number.get().to_be_bytes());
+        push_identity_field(&mut identity, state.lifecycle.storage().as_bytes());
+        push_identity_field(&mut identity, state.head.as_str().as_bytes());
+        push_identity_field(&mut identity, state.head_repository.as_str().as_bytes());
+        push_identity_field(&mut identity, state.head_branch.as_str().as_bytes());
+        push_identity_field(&mut identity, state.base_branch.as_str().as_bytes());
+        push_identity_field(&mut identity, state.title.as_str().as_bytes());
+        push_identity_field(&mut identity, state.body.as_str().as_bytes());
+        identity.push(u8::from(state.draft));
+        match state.author {
+            Some(author) => {
+                identity.push(1);
+                push_identity_field(&mut identity, author.as_str().as_bytes());
+            }
+            None => identity.push(0),
+        }
+        identity.extend_from_slice(&state.observed_at.unix_timestamp_nanos().to_be_bytes());
+    }
     for entry in frontier {
         identity.push(b'F');
         identity.extend_from_slice(entry.stream_identity().as_slice());
@@ -1051,6 +1218,11 @@ fn frontier_candidate_identity(
         identity.extend_from_slice(occurrence.content_identity().as_bytes());
     }
     identity
+}
+
+fn push_identity_field(identity: &mut Vec<u8>, field: &[u8]) {
+    identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    identity.extend_from_slice(field);
 }
 
 fn frontier_release_identity(stream_identity: &[u8; 32]) -> Vec<u8> {
@@ -1316,17 +1488,22 @@ impl RepoWatchStore {
             return Err(StoreError::InvalidDispatchBatch);
         };
         let initial_batch = first.trigger_sequence().is_none();
-        if planned.iter().enumerate().any(|(index, command)| {
-            command.dispatch() != first.dispatch()
-                || command.repository() != first.repository()
-                || command.rule_id() != first.rule_id()
-                || command.rule_revision() != first.rule_revision()
-                || command.event_id() != first.event_id()
-                || command.trigger_sequence() != first.trigger_sequence()
-                || (initial_batch
-                    && command.action_ordinal()
-                        != u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
-        }) {
+        if planned.iter().any(|command| command.action_ordinal() == 0)
+            || planned
+                .windows(2)
+                .any(|commands| commands[0].action_ordinal() >= commands[1].action_ordinal())
+            || planned.iter().enumerate().any(|(index, command)| {
+                command.dispatch() != first.dispatch()
+                    || command.repository() != first.repository()
+                    || command.rule_id() != first.rule_id()
+                    || command.rule_revision() != first.rule_revision()
+                    || command.event_id() != first.event_id()
+                    || command.trigger_sequence() != first.trigger_sequence()
+                    || (initial_batch
+                        && command.action_ordinal()
+                            != u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
+            })
+        {
             return Err(StoreError::InvalidDispatchBatch);
         }
         let encoded_commands = planned
@@ -1353,25 +1530,6 @@ impl RepoWatchStore {
         .bind(first.dispatch().into_uuid())
         .execute(&mut *transaction)
         .await?;
-        let conflicting_dispatch: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1 FROM dispatch_ledger WHERE dispatch_ref = $1
-                  AND (repository IS DISTINCT FROM $2
-                       OR rule_id IS DISTINCT FROM $3
-                       OR rule_revision IS DISTINCT FROM $4
-                       OR event_id IS DISTINCT FROM $5))",
-        )
-        .bind(first.dispatch().into_uuid())
-        .bind(first.repository().as_str())
-        .bind(first.rule_id().as_str())
-        .bind(Decimal::from(first.rule_revision().get()))
-        .bind(first.event_id().into_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        if conflicting_dispatch {
-            transaction.rollback().await?;
-            return Ok(DispatchAdmission::ConflictingReuse);
-        }
         let retained_actions: Vec<(Uuid, Decimal, Uuid, String, Vec<u8>)> = sqlx::query_as(
             "SELECT dispatch_ref, action_ordinal, command_id, command_kind, command_payload
                FROM dispatch_ledger
@@ -1417,6 +1575,25 @@ impl RepoWatchStore {
             });
         }
         if !retained_actions.is_empty() {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::ConflictingReuse);
+        }
+        let conflicting_dispatch: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM dispatch_ledger WHERE dispatch_ref = $1
+                  AND (repository IS DISTINCT FROM $2
+                       OR rule_id IS DISTINCT FROM $3
+                       OR rule_revision IS DISTINCT FROM $4
+                       OR event_id IS DISTINCT FROM $5))",
+        )
+        .bind(first.dispatch().into_uuid())
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .bind(Decimal::from(first.rule_revision().get()))
+        .bind(first.event_id().into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if conflicting_dispatch {
             transaction.rollback().await?;
             return Ok(DispatchAdmission::ConflictingReuse);
         }
@@ -1576,6 +1753,64 @@ impl RepoWatchStore {
             )
             .collect::<Result<Vec<_>, _>>()
             .map(Vec::into_boxed_slice)
+    }
+
+    /// Finds the retained create action that produced one session.
+    ///
+    /// The lookup joins the retained rule revision and event, so it remains
+    /// sufficient for lifecycle reaction planning after active configuration
+    /// is removed and after a daemon restart.
+    pub async fn reaction_origin_for_session(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<RetainedDispatchAction>, StoreError> {
+        type OriginRow = (Uuid, Decimal, String, String, Decimal, Uuid);
+        let rows: Vec<OriginRow> = sqlx::query_as(
+            "SELECT ledger.dispatch_ref, ledger.action_ordinal, ledger.repository,
+                    ledger.rule_id, ledger.rule_revision, ledger.event_id
+               FROM dispatch_ledger AS ledger
+               JOIN rule_revision AS retained_rule
+                 ON retained_rule.repository = ledger.repository
+                AND retained_rule.rule_id = ledger.rule_id
+                AND retained_rule.revision = ledger.rule_revision
+               JOIN gh_event AS retained_event
+                 ON retained_event.event_id = ledger.event_id
+                AND retained_event.repository = ledger.repository
+              WHERE ledger.created_session_id = $1
+                AND ledger.trigger_sequence IS NULL
+              ORDER BY ledger.dispatch_ref, ledger.action_ordinal
+              LIMIT 2",
+        )
+        .bind(session.into_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        let [row] = rows.as_slice() else {
+            return if rows.is_empty() {
+                Ok(None)
+            } else {
+                Err(StoreError::InvalidRetainedCommand)
+            };
+        };
+        let (dispatch, ordinal, repository, rule_id, rule_revision, event_id) = row;
+        let action_ordinal = ordinal
+            .to_u64()
+            .and_then(NonZeroU64::new)
+            .ok_or(StoreError::InvalidRetainedCommand)?;
+        let rule_revision = rule_revision
+            .to_u64()
+            .and_then(NonZeroU64::new)
+            .and_then(RepoWatchRuleVersion::new)
+            .ok_or(StoreError::InvalidRetainedCommand)?;
+        Ok(Some(RetainedDispatchAction {
+            dispatch: RepoWatchDispatchId::from_uuid(*dispatch),
+            action_ordinal,
+            repository: RepositorySlug::try_new(repository.clone())
+                .map_err(|_| StoreError::InvalidRetainedCommand)?,
+            rule_id: RepoWatchRuleId::try_new(rule_id.clone())
+                .map_err(|_| StoreError::InvalidRetainedCommand)?,
+            rule_revision,
+            event_id: signalbox_ownership_seam::RepoWatchEventId::from_uuid(*event_id),
+        }))
     }
 
     /// Applies one lifecycle event to the module command ledger.
@@ -1750,6 +1985,51 @@ fn plan_lifecycle_reaction_at_sequence(
     ))
 }
 
+/// Admits a lifecycle reaction using the durable origin of its created session.
+pub fn plan_retained_lifecycle_reaction(
+    trigger: &LifecycleEvent,
+    origin: &RetainedDispatchAction,
+    command: SessionLifecycleCommand,
+) -> Result<PlannedCommand, LifecycleReactionError> {
+    if !matches!(
+        trigger.kind(),
+        LifecycleEventKind::SessionTerminal(_) | LifecycleEventKind::GoalChanged(_)
+    ) {
+        return Err(LifecycleReactionError::UnsupportedTrigger);
+    }
+    plan_retained_lifecycle_reaction_at_sequence(trigger.sequence(), origin, command)
+}
+
+fn plan_retained_lifecycle_reaction_at_sequence(
+    trigger_sequence: u64,
+    origin: &RetainedDispatchAction,
+    command: SessionLifecycleCommand,
+) -> Result<PlannedCommand, LifecycleReactionError> {
+    let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
+        || matches!(
+            command.operation(),
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Sticky,
+                ..
+            }
+        );
+    if !admitted {
+        return Err(LifecycleReactionError::UnsupportedCommand);
+    }
+    let command = SessionCommand::lifecycle(command)
+        .map_err(|_| LifecycleReactionError::UnsupportedCommand)?;
+    Ok(PlannedCommand {
+        dispatch: origin.dispatch,
+        action_ordinal: origin.action_ordinal.get(),
+        repository: origin.repository.clone(),
+        rule_id: origin.rule_id.clone(),
+        rule_revision: origin.rule_revision,
+        event_id: origin.event_id,
+        trigger_sequence: Some(trigger_sequence),
+        command,
+    })
+}
+
 /// Builds a lifecycle reaction from an explicit positive trigger sequence.
 ///
 /// This constructor exists only for persistence-boundary integration tests;
@@ -1771,6 +2051,16 @@ pub fn plan_lifecycle_reaction_for_test(
         action_ordinal,
         command,
     )
+}
+
+/// Builds a retained-origin reaction from an explicit positive trigger sequence.
+#[cfg(feature = "test-support")]
+pub fn plan_retained_lifecycle_reaction_for_test(
+    trigger_sequence: NonZeroU64,
+    origin: &RetainedDispatchAction,
+    command: SessionLifecycleCommand,
+) -> Result<PlannedCommand, LifecycleReactionError> {
+    plan_retained_lifecycle_reaction_at_sequence(trigger_sequence.get(), origin, command)
 }
 
 /// Returns configured rules whose checked matcher accepts one normalized fact.

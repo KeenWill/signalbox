@@ -13,9 +13,11 @@ use signalbox_domain::{
 };
 use signalbox_module_repo_watch_v2::{
     CreateSessionCommandFactory, DispatchAdmission, DispatchReferenceGenerator, EventAdmission,
-    FrontierEventAdmission, PullRequestLifecycle, PullRequestState, RepoWatchStore,
-    RepositoryState, RuleAdmission, SessionCommandCodec, WebhookAdmission, WebhookDelivery,
-    WebhookDisposition, matching_rules, plan_lifecycle_reaction_for_test, plan_repository_event,
+    FrontierEventAdmission, FrontierReleaseAdmission, PullRequestLifecycle, PullRequestState,
+    RepoWatchStore, RepositoryProjection, RepositoryState, RuleAdmission, SessionCommandCodec,
+    StoreError, WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules,
+    plan_lifecycle_reaction_for_test, plan_repository_event,
+    plan_retained_lifecycle_reaction_for_test,
 };
 use signalbox_ownership_seam::{
     BranchName, CommitSha, CreateSession, DescendantTerminationScope, DurableCommandId,
@@ -254,34 +256,34 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         WebhookAdmission::Inserted
     );
 
-    store
-        .upsert_repository(RepositoryState {
-            repository: &repository,
-            default_branch: &default_branch,
-            default_head: &default_head,
-            observed_at,
-        })
-        .await?;
+    let repository_state = RepositoryState {
+        repository: &repository,
+        default_branch: &default_branch,
+        default_head: &default_head,
+        observed_at,
+    };
 
     let title = PullRequestTitle::try_new(String::from("A bounded rewrite"))?;
     let body = PullRequestBody::try_new(String::from("Current provider state"))?;
     let author = RepoWatchAuthorLogin::try_new(String::from("octocat"))?;
-    store
-        .upsert_pull_request(PullRequestState {
-            repository: &repository,
-            number: PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
-            lifecycle: PullRequestLifecycle::Open,
-            head: &default_head,
-            head_repository: &repository,
-            head_branch: &default_branch,
-            base_branch: &default_branch,
-            title: &title,
-            body: &body,
-            draft: false,
-            author: Some(&author),
-            observed_at,
-        })
-        .await?;
+    let pull_request_state = PullRequestState {
+        repository: &repository,
+        number: PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+        lifecycle: PullRequestLifecycle::Open,
+        head: &default_head,
+        head_repository: &repository,
+        head_branch: &default_branch,
+        base_branch: &default_branch,
+        title: &title,
+        body: &body,
+        draft: false,
+        author: Some(&author),
+        observed_at,
+    };
+    let mut projection = RepositoryProjection {
+        repository: repository_state,
+        pull_requests: vec![pull_request_state],
+    };
 
     let stream = [13; 32];
     let frontier_entry = RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
@@ -371,7 +373,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store
             .commit_frontier_candidate(
-                &repository,
+                &projection,
                 0,
                 &frontier,
                 std::slice::from_ref(&occurrence),
@@ -395,7 +397,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store
             .commit_frontier_candidate(
-                &repository,
+                &projection,
                 0,
                 &frontier,
                 std::slice::from_ref(&replayed_occurrence),
@@ -408,10 +410,13 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             events: Box::new([EventAdmission::Replayed]),
         }
     );
+    let updated_title = PullRequestTitle::try_new(String::from("Updated projection"))?;
+    projection.pull_requests[0].title = &updated_title;
+    projection.pull_requests[0].observed_at = observed_at + Duration::from_secs(2);
     assert_eq!(
         store
             .commit_frontier_candidate(
-                &repository,
+                &projection,
                 1,
                 &frontier,
                 &[],
@@ -421,6 +426,15 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         FrontierEventAdmission::Unchanged
     );
+    let stored_title: String = sqlx::query_scalar(
+        "SELECT title FROM pr_state
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(Decimal::from(projection.pull_requests[0].number.get()))
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(stored_title, updated_title.as_str());
     let rejected_event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(17)),
         repository.clone(),
@@ -432,10 +446,15 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         rejected_event.clone(),
         RepoWatchEventContentIdentityV1::from_bytes([18; 32]),
     );
+    let rejected_title = PullRequestTitle::try_new(String::from("Must roll back"))?;
+    let rejected_default_head =
+        CommitSha::try_new(String::from("9999999999999999999999999999999999999999"))?;
+    projection.pull_requests[0].title = &rejected_title;
+    projection.repository.default_head = &rejected_default_head;
     assert_eq!(
         store
             .commit_frontier_candidate(
-                &repository,
+                &projection,
                 1,
                 &frontier,
                 std::slice::from_ref(&rejected_occurrence),
@@ -445,6 +464,22 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         FrontierEventAdmission::ConflictingReuse
     );
+    let retained_projection: (String, String) = sqlx::query_as(
+        "SELECT repository.default_head_sha, pull_request.title
+           FROM repository_state AS repository
+           JOIN pr_state AS pull_request USING (repository)
+          WHERE repository.repository = $1 AND pull_request.pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(Decimal::from(projection.pull_requests[0].number.get()))
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(
+        retained_projection,
+        (default_head.as_str().into(), updated_title.as_str().into())
+    );
+    projection.pull_requests[0].title = &updated_title;
+    projection.repository.default_head = &default_head;
     let unchanged_generation: Decimal = sqlx::query_scalar(
         "SELECT frontier_generation FROM repository_state WHERE repository = $1",
     )
@@ -459,14 +494,15 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?;
     assert_eq!(rejected_count, 0);
     let complete_repository = RepositorySlug::try_new(String::from("complete/repository"))?;
-    store
-        .upsert_repository(RepositoryState {
+    let complete_projection = RepositoryProjection {
+        repository: RepositoryState {
             repository: &complete_repository,
             default_branch: &default_branch,
             default_head: &default_head,
             observed_at,
-        })
-        .await?;
+        },
+        pull_requests: Vec::new(),
+    };
     let complete_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
         RepoWatchEventIdentityFrontierEntryV1::new([20; 32], NonZeroU64::MIN),
         RepoWatchEventIdentityFrontierEntryV1::new([21; 32], NonZeroU64::MIN),
@@ -474,7 +510,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store
             .commit_frontier_candidate(
-                &complete_repository,
+                &complete_projection,
                 0,
                 &complete_frontier,
                 &[],
@@ -504,7 +540,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store
             .commit_frontier_candidate(
-                &complete_repository,
+                &complete_projection,
                 1,
                 &incomplete_frontier,
                 std::slice::from_ref(&incomplete_occurrence),
@@ -542,7 +578,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store
             .commit_frontier_candidate(
-                &repository,
+                &projection,
                 0,
                 &incompatible_frontier,
                 &[],
@@ -646,6 +682,26 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         DispatchAdmission::ConflictingReuse
     ));
+    let mut occupied_ids = FixedDispatchIds {
+        value: 30,
+        calls: 0,
+    };
+    let mut occupied_factory = FixtureSessionFactory {
+        next_command: 90,
+        model: 18,
+    };
+    let occupied_batches = plan_repository_event(
+        std::slice::from_ref(&second_rule),
+        &event,
+        &mut occupied_ids,
+        &mut occupied_factory,
+    )?;
+    assert!(matches!(
+        store
+            .record_commands(&occupied_batches[0], observed_at, &mut command_codec)
+            .await?,
+        DispatchAdmission::Inserted
+    ));
     let mut replay_ids = FixedDispatchIds {
         value: 30,
         calls: 0,
@@ -726,14 +782,18 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         retained_command_ids
     );
     let recovered_without_rule = store.recover_pending_commands(&mut command_codec).await?;
+    let recovered_without_removed_rule = recovered_without_rule
+        .iter()
+        .filter(|planned| planned.rule_id() == rule.id())
+        .collect::<Vec<_>>();
     assert_eq!(
-        recovered_without_rule
+        recovered_without_removed_rule
             .iter()
             .map(|planned| planned.command().command_id())
             .collect::<Vec<_>>(),
         retained_command_ids
     );
-    assert!(recovered_without_rule.iter().all(|planned| {
+    assert!(recovered_without_removed_rule.iter().all(|planned| {
         let SessionCommandPayload::CreateSession(command) =
             planned.command().clone().into_payload()
         else {
@@ -763,6 +823,50 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .record_commands(&unowned_reaction, observed_at, &mut command_codec)
             .await?,
         DispatchAdmission::ConflictingReuse
+    ));
+    let ordered_reaction_one = plan_lifecycle_reaction_for_test(
+        trigger_sequence,
+        retained_dispatch,
+        &rule,
+        &event,
+        NonZeroU64::MIN,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(85)),
+            reaction_session,
+            SessionLifecycleOperation::ReleaseStart,
+        ),
+    )?;
+    let ordered_reaction_two = plan_lifecycle_reaction_for_test(
+        trigger_sequence,
+        retained_dispatch,
+        &rule,
+        &event,
+        NonZeroU64::new(2).expect("two is positive"),
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(86)),
+            reaction_session,
+            SessionLifecycleOperation::ReleaseStart,
+        ),
+    )?;
+    assert!(matches!(
+        store
+            .record_commands(
+                &[ordered_reaction_two.clone(), ordered_reaction_one.clone()],
+                observed_at,
+                &mut command_codec,
+            )
+            .await,
+        Err(StoreError::InvalidDispatchBatch)
+    ));
+    assert!(matches!(
+        store
+            .record_commands(
+                &[ordered_reaction_one.clone(), ordered_reaction_one],
+                observed_at,
+                &mut command_codec,
+            )
+            .await,
+        Err(StoreError::InvalidDispatchBatch)
     ));
     let reaction_commands = [plan_lifecycle_reaction_for_test(
         trigger_sequence,
@@ -822,6 +926,32 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .fetch_one(&module_pool)
             .await?;
     assert_eq!(linked_session, created_session);
+    let restarted_store = RepoWatchStore::new(module_pool.clone());
+    let retained_origin = restarted_store
+        .reaction_origin_for_session(reaction_session)
+        .await?
+        .expect("a created module session retains its reaction origin");
+    assert_eq!(retained_origin.dispatch(), retained_dispatch);
+    assert_eq!(retained_origin.action_ordinal(), NonZeroU64::MIN);
+    assert_eq!(retained_origin.repository(), &repository);
+    assert_eq!(retained_origin.rule_id(), rule.id());
+    assert_eq!(retained_origin.rule_revision(), rule.version());
+    assert_eq!(retained_origin.event_id(), event.id());
+    let restarted_reaction = [plan_retained_lifecycle_reaction_for_test(
+        NonZeroU64::new(44).expect("forty-four is positive"),
+        &retained_origin,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(87)),
+            reaction_session,
+            SessionLifecycleOperation::ReleaseStart,
+        ),
+    )?];
+    assert!(matches!(
+        restarted_store
+            .record_commands(&restarted_reaction, observed_at, &mut command_codec)
+            .await?,
+        DispatchAdmission::Inserted
+    ));
     let still_pending_creates: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM dispatch_ledger
           WHERE dispatch_ref = $1 AND command_kind = 'create_session' AND status = 'pending'",
@@ -878,7 +1008,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store
             .commit_frontier_candidate(
-                &repository,
+                &projection,
                 1,
                 &next_frontier,
                 &[preceding_occurrence, conflicting_occurrence],
@@ -913,7 +1043,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         store
             .commit_frontier_candidate(
-                &repository,
+                &projection,
                 1,
                 &stale_frontier,
                 &[],
@@ -930,7 +1060,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .bind(repository.as_str())
     .fetch_one(&module_pool)
     .await?;
-    assert!(store.release_frontier(&repository, &stream).await?);
+    assert_eq!(
+        store.release_frontier(&repository, &stream).await?,
+        FrontierReleaseAdmission::Released { generation: 2 }
+    );
     let (released_generation, released_digest): (Decimal, Vec<u8>) = sqlx::query_as(
         "SELECT frontier_generation, last_frontier_commit_digest
            FROM repository_state WHERE repository = $1",
@@ -942,11 +1075,18 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_ne!(released_digest, committed_digest);
     assert_eq!(
         store
-            .commit_frontier_candidate(&repository, 1, &frontier, &[], observed_at, retain_until,)
+            .commit_frontier_candidate(&projection, 1, &frontier, &[], observed_at, retain_until,)
             .await?,
         FrontierEventAdmission::Stale
     );
-    assert!(!store.release_frontier(&repository, &stream).await?);
+    assert_eq!(
+        store.release_frontier(&repository, &stream).await?,
+        FrontierReleaseAdmission::Replayed { generation: 2 }
+    );
+    assert_eq!(
+        store.release_frontier(&repository, &[99; 32]).await?,
+        FrontierReleaseAdmission::Absent
+    );
 
     let mut replay = delivery();
     replay.received_at += Duration::from_secs(1);

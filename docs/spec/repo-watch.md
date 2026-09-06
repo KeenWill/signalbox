@@ -37,6 +37,11 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
+Each repository frontier commit includes the complete current repository and
+pull-request projections, expected generation, complete identity candidate, and
+ordered event occurrences in one transaction. A generation mismatch is stale
+unless that complete input exactly replays the immediately succeeding commit.
+
 ## Ownership boundary
 
 The v2 crate depends on the ownership seam as its only Signalbox dependency. It
@@ -51,6 +56,13 @@ The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
 membership path back to the core identity, and has no table privileges in
 `public`. Module SQL uses an unqualified search path confined to its schema.
 Core and other modules receive no privileges on the module tables.
+
+Initial dispatch actions and lifecycle reactions are retained and submitted in
+strictly increasing, unique action-ordinal order. A created session indexes its
+retained rule revision, event, dispatch, and action ordinal, so lifecycle
+reaction planning survives rule removal and process restart. Equal evaluation
+recovery finds the retained batch before considering newly reserved dispatch or
+command identities.
 
 The module schema contains twelve tables:
 
