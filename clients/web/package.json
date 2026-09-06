@@ -14,7 +14,7 @@
     "test:browser:update": "npm run build && playwright test --update-snapshots"
   },
   "engines": {
-    "node": ">=26"
+    "node": "v26.8.1"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.23",
