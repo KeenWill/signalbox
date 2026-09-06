@@ -744,7 +744,7 @@ impl SessionPlanRepository {
         }
 
         let prior = next
-            .as_u64()
+            .get()
             .checked_sub(1)
             .filter(|prior| *prior > 0)
             .map(Decimal::from);
@@ -758,7 +758,7 @@ impl SessionPlanRepository {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(request.session().into_uuid())
-        .bind(Decimal::from(next.as_u64()))
+        .bind(Decimal::from(next.get()))
         .bind(prior)
         .bind(mapping::plan_event_kind_to_str(encoded.kind))
         .bind(Decimal::from(encoded.entry.as_u64()))
