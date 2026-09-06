@@ -1,5 +1,4 @@
--- Repository-watch v1 state is disposable derived data. The v2 module is not
--- dispatched yet, so cutover drops the old surface without a backfill.
+-- The public schema retains only the repository and branch validators used by commissioned dispatch.
 
 DROP TRIGGER commissioned_dispatch_counts_pull_request_session
     ON commissioned_dispatch;

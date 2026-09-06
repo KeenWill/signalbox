@@ -18,6 +18,7 @@ PERSISTENCE_FILE = Path("crates/persistence/src/lib.rs")
 PREEXISTING_UNCLASSIFIED_FILE = Path(
     "apps/signalboxd/src/blob_storage_configuration.rs"
 )
+RETIRED_REPO_WATCH_FILE = Path("apps/signalboxd/src/repo_watch_runtime.rs")
 
 
 def run_checker_tree(sources: dict[Path, str]) -> subprocess.CompletedProcess[str]:
@@ -147,6 +148,16 @@ class NumericBoundCheckerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("1 outside blocking scope", result.stdout)
+
+    def test_reintroduced_repo_watch_bound_is_not_exempt(self) -> None:
+        result = run_checker(
+            RETIRED_REPO_WATCH_FILE,
+            "const MAX_RESPONSE_BYTES: usize = 2048;\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("apps/signalboxd/src/repo_watch_runtime.rs:1", result.stdout)
+        self.assertIn("MAX_RESPONSE_BYTES", result.stdout)
 
     def test_non_bound_false_positive_escape_requires_a_rationale(self) -> None:
         result = run_checker(
