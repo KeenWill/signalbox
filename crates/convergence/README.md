@@ -28,6 +28,10 @@ Every recorded observation must end with a complete identity query. The final
 identity read follows pagination and checks; `checks_green` describes those
 refreshed checks.
 
+JSON also includes the revalidated pull-request identity for operational
+drivers. The Python [reconciler](../../tooling/convergence-reconciler/README.md)
+delegates its evidence evaluation to this CLI.
+
 State records the complete policy value as its identity. A policy change
 discards retained review authentication and wave counts and qualifies current
 evidence again; check inventories and resolution observation times remain facts.
@@ -73,43 +77,34 @@ field is absent; there is no compiled default. Repository values live in the
 Evidence timestamps are compared as RFC 3339 instants with `chrono`, including
 UTC offsets and fractional seconds.
 
-The frozen differential reference is
-[reference.py](../../tooling/convergence-reconciler/reference.py) from
-[39bfc826d](https://github.com/KeenWill/signalbox/commit/39bfc826d). The
-configuration shape follows
-[#1588](https://github.com/KeenWill/signalbox/pull/1588). The reference includes
-the removal of the source-comment-only exemption and supplies the evidence
-rules; it is not a consumer of this crate. The harness additionally applies the
-[repository-watch contract](../../docs/spec/repo-watch.md) requiring at least
-one gating check and every review thread to be resolved, including escalated
-threads. An empty or entirely exempt inventory cannot converge. Draft status and
-description must be present with boolean and string types. The harness also
-applies the
-[review-workflow identity contract](../../docs/spec/review-workflows.md): a
-change of open or closed state between observations invalidates the snapshot.
-Policy-bound state and the removal of the comment-only exemption apply to both
-evaluations. Comment-only changes require a fresh quiet review; rename-only
-changes and clean base forwards remain exempt.
+The [frozen expectations](fixtures/expected.json) contain the differential
+oracle for the Rust corpus and CLI regression tests. The complete corpus agrees
+with the frozen Python reference plus the repository-watch and review-workflow
+contracts. For reproduction, the
+[reference implementation](https://github.com/KeenWill/signalbox/blob/89182dd8b11c55c89940df287526981e84c02855/tooling/convergence-reconciler/reference.py)
+and
+[differential adapter](https://github.com/KeenWill/signalbox/blob/89182dd8b11c55c89940df287526981e84c02855/tooling/convergence-reconciler/differential.py)
+are available together at the fixed checkpoint. Runtime evidence evaluation has
+one implementation in this crate.
 
 Run `python3 tooling/convergence-reconciler/differential.py` after building the
-CLI. The harness compares convergence and the complete reason set for every
-fixture. `--write-expectations` writes the Python outcomes for Rust corpus tests
-only after every comparison agrees. It rejects explicit fixture selections when
-writing expectations.
+CLI. It checks convergence and the complete reason set against the frozen
+expectations and rejects an incomplete fixture inventory. It cannot rewrite the
+oracle.
 
 [Fixtures](fixtures/) contain losslessly compressed, unredacted provider
 responses for thirty real pull requests. Each [mutation](fixtures/mutations/)
 names its source, the evidence edge it exercises, and explicit JSON-pointer
 replacements. The historical settled scenario retains its recorded ancestry
 responses while the thirty provider recordings include fresh final identity
-reads. Recorded responses remain unchanged. Mutations cover request edits and
-deletions, body-only findings, completion summaries, pre-green requests, review
-edits after disposition, wave boundaries and check reruns, rename-only and
-comment-only heads requiring a fresh review, clean and material base forwards,
-101-thread pagination, and disappearing checks. Later authenticated body
-findings invalidate earlier quiet reviews on the same head; an escalation must
-follow the latest reviewer edit. The harness applies these disposition and
-revalidation contracts while keeping the reference implementation frozen.
+reads. Recorded responses are unmodified provider data. Mutations cover request
+edits and deletions, body-only findings, completion summaries, pre-green
+requests, review edits after disposition, wave boundaries and check reruns,
+rename-only and comment-only heads requiring a fresh review, clean and material
+base forwards, 101-thread pagination, and disappearing checks. Later
+authenticated body findings invalidate earlier quiet reviews on the same head;
+an escalation must follow the latest reviewer edit. The frozen expectations
+cover these disposition and revalidation contracts.
 
 Not built: provider abstractions, new convergence gates, schedulers, storage
 tables, or migrations.

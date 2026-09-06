@@ -74,11 +74,19 @@ fn run() -> Result<u8, Error> {
             Ok(0)
         }
         "evaluate" => {
-            let result = evaluate(&recording.snapshot(&policy)?, &policy)?;
+            let snapshot = recording.snapshot(&policy)?;
+            let result = evaluate(&snapshot, &policy)?;
             if let Some(path) = options.get("--state") {
                 save_state(Path::new(path), &result.state)?;
             }
-            serde_json::to_writer(std::io::stdout().lock(), &result)?;
+            let mut output = serde_json::to_value(&result)?;
+            let node = &snapshot.current;
+            output["pull_request"] = serde_json::json!({
+                "id":node["id"], "number":node["number"], "title":node["title"],
+                "url":node["url"], "baseRefName":node["baseRefName"],
+                "headRefName":node["headRefName"], "headRepository":node["headRepository"],
+            });
+            serde_json::to_writer(std::io::stdout().lock(), &output)?;
             Ok(if result.converged { 0 } else { 1 })
         }
         _ => Err(Error::Evidence("expected record or evaluate".into())),

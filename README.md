@@ -40,7 +40,6 @@ boundaries.
 - [Architecture](docs/architecture.md)
 - [Glossary](docs/glossary.md)
 - [Scenarios](docs/scenarios.md)
-- [Invariant test index](docs/invariants.md)
 - [Domain API](docs/api/signalbox-domain/README.md)
 - [Application API](docs/api/signalbox-application/README.md)
 - [Testing style](docs/agents/testing-style.md)

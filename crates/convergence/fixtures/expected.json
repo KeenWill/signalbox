@@ -280,6 +280,224 @@
       "quiet-review-not-completed-for-current-head"
     ]
   },
+  "mutations/python-acknowledged-finding.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-base-commit-missing.json": {
+    "converged": false,
+    "reasons": [
+      "base-commits-not-in-head:1"
+    ]
+  },
+  "mutations/python-edited-disposition.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-edited-rename.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-fixed-finding.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-later-decline-supersedes-escalation.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-missing-fix.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-missing-quiet-review.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-non-python-c-header.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-non-python-rust-file.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-pending-gating-check.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:required build:IN_PROGRESS"
+    ]
+  },
+  "mutations/python-persisted-review-id-replaced.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-persisted-review-missing.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-persisted-review-red-rerun.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head",
+      "check-not-green:required build:FAILURE"
+    ]
+  },
+  "mutations/python-planning-banner-only-at-head.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-planning-only-added.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-planning-only-modified.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-planning-rename-base-path.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-python-encoding-cookie-change.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-executable-change.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-hash-comments.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-hunk-content-that-looks-like-a-header.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-shebang-change.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-python-string-contents.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-question-finding.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-request-typo-plural.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-request-typo-suffix.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-request-wrong-head.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-review-and-request-pagination.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-thread-comment-pagination.json": {
+    "converged": true,
+    "reasons": []
+  },
+  "mutations/python-trivial-information.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-unreachable-review-commit.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-untrusted-disposition.json": {
+    "converged": false,
+    "reasons": [
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-unverified-merge.json": {
+    "converged": false,
+    "reasons": [
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/python-wave-ancestry-unavailable.json": {
+    "error": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...113746d23d6c7b398ef34464a071dca532791898"
+  },
+  "mutations/python-wave-base-comparison-unavailable.json": {
+    "error": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
   "mutations/rename-only-head.json": {
     "converged": false,
     "reasons": [
