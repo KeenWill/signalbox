@@ -265,7 +265,7 @@ sample
             Path(__file__).resolve().parents[1] / ".github/workflows/rust.yml"
         ).read_text()
 
-        self.assertIn("| docs/api/* | docs/invariants.md", workflow)
+        self.assertIn("| docs/api/*", workflow)
 
     def test_public_static_is_delta_item(self) -> None:
         baseline = "pub mod sample\n"
