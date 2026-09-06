@@ -483,6 +483,5 @@ pub fn runtime_tool_definitions(
 ## render_delegation_outcome
 
 ```rust
-pub fn render_delegation_outcome(outcome: &session_delegation::DelegationOutcome)
-    -> string::String;
+pub fn render_delegation_outcome(outcome: &outcome::DelegationOutcome) -> string::String;
 ```

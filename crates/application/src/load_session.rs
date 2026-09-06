@@ -166,10 +166,10 @@ mod tests {
         }
     }
 
-    /// S01: application orchestration returns the exact
+    /// application orchestration returns the exact
     /// complete domain snapshot supplied by the current-session port.
     #[test]
-    fn s01_complete_current_session_is_returned_unchanged() {
+    fn complete_current_session_is_returned_unchanged() {
         let requested = session_id(1);
         let current = current_session(requested, 4);
         let service =
@@ -187,11 +187,11 @@ mod tests {
         assert_eq!(service.into_reader().observed(), [requested]);
     }
 
-    /// S01 / docs/spec/sessions-and-transcript.md: true session absence
+    /// docs/spec/sessions-and-transcript.md: true session absence
     /// remains `None`; the application does not fabricate an initial or
     /// partial projection.
     #[test]
-    fn s01_true_session_absence_is_preserved() {
+    fn true_session_absence_is_preserved() {
         let requested = session_id(1);
         let service = LoadSessionService::new(FakeSessionReader::returning(Ok(None)));
 
@@ -201,10 +201,10 @@ mod tests {
         assert_eq!(service.into_reader().observed(), [requested]);
     }
 
-    /// S01: loading by semantic session identity is a single query;
+    /// loading by semantic session identity is a single query;
     /// an adapter failure is returned without retry or command handling.
     #[test]
-    fn s01_reader_failure_is_returned_without_retry() {
+    fn reader_failure_is_returned_without_retry() {
         let requested = session_id(1);
         let service = LoadSessionService::new(FakeSessionReader::returning(Err(
             FakeReaderError::Unavailable,

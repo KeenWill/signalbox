@@ -6834,7 +6834,7 @@ mod tests {
     }
 
     #[test]
-    fn s19_descendant_scope_follows_the_explicit_cli_choice() {
+    fn descendant_scope_follows_the_explicit_cli_choice() {
         assert_eq!(
             descendant_scope(false),
             DescendantTerminationScope::ParentAlone
@@ -8798,10 +8798,10 @@ mod tests {
         Ok(())
     }
 
-    /// S28: a directory replaced after enumeration cannot redirect
+    /// a directory replaced after enumeration cannot redirect
     /// a queued candidate read through a symbolic link.
     #[tokio::test]
-    async fn s28_scan_refuses_directory_symlink_replacement() -> Result<(), Box<dyn Error>> {
+    async fn scan_refuses_directory_symlink_replacement() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let outside = tempfile::tempdir()?;
         let queued_directory = root.path().join("queued");
@@ -8824,12 +8824,12 @@ mod tests {
         Ok(())
     }
 
-    /// S34: an unreadable `--system-prompt-file` names the prompt file, not
+    /// an unreadable `--system-prompt-file` names the prompt file, not
     /// the unrelated conversation-import source, in both its typed variant and
     /// its rendered diagnostic.
     #[tokio::test]
-    async fn s34_missing_system_prompt_file_reports_a_prompt_file_failure()
-    -> Result<(), Box<dyn Error>> {
+    async fn missing_system_prompt_file_reports_a_prompt_file_failure() -> Result<(), Box<dyn Error>>
+    {
         let root = tempfile::tempdir()?;
         let absent = root.path().join("prompt.txt");
 
@@ -8845,11 +8845,11 @@ mod tests {
         Ok(())
     }
 
-    /// S28: a regular candidate replaced after enumeration by a
+    /// a regular candidate replaced after enumeration by a
     /// FIFO is rejected without waiting for a writer.
     #[cfg(not(target_vendor = "apple"))]
     #[tokio::test]
-    async fn s28_scan_refuses_fifo_replacement_without_blocking() -> Result<(), Box<dyn Error>> {
+    async fn scan_refuses_fifo_replacement_without_blocking() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let candidate_path = root.path().join("conversation.jsonl");
         fs::write(&candidate_path, b"inside")?;
@@ -9519,7 +9519,7 @@ mod tests {
         Ok(())
     }
 
-    /// S28: the inspection read is the client's source of selectable
+    /// the inspection read is the client's source of selectable
     /// positions, so a gap in the emitted sequence is rejected before any row
     /// can suggest a position the daemon did not emit.
     #[tokio::test]
@@ -9590,7 +9590,7 @@ mod tests {
         Ok(())
     }
 
-    /// S28: an imported conversation's normalized entry sequence is nonempty,
+    /// an imported conversation's normalized entry sequence is nonempty,
     /// so an empty inventory contradicts the record the daemon claims to be
     /// reading. The shared reader fails closed on it rather than printing a
     /// conversation with no selectable position.
@@ -9653,7 +9653,7 @@ mod tests {
         Ok(())
     }
 
-    /// S28: `latest` resolves against the imported conversation's own declared
+    /// `latest` resolves against the imported conversation's own declared
     /// entry count and reaches the wire as that concrete ordinal, so the
     /// durable command an exact replay reconstructs is unchanged.
     #[tokio::test]

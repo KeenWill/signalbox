@@ -486,11 +486,11 @@ async fn insert_exact_seed_members(
     Ok(())
 }
 
-/// S28: one applied imported-frontier command can commit only with its
+/// one applied imported-frontier command can commit only with its
 /// exact ancestry, imported semantic prefix, and one-to-one seed frontier.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>> {
+async fn exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -524,11 +524,11 @@ async fn s28_exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// S28: the complete seed can be assembled in any in-transaction order;
+/// the complete seed can be assembled in any in-transaction order;
 /// inserting its one-to-one link before the semantic prefix remains valid.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
+async fn seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -561,12 +561,12 @@ async fn s28_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// S28: a seed link inserted by a nested transaction still belongs to
+/// a seed link inserted by a nested transaction still belongs to
 /// its top-level transaction, so the remaining prefix may be assembled after the
 /// savepoint is released.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_savepoint_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
+async fn savepoint_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -607,11 +607,11 @@ async fn s28_savepoint_seed_link_can_precede_semantic_prefix() -> Result<(), Box
     Ok(())
 }
 
-/// S28: the one-to-one seed link can precede its imported session;
+/// the one-to-one seed link can precede its imported session;
 /// the deferred ancestry check validates the final cross-table facts.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_seed_link_can_precede_imported_session() -> Result<(), Box<dyn Error>> {
+async fn seed_link_can_precede_imported_session() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_source_scaffolding(&mut transaction).await?;
@@ -645,11 +645,11 @@ async fn s28_seed_link_can_precede_imported_session() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// S28: once the complete same-transaction seed check is discharged,
+/// once the complete same-transaction seed check is discharged,
 /// another imported semantic row cannot extend the selected prefix.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_immediate_seed_check_seals_same_transaction_prefix() -> Result<(), Box<dyn Error>> {
+async fn immediate_seed_check_seals_same_transaction_prefix() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -694,11 +694,11 @@ async fn s28_immediate_seed_check_seals_same_transaction_prefix() -> Result<(), 
     Ok(())
 }
 
-/// S28: imported ancestry cannot commit without the separate one-to-one
+/// imported ancestry cannot commit without the separate one-to-one
 /// seed record, even when the materialized frontier content is exact.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn Error>> {
+async fn imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -720,11 +720,11 @@ async fn s28_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// S28: equal imported members in the wrong order are not the selected
+/// equal imported members in the wrong order are not the selected
 /// imported prefix.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_reordered_imported_seed_members_are_rejected() -> Result<(), Box<dyn Error>> {
+async fn reordered_imported_seed_members_are_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -768,12 +768,11 @@ async fn s28_reordered_imported_seed_members_are_rejected() -> Result<(), Box<dy
     Ok(())
 }
 
-/// S28: an imported semantic payload cannot fabricate any native
+/// an imported semantic payload cannot fabricate any native
 /// accepted-input, turn, call, or tool evidence.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_imported_semantic_entry_rejects_native_payload_columns() -> Result<(), Box<dyn Error>>
-{
+async fn imported_semantic_entry_rejects_native_payload_columns() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query(
         "INSERT INTO semantic_transcript_entry
@@ -801,12 +800,11 @@ async fn s28_imported_semantic_entry_rejects_native_payload_columns() -> Result<
     Ok(())
 }
 
-/// S28: the new durable command discriminator still requires its complete
+/// the new durable command discriminator still requires its complete
 /// typed record at the transaction boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_imported_creation_registry_claim_requires_typed_record() -> Result<(), Box<dyn Error>>
-{
+async fn imported_creation_registry_claim_requires_typed_record() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
@@ -833,11 +831,11 @@ async fn s28_imported_creation_registry_claim_requires_typed_record() -> Result<
     Ok(())
 }
 
-/// S28: the reciprocal template-provenance creation FK does not make
+/// the reciprocal template-provenance creation FK does not make
 /// the preexisting native command table truncatable.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_native_creation_command_truncate_remains_rejected() -> Result<(), Box<dyn Error>> {
+async fn native_creation_command_truncate_remains_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query("TRUNCATE TABLE create_session_command")
         .execute(&pool)
@@ -853,11 +851,11 @@ async fn s28_native_creation_command_truncate_remains_rejected() -> Result<(), B
     Ok(())
 }
 
-/// S28: row-level immutability cannot be bypassed by truncating the table
+/// row-level immutability cannot be bypassed by truncating the table
 /// that carries exact seed-frontier membership.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dyn Error>> {
+async fn seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query("TRUNCATE TABLE context_frontier_delta")
         .execute(&pool)
@@ -873,11 +871,11 @@ async fn s28_seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// S28: seed construction is ordered once per session; after the seed link
+/// seed construction is ordered once per session; after the seed link
 /// exists, its imported semantic prefix cannot grow.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<dyn Error>> {
+async fn committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -975,10 +973,10 @@ async fn import_round_trip_fixture() -> Result<ImportRoundTripFixture, Box<dyn E
     })
 }
 
-/// S28: exact reingestion resolves the immutable imported winner.
+/// exact reingestion resolves the immutable imported winner.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_exact_reingestion_resolves_the_immutable_winner() -> Result<(), Box<dyn Error>> {
+async fn exact_reingestion_resolves_the_immutable_winner() -> Result<(), Box<dyn Error>> {
     let fixture = import_round_trip_fixture().await?;
 
     assert_eq!(
@@ -998,11 +996,11 @@ async fn s28_exact_reingestion_resolves_the_immutable_winner() -> Result<(), Box
     Ok(())
 }
 
-/// S28: imported raw bytes deduplicate by content identity while
+/// imported raw bytes deduplicate by content identity while
 /// every ordered occurrence and semantic frontier reconstitutes.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_imported_raw_blobs_deduplicate_and_reconstitute() -> Result<(), Box<dyn Error>> {
+async fn imported_raw_blobs_deduplicate_and_reconstitute() -> Result<(), Box<dyn Error>> {
     let fixture = import_round_trip_fixture().await?;
     let source_result_kind = "future-result-kind";
 
@@ -1060,11 +1058,11 @@ async fn converged_import_relations_remain_append_only() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// S28: restart loading reconstructs the exact imported aggregate
+/// restart loading reconstructs the exact imported aggregate
 /// from catalogued raw blobs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_imported_blob_round_trip_survives_pool_restart() -> Result<(), Box<dyn Error>> {
+async fn imported_blob_round_trip_survives_pool_restart() -> Result<(), Box<dyn Error>> {
     let fixture = import_round_trip_fixture().await?;
 
     fixture.pool.close().await;
@@ -1083,13 +1081,12 @@ async fn s28_imported_blob_round_trip_survives_pool_restart() -> Result<(), Box<
     Ok(())
 }
 
-/// S28: appending Claude Code records creates a distinct exact
+/// appending Claude Code records creates a distinct exact
 /// snapshot while shared raw records remain content-addressed once and source
 /// session evidence groups both snapshots without identifying them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_grown_claude_source_is_new_snapshot_with_shared_lineage() -> Result<(), Box<dyn Error>>
-{
+async fn grown_claude_source_is_new_snapshot_with_shared_lineage() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let leading_record = concat!(
         "{\"sessionId\":\"claude-lineage\",\"uuid\":\"record-1\",",
@@ -1168,13 +1165,12 @@ async fn s28_grown_claude_source_is_new_snapshot_with_shared_lineage() -> Result
     Ok(())
 }
 
-/// S28: appending Codex records creates a distinct exact snapshot
+/// appending Codex records creates a distinct exact snapshot
 /// while shared raw records remain content-addressed once and source session
 /// evidence groups both snapshots without identifying them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_grown_codex_source_is_new_snapshot_with_shared_lineage() -> Result<(), Box<dyn Error>>
-{
+async fn grown_codex_source_is_new_snapshot_with_shared_lineage() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let leading_record = concat!(
         "{\"timestamp\":\"t0\",\"type\":\"response_item\",\"payload\":",
@@ -1255,11 +1251,11 @@ async fn s28_grown_codex_source_is_new_snapshot_with_shared_lineage() -> Result<
     Ok(())
 }
 
-/// S28: source-session lineage remains unknown when no record attests an
+/// source-session lineage remains unknown when no record attests an
 /// identifier or when records attest conflicting identifiers.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_source_session_lineage_is_null_without_one_consistent_attestation()
+async fn source_session_lineage_is_null_without_one_consistent_attestation()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let missing_source = "{\"type\":\"summary\",\"value\":\"missing\"}";
@@ -1307,11 +1303,11 @@ async fn s28_source_session_lineage_is_null_without_one_consistent_attestation()
     Ok(())
 }
 
-/// S28: checked loading and exact reingestion reject
+/// checked loading and exact reingestion reject
 /// non-null lineage evidence that disagrees with the reconstructed entries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_corrupt_source_session_lineage_fails_closed() -> Result<(), Box<dyn Error>> {
+async fn corrupt_source_session_lineage_fails_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let source = concat!(
         "{\"sessionId\":\"lineage-original\",\"uuid\":\"record-1\",",
@@ -1396,12 +1392,11 @@ async fn s28_corrupt_source_session_lineage_fails_closed() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// S28: Codex rollout entries use the same append-only,
+/// Codex rollout entries use the same append-only,
 /// content-addressed persistence boundary as every imported conversation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_codex_rollout_round_trip_is_idempotent_and_restart_safe() -> Result<(), Box<dyn Error>>
-{
+async fn codex_rollout_round_trip_is_idempotent_and_restart_safe() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let source = concat!(
         "{\"timestamp\":\"t0\",\"type\":\"response_item\",\"payload\":",
@@ -1463,11 +1458,11 @@ async fn s28_codex_rollout_round_trip_is_idempotent_and_restart_safe() -> Result
     Ok(())
 }
 
-/// S28: equal source bytes cannot resolve as replay when a drifting
+/// equal source bytes cannot resolve as replay when a drifting
 /// converter supplies a different normalized record and semantic projection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_reingestion_rejects_converter_projection_drift() -> Result<(), Box<dyn Error>> {
+async fn reingestion_rejects_converter_projection_drift() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let source = br#"{"type":"user","message":{"content":"original"}}"#;
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
@@ -1550,11 +1545,11 @@ async fn s28_reingestion_rejects_converter_projection_drift() -> Result<(), Box<
     Ok(())
 }
 
-/// S28: exact reingestion checks an existing snapshot
+/// exact reingestion checks an existing snapshot
 /// before the new-digest blob path and cannot conceal durable raw corruption.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_reingestion_does_not_mask_raw_corruption() -> Result<(), Box<dyn Error>> {
+async fn reingestion_does_not_mask_raw_corruption() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let source = br#"{"type":"summary","summary":"corruption-only"}"#;
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x750));
@@ -1592,11 +1587,11 @@ async fn s28_reingestion_does_not_mask_raw_corruption() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// S28: imports sharing raw blobs acquire their global content keys
+/// imports sharing raw blobs acquire their global content keys
 /// in one stable order even when the source occurrences are reversed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_concurrent_reversed_raws_use_stable_blob_order() -> Result<(), Box<dyn Error>> {
+async fn concurrent_reversed_raws_use_stable_blob_order() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let forward_source = concat!(
         "{\"type\":\"summary\",\"value\":\"first\"}\n",
@@ -1649,11 +1644,11 @@ async fn s28_concurrent_reversed_raws_use_stable_blob_order() -> Result<(), Box<
     Ok(())
 }
 
-/// S28: overlapping imported-entry identity keys are
+/// overlapping imported-entry identity keys are
 /// acquired in one stable order even when transcript positions reverse them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_concurrent_reversed_entry_ids_return_typed_collision() -> Result<(), Box<dyn Error>> {
+async fn concurrent_reversed_entry_ids_return_typed_collision() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let forward_source = concat!(
         "{\"type\":\"summary\",\"value\":\"forward-first\"}\n",
@@ -1822,11 +1817,11 @@ async fn incomplete_import_header_cannot_commit() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// S28: a newly inserted content-addressed raw blob cannot commit
+/// a newly inserted content-addressed raw blob cannot commit
 /// without at least one conversation-owned occurrence.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_unowned_raw_source_record_cannot_commit() -> Result<(), Box<dyn Error>> {
+async fn unowned_raw_source_record_cannot_commit() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     insert_catalogued_raw_source(&mut transaction, vec![0x41_u8; 32], 1).await?;

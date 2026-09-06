@@ -799,9 +799,9 @@ mod tests {
         ));
     }
 
-    /// S18: the durable delegated spelling retains its exact request.
+    /// the durable delegated spelling retains its exact request.
     #[test]
-    fn s18_delegated_provenance_decodes_exactly() {
+    fn delegated_provenance_decodes_exactly() {
         let request = spawning_request();
         let provenance = decode_provenance(
             String::from(session_creation_cause_to_str(
@@ -825,9 +825,9 @@ mod tests {
         assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
     }
 
-    /// S18: delegated storage cannot omit its spawning request.
+    /// delegated storage cannot omit its spawning request.
     #[test]
-    fn s18_delegated_provenance_requires_spawning_request() {
+    fn delegated_provenance_requires_spawning_request() {
         let delegated = SessionCreationCause::Delegated {
             spawning_request: signalbox_domain::ToolRequestId::from_uuid(spawning_request()),
         };
@@ -846,9 +846,9 @@ mod tests {
         );
     }
 
-    /// S01: interactive storage cannot claim a spawning request.
+    /// interactive storage cannot claim a spawning request.
     #[test]
-    fn s01_interactive_provenance_rejects_spawning_request() {
+    fn interactive_provenance_rejects_spawning_request() {
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(
                 &SessionCreationCause::Interactive,
@@ -866,10 +866,10 @@ mod tests {
         );
     }
 
-    /// S28: an imported interactive row cannot silently discard
+    /// an imported interactive row cannot silently discard
     /// a contradictory delegated spawning identity.
     #[test]
-    fn s28_imported_provenance_rejects_spawning_request() {
+    fn imported_provenance_rejects_spawning_request() {
         let error = validate_imported_creation_provenance(
             String::from(session_creation_cause_to_str(
                 &SessionCreationCause::Interactive,
@@ -886,9 +886,9 @@ mod tests {
         );
     }
 
-    /// S18: delegated creation cannot acquire transcript ancestry.
+    /// delegated creation cannot acquire transcript ancestry.
     #[test]
-    fn s18_delegated_provenance_rejects_non_none_ancestry() {
+    fn delegated_provenance_rejects_non_none_ancestry() {
         let error =
             decode_provenance(
                 String::from(session_creation_cause_to_str(
