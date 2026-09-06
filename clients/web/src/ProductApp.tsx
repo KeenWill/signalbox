@@ -876,6 +876,7 @@ export function ProductApp({
         onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}
         timelineCapability={timelineCapability}
+        transcriptAvailable={bootstrap.data.capabilities.bounded_session_timeline_detail}
         timelineRef={timelineRef}
         windowRequest={windowRequest}
       />

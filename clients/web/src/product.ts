@@ -1088,6 +1088,7 @@ export async function* followSession(
             cursor = BigInt(event.cursor)
             yield event
           } else if (event.kind === 'resync_required') {
+            yield event
             resync = true
             break stream
           }
@@ -1124,7 +1125,7 @@ export async function readSessionTranscript(
   continuation: WebTimelineDetailContinuation | null,
   signal?: AbortSignal,
 ) {
-  const query = new URLSearchParams({ first, through, max_items: '80', max_bytes: '65536' })
+  const query = new URLSearchParams({ first, through, max_items: '8', max_bytes: '65536' })
   if (continuation?.type === 'more_at')
     query.set('cursor_address', continuation.address.event_sequence)
   if (continuation?.type === 'more_body') {
@@ -1137,8 +1138,11 @@ export async function readSessionTranscript(
     credentials: 'same-origin',
     signal,
   })
-  // JSON escaping can use six bytes per text byte; the existing timeline response budget covers metadata.
-  const payload = await readBoundedJson(response, MAX_PRODUCT_JSON_BYTES * 7)
+  // Eight items can each carry 256 references. Each reference fits in 1 KiB:
+  // a 71-byte blob ID, a 20-digit length, and 255 visible ASCII media-type
+  // bytes (at most doubled by JSON escaping), plus JSON keys and punctuation.
+  // The remaining budget covers escaped text and non-attachment envelopes.
+  const payload = await readBoundedJson(response, MAX_PRODUCT_JSON_BYTES * 7 + 8 * 256 * 1024)
   if (!response.ok)
     throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
   const page = decodeWebSessionTimelineDetailPage(payload)

@@ -33,13 +33,14 @@ it('backs off repeated resyncs and cancels the wait without opening another requ
   vi.stubGlobal('fetch', fetch)
   const controller = new AbortController()
   const follow = followSession(sessionId, controller.signal)
-  for (let count = 0; count < 4; count++) await follow.next()
+  for (let count = 0; count < 6; count++) await follow.next()
   expect(fetch).toHaveBeenCalledTimes(4)
   const delayed = follow.next()
   await vi.advanceTimersByTimeAsync(999)
   expect(fetch).toHaveBeenCalledTimes(4)
   await vi.advanceTimersByTimeAsync(1)
   expect((await delayed).value).toEqual({ kind: 'snapshot', snapshot: snapshot('41') })
+  await follow.next()
   await follow.next()
   expect(fetch).toHaveBeenCalledTimes(6)
   const cancelled = follow.next()
@@ -83,6 +84,7 @@ it('resynchronizes a live gap from a fresh snapshot and skips duplicate durable 
   const follow = followSession(sessionId, new AbortController().signal)
   expect((await follow.next()).value).toEqual({ kind: 'snapshot', snapshot: snapshot('41') })
   expect((await follow.next()).value).toEqual({ kind: 'snapshot', snapshot: snapshot('41') })
+  expect((await follow.next()).value).toEqual({ kind: 'resync_required', cursor: '45' })
   expect((await follow.next()).value).toEqual({ kind: 'snapshot', snapshot: snapshot('45') })
   expect((await follow.next()).value).toEqual({ kind: 'snapshot', snapshot: snapshot('45') })
   expect((await follow.next()).value).toMatchObject({ kind: 'durable', cursor: '46' })
@@ -156,11 +158,39 @@ it('uses body continuations to replace one bounded transcript region', async () 
   expect(Object.fromEntries(url.searchParams)).toEqual({
     first: '41',
     through: '46',
-    max_items: '80',
+    max_items: '8',
     max_bytes: '65536',
     cursor_address: '44',
     cursor_field: 'model_response',
     cursor_member: '0',
     cursor_offset: '65000',
   })
+})
+
+it('reads a full attachment-heavy text page within the derived response ceiling', async () => {
+  const items = Array.from({ length: 8 }, (_, index) => ({
+    address: { event_sequence: String(index + 1) },
+    kind: 'input_accepted',
+    projected_body_bytes: 128 + 8000,
+    body: {
+      type: 'user_input',
+      turn_id: sessionId,
+      text: {
+        text: '\u0001'.repeat(8000),
+        offset_bytes: '0',
+        total_bytes: '8000',
+        continuation: null,
+      },
+      attachments: Array.from({ length: 256 }, () => ({
+        blob_id: `sha256:${'f'.repeat(64)}`,
+        length_bytes: '18446744073709551615',
+        media_type: '"'.repeat(255),
+      })),
+    },
+  }))
+  const page = { session_id: sessionId, items, projected_body_bytes: 8 * 8128, continuation: null }
+  const response = Response.json(page)
+  expect((await response.clone().arrayBuffer()).byteLength).toBeGreaterThan(7 * 65536)
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+  expect(await readSessionTranscript(sessionId, '1', '8', null)).toEqual(page)
 })

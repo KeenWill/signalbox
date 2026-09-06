@@ -193,6 +193,18 @@ test('retries an unconfirmed acceptance with the same command and text', async (
   )
   await expect(page.getByRole('button', { name: 'Discard retained command' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toHaveCount(0)
+  await page
+    .getByRole('link', { name: 'Settings Local workspace preferences', exact: true })
+    .click()
+  await expect(page.getByRole('form', { name: 'Message composer' })).toHaveCount(0)
+  await page.goBack()
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue(
+    'Preserve this message.',
+  )
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveAttribute(
+    'readonly',
+    '',
+  )
   await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) =>
     route.fulfill({ status: 503, body: 'Timeline temporarily unavailable' }),
   )
@@ -202,6 +214,45 @@ test('retries an unconfirmed acceptance with the same command and text', async (
       .getByRole('alert')
       .filter({ hasText: 'The daemon could not provide this bounded session window' }),
   ).toBeVisible()
+  await page.getByRole('button', { name: 'Retry message' }).click()
+  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  expect(attempts).toHaveLength(2)
+  expect(attempts[1]).toEqual(attempts[0])
+  api.grow()
+})
+
+test('retains a command whose response is lost while its composer is unmounted', async ({
+  page,
+}) => {
+  const api = await sessionApi(page)
+  const attempts: unknown[] = []
+  let loseResponse = () => {}
+  const responsePending = new Promise<void>((resolve) => {
+    loseResponse = resolve
+  })
+  await page.route(`**/api/sessions/${sessionId}/input`, async (route) => {
+    attempts.push(route.request().postDataJSON())
+    if (attempts.length === 1) {
+      await responsePending
+      return route.abort()
+    }
+    return route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  await page
+    .getByRole('textbox', { name: 'Message to session' })
+    .fill('Keep the in-flight identity.')
+  await page.getByRole('button', { name: 'Send message', exact: true }).click()
+  await expect.poll(() => attempts.length).toBe(1)
+  await page
+    .getByRole('link', { name: 'Settings Local workspace preferences', exact: true })
+    .click()
+  await expect(page.getByRole('form', { name: 'Message composer' })).toHaveCount(0)
+  loseResponse()
+  await page.goBack()
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue(
+    'Keep the in-flight identity.',
+  )
   await page.getByRole('button', { name: 'Retry message' }).click()
   await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
   expect(attempts).toHaveLength(2)
@@ -263,3 +314,26 @@ for (const viewport of [
     })
   })
 }
+
+test('keeps header-only history when transcript detail is not advertised', async ({ page }) => {
+  const api = await sessionApi(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_session_timeline_detail: false },
+      },
+    }),
+  )
+  const detailRequests: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/timeline-detail')) detailRequests.push(request.url())
+  })
+  await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Transcript text' })).toHaveCount(0)
+  await expect(page.getByRole('textbox', { name: 'Message to session' })).toBeVisible()
+  api.grow()
+  await expect(page.getByRole('option')).toHaveCount(3)
+  expect(detailRequests).toEqual([])
+})

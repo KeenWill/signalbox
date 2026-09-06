@@ -29,6 +29,7 @@ import { ProductApp } from './ProductApp'
 import { applyPresentationPreferences } from './preferences'
 import { type ProductRouteId, productRoutes, readProductRouteState } from './product'
 import { defaultSearchUsageRouteState, type SearchUsageRouteState } from './SearchUsage'
+import { startSessionSynchronization } from './session-sync'
 import { selectApp, store } from './state'
 import './app.css'
 
@@ -171,6 +172,8 @@ const TOOLTIP_DELAY_MS = 350
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, gcTime: QUERY_CACHE_GC_TIME_MS } },
 })
+
+startSessionSynchronization(store, queryClient)
 
 declare module '@tanstack/react-router' {
   interface Register {

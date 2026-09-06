@@ -1,51 +1,9 @@
 import { useMutation } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { invokeCommand } from './commands'
-import type { WebSessionLiveSnapshot, WebSubmitInputRequest } from './generated/web-contract.mjs'
-import {
-  followSession,
-  ProductInputError,
-  ProductRequestError,
-  readSessionLive,
-  submitSessionInput,
-} from './product'
-import { store, useAppDispatch } from './state'
-
-export function useSessionFollow(sessionId: string | null, onDurable: () => Promise<unknown>) {
-  const [live, setLive] = useState<WebSessionLiveSnapshot | null>(null)
-  const [error, setError] = useState(false)
-  const [attempt, setAttempt] = useState(0)
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reconnect explicitly opens a new stream.
-  useEffect(() => {
-    setLive(null)
-    setError(false)
-    if (sessionId === null) return
-    const controller = new AbortController()
-    void (async () => {
-      try {
-        for await (const event of followSession(sessionId, controller.signal)) {
-          if (event.kind === 'snapshot') {
-            setLive(event.snapshot)
-            await onDurable()
-          }
-          if (event.kind === 'durable') {
-            await onDurable()
-            const snapshot = await readSessionLive(sessionId, controller.signal)
-            setLive(snapshot)
-          }
-        }
-      } catch {
-        if (!controller.signal.aborted) setError(true)
-      }
-    })()
-    return () => controller.abort()
-  }, [sessionId, onDurable, attempt])
-  return {
-    live: live?.session_id === sessionId ? live : null,
-    error,
-    reconnect: () => setAttempt((value) => value + 1),
-  }
-}
+import type { WebSubmitInputRequest } from './generated/web-contract.mjs'
+import { ProductInputError, ProductRequestError, submitSessionInput } from './product'
+import { actions, selectPendingSessionInput, store, useAppDispatch, useAppSelector } from './state'
 
 export function SessionComposer({
   sessionId,
@@ -59,35 +17,45 @@ export function SessionComposer({
   onAccepted: () => Promise<unknown>
 }) {
   const dispatch = useAppDispatch()
+  const pending = useAppSelector((state) => selectPendingSessionInput(state, sessionId))
+  const retained = pending?.input ?? null
   const [text, setText] = useState('')
-  const [retained, setRetained] = useState<WebSubmitInputRequest | null>(null)
   const [notice, setNotice] = useState('')
   const mutation = useMutation({
     mutationFn: (input: WebSubmitInputRequest) => submitSessionInput(sessionId, input),
-    onSuccess: () => {
-      setRetained(null)
+    onSuccess: (_, input) => {
+      dispatch(
+        actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: true }),
+      )
       setText('')
       setNotice('Message accepted by the daemon.')
       void onAccepted()
     },
-    onError: (error) => {
+    onError: (error, input) => {
       if (
         error instanceof ProductInputError ||
         (error instanceof ProductRequestError && error.status < 500)
       ) {
-        setRetained(null)
+        dispatch(
+          actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: true }),
+        )
+        setText(input.message)
         setNotice(`Rejected: ${error.message}`)
       } else {
-        setNotice('Acceptance is unconfirmed. Retry sends the same command and message.')
+        dispatch(
+          actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: false }),
+        )
       }
     },
   })
   const canSend =
-    !mutation.isPending && (retained !== null || (activeState === null && text.length > 0))
+    pending?.phase !== 'sending' && (retained !== null || (activeState === null && text.length > 0))
   const send = () => {
     if (!canSend) return
-    const input = retained ?? { command_id: crypto.randomUUID(), message: text }
-    setRetained(input)
+    const current = selectPendingSessionInput(store.getState(), sessionId)
+    if (current?.phase === 'sending') return
+    const input = current?.input ?? { command_id: crypto.randomUUID(), message: text }
+    dispatch(actions.sessionInputStarted({ sessionId, input }))
     setNotice('Sending message…')
     mutation.mutate(input)
   }
@@ -126,15 +94,25 @@ export function SessionComposer({
       <textarea
         id="session-message"
         rows={3}
-        value={text}
-        readOnly={retained !== null || mutation.isPending}
+        value={retained?.message ?? text}
+        readOnly={retained !== null}
         onChange={(event) => setText(event.target.value)}
       />
       <div className="session-composer-actions">
         <button type="submit" disabled={!canSend}>
-          {retained === null ? 'Send message' : mutation.isPending ? 'Sending…' : 'Retry message'}
+          {retained === null
+            ? 'Send message'
+            : pending?.phase === 'sending'
+              ? 'Sending…'
+              : 'Retry message'}
         </button>
-        <span role="status">{notice}</span>
+        <span role="status">
+          {pending?.phase === 'unconfirmed'
+            ? 'Acceptance is unconfirmed. Retry sends the same command and message.'
+            : pending?.phase === 'sending'
+              ? 'Sending message…'
+              : notice}
+        </span>
       </div>
     </form>
   )

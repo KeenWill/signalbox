@@ -13,14 +13,21 @@ import {
 import { invokeCommand } from './commands'
 import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
-import { SessionComposer, useSessionFollow } from './SessionComposer'
+import { SessionComposer } from './SessionComposer'
 import { SessionTranscriptText } from './SessionTranscriptText'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
   type SessionWindowAnchor,
 } from './session-timeline/model'
-import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
+import {
+  actions,
+  selectApp,
+  selectSessionSync,
+  store,
+  useAppDispatch,
+  useAppSelector,
+} from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
@@ -117,6 +124,7 @@ export function SessionWorkspaceSurface({
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
   timelineCapability,
+  transcriptAvailable,
   timelineRef,
   windowRequest,
 }: {
@@ -126,6 +134,7 @@ export function SessionWorkspaceSurface({
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
   timelineCapability: TimelineCapability
+  transcriptAvailable: boolean
   timelineRef: RefObject<HTMLDivElement | null>
   windowRequest: { anchor: 'first' | 'latest'; attempt: number } | null
 }) {
@@ -208,10 +217,15 @@ export function SessionWorkspaceSurface({
     enabled: sessionId !== null && timelineCapability === 'available',
   })
   const refetchSession = session.refetch
-  const follow = useSessionFollow(
-    timelineCapability === 'available' ? sessionId : null,
-    refetchSession,
-  )
+  const synchronization = useAppSelector(selectSessionSync)
+  const live = synchronization.sessionId === sessionId ? synchronization.snapshot : null
+  const followFailed = synchronization.sessionId === sessionId && synchronization.phase === 'failed'
+  useEffect(() => {
+    dispatch(actions.sessionFollowRequested(timelineCapability === 'available' ? sessionId : null))
+    return () => {
+      dispatch(actions.sessionFollowRequested(null))
+    }
+  }, [dispatch, sessionId, timelineCapability])
   const displayedSession =
     session.isSuccess && awaitingSessionId !== sessionId ? session.data : undefined
   const items = useMemo(
@@ -460,7 +474,7 @@ export function SessionWorkspaceSurface({
             <h2 id="session-entry-heading">Open a known session by immutable identity</h2>
             <p>
               {timelineCapability === 'available'
-                ? 'This branch provides bounded descriptor and timeline reads, but no session catalog, creation operation, or live follow channel. Enter an exact server-issued ID.'
+                ? 'Enter an exact server-issued ID to read bounded history, follow live updates, and send a message.'
                 : 'The validated daemon bootstrap has not authorized bounded session timeline reads. Signalbox will not call or advertise that surface until the capability is available.'}
             </p>
           </div>
@@ -549,34 +563,38 @@ export function SessionWorkspaceSurface({
             </span>
           </div>
           <p className="session-live-status" role="status">
-            {follow.error ? (
+            {followFailed ? (
               <>
                 Live updates unavailable.{' '}
-                <button type="button" onClick={follow.reconnect}>
+                <button
+                  type="button"
+                  onClick={() => dispatch(actions.sessionFollowReconnectRequested())}
+                >
                   Reconnect live updates
                 </button>
               </>
-            ) : follow.live ? (
+            ) : live ? (
               'Following live session'
             ) : (
               'Connecting live session…'
             )}
           </p>
-          {displayedSession.descriptor.sizes.projected_text_bytes !== '0' && (
-            <SessionTranscriptText
-              key={`${sessionId}:${displayedSession.window.items[0]?.address.event_sequence}:${displayedSession.window.items.at(-1)?.address.event_sequence}`}
-              sessionId={sessionId ?? ''}
-              first={
-                displayedSession.window.items[0]?.address.event_sequence ??
-                displayedSession.descriptor.first_address.event_sequence
-              }
-              through={
-                displayedSession.window.items.at(-1)?.address.event_sequence ??
-                displayedSession.descriptor.latest_address.event_sequence
-              }
-              observed={displayedSession.descriptor.observed_through}
-            />
-          )}
+          {transcriptAvailable &&
+            displayedSession.descriptor.sizes.projected_text_bytes !== '0' && (
+              <SessionTranscriptText
+                key={`${sessionId}:${displayedSession.window.items[0]?.address.event_sequence}:${displayedSession.window.items.at(-1)?.address.event_sequence}`}
+                sessionId={sessionId ?? ''}
+                first={
+                  displayedSession.window.items[0]?.address.event_sequence ??
+                  displayedSession.descriptor.first_address.event_sequence
+                }
+                through={
+                  displayedSession.window.items.at(-1)?.address.event_sequence ??
+                  displayedSession.descriptor.latest_address.event_sequence
+                }
+                observed={displayedSession.descriptor.observed_through}
+              />
+            )}
           <div
             className={`session-timeline presentation-${app.detail}`}
             aria-label="Session timeline"
@@ -646,7 +664,9 @@ export function SessionWorkspaceSurface({
                         <div>
                           <dt>Projection</dt>
                           <dd>
-                            Durable event metadata; message text appears in the transcript above
+                            {transcriptAvailable
+                              ? 'Durable event metadata; message text appears in the transcript above'
+                              : 'Durable event metadata; transcript text is unavailable'}
                           </dd>
                         </div>
                       </dl>
@@ -665,8 +685,8 @@ export function SessionWorkspaceSurface({
         <SessionComposer
           key={sessionId}
           sessionId={sessionId ?? ''}
-          activeState={follow.live ? (follow.live.active?.state.kind ?? null) : undefined}
-          stateUnavailable={follow.error && follow.live === null}
+          activeState={live ? (live.active?.state.kind ?? null) : undefined}
+          stateUnavailable={followFailed && live === null}
           onAccepted={refetchSession}
         />
       )}

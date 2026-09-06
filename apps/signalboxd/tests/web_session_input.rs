@@ -7,6 +7,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use signalbox_application::EligibilityWorkSource as _;
 use signalbox_domain::{
     CreateSession, DeliveryRequest, DirectModelSelection, DurableCommandId, FastModeOverlay,
     ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay,
@@ -71,6 +72,21 @@ impl signalbox_application::EligibilityNudge for FixtureNudge {
     }
 }
 
+struct EmptySweep;
+
+impl signalbox_application::EligibilitySweep for EmptySweep {
+    type Error = std::convert::Infallible;
+
+    async fn find_sessions(
+        &mut self,
+    ) -> Result<signalbox_application::EligibilitySweepBatch, Self::Error> {
+        Ok(signalbox_application::EligibilitySweepBatch::new(
+            Vec::new(),
+            false,
+        ))
+    }
+}
+
 fn submission(session: SessionId, command: Uuid, message: &str) -> Request<Body> {
     Request::post(format!("/api/sessions/{}/input", session.into_uuid()))
         .header("host", "localhost")
@@ -120,6 +136,8 @@ async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
     CreateSessionRepository::new(pool.clone(), configuration.session_credential_pin())
         .handle(creation)
         .await?;
+    let (eligibility_nudge, mut work_source) =
+        signalbox_application::InProcessEligibilityWorkSource::with_options(EmptySweep, None, None);
     let router = signalboxd::web_http::production_router(
         None,
         Some(pool.clone()),
@@ -127,6 +145,7 @@ async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
         Some(configuration.clone()),
         None,
         None,
+        Some(eligibility_nudge),
     );
     let command = Uuid::from_u128(30);
     for _ in 0..2 {
@@ -138,6 +157,11 @@ async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
         let body = to_bytes(response.into_body(), 65536).await?;
         assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
     }
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), work_source.next()).await??,
+        session,
+        "accepted web input nudges the work source without a reconciliation sweep",
+    );
     let accepted: i64 =
         sqlx::query_scalar("SELECT count(*) FROM accepted_input WHERE session_id = $1")
             .bind(session.into_uuid())
@@ -223,7 +247,7 @@ async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
 }
 #[tokio::test]
 async fn web_input_requires_same_origin_json_and_valid_text() -> Result<(), Box<dyn Error>> {
-    let router = signalboxd::web_http::production_router(None, None, None, None, None, None);
+    let router = signalboxd::web_http::production_router(None, None, None, None, None, None, None);
     let session = SessionId::from_uuid(Uuid::from_u128(27));
     let command = Uuid::from_u128(30);
     let mut cross_origin = submission(session, command, "Message");

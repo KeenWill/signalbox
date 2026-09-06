@@ -685,7 +685,11 @@ struct ProductionReadRuntime {
 
 impl BoundWebHttpListener {
     /// Attaches the daemon's one bounded monitor and builds the production router.
-    pub fn into_runtime(self, monitor: ProcessMonitor) -> WebHttpRuntime {
+    pub fn into_runtime(
+        self,
+        monitor: ProcessMonitor,
+        eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
+    ) -> WebHttpRuntime {
         let (follow_shutdown, follow_shutdown_receiver) = watch::channel(false);
         let router = production_router_with_budget(
             self.asset_root,
@@ -698,6 +702,7 @@ impl BoundWebHttpListener {
                 shutdown: Some(follow_shutdown_receiver),
                 monitor: Some(monitor),
             },
+            Some(eligibility_nudge),
         );
         WebHttpRuntime {
             listener: self.listener,
@@ -801,6 +806,7 @@ impl WebHttpRuntime {
                 shutdown: Some(follow_shutdown_receiver),
                 monitor: None,
             },
+            None,
         );
         Self::bind_router_with_follow_shutdown(
             configuration.bind_address,
@@ -878,6 +884,7 @@ pub fn production_router(
     model_configuration: Option<HubModelConfiguration>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     shutdown: Option<watch::Receiver<bool>>,
+    eligibility_nudge: Option<signalbox_application::InProcessEligibilityNudge>,
 ) -> Router {
     let snapshot_reader_budget = pool.as_ref().and_then(|pool| {
         super::process_runtime::shared_snapshot_reader_budget(
@@ -896,6 +903,7 @@ pub fn production_router(
             shutdown,
             monitor: None,
         },
+        eligibility_nudge,
     )
 }
 
@@ -906,6 +914,7 @@ fn production_router_with_budget(
     model_configuration: Option<HubModelConfiguration>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     read_runtime: ProductionReadRuntime,
+    eligibility_nudge: Option<signalbox_application::InProcessEligibilityNudge>,
 ) -> Router {
     let http_state = WebHttpState {
         blobs,
@@ -926,6 +935,7 @@ fn production_router_with_budget(
         snapshot_reader_budget: read_runtime.snapshot_reader_budget.clone(),
         shutdown: read_runtime.shutdown,
         monitor: read_runtime.monitor,
+        eligibility_nudge,
     };
     // Every route that reads session data sits behind the loopback authority
     // gate. The attention projection returns session identities, goal-need
@@ -1058,6 +1068,7 @@ struct WebApiState {
     snapshot_reader_budget: Option<Arc<Semaphore>>,
     shutdown: Option<watch::Receiver<bool>>,
     monitor: Option<ProcessMonitor>,
+    eligibility_nudge: Option<signalbox_application::InProcessEligibilityNudge>,
 }
 
 #[derive(Debug, Default)]
@@ -1068,15 +1079,6 @@ struct SessionCatalogQuery {
     sort: Option<String>,
     after_session_id: Option<String>,
     after_activity_unix_microseconds: Option<String>,
-}
-
-// The scheduler's durable reconciliation observes web inputs without a local process connection.
-struct WebInputNudge;
-
-impl signalbox_application::EligibilityNudge for WebInputNudge {
-    fn nudge(&self, _session: SessionId) -> signalbox_application::EligibilityNudgeOutcome {
-        signalbox_application::EligibilityNudgeOutcome::WorkSourceClosed
-    }
 }
 
 async fn session_submit_input(
@@ -1125,7 +1127,11 @@ async fn session_submit_input(
             "message must be nonempty, NUL-free text within the input limit",
         );
     };
-    let (Some(pool), Some(configuration)) = (state.pool, state.model_configuration) else {
+    let (Some(pool), Some(configuration), Some(eligibility_nudge)) = (
+        state.pool,
+        state.model_configuration,
+        state.eligibility_nudge,
+    ) else {
         return application_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "input_unavailable",
@@ -1201,7 +1207,7 @@ async fn session_submit_input(
             principal: signalbox_domain::CommandPrincipal::Operator,
             cascade_root_kind: signalbox_domain::ParentTerminationKind::Cancelled,
         },
-        WebInputNudge,
+        eligibility_nudge,
         signalbox_application::InProcessToolDispatchGate::default(),
     );
     match service.execute(request).await {
@@ -5015,6 +5021,7 @@ mod tests {
             model_configuration,
             blob_store_registry,
             None,
+            None,
         )
     }
 
@@ -5035,6 +5042,7 @@ mod tests {
                 shutdown: None,
                 monitor,
             },
+            None,
         )
     }
 
@@ -5056,6 +5064,7 @@ mod tests {
                 shutdown: Some(shutdown),
                 monitor: None,
             },
+            None,
         )
     }
 
