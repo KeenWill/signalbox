@@ -2792,6 +2792,29 @@
                 }
               }
             }
+          },
+          {
+            "query": "query($id:ID!) { node(id:$id) { ... on PullRequest { id state baseRefName baseRefOid headRefName headRefOid isDraft body lastEditedAt mergeable reviewDecision } } }",
+            "variables": {
+              "id": "PR_kwDOTWhy-88AAAABCVHcjw"
+            },
+            "response": {
+              "data": {
+                "node": {
+                  "baseRefName": "main",
+                  "baseRefOid": "113746d23d6c7b398ef34464a071dca532791898",
+                  "body": "",
+                  "headRefName": "agent/domain-spine-generator",
+                  "headRefOid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                  "id": "PR_kwDOTWhy-88AAAABCVHcjw",
+                  "isDraft": false,
+                  "lastEditedAt": null,
+                  "mergeable": "MERGEABLE",
+                  "reviewDecision": null,
+                  "state": "OPEN"
+                }
+              }
+            }
           }
         ],
         [
@@ -5578,6 +5601,29 @@
                       }
                     }
                   }
+                }
+              }
+            }
+          },
+          {
+            "query": "query($id:ID!) { node(id:$id) { ... on PullRequest { id state baseRefName baseRefOid headRefName headRefOid isDraft body lastEditedAt mergeable reviewDecision } } }",
+            "variables": {
+              "id": "PR_kwDOTWhy-88AAAABCVHcjw"
+            },
+            "response": {
+              "data": {
+                "node": {
+                  "baseRefName": "main",
+                  "baseRefOid": "113746d23d6c7b398ef34464a071dca532791898",
+                  "body": "",
+                  "headRefName": "agent/domain-spine-generator",
+                  "headRefOid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+                  "id": "PR_kwDOTWhy-88AAAABCVHcjw",
+                  "isDraft": false,
+                  "lastEditedAt": null,
+                  "mergeable": "MERGEABLE",
+                  "reviewDecision": null,
+                  "state": "OPEN"
                 }
               }
             }
