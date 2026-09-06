@@ -737,8 +737,8 @@ impl QuiescentActiveTurnPage {
 /// same reason `input_accepted` is excluded — a message arriving for a session
 /// queues work rather than advancing the turn holding its slot — and a turn
 /// actually waiting on a child sits in `awaiting_child`, which the phase filter
-/// excludes before any of this is consulted. Naming what to exclude rather than what to include means a kind
-/// added later reads as progress until someone decides otherwise, which delays
+/// excludes before any of this is consulted. Naming what to exclude rather than what to include
+/// means a kind added later reads as progress until someone decides otherwise, which delays
 /// a terminalization rather than risking a live turn.
 ///
 /// It is read with `ORDER BY … DESC LIMIT 1` over

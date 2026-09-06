@@ -5549,8 +5549,7 @@ async fn schema_requires_new_pass_to_be_queued() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// change-request targets require a frozen comparison
-/// revision.
+/// change-request targets require a frozen comparison revision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn schema_requires_change_request_base() -> Result<(), Box<dyn Error>> {
