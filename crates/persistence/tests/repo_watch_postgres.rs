@@ -18,8 +18,8 @@ use signalbox_application::{
     RepoWatchEventIdGenerator, RepoWatchEventOccurrenceV1, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
-    RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation, RepoWatchThreadState,
-    RepoWatchWorkflowRunObservation, derive_repo_watch_events,
+    RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation, derive_repo_watch_events,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
@@ -171,6 +171,15 @@ fn pull_request_state(
     threads: Vec<RepoWatchThreadObservation>,
     mergeable_state: MergeableState,
 ) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+    pull_request_state_with_reviews(head, threads, mergeable_state, Vec::new())
+}
+
+fn pull_request_state_with_reviews(
+    head: &str,
+    threads: Vec<RepoWatchThreadObservation>,
+    mergeable_state: MergeableState,
+    reviews: Vec<RepoWatchReviewObservation>,
+) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
     Ok(RepoWatchPullRequestState::try_new(
         RepoWatchPullRequestStateInput {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
@@ -202,7 +211,7 @@ fn pull_request_state(
                 CheckRunName::try_new(String::from(CHECK_RUN_NAME))?,
                 CheckConclusion::Success,
             )],
-            reviews: Vec::new(),
+            reviews,
             threads,
             reactions: Vec::new(),
         },
@@ -725,6 +734,61 @@ async fn unchanged_candidate_without_events_does_not_advance() -> Result<(), Box
         .await?;
 
     assert_eq!(unchanged_generation(unchanged), fixture.second_generation);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn non_recurring_event_with_changed_projection_advances() -> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+    let reviewed = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull_request_state_with_reviews(
+                INITIAL_HEAD,
+                Vec::new(),
+                MergeableState::Mergeable,
+                vec![RepoWatchReviewObservation::new(
+                    GitHubObjectId::new(71_u64.try_into()?),
+                    RepoWatchAuthorLogin::try_new(REVIEW_REVIEWER.to_owned())?,
+                    Some(ReviewState::ChangesRequested),
+                    CommitSha::try_new(REVIEW_COMMIT.to_owned())?,
+                )],
+            )?],
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(BASE_REVISION.to_owned())?,
+            )],
+        })?,
+    );
+    let mut frontier = fixture.second_candidate.event_identity_frontier().clone();
+    let events = derive_repo_watch_events(
+        &fixture.repository,
+        Some(fixture.second_candidate.observation()),
+        &reviewed,
+        &mut frontier,
+        &mut FixedEventIds(100),
+    )?;
+    assert_eq!(
+        frontier,
+        *fixture.second_candidate.event_identity_frontier()
+    );
+    assert_eq!(events.len(), 1);
+    let candidate = RepoWatchCursorCandidate::with_event_identity_frontier(reviewed, frontier);
+
+    let committed = fixture
+        .store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(Some(fixture.second_generation), candidate, events),
+        )
+        .await?;
+
+    assert_eq!(
+        committed_generation(committed).get(),
+        next_generation_value(fixture.second_generation)
+    );
     Ok(())
 }
 
