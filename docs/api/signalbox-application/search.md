@@ -53,9 +53,11 @@ pub enum SearchTextError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for SearchTextError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for SearchTextError {}
+impl error::Error for SearchTextError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## SearchText
@@ -95,9 +97,11 @@ pub enum SearchScope {
 pub struct SearchPageLimitError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for SearchPageLimitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for SearchPageLimitError {}
+impl error::Error for SearchPageLimitError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## SearchPageLimit
@@ -179,9 +183,11 @@ pub enum SearchProjectionTextError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for SearchProjectionTextError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for SearchProjectionTextError {}
+impl error::Error for SearchProjectionTextError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## SearchProjectionText

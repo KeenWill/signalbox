@@ -1,6 +1,6 @@
 //! Atomic delegated-session await and peer-message persistence.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::num::NonZeroU64;
 
 use rust_decimal::Decimal;
 use signalbox_application::DelegationMessageDeliveryProjection;
@@ -235,42 +235,20 @@ pub enum SessionDelegationCorruption {
     Reconstitution(SessionDelegationReconstitutionFailure),
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Database or fail-closed delegated-session persistence failure.
 #[derive(Debug)]
 pub enum SessionDelegationRepositoryError {
-    Database(sqlx::Error),
-    CommitAmbiguous(sqlx::Error),
-    ToolLoop(ToolLoopRepositoryError),
+    #[error("delegation database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("delegation commit is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("delegation tool-loop failure: {field_0}")]
+    ToolLoop(#[source] ToolLoopRepositoryError),
+    #[error("delegation transition is invalid: {field_0}")]
     InvalidTransition(&'static str),
+    #[error("delegation storage is corrupt: {field_0:?}")]
     Corruption(SessionDelegationCorruption),
-}
-
-impl fmt::Display for SessionDelegationRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "delegation database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(formatter, "delegation commit is ambiguous: {error}")
-            }
-            Self::ToolLoop(error) => write!(formatter, "delegation tool-loop failure: {error}"),
-            Self::InvalidTransition(reason) => {
-                write!(formatter, "delegation transition is invalid: {reason}")
-            }
-            Self::Corruption(reason) => {
-                write!(formatter, "delegation storage is corrupt: {reason:?}")
-            }
-        }
-    }
-}
-
-impl Error for SessionDelegationRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::ToolLoop(error) => Some(error),
-            Self::InvalidTransition(_) | Self::Corruption(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for SessionDelegationRepositoryError {

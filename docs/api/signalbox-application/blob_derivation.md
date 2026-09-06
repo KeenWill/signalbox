@@ -114,14 +114,21 @@ pub enum BlobDerivationServiceError<StoreError, ProducerError> {
     InvalidProducerOutput(blob::BlobDerivationError),
 }
 // derives: fmt::Debug
-impl<StoreError: fmt::Display, ProducerError: fmt::Display> fmt::Display
+impl<StoreError, ProducerError> fmt::Display
     for BlobDerivationServiceError<StoreError, ProducerError>
+where
+    StoreError: fmt::Display,
+    ProducerError: fmt::Display,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<StoreError: error::Error + 'static, ProducerError: error::Error + 'static> error::Error
+impl<StoreError, ProducerError> error::Error
     for BlobDerivationServiceError<StoreError, ProducerError>
+where
+    StoreError: error::Error + 'static + fmt::Display,
+    ProducerError: error::Error + 'static + fmt::Display,
 {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 

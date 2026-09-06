@@ -1,7 +1,5 @@
 //! Explicit mappings between domain values and PostgreSQL-compatible values.
 
-use std::{error::Error, fmt};
-
 use crate::outbox::OutboxConsumer;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
@@ -2156,28 +2154,18 @@ pub(crate) fn goal_command_rejection_from_str(value: &str) -> Option<GoalCommand
 }
 
 /// Why a PostgreSQL `numeric(20, 0)` value is not a positive domain ordinal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum PositiveOrdinalMappingError {
     /// The value is zero or negative.
+    #[error("ordinal must be positive")]
     NonPositive,
     /// The value has a nonzero fractional component.
+    #[error("ordinal must not have a fractional component")]
     Fractional,
     /// The positive integral value exceeds `u64::MAX`.
+    #[error("ordinal exceeds the u64 range")]
     OutOfRange,
 }
-
-impl fmt::Display for PositiveOrdinalMappingError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::NonPositive => "ordinal must be positive",
-            Self::Fractional => "ordinal must not have a fractional component",
-            Self::OutOfRange => "ordinal exceeds the u64 range",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl Error for PositiveOrdinalMappingError {}
 
 /// Encodes a defaults version as its exact PostgreSQL `numeric(20, 0)` value.
 pub fn defaults_version_to_numeric(value: SessionConfigurationDefaultsVersion) -> Decimal {
@@ -2444,24 +2432,14 @@ pub fn tool_attempt_id_from_uuid(value: Uuid) -> ToolAttemptId {
 }
 
 /// Why a PostgreSQL `uuid` value is not a valid durable-command identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum DurableCommandIdMappingError {
     /// The value is the nil or max sentinel UUID, rejected as an invalid
     /// command identity before canonical command construction
     /// (docs/spec/identity-and-commands.md).
+    #[error("durable-command identity must not be the nil or max UUID")]
     SentinelUuid,
 }
-
-impl fmt::Display for DurableCommandIdMappingError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::SentinelUuid => "durable-command identity must not be the nil or max UUID",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl Error for DurableCommandIdMappingError {}
 
 /// Encodes a durable-command identity for a PostgreSQL `uuid` column.
 pub fn durable_command_id_to_uuid(value: DurableCommandId) -> Uuid {
@@ -2482,30 +2460,15 @@ pub fn durable_command_id_from_uuid(
     Ok(DurableCommandId::from_uuid(value))
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A stored settings document that cannot reconstruct domain validation
 /// evidence. Dynamic document content is deliberately omitted from display.
 #[derive(Debug)]
 pub(crate) enum StoredModelSettingsError {
-    Json(serde_json::Error),
+    #[error("stored model settings have an invalid shape")]
+    Json(#[source] serde_json::Error),
+    #[error("stored model settings have invalid {field_0}")]
     Invalid(&'static str),
-}
-
-impl fmt::Display for StoredModelSettingsError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Json(_) => formatter.write_str("stored model settings have an invalid shape"),
-            Self::Invalid(field) => write!(formatter, "stored model settings have invalid {field}"),
-        }
-    }
-}
-
-impl Error for StoredModelSettingsError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Json(error) => Some(error),
-            Self::Invalid(_) => None,
-        }
-    }
 }
 
 #[derive(Deserialize)]

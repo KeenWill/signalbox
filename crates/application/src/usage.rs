@@ -4,7 +4,7 @@
 //! owns the product query shape used by dedicated projections, including the
 //! dimensions that must remain separate before a configured cost is derived.
 
-use std::{fmt, future::Future};
+use std::future::Future;
 
 use signalbox_domain::{ModelCallId, ResolvedProviderTarget, SessionId, TurnId};
 
@@ -40,43 +40,29 @@ pub const fn max_usage_credential_profile_utf8_bytes() -> u16 {
     256
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Rejection of a credential-profile projection label.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UsageCredentialProfileLabelError {
+    #[error("credential-profile label is empty")]
     /// The label was empty.
     Empty,
+    #[error(
+        "credential-profile label carries {rejected_utf8_bytes} UTF-8 bytes, over the {} ceiling",
+        max_usage_credential_profile_utf8_bytes()
+    )]
     /// The label exceeded the bounded projection size.
     Oversized {
         /// Rejected UTF-8 byte length.
         rejected_utf8_bytes: usize,
     },
+    #[error(
+        "credential-profile label carries neither the `exact:` nor the `mapped:` discriminator with a nonempty tail"
+    )]
     /// The label carried neither the `exact:` nor the `mapped:` discriminator
     /// with a nonempty tail.
     UndiscriminatedForm,
 }
-
-impl fmt::Display for UsageCredentialProfileLabelError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => write!(formatter, "credential-profile label is empty"),
-            Self::Oversized {
-                rejected_utf8_bytes,
-            } => write!(
-                formatter,
-                "credential-profile label carries {rejected_utf8_bytes} UTF-8 bytes, over the \
-                 {} ceiling",
-                max_usage_credential_profile_utf8_bytes()
-            ),
-            Self::UndiscriminatedForm => write!(
-                formatter,
-                "credential-profile label carries neither the `exact:` nor the `mapped:` \
-                 discriminator with a nonempty tail"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for UsageCredentialProfileLabelError {}
 
 /// Bounded non-secret projection label for a credential profile, not the
 /// canonical credential reference: references of at most 250 UTF-8 bytes
@@ -121,24 +107,17 @@ impl UsageCredentialProfileLabel {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error(
+    "usage timestamp {} microseconds exceeds the supported range",
+    rejected_micros
+)]
 /// Invalid microsecond timestamp supplied at an application boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UsageTimestampError {
     /// Rejected microseconds from the Unix epoch.
     pub rejected_micros: u64,
 }
-
-impl fmt::Display for UsageTimestampError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "usage timestamp {} microseconds exceeds the supported range",
-            self.rejected_micros
-        )
-    }
-}
-
-impl std::error::Error for UsageTimestampError {}
 
 /// Exact nonnegative microseconds from the Unix epoch.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -164,6 +143,12 @@ impl UsageTimestampMicros {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error(
+    "usage time range [{}, {}) microseconds is empty or reversed",
+    from_inclusive_micros,
+    to_exclusive_micros
+)]
 /// Invalid half-open usage time range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UsageTimeRangeError {
@@ -172,18 +157,6 @@ pub struct UsageTimeRangeError {
     /// Rejected exclusive upper boundary, in microseconds from the Unix epoch.
     pub to_exclusive_micros: u64,
 }
-
-impl fmt::Display for UsageTimeRangeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "usage time range [{}, {}) microseconds is empty or reversed",
-            self.from_inclusive_micros, self.to_exclusive_micros
-        )
-    }
-}
-
-impl std::error::Error for UsageTimeRangeError {}
 
 /// Inclusive lower usage-time boundary.
 ///
@@ -429,25 +402,18 @@ pub struct UsageQuery {
     pub selection: UsageSelection,
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error(
+    "usage call page size {} is outside 1..={}",
+    rejected_items,
+    max_usage_call_page_items()
+)]
 /// Rejection of an individual-call page size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UsageCallPageLimitError {
     /// Rejected page size.
     pub rejected_items: u16,
 }
-
-impl fmt::Display for UsageCallPageLimitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "usage call page size {} is outside 1..={}",
-            self.rejected_items,
-            max_usage_call_page_items()
-        )
-    }
-}
-
-impl std::error::Error for UsageCallPageLimitError {}
 
 /// Validated item ceiling for one individual-call page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -542,9 +508,13 @@ pub enum UsageCallPageContinuation {
     HasMore,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A detail page that violated its construction bounds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UsageCallPageError {
+    #[error(
+        "usage detail page carries {returned_calls} calls, over its requested limit of {limit_items}"
+    )]
     /// The page carried more calls than its requested limit.
     Overflow {
         /// Calls the reader tried to return.
@@ -552,9 +522,15 @@ pub enum UsageCallPageError {
         /// Requested page ceiling.
         limit_items: u16,
     },
+    #[error(
+        "usage detail page claims more matching calls but returns none to anchor the continuation cursor"
+    )]
     /// The page claimed more matching calls behind it while returning none, so
     /// no last call exists to anchor the continuation cursor.
     DanglingContinuation,
+    #[error(
+        "usage detail page call at position {position} is not strictly older than its predecessor"
+    )]
     /// The page's calls are not in strictly newest-first
     /// `(recorded_at, call)` order, so a derived cursor would skip or repeat
     /// evidence.
@@ -563,33 +539,6 @@ pub enum UsageCallPageError {
         position: usize,
     },
 }
-
-impl fmt::Display for UsageCallPageError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Overflow {
-                returned_calls,
-                limit_items,
-            } => write!(
-                formatter,
-                "usage detail page carries {returned_calls} calls, over its requested limit of \
-                 {limit_items}"
-            ),
-            Self::DanglingContinuation => write!(
-                formatter,
-                "usage detail page claims more matching calls but returns none to anchor the \
-                 continuation cursor"
-            ),
-            Self::Misordered { position } => write!(
-                formatter,
-                "usage detail page call at position {position} is not strictly older than its \
-                 predecessor"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for UsageCallPageError {}
 
 /// One bounded detail page: no larger than its requested limit, with its
 /// continuation cursor derived from its own last returned call, by
@@ -722,9 +671,11 @@ pub enum UsageTokenAxis {
     CacheReadInput,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// An aggregate group that violated its construction consistency rules.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UsageAggregateGroupError {
+    #[error("aggregate {axis:?} sum contradicts its declared {declared:?} coverage")]
     /// A sum contradicts its declared presence coverage.
     Coverage {
         /// Axis whose sum and declared presence disagree.
@@ -732,6 +683,9 @@ pub enum UsageAggregateGroupError {
         /// Presence the key declares for that axis.
         declared: UsageTokenPresence,
     },
+    #[error(
+        "aggregate {claimed:?} cache normalization contradicts its {input_semantics:?} input-token semantics and sums"
+    )]
     /// The cache-normalization state contradicts the group's input-token
     /// semantics and sums.
     NormalizationClaim {
@@ -741,27 +695,6 @@ pub enum UsageAggregateGroupError {
         input_semantics: UsageInputTokenSemantics,
     },
 }
-
-impl fmt::Display for UsageAggregateGroupError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Coverage { axis, declared } => write!(
-                formatter,
-                "aggregate {axis:?} sum contradicts its declared {declared:?} coverage"
-            ),
-            Self::NormalizationClaim {
-                claimed,
-                input_semantics,
-            } => write!(
-                formatter,
-                "aggregate {claimed:?} cache normalization contradicts its {input_semantics:?} \
-                 input-token semantics and sums"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for UsageAggregateGroupError {}
 
 const fn coverage_agrees(sum: Option<u128>, declared: UsageTokenPresence) -> bool {
     matches!(
@@ -882,14 +815,23 @@ impl UsageAggregateGroup {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// An aggregate result that exceeded a hard aggregate ceiling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UsageAggregateReportError {
+    #[error(
+        "usage aggregate carries {returned_groups} groups, over the {} ceiling",
+        max_usage_aggregate_groups()
+    )]
     /// The result carried more groups than the hard group ceiling.
     GroupOverflow {
         /// Groups the reader tried to return.
         returned_groups: usize,
     },
+    #[error(
+        "usage aggregate represents {represented_calls} source calls, over the {} ceiling",
+        max_usage_aggregate_calls()
+    )]
     /// The result's groups together represent more source calls than one
     /// aggregate read may consume.
     SourceCallOverflow {
@@ -897,25 +839,6 @@ pub enum UsageAggregateReportError {
         represented_calls: u128,
     },
 }
-
-impl fmt::Display for UsageAggregateReportError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::GroupOverflow { returned_groups } => write!(
-                formatter,
-                "usage aggregate carries {returned_groups} groups, over the {} ceiling",
-                max_usage_aggregate_groups()
-            ),
-            Self::SourceCallOverflow { represented_calls } => write!(
-                formatter,
-                "usage aggregate represents {represented_calls} source calls, over the {} ceiling",
-                max_usage_aggregate_calls()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for UsageAggregateReportError {}
 
 /// Bounded aggregate result with explicit truncation, within the hard group
 /// and source-call ceilings by construction.

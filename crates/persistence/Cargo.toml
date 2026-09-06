@@ -15,11 +15,13 @@ postgres-integration = ["dep:testcontainers-modules", "test-support"]
 test-support = []
 
 [dependencies]
+signalbox-newtype = { path = "../newtype" }
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
 signalbox-application = { path = "../application" }
 signalbox-blob-store = { path = "../blob-store" }
+signalbox-derive = { path = "../derive" }
 signalbox-domain = { path = "../domain" }
 signalbox-tools-plan = { path = "../tools-plan" }
 sqlx = { version = "0.9.0", default-features = false, features = [

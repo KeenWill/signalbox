@@ -1,6 +1,6 @@
 //! PostgreSQL adapter for coherent bounded fleet attention reads.
 
-use std::{collections::BTreeSet, error::Error, fmt, time::SystemTime};
+use std::{collections::BTreeSet, time::SystemTime};
 
 use signalbox_application::{
     AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
@@ -19,49 +19,22 @@ use crate::mapping::{
 
 const UNMONITORED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and the session is unmonitored, so no automatic resumption is scheduled. Resolve the failed goal turn's execution condition, then resume the goal.";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(signalbox_derive::OperatorError, Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
+    #[error("missing operator attention {field_0}")]
     Missing(&'static str),
+    #[error("invalid operator attention {field_0}")]
     Invalid(&'static str),
+    #[error("unsupported operator attention {field}: {value}")]
     Unsupported { field: &'static str, value: String },
 }
 
-impl fmt::Display for AttentionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing operator attention {field}"),
-            Self::Invalid(field) => write!(formatter, "invalid operator attention {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported operator attention {field}: {value}")
-            }
-        }
-    }
-}
-
-impl Error for AttentionCorruption {}
-
-#[derive(Debug)]
+#[derive(signalbox_derive::OperatorError, Debug)]
 pub enum AttentionRepositoryError {
-    Database(sqlx::Error),
-    Corruption(AttentionCorruption),
-}
-
-impl fmt::Display for AttentionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "attention database failure: {error}"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for AttentionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    #[error("attention database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
+    Corruption(#[source] AttentionCorruption),
 }
 
 impl From<sqlx::Error> for AttentionRepositoryError {

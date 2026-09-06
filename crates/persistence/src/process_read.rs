@@ -4,7 +4,7 @@
 //! domain aggregates. Reads use one read-only repeatable-read transaction so
 //! the hub can map a complete, stable projection explicitly.
 
-use std::{collections::VecDeque, error::Error, fmt};
+use std::collections::VecDeque;
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -1549,11 +1549,14 @@ async fn advance_through_latest_compaction(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A committed read shape that cannot form the closed process projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessReadCorruption {
+    #[error("process read is missing {field_0}")]
     /// One required row or field was absent.
     Missing(&'static str),
+    #[error("process read has unsupported {field}: {value}")]
     /// A closed storage discriminator had no admitted mapping.
     Unsupported {
         /// Storage field containing the discriminator.
@@ -1561,56 +1564,24 @@ pub enum ProcessReadCorruption {
         /// Unsupported durable spelling.
         value: String,
     },
+    #[error("process read has inconsistent {field_0}")]
     /// Related durable fields disagreed.
     Inconsistent(&'static str),
+    #[error("process read has invalid {field_0}")]
     /// A stored ordinal was not an admitted unsigned integer.
     InvalidOrdinal(&'static str),
 }
 
-impl fmt::Display for ProcessReadCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "process read is missing {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "process read has unsupported {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "process read has inconsistent {relationship}")
-            }
-            Self::InvalidOrdinal(field) => {
-                write!(formatter, "process read has invalid {field}")
-            }
-        }
-    }
-}
-
-impl Error for ProcessReadCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL failure or fail-closed projection corruption.
 #[derive(Debug)]
 pub enum ProcessReadError {
+    #[error("process read database operation failed")]
     /// PostgreSQL could not complete the repeatable-read transaction.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Committed rows could not form the closed projection.
-    Corruption(ProcessReadCorruption),
-}
-
-impl fmt::Display for ProcessReadError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(_) => formatter.write_str("process read database operation failed"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ProcessReadError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] ProcessReadCorruption),
 }
 
 impl From<sqlx::Error> for ProcessReadError {

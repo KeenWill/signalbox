@@ -7,8 +7,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    error::Error,
-    fmt,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
@@ -240,39 +238,33 @@ impl ProspectiveModelCall {
 }
 
 /// Which fresh execution identity collided with an existing durable record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum ModelCallIdentityCollision {
     /// The proposed model-call identity already exists.
+    #[error("model-call identity already exists")]
     ModelCall,
     /// A proposed semantic-entry identity already exists.
+    #[error("semantic-entry identity already exists")]
     SemanticEntry,
     /// The proposed terminal-frontier identity already exists.
+    #[error("context-frontier identity already exists")]
     TerminalFrontier,
     /// A proposed reclassified successor-turn identity already exists.
+    #[error("reclassified successor-turn identity already exists")]
     ReclassifiedTurn,
 }
 
-impl fmt::Display for ModelCallIdentityCollision {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let identity = match self {
-            Self::ModelCall => "model-call",
-            Self::SemanticEntry => "semantic-entry",
-            Self::TerminalFrontier => "context-frontier",
-            Self::ReclassifiedTurn => "reclassified successor-turn",
-        };
-        write!(formatter, "{identity} identity already exists")
-    }
-}
-
-impl Error for ModelCallIdentityCollision {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct the execution aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCallCorruption {
+    #[error("missing model-call execution {field_0}")]
     /// One required durable record or field is absent.
     Missing(&'static str),
+    #[error("inconsistent model-call execution {field_0}")]
     /// Stored records disagree about an exact relationship.
     Inconsistent(&'static str),
+    #[error("unsupported model-call execution {field}: {value}")]
     /// A closed durable discriminator is unsupported.
     Unsupported {
         /// The field whose spelling is unsupported.
@@ -280,96 +272,42 @@ pub enum ModelCallCorruption {
         /// The exact durable spelling.
         value: String,
     },
+    #[error("model-call current Session is invalid: {field_0}")]
     /// The current session projection is invalid.
     CurrentSession(SessionCorruption),
+    #[error("model-call scheduling projection is invalid: {field_0}")]
     /// Complete scheduling records are invalid.
     Scheduling(SubmitInputCorruption),
+    #[error("model-call execution reconstitution failed: {field_0:?}")]
     /// Complete live facts fail domain reconstitution.
     Execution(ModelCallExecutionReconstitutionFailure),
 }
 
-impl fmt::Display for ModelCallCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(record) => write!(formatter, "missing model-call execution {record}"),
-            Self::Inconsistent(relationship) => {
-                write!(
-                    formatter,
-                    "inconsistent model-call execution {relationship}"
-                )
-            }
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "unsupported model-call execution {field}: {value}"
-                )
-            }
-            Self::CurrentSession(error) => {
-                write!(formatter, "model-call current Session is invalid: {error}")
-            }
-            Self::Scheduling(error) => {
-                write!(
-                    formatter,
-                    "model-call scheduling projection is invalid: {error}"
-                )
-            }
-            Self::Execution(failure) => {
-                write!(
-                    formatter,
-                    "model-call execution reconstitution failed: {failure:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ModelCallCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, integrity, identity, or caller failure at the execution boundary.
 #[derive(Debug)]
 pub enum ModelCallRepositoryError {
+    #[error("model-call database failure: {source}")]
     /// PostgreSQL could not complete the operation.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Committed rows cannot form the accepted aggregate.
-    Corruption(ModelCallCorruption),
+    Corruption(#[source] ModelCallCorruption),
+    #[error(transparent)]
     /// A fresh identity collided durably.
-    IdentityCollision(ModelCallIdentityCollision),
+    IdentityCollision(#[source] ModelCallIdentityCollision),
+    #[error("no live model-call execution exists")]
     /// The application invoked an execution transition without a live turn.
     NoLiveExecution,
+    #[error("model-call transition rejected: {field_0}")]
     /// A checked transition rejected an application-supplied operation.
     InvalidTransition(&'static str),
-}
-
-impl fmt::Display for ModelCallRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "model-call database failure: {source}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::IdentityCollision(error) => error.fmt(formatter),
-            Self::NoLiveExecution => formatter.write_str("no live model-call execution exists"),
-            Self::InvalidTransition(operation) => {
-                write!(formatter, "model-call transition rejected: {operation}")
-            }
-        }
-    }
-}
-
-impl Error for ModelCallRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision(error) => Some(error),
-            Self::NoLiveExecution | Self::InvalidTransition(_) => None,
-        }
-    }
 }
 
 impl ClassifyOperatorFailure for ModelCallRepositoryError {

@@ -137,9 +137,11 @@ marker, and a reconciliation outbox record, and releases the slot.
 
 A `KnownFailed` call with proven non-acceptance may be followed by a successor
 call when the bounded same-credential retry below admits it or when its pinned
-pool action is `switch_now`. The latter uses the next admitted member of the
-same pool. `AvailabilitySuccessorModelCallTurn` is the aggregate transition that
-authorizes either distinct call on a successor turn attempt.
+pool action is `switch_now`. A `CredentialRejected` failure instead admits that
+`switch_now` successor without non-acceptance proof. `switch_now` uses the next
+admitted member of the same pool. `AvailabilitySuccessorModelCallTurn` is the
+aggregate transition that authorizes either distinct call on a successor turn
+attempt.
 
 Usage evidence is a projection of terminal physical model calls that never
 materializes the transcript; `UsageReader` in `crates/application/src/usage.rs`
@@ -236,9 +238,10 @@ acknowledgement cannot prove the provider did not act, and an invented
 exactly-once claim could duplicate both an effect and its spend. Refusal never
 admits a successor: it is provider judgment about the request, so another
 account would refuse the same content and substituting one would only seek a
-different answer. Credential resolution failure and credential rejection never
-admit a successor: both are deployment misconfiguration, and moving to another
-account hides the account that is broken.
+different answer. Credential resolution failure never admits a successor: it is
+deployment misconfiguration. Credential rejection admits only the configured
+`switch_now` rotation; the rejection remains recorded durably on the failed
+attempt.
 
 A successful call ends its availability chain, and a later tool round starts a
 fresh one, so a round that exhausts the pool before calling carries no earlier
@@ -303,16 +306,29 @@ A model call is one recorded attempt. The daemon sends each attempt to the
 provider at most once. A retry is a new recorded attempt; no code retries a call
 without recording the retry in the database. Before anything has been sent to
 the provider, the daemon may prepare an unsent call again. After a known failure
-with proven non-acceptance, a rate-limited, overloaded or provider-internal call
-may immediately create a new recorded attempt on the same credential while that
-credential remains below `numeric_bounds.max_same_credential_attempts_per_turn`;
-its initial call and every successor call count. The successor carries the
-durable retry deadline, and its call preparation and dispatch wait until that
-deadline. This retry precedes the pinned pool action. At the bound, a
-provider-internal call terminalizes. At the bound for a rate-limited or
-overloaded call, or for another qualifying failure, a pinned `switch_now` action
-starts a new attempt on another admitted credential and writes the failed
-member's durable chain exclusion. A call whose outcome is unknown is never
+with proven non-acceptance, the failure-observation commit may immediately
+record a new successor attempt on the same credential for a rate-limited,
+overloaded or provider-internal call while the credential remains admitted and
+below the required finite-positive
+`numeric_bounds.max_same_credential_attempts_per_turn` configuration value. The
+contract fixes no numeric value; the initial call and every same-credential
+successor call count toward the configured bound. The commit stores the retry
+deadline on that successor attempt; call preparation and sending both wait for
+the deadline. [Credential availability](credential-availability.md) owns the
+credential-scoped durable transient exclusion, its reset deadline, and
+preparation admission for every session.
+
+When the failure observation commits, the same-credential retry for a
+rate-limit, overload or provider-internal failure is evaluated before any pinned
+pool action, and that action is not applied while the retry is admitted. If the
+configured bound is exhausted or the failed credential is no longer admitted at
+that commit, any pinned action is applied once. Quota exhaustion bypasses the
+same-credential retry and those bound and admission conditions, applying its
+pinned action immediately. `switch_now` starts a new attempt on another admitted
+credential and writes the failed member's durable chain exclusion only if no
+stop is requested; any other action terminalizes this turn after recording its
+own durable effect when applicable. Provider-internal failure has no trigger
+action and terminalizes at the bound. A call whose outcome is unknown is never
 retried automatically; the turn parks for recovery. A CLI harness may retry
 inside one provider invocation. Those internal retries remain part of that
 recorded call; the daemon neither observes nor separately records them. A proven

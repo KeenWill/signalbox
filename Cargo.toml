@@ -37,6 +37,7 @@ members = [
     "crates/model-provider-runtime",
     "crates/model-reference-catalog",
     "crates/modules/repo-watch-v2",
+    "crates/newtype",
     "crates/ownership-seam",
     "crates/persistence",
     "crates/process-protocol",

@@ -1,6 +1,6 @@
 //! PostgreSQL reconciliation sweep for the application scheduler.
 
-use std::{collections::HashSet, error::Error, fmt};
+use std::collections::HashSet;
 
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilitySweep, EligibilitySweepBatch, OperatorFailureClass,
@@ -25,25 +25,11 @@ fn next_page_state(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("eligibility reconciliation query failed: {}", field_0)]
 /// Infrastructure failure while reading reconciliation hints.
 #[derive(Debug)]
-pub struct PostgresEligibilitySweepError(sqlx::Error);
-
-impl fmt::Display for PostgresEligibilitySweepError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "eligibility reconciliation query failed: {}",
-            self.0
-        )
-    }
-}
-
-impl Error for PostgresEligibilitySweepError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.0)
-    }
-}
+pub struct PostgresEligibilitySweepError(#[source] sqlx::Error);
 
 impl From<sqlx::Error> for PostgresEligibilitySweepError {
     fn from(error: sqlx::Error) -> Self {

@@ -76,18 +76,11 @@ impl SchedulerPassOccupancyBound {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("scheduler pass occupancy bound must be a nonzero whole-second duration")]
 /// A proposed scheduler-pass occupancy bound was not a valid lowering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidSchedulerPassOccupancyBound;
-
-impl fmt::Display for InvalidSchedulerPassOccupancyBound {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .write_str("scheduler pass occupancy bound must be a nonzero whole-second duration")
-    }
-}
-
-impl Error for InvalidSchedulerPassOccupancyBound {}
 
 /// Oldest-pass identity and start time retained by occupancy telemetry.
 #[derive(Clone, Copy, Debug)]
@@ -148,18 +141,11 @@ impl ReconciliationSweepInterval {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("scheduler reconciliation interval must be nonzero and fit the timer range")]
 /// A zero or timer-unrepresentable duration cannot drive the safety-net sweep.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidReconciliationSweepInterval;
-
-impl fmt::Display for InvalidReconciliationSweepInterval {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .write_str("scheduler reconciliation interval must be nonzero and fit the timer range")
-    }
-}
-
-impl Error for InvalidReconciliationSweepInterval {}
 
 /// The observable result of handing a nonauthoritative hint to a work source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
