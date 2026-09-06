@@ -2818,6 +2818,12 @@ async fn s04_automatic_reconciliation_server_bound_releases_its_database_work()
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     let batch = repository.claim_due().await?;
     let claimed = batch.claimed()[0];
+    // Keep the observer and both transaction connections established before
+    // opening the bounded wait. A cold observer connection can otherwise
+    // arrive after PostgreSQL's lock timeout and miss a wait that did happen.
+    let mut observer = pool.acquire().await?;
+    let established = [pool.acquire().await?, pool.acquire().await?];
+    drop(established);
     let mut allocator_holder = pool.begin().await?;
     let _: bool = sqlx::query_scalar(
         "SELECT singleton
@@ -2830,19 +2836,26 @@ async fn s04_automatic_reconciliation_server_bound_releases_its_database_work()
     let bounded_repository = repository.clone();
     let started = tokio::time::Instant::now();
     let reconciliation = tokio::spawn(async move { bounded_repository.reconcile(claimed).await });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     // The probe counts blocked backends rather than one statement's text: the
     // reconciliation transaction reaches the commit-ordered allocator through a
     // durable trigger, and `pg_stat_activity` reports the top-level statement
     // that fired it, not the allocator lock the trigger takes.
-    let waiting_before_timeout: i64 = sqlx::query_scalar(
-        "SELECT count(*)
-           FROM pg_stat_activity
-          WHERE datname = current_database()
-            AND wait_event_type = 'Lock'",
-    )
-    .fetch_one(&pool)
-    .await?;
+    let mut waiting_before_timeout: i64 = 0;
+    for _ in 0..400 {
+        waiting_before_timeout = sqlx::query_scalar(
+            "SELECT count(*)
+               FROM pg_stat_activity
+              WHERE datname = current_database()
+                AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&mut *observer)
+        .await?;
+        if waiting_before_timeout == 1 || reconciliation.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    drop(observer);
     let error = reconciliation
         .await?
         .expect_err("the database-side lock budget ends the blocked recovery");

@@ -14,10 +14,10 @@ fetch.
 
 ## Design
 
-Provenance: session creation and input submission accept a repository-watch
-creation cause and actor identity. A durable provenance record is linked to
-`RepoWatchDispatchId` and names the dispatch, session, context, and input
-identities the dispatch transaction records.
+Provenance: session creation accepts a repository-watch creation cause and
+module actor identity. A durable provenance record is linked to
+`RepoWatchDispatchId` and names the dispatch and session identities recorded
+with the held `create_session` command.
 
 Poll-cache persistence: each bounded canonical resource or page key is stored
 with its HTTP validator and a typed, minimal accepted snapshot sufficient to
@@ -36,9 +36,8 @@ worker is composed.
 ## Acceptance criteria
 
 A dispatched session's creation cause and actor identify repository watch, and
-its provenance record resolves the same dispatch, session, context, and input
-identities the dispatch transaction recorded, with no second copy of any of
-them.
+its provenance record resolves the same dispatch and session identities as the
+held `create_session` command, with no second copy of either identity.
 
 After a daemon restart, the first complete poll sends a conditional request for
 every resource whose validator was persisted, and no persisted snapshot contains

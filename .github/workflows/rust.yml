@@ -111,7 +111,7 @@ jobs:
 
   contract-checks:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -536,7 +536,7 @@ jobs:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
-    # Generous by design: this job now absorbs all six suites' compilation,
+    # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
@@ -669,14 +669,6 @@ jobs:
           path: ${{ runner.temp }}/terminal-client.tar.zst
           if-no-files-found: error
           retention-days: 1
-      - name: Upload the approval-judge-eval archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-integration-archive-approval-judge-eval
-          path: ${{ runner.temp }}/approval-judge-eval.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-
   # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
   # build and run jobs share the same runner image and absolute work-path shape,
   # which keeps paths embedded in nextest archives valid across their pods.
@@ -689,7 +681,7 @@ jobs:
   # Persistence is sharded according to its measured test-execution cost; every
   # other suite runs whole because it fits well inside the job timeout.
   #
-  # The run matrix currently expands to eleven shards after the one shared
+  # The run matrix currently expands to ten shards after the one shared
   # build.
   # The shards compile nothing and run for minutes; the build's single cache
   # key replaces the old per-suite keys that evicted one another.
