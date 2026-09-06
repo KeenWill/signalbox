@@ -338,6 +338,9 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
         return ProbeRoot::Indeterminate;
     };
     let mut reader = NsReader::from_reader(document.as_bytes());
+    reader
+        .resolver_mut()
+        .set_max_namespace_bindings(MAX_ATTRIBUTES);
     let mut buffer = Vec::new();
     let mut declaration_matches_source = true;
     let mut forbidden_prolog_event = false;
@@ -345,7 +348,8 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
     loop {
         match reader.read_resolved_event_into(&mut buffer) {
             Ok((namespace, Event::Start(start) | Event::Empty(start))) => {
-                if start.local_name().as_ref() != b"svg" || !is_svg_namespace(&namespace) {
+                if start.local_name().as_ref().as_bytes() != b"svg" || !is_svg_namespace(&namespace)
+                {
                     return ProbeRoot::Other;
                 }
                 return if active_prolog_event {
@@ -363,10 +367,12 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
             Ok((_, Event::PI(instruction))) => {
                 if instruction
                     .as_ref()
+                    .as_bytes()
                     .get(..3)
                     .is_some_and(|target| target.eq_ignore_ascii_case(b"xml"))
                     && instruction
                         .as_ref()
+                        .as_bytes()
                         .get(3)
                         .is_none_or(|byte| !is_name_character(char::from(*byte)))
                 {
@@ -378,11 +384,11 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
             Ok((_, Event::DocType(_) | Event::GeneralRef(_) | Event::CData(_))) => {
                 forbidden_prolog_event = true;
             }
-            Ok((_, Event::Text(text))) => match text.xml10_content() {
-                Ok(text) if is_xml_whitespace(&text) => {}
-                Ok(_) => forbidden_prolog_event = true,
-                Err(_) => return ProbeRoot::Indeterminate,
-            },
+            Ok((_, Event::Text(text))) => {
+                if !is_xml_whitespace(&text.xml10_content()) {
+                    forbidden_prolog_event = true;
+                }
+            }
             Ok((_, Event::Eof)) | Err(_) => return ProbeRoot::Indeterminate,
             _ => {}
         }
@@ -397,11 +403,11 @@ fn classify_svg_root(bytes: &[u8]) -> Result<bool, ParseIssue> {
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(start) | Event::Empty(start)) => {
-                if start.local_name().as_ref() != b"svg" {
+                if start.local_name().as_ref().as_bytes() != b"svg" {
                     return Ok(false);
                 }
                 let qualified_name = start.name();
-                let qualified_name = qualified_name.as_ref();
+                let qualified_name = qualified_name.as_ref().as_bytes();
                 let prefix = qualified_name
                     .iter()
                     .position(|byte| *byte == b':')
@@ -414,21 +420,18 @@ fn classify_svg_root(bytes: &[u8]) -> Result<bool, ParseIssue> {
                     let Ok(attribute) = attribute else {
                         return Ok(true);
                     };
-                    let Some(value) = std::str::from_utf8(attribute.value.as_ref())
-                        .ok()
-                        .and_then(|value| unescape(value).ok())
-                    else {
+                    let Ok(value) = unescape(attribute.value.as_ref()) else {
                         return Ok(true);
                     };
                     if value.as_bytes() != SVG_NAMESPACE {
                         continue;
                     }
-                    if attribute.key.as_ref() == b"xmlns" {
+                    if attribute.key.as_ref().as_bytes() == b"xmlns" {
                         default_svg_namespace = true;
                     }
                     if prefixed_namespace
                         .as_ref()
-                        .is_some_and(|key| attribute.key.as_ref() == key.as_slice())
+                        .is_some_and(|key| attribute.key.as_ref().as_bytes() == key.as_slice())
                     {
                         prefixed_svg_namespace = true;
                     }
@@ -452,6 +455,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
     }
     let (document, source_encoding) = decode_xml(bytes, false)?;
     let mut reader = NsReader::from_reader(document.as_bytes());
+    reader
+        .resolver_mut()
+        .set_max_namespace_bindings(MAX_ATTRIBUTES);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut parsed = ParsedSvg {
@@ -476,7 +482,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             .map_err(|_| ParseIssue::Malformed)?
         {
             Event::Start(start) => {
-                validate_qname(start.name().as_ref())?;
+                validate_qname(start.name().as_ref().as_bytes())?;
                 let (namespace, _) = reader.resolver().resolve_element(start.name());
                 prolog_event_seen = true;
                 inspect_element(
@@ -501,14 +507,14 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 if depth > MAX_DEPTH {
                     return Err(ParseIssue::StructureLimit);
                 }
-                if is_svg_element(&namespace, start.local_name().as_ref(), b"text") {
+                if is_svg_element(&namespace, start.local_name().as_ref().as_bytes(), b"text") {
                     text_depth = text_depth
                         .checked_add(1)
                         .ok_or(ParseIssue::StructureLimit)?;
                 }
             }
             Event::Empty(empty) => {
-                validate_qname(empty.name().as_ref())?;
+                validate_qname(empty.name().as_ref().as_bytes())?;
                 let (namespace, _) = reader.resolver().resolve_element(empty.name());
                 prolog_event_seen = true;
                 let prospective_depth = depth.checked_add(1).ok_or(ParseIssue::StructureLimit)?;
@@ -533,7 +539,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     return Err(issue);
                 }
                 if mode.collects_text()
-                    && is_svg_element(&namespace, empty.local_name().as_ref(), b"text")
+                    && is_svg_element(&namespace, empty.local_name().as_ref().as_bytes(), b"text")
                     && !parsed.text.ends_with('\n')
                 {
                     append_text(&mut parsed.text, "\n")?;
@@ -544,12 +550,12 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 }
             }
             Event::End(end) => {
-                validate_qname(end.name().as_ref())?;
+                validate_qname(end.name().as_ref().as_bytes())?;
                 let (namespace, _) = reader.resolver().resolve_element(end.name());
                 if depth == 0 {
                     return Err(ParseIssue::Malformed);
                 }
-                if is_svg_element(&namespace, end.local_name().as_ref(), b"text") {
+                if is_svg_element(&namespace, end.local_name().as_ref().as_bytes(), b"text") {
                     text_depth = text_depth.checked_sub(1).ok_or(ParseIssue::Malformed)?;
                     if mode.collects_text() && !parsed.text.ends_with('\n') {
                         append_text(&mut parsed.text, "\n")?;
@@ -561,10 +567,15 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 }
             }
             Event::Text(text) => {
-                if text.as_ref().windows(3).any(|window| window == b"]]>") {
+                if text
+                    .as_ref()
+                    .as_bytes()
+                    .windows(3)
+                    .any(|window| window == b"]]>")
+                {
                     return Err(ParseIssue::Malformed);
                 }
-                let decoded = text.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                let decoded = text.xml10_content();
                 if !has_only_xml10_characters(&decoded) {
                     return Err(ParseIssue::Malformed);
                 }
@@ -591,7 +602,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     buffer.clear();
                     continue;
                 }
-                let decoded = cdata.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                let decoded = cdata.xml10_content();
                 if !has_only_xml10_characters(&decoded) {
                     return Err(ParseIssue::Malformed);
                 }
@@ -603,8 +614,8 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 if depth == 0 {
                     return Err(ParseIssue::Malformed);
                 }
-                let decoded = reference.decode().map_err(|_| ParseIssue::Malformed)?;
-                let value = decode_reference(decoded.as_ref())?;
+                let decoded = reference.as_ref();
+                let value = decode_reference(decoded)?;
                 if mode.collects_text() && text_depth > 0 {
                     append_text(&mut parsed.text, &value)?;
                 }
@@ -616,12 +627,16 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 }
             }
             Event::Comment(comment) => {
-                let decoded = comment.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                let decoded = comment.xml10_content();
                 if !has_only_xml10_characters(&decoded) {
                     return Err(ParseIssue::Malformed);
                 }
-                if comment.as_ref().windows(2).any(|window| window == b"--")
-                    || comment.as_ref().ends_with(b"-")
+                if comment
+                    .as_ref()
+                    .as_bytes()
+                    .windows(2)
+                    .any(|window| window == b"--")
+                    || comment.as_ref().as_bytes().ends_with(b"-")
                 {
                     return Err(ParseIssue::Malformed);
                 }
@@ -662,10 +677,10 @@ fn inspect_element(
         return Err(ParseIssue::Malformed);
     }
     let binding = element.local_name();
-    let name = binding.as_ref();
+    let name = binding.as_ref().as_bytes();
     if depth == 0 {
         if matches!(namespace, ResolveResult::Unbound)
-            && !element.name().as_ref().contains(&b':')
+            && !element.name().as_ref().as_bytes().contains(&b':')
             && name != b"svg"
         {
             return Err(ParseIssue::NoMatch);
@@ -673,7 +688,8 @@ fn inspect_element(
         if !is_svg_element(namespace, name, b"svg") {
             let declares_default_svg_namespace = element.attributes().any(|attribute| {
                 attribute.is_ok_and(|attribute| {
-                    attribute.key.as_ref() == b"xmlns" && attribute.value.as_ref() == SVG_NAMESPACE
+                    attribute.key.as_ref().as_bytes() == b"xmlns"
+                        && attribute.value.as_ref().as_bytes() == SVG_NAMESPACE
                 })
             });
             return Err(if name == b"svg" && declares_default_svg_namespace {
@@ -713,12 +729,11 @@ fn inspect_element(
         if *attribute_count > MAX_ATTRIBUTES || attribute.value.len() > MAX_ATTRIBUTE_BYTES {
             return Err(ParseIssue::StructureLimit);
         }
-        validate_qname(attribute.key.as_ref())?;
-        let qualified_key = attribute.key.as_ref();
+        validate_qname(attribute.key.as_ref().as_bytes())?;
+        let qualified_key = attribute.key.as_ref().as_bytes();
         let key_binding = attribute.key.local_name();
-        let key = key_binding.as_ref();
-        let raw_value =
-            std::str::from_utf8(attribute.value.as_ref()).map_err(|_| ParseIssue::Malformed)?;
+        let key = key_binding.as_ref().as_bytes();
+        let raw_value = attribute.value.as_ref();
         if raw_value.contains('<') || !has_only_xml10_characters(raw_value) {
             return Err(ParseIssue::Malformed);
         }
@@ -741,14 +756,10 @@ fn inspect_element(
             None
         };
         let expanded_namespace = match &attribute_namespace {
-            Some(ResolveResult::Bound(namespace)) => {
-                let namespace =
-                    std::str::from_utf8(namespace.as_ref()).map_err(|_| ParseIssue::Malformed)?;
-                unescape(namespace)
-                    .map_err(|_| ParseIssue::Malformed)?
-                    .into_owned()
-                    .into_bytes()
-            }
+            Some(ResolveResult::Bound(namespace)) => unescape(namespace.as_ref())
+                .map_err(|_| ParseIssue::Malformed)?
+                .into_owned()
+                .into_bytes(),
             Some(ResolveResult::Unbound | ResolveResult::Unknown(_)) => {
                 return Err(ParseIssue::Malformed);
             }
@@ -805,9 +816,8 @@ fn namespace_matches(namespace: &ResolveResult<'_>, expected: &[u8]) -> bool {
     let ResolveResult::Bound(namespace) = namespace else {
         return false;
     };
-    std::str::from_utf8(namespace.as_ref())
+    unescape(namespace.as_ref())
         .ok()
-        .and_then(|namespace| unescape(namespace).ok())
         .is_some_and(|namespace| namespace.as_bytes() == expected)
 }
 
@@ -1601,7 +1611,10 @@ fn declaration_matches_encoding(
 ) -> Result<bool, ()> {
     match declaration.encoding() {
         None => Ok(true),
-        Some(Ok(encoding)) => Ok(encoding_matches_source(encoding.as_ref(), source_encoding)),
+        Some(Ok(encoding)) => Ok(encoding_matches_source(
+            encoding.as_bytes(),
+            source_encoding,
+        )),
         Some(Err(_)) => Err(()),
     }
 }
@@ -1610,7 +1623,7 @@ fn validate_declaration(
     declaration: &BytesDecl<'_>,
     source_encoding: XmlEncoding,
 ) -> Result<(), ParseIssue> {
-    let mut input = declaration.as_ref();
+    let mut input = declaration.as_ref().as_bytes();
     input = input.strip_prefix(b"xml").ok_or(ParseIssue::Malformed)?;
     if !input
         .first()
