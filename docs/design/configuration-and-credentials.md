@@ -199,8 +199,8 @@ A stored authorization is bound to the exact `client_id`, `token_url`,
 in the same transaction as the token generation. Every refresh and every
 dispatch compares that stored tuple with the current registration by canonical
 components, under the profile row lock and before any request is formed; a
-mismatch never sends the stored token, the generation quarantines, and
-re-provisioning is the only recovery.
+mismatch never sends the stored token, the generation quarantines, and recovery
+requires re-provisioning or deletion followed by provisioning.
 
 The daemon is the sole refresher. It locks the profile row, reads the stored
 token, and transactionally marks that generation's refresh in progress; the
@@ -227,10 +227,11 @@ possible request bytes and ambiguous afterward. Access tokens are held in memory
 only; a clean restart discards them without contacting a provider, and the first
 later preparation that needs the profile refreshes lazily, so recovery stays
 configuration-independent. A refresh rejected as expired, reused, or revoked is
-permanent: the profile quarantines and re-provisioning is the only recovery.
-Delivery-layer quarantine that occurs before a provider request names its own
-typed refresh or credential-home failure, commits that evidence atomically with
-the quarantine, and bypasses pool trigger policy.
+permanent: the profile quarantines and recovery requires re-provisioning or
+deletion followed by provisioning. Delivery-layer quarantine that occurs before
+a provider request names its own typed refresh or credential-home failure,
+commits that evidence atomically with the quarantine, and bypasses pool trigger
+policy.
 
 Dispatch supplies each invocation a scratch credential home carrying the
 complete authentication state the CLI needs to form a request minus the refresh
@@ -301,10 +302,10 @@ commit mints the generation; a later commit for an exclusion already active at
 the same scope and of the same origin records its correlation against that
 generation and mints no second one. Origin is part of the coalescing key because
 a policy-origin quarantine is clearable by operator command while a
-delivery-origin one requires re-provisioning, except a `codex_home` quarantine,
-which an operator clears once the store is repaired; a delivery-origin failure
-against a profile carrying an active policy-origin generation mints its own, and
-the two are cleared and reported separately.
+delivery-origin one requires re-provisioning or deletion, except a `codex_home`
+quarantine, which an operator clears once the store is repaired; a
+delivery-origin failure against a profile carrying an active policy-origin
+generation mints its own, and the two are cleared and reported separately.
 
 The session credential history event carries a complete family-to-pool-policy
 snapshot rather than a family-to-reference one. Each immutable policy includes
@@ -426,7 +427,7 @@ snapshot atomically without a reader observing two documents.
   remaining capacity.
 - An exclusion with a reported reset clears when it passes, an operator clear or
   zero-cost probe ends an indefinite policy-origin generation while a
-  delivery-origin one ends only by re-provisioning except a `codex_home`
+  delivery-origin one ends by re-provisioning or deletion except a `codex_home`
   quarantine, which an operator clears once the store is repaired, and repeated
   triggers of one origin coalesce onto one generation.
 - Session credential history carries the complete pool policy, each call pins

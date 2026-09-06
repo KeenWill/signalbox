@@ -171,3 +171,7 @@ Contracts this page relies on but does not own: module-state pruning and outbox
 retention permission in [persistence protocol](persistence-protocol.md), session
 command behavior, and the module event/command/database boundary in the
 [ownership seam](ownership-seam.md).
+
+## Planned
+
+- Webhook listener composition and reload: [design](../design/repo-watch.md).

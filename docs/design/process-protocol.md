@@ -34,13 +34,14 @@ Each request ends with
 `device_endpoint_rejected`, `polling_expired`,
 `token_response_without_identity`, or `account_independence_failed`.
 Provisioning stores the authorization; re-provisioning replaces it and clears
-its refresh quarantine only on success. Deletion removes stored authorization
-and cached access tokens, preventing future dispatches while retaining the
-configured registration and referenced history; a child already holding a copied
-token finishes its invocation. An equal request with the same `command_id`
-reports busy while pending or returns its stored receipt without repeating the
-exchange or deletion; conflicting reuse is rejected. The credential mutation and
-terminal receipt commit atomically under the command claim protocol in
+its refresh quarantine only on success. Deletion ends its delivery-origin
+quarantine and removes stored authorization and cached access tokens, preventing
+future dispatches while retaining the configured registration and referenced
+history; a child already holding a copied token finishes its invocation. An
+equal request with the same `command_id` reports busy while pending or returns
+its stored receipt without repeating the exchange or deletion; conflicting reuse
+is rejected. The credential mutation and terminal receipt commit atomically
+under the command claim protocol in
 [identity and commands](../spec/identity-and-commands.md).
 
 Credential-exclusion administration is one `list_credential_exclusions` read
@@ -54,15 +55,14 @@ or
 The read lists every active exclusion the mutation admits, as its exact target
 object, and omits exactly the records the mutation rejects; the filter turns on
 the exclusion's origin, never on the profile's delivery. A quarantine minted by
-a rejected daemon-owned OAuth refresh is rejected, because only re-provisioning
-clears it; a quarantine minted by a failed `codex_home` identity walk is
-accepted, because the walk reruns at every preparation and re-quarantines a
-still-broken home. `page_size` is 1 through 100; `after` is null or one complete
-target object and is an exclusive keyset cursor. Results sort by target tag in
-the order above, then by each field's canonical order: UTF-8 bytes for
-configured names, UUID bytes for durable identities, numeric order for
-generations. The read opens with `credential_exclusion_start`, then one
-`credential_exclusion` per row, then
+a rejected daemon-owned OAuth refresh is rejected; a quarantine minted by a
+failed `codex_home` identity walk is accepted, because the walk reruns at every
+preparation and re-quarantines a still-broken home. `page_size` is 1 through
+100; `after` is null or one complete target object and is an exclusive keyset
+cursor. Results sort by target tag in the order above, then by each field's
+canonical order: UTF-8 bytes for configured names, UUID bytes for durable
+identities, numeric order for generations. The read opens with
+`credential_exclusion_start`, then one `credential_exclusion` per row, then
 `credential_exclusion_end { exclusion_count, next_after }` with a null
 `next_after` only at the end. The mutation marks exactly the named active
 generation or predecessor correlation cleared. A newer active generation at the
