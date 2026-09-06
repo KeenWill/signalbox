@@ -882,17 +882,6 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         Ok(self.run_with_capture(arguments, EXEC_CAPTURE_BYTES).await)
     }
 
-    pub(crate) fn pinned_workspace_root(&self) -> &Path {
-        #[cfg(target_os = "linux")]
-        {
-            &self.workspace_identity.bind_source
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            &self.workspace_root
-        }
-    }
-
     pub(crate) async fn run_with_capture(
         &mut self,
         arguments: ExecArguments,
