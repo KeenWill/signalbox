@@ -132,7 +132,8 @@ Repository and pull-request UPSERTs replace one complete current projection.
 Webhook admission writes delivery metadata, exact authenticated bytes, and a
 pending disposition atomically. Reusing a delivery identity with equal content
 is a replay; different content is a conflict. Settlement changes a pending
-disposition exactly once.
+disposition exactly once. A frontier release supplies its observed generation
+and is stale after any intervening frontier commit.
 
 Repository watch has no dedicated runtime, webhook listener, convergence task,
 operator routes, or public-schema persistence surface. Its durable state is the

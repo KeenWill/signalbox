@@ -1197,7 +1197,20 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(
-        store.release_frontier(&repository, &stream).await?,
+        store.release_frontier(&repository, 2, &stream).await?,
+        FrontierReleaseAdmission::Stale
+    );
+    let sequence_after_stale_release: Decimal = sqlx::query_scalar(
+        "SELECT sequence FROM frontier
+          WHERE repository = $1 AND stream_identity = $2",
+    )
+    .bind(repository.as_str())
+    .bind(stream.as_slice())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(sequence_after_stale_release, Decimal::from(2_u64));
+    assert_eq!(
+        store.release_frontier(&repository, 3, &stream).await?,
         FrontierReleaseAdmission::Released { generation: 4 }
     );
     let (released_generation, released_digest): (Decimal, Vec<u8>) = sqlx::query_as(
@@ -1216,11 +1229,11 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         FrontierEventAdmission::Stale
     );
     assert_eq!(
-        store.release_frontier(&repository, &stream).await?,
+        store.release_frontier(&repository, 3, &stream).await?,
         FrontierReleaseAdmission::Replayed { generation: 4 }
     );
     assert_eq!(
-        store.release_frontier(&repository, &[99; 32]).await?,
+        store.release_frontier(&repository, 4, &[99; 32]).await?,
         FrontierReleaseAdmission::Absent
     );
 
