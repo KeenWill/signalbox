@@ -1362,11 +1362,10 @@ mod tests {
         assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
     }
 
-    /// the provider's server-side fallback marker is the distinct
-    /// substitution signal. This adapter never enables fallback, so the
-    /// response is not completion material, and the substituting identity is
-    /// surfaced as a reported-model fact for the caller's provider-target
-    /// rule rather than being lost in a generic unknown-block failure.
+    /// the provider's server-side fallback marker is the distinct substitution signal. This adapter
+    /// never enables fallback, so the response is not completion material, and the substituting
+    /// identity is surfaced as a reported-model fact for the caller's provider-target rule rather
+    /// than being lost in a generic unknown-block failure.
     #[test]
     fn server_side_fallback_block_reports_the_substituting_model() {
         let (evidence, observations) = decode(

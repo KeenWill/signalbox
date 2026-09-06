@@ -370,10 +370,9 @@ mod tests {
         )
     }
 
-    /// the dedicated compaction call configures no thinking
-    /// display, so a Claude 5-family completion carries the omitted-display
-    /// empty thinking block by default. Folding the summary drops it exactly as
-    /// the ordinary bridge does, instead of failing the default path closed and
+    /// the dedicated compaction call configures no thinking display, so a Claude 5-family
+    /// completion carries the omitted-display empty thinking block by default. Folding the summary
+    /// drops it exactly as the ordinary bridge does, instead of failing the default path closed and
     /// stalling the very turn automatic compaction exists to rescue.
     #[tokio::test]
     async fn empty_thinking_part_is_dropped_from_a_compaction_summary() {
@@ -393,9 +392,8 @@ mod tests {
         assert_eq!(result.summary, "compacted fixture summary");
     }
 
-    /// thinking with actual text still fails the summary closed,
-    /// because accepting it would publish a summary that silently omits
-    /// response material no durable representation can carry.
+    /// thinking with actual text still fails the summary closed, because accepting it would publish
+    /// a summary that silently omits response material no durable representation can carry.
     #[tokio::test]
     async fn nonempty_thinking_part_still_fails_the_summary_closed() {
         let model = compaction_model(vec![
@@ -412,8 +410,8 @@ mod tests {
         );
     }
 
-    /// redacted thinking carries withheld reasoning in opaque
-    /// form and fails the summary closed for the same reason.
+    /// redacted thinking carries withheld reasoning in opaque form and fails the summary closed for
+    /// the same reason.
     #[tokio::test]
     async fn redacted_thinking_part_still_fails_the_summary_closed() {
         let model = compaction_model(vec![

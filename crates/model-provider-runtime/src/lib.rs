@@ -344,11 +344,10 @@ pub enum ProviderTargetRelation {
 /// table of known provider identifiers:
 ///
 /// - equal spellings are [`Exact`](ProviderTargetRelation::Exact);
-/// - the configured spelling followed by `-` and a *dated snapshot qualifier*
-///   is [`AliasConcretion`](ProviderTargetRelation::AliasConcretion) — the
-///   configured family made concrete;
-/// - everything else is
-///   [`DifferentLineage`](ProviderTargetRelation::DifferentLineage).
+/// - the configured spelling followed by `-` and a *dated snapshot qualifier* is
+///   [`AliasConcretion`](ProviderTargetRelation::AliasConcretion) — the configured family made
+///   concrete;
+/// - everything else is [`DifferentLineage`](ProviderTargetRelation::DifferentLineage).
 ///
 /// A dated snapshot qualifier is `YYYYMMDD` or `YYYY-MM-DD`; calendar
 /// validity is deliberately not checked, because the shape alone makes the
@@ -2454,9 +2453,8 @@ mod tests {
         .into_request()
     }
 
-    /// the outward runtime bridge consumes imported
-    /// messages under their rendered role and exact text without consulting or
-    /// manufacturing native execution provenance.
+    /// the outward runtime bridge consumes imported messages under their rendered role and exact
+    /// text without consulting or manufacturing native execution provenance.
     #[test]
     fn imported_messages_map_to_provider_neutral_text_roles() {
         let source = SemanticTranscriptEntryRef::from_source(
@@ -2487,9 +2485,8 @@ mod tests {
         );
     }
 
-    /// the provider bridge renders the durable identity boundary
-    /// as the exact injected user-role session event selected by the recorded
-    /// context-lifecycle decision.
+    /// the provider bridge renders the durable identity boundary as the exact injected user-role
+    /// session event selected by the recorded context-lifecycle decision.
     #[test]
     fn model_identity_boundary_is_an_injected_user_message() {
         let source = source(12);
@@ -2589,9 +2586,8 @@ mod tests {
             usage: TokenUsage::unreported(),
         })
     }
-    /// one provider response and its ordered result
-    /// batch remain grouped, while malformed arguments use replay-safe JSON
-    /// without replacing their exact durable request evidence.
+    /// one provider response and its ordered result batch remain grouped, while malformed arguments
+    /// use replay-safe JSON without replacing their exact durable request evidence.
     #[test]
     fn tool_history_is_grouped_and_replay_safe() {
         let first = request(20, "{}");
@@ -2859,8 +2855,8 @@ mod tests {
         );
     }
 
-    /// runtime terminal evidence maps to the exact
-    /// physical disposition without retryability or error-string inference.
+    /// runtime terminal evidence maps to the exact physical disposition without retryability or
+    /// error-string inference.
     #[test]
     fn terminal_evidence_classification_is_total() {
         let exchange = ExchangeFacts::default();
@@ -2960,8 +2956,8 @@ mod tests {
         );
     }
 
-    /// only exact text from a matching reported target becomes
-    /// assistant content; empty blocks create no invalid empty entry.
+    /// only exact text from a matching reported target becomes assistant content; empty blocks
+    /// create no invalid empty entry.
     #[test]
     fn matching_completion_preserves_text_parts() {
         assert_eq!(
@@ -3149,8 +3145,8 @@ mod tests {
         ));
     }
 
-    /// runtime-native tool calls become ordered,
-    /// normalized domain proposals without retaining provider identifiers.
+    /// runtime-native tool calls become ordered, normalized domain proposals without retaining
+    /// provider identifiers.
     #[test]
     fn tool_completion_crosses_as_provider_neutral_proposals() {
         let classified = classify_terminal(
@@ -3178,10 +3174,9 @@ mod tests {
         ));
     }
 
-    /// a Claude 5-family tool completion carrying the
-    /// omitted-display empty thinking part classifies as a tool round — the
-    /// empty part is dropped like an empty text block instead of failing the
-    /// whole legitimate completion closed.
+    /// a Claude 5-family tool completion carrying the omitted-display empty thinking part
+    /// classifies as a tool round — the empty part is dropped like an empty text block instead of
+    /// failing the whole legitimate completion closed.
     #[test]
     fn empty_thinking_part_is_dropped_from_a_tool_completion() {
         let classified = classify_terminal(
@@ -3217,9 +3212,8 @@ mod tests {
         ));
     }
 
-    /// thinking with actual text still fails the bridge
-    /// closed — dropping it would silently erase response material for which
-    /// no durable semantic representation exists.
+    /// thinking with actual text still fails the bridge closed — dropping it would silently erase
+    /// response material for which no durable semantic representation exists.
     #[test]
     fn nonempty_thinking_part_still_fails_closed() {
         let outcome = classify_terminal(
@@ -3243,8 +3237,8 @@ mod tests {
         ));
     }
 
-    /// tool-call content and the `ToolUse` finish reason must
-    /// agree before either terminal completion observation is constructed.
+    /// tool-call content and the `ToolUse` finish reason must agree before either terminal
+    /// completion observation is constructed.
     #[test]
     fn mismatched_tool_finish_is_known_failed() {
         assert_eq!(
@@ -3433,9 +3427,9 @@ mod tests {
         );
     }
 
-    /// an alias resolved to its own canonical dated form is
-    /// the same logical target. The exchange completes, and the concrete
-    /// identity that actually served it is retained as sanitized evidence.
+    /// an alias resolved to its own canonical dated form is the same logical target. The exchange
+    /// completes, and the concrete identity that actually served it is retained as sanitized
+    /// evidence.
     ///
     /// This is the regression pin for the live wedge: before the
     /// normalization law, a configured undated alias whose response echoed
@@ -3477,8 +3471,8 @@ mod tests {
         );
     }
 
-    /// an exactly matching identity needs no normalization
-    /// record, so nothing is manufactured for it.
+    /// an exactly matching identity needs no normalization record, so nothing is manufactured for
+    /// it.
     #[test]
     fn exact_identity_records_no_concretion() {
         let classified = classify_terminal(
@@ -3524,8 +3518,8 @@ mod tests {
             .collect()
     }
 
-    /// the discriminator between an alias made concrete and a
-    /// substituted lineage, stated as a table.
+    /// the discriminator between an alias made concrete and a substituted lineage, stated as a
+    /// table.
     #[test]
     fn distinguishes_exact_targets_alias_concretion_and_different_lineages() {
         let rows = relation_rows(&[
