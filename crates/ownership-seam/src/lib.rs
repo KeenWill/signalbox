@@ -15,9 +15,10 @@ pub use signalbox_domain::{
     SessionCreationCause, SessionCreationProvenance, SessionFailureCause, SessionId,
     SessionLifecycleCommand, SessionLifecycleOperation, SessionLifecycleState, SessionOwnership,
     SessionOwnershipTransition, SessionParkCause, SessionParkResponder, SessionRecoveryOperation,
-    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause, SessionTemplateName,
-    SessionTemplateProvenance, SessionTerminalOutcome, SessionWait, StartGate, StopStickiness,
-    SubmitInput, ToolAttemptId, ToolRequestId, TurnId, UserContent, UserContentPart,
+    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    SessionTerminalOutcome, SessionWait, StartGate, StopStickiness, SubmitInput, ToolAttemptId,
+    ToolRequestId, TurnId, UserContent, UserContentPart,
 };
 pub use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::outbox::{
