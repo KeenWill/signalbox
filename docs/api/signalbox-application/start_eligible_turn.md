@@ -63,7 +63,9 @@ pub trait StartEligibleTurnTransaction {
             StartEligibleTurnOutcome,
             <Self as StartEligibleTurnTransaction>::Error,
         >,
-    > + marker::Send;
+    > + marker::Send {
+        /* provided */
+    }
 }
 ```
 

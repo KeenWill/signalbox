@@ -102,8 +102,12 @@ pub enum EligibilityNudgeOutcome {
 ```rust
 pub trait EligibilityNudge {
     fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
-    fn nudge_dispatch_start(&self, session: signalbox_domain::SessionId)
-        -> EligibilityNudgeOutcome;
+    fn nudge_dispatch_start(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> EligibilityNudgeOutcome {
+        /* provided */
+    }
 }
 ```
 
@@ -158,9 +162,15 @@ pub trait EligibilityWorkSource {
             <Self as EligibilityWorkSource>::Error,
         >,
     > + marker::Send;
-    fn take_returned_dispatch_start(&mut self, _session: signalbox_domain::SessionId) -> bool;
-    fn take_returned_unmonitored(&mut self, _session: signalbox_domain::SessionId) -> bool;
-    fn take_pending_dispatch_start(&mut self) -> option::Option<signalbox_domain::SessionId>;
+    fn take_returned_dispatch_start(&mut self, _session: signalbox_domain::SessionId) -> bool {
+        /* provided */
+    }
+    fn take_returned_unmonitored(&mut self, _session: signalbox_domain::SessionId) -> bool {
+        /* provided */
+    }
+    fn take_pending_dispatch_start(&mut self) -> option::Option<signalbox_domain::SessionId> {
+        /* provided */
+    }
     fn next_pending_dispatch_start(
         &mut self,
     ) -> impl future::Future<
@@ -168,7 +178,9 @@ pub trait EligibilityWorkSource {
             signalbox_domain::SessionId,
             <Self as EligibilityWorkSource>::Error,
         >,
-    > + marker::Send;
+    > + marker::Send {
+        /* provided */
+    }
 }
 ```
 
@@ -177,12 +189,19 @@ pub trait EligibilityWorkSource {
 ```rust
 pub trait EligibilityPass {
     type Error;
-    fn failure_stage(_error: &<Self as EligibilityPass>::Error) -> &'static str;
+    fn failure_stage(_error: &<Self as EligibilityPass>::Error) -> &'static str {
+        /* provided */
+    }
     fn failure_turn(
         _error: &<Self as EligibilityPass>::Error,
-    ) -> option::Option<signalbox_domain::TurnId>;
-    fn occupancy_expiry_handler(&self)
-        -> option::Option<sync::Arc<dyn SchedulerPassExpiryHandler>>;
+    ) -> option::Option<signalbox_domain::TurnId> {
+        /* provided */
+    }
+    fn occupancy_expiry_handler(
+        &self,
+    ) -> option::Option<sync::Arc<dyn SchedulerPassExpiryHandler>> {
+        /* provided */
+    }
     fn run(
         &mut self,
         session: signalbox_domain::SessionId,
@@ -194,7 +213,9 @@ pub trait EligibilityPass {
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
-           + 'static;
+           + 'static {
+        /* provided */
+    }
 }
 ```
 

@@ -70,7 +70,9 @@ pub trait ToolArgumentValidator: marker::Send + marker::Sync {
     fn preauthorization(
         &self,
         _arguments: &tool::NormalizedToolArguments,
-    ) -> result::Result<ToolPreauthorization, tool_attempt::ToolExecutionErrorDetail>;
+    ) -> result::Result<ToolPreauthorization, tool_attempt::ToolExecutionErrorDetail> {
+        /* provided */
+    }
 }
 impl<Validate> ToolArgumentValidator for Validate
 where
@@ -169,7 +171,9 @@ pub trait ToolCatalog: marker::Send + marker::Sync {
         &self,
         _name: &tool::ToolName,
         _arguments: &tool::NormalizedToolArguments,
-    ) -> result::Result<ToolPreauthorization, ToolCatalogValidationFailure>;
+    ) -> result::Result<ToolPreauthorization, ToolCatalogValidationFailure> {
+        /* provided */
+    }
 }
 ```
 
@@ -295,7 +299,10 @@ pub trait ToolExecutor {
         Output = result::Result<ToolExecutorDisposition, <Self as ToolExecutor>::Error>,
     > + marker::Send
     where
-        Self: marker::Send;
+        Self: marker::Send,
+    {
+        /* provided */
+    }
 }
 ```
 

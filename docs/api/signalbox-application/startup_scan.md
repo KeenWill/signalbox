@@ -8,8 +8,12 @@
 pub trait StartupScanIdGenerator {
     fn next_failure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
     fn next_terminal_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    fn next_tool_closure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_tool_closure_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_tool_closure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId {
+        /* provided */
+    }
+    fn next_tool_closure_frontier_id(&mut self) -> context_frontier::ContextFrontierId {
+        /* provided */
+    }
     fn next_reclassified_turn_id(
         &mut self,
         accepted_input: signalbox_domain::AcceptedInputId,

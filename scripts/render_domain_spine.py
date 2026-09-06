@@ -71,25 +71,26 @@ def attributes(item):
 
 
 def format_rust(code):
+    with tempfile.TemporaryDirectory(prefix='domain-spine-rustfmt-') as temporary:
+        path = Path(temporary) / 'declarations.rs'
+        path.write_text(code + '\n')
+        result = subprocess.run([
+            'rustfmt', '--quiet', '--edition', '2021', '--emit', 'stdout',
+            '--config', 'max_width=100', str(path),
+        ], check=False, capture_output=True, text=True)
+    if result.returncode == 0:
+        return result.stdout.rstrip()
     fallback = []
     for line in code.splitlines():
         indent = line[:len(line) - len(line.lstrip())]
-        if len(line) > 100 and not line.lstrip().startswith('//'):
+        if len(line) > 100 and not line.lstrip().startswith(('//', '#[')):
             fallback.append(textwrap.fill(
                 line, width=100, subsequent_indent=indent + '    ',
                 break_long_words=False, break_on_hyphens=False,
             ))
         else:
             fallback.append(line)
-    code = '\n'.join(fallback) + '\n'
-    with tempfile.TemporaryDirectory(prefix='domain-spine-rustfmt-') as temporary:
-        path = Path(temporary) / 'declarations.rs'
-        path.write_text(code)
-        result = subprocess.run([
-            'rustfmt', '--quiet', '--edition', '2021', '--emit', 'stdout',
-            '--config', 'max_width=100', str(path),
-        ], check=False, capture_output=True, text=True)
-    return (result.stdout if result.returncode == 0 else code).rstrip()
+    return '\n'.join(fallback).rstrip()
 
 
 class Renderer:
@@ -293,10 +294,10 @@ class Renderer:
             fields.append('/* private */')
         return ' { ' + ', '.join(fields) + ' }'
 
-    def declaration(self, item, *, associated=False):
-        return attributes(item) + self.declaration_body(item, associated=associated)
+    def declaration(self, item, *, associated=False, trait_definition=False):
+        return attributes(item) + self.declaration_body(item, associated=associated, trait_definition=trait_definition)
 
-    def declaration_body(self, item, *, associated=False):
+    def declaration_body(self, item, *, associated=False, trait_definition=False):
         kind, body = next(iter(item['inner'].items()))
         name = item['name']
         generics = body.get('generics', {'params': [], 'where_predicates': []})
@@ -304,7 +305,8 @@ class Renderer:
         where = self.where(generics)
         prefix = '' if associated else 'pub '
         if kind == 'function':
-            return prefix + self.modifiers(body['header']) + 'fn ' + generic_name + self.signature(body['sig']) + where + ';'
+            ending = ' {\n    /* provided */\n}' if trait_definition and body['has_body'] else ';'
+            return prefix + self.modifiers(body['header']) + 'fn ' + generic_name + self.signature(body['sig']) + where + ending
         if kind == 'struct':
             shape = self.shape(body['kind'], public=True)
             if isinstance(body['kind'], dict) and 'tuple' in body['kind']:
@@ -324,7 +326,7 @@ class Renderer:
             bounds = self.bounds(body['bounds'])
             header = 'pub ' + ('unsafe ' if body['is_unsafe'] else '') + ('auto ' if body['is_auto'] else '') + 'trait ' + generic_name
             header += ': ' + bounds if bounds else ''
-            methods = [self.declaration(self.item(i), associated=True) for i in body['items']]
+            methods = [self.declaration(self.item(i), associated=True, trait_definition=True) for i in body['items']]
             return header + where + ' {\n' + '\n'.join(textwrap.indent(m, '    ') for m in methods) + '\n}'
         if kind in {'type_alias', 'assoc_type'}:
             bounds = self.bounds(body.get('bounds', []))

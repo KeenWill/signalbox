@@ -19,12 +19,12 @@ def path(name, identity, args=None):
     return {'path': name, 'id': identity, 'args': args}
 
 
-def function(inputs=(), output=None, *, generics=None):
+def function(inputs=(), output=None, *, generics=None, has_body=True):
     return {
         'sig': {'inputs': list(inputs), 'output': output, 'is_c_variadic': False},
         'generics': generics or EMPTY_GENERICS,
         'header': {'is_const': False, 'is_async': False, 'is_unsafe': False, 'abi': 'Rust'},
-        'has_body': True,
+        'has_body': has_body,
     }
 
 
@@ -72,7 +72,7 @@ def fixture():
         'is_unsafe': False, 'items': [16, 17], 'implementations': [6]}, line=15)
     item(16, 'Output', 'assoc_type', {'generics': EMPTY_GENERICS, 'bounds': [], 'type': None}, line=16)
     item(17, 'read', 'function', function(output={'qualified_path': {
-        'name': 'Output', 'args': None, 'self_type': {'generic': 'Self'}, 'trait': path('Read', 15)}}), line=17)
+        'name': 'Output', 'args': None, 'self_type': {'generic': 'Self'}, 'trait': path('Read', 15)}}, has_body=False), line=17)
     item(20, 'fetch', 'function', function(output=record_type), line=20)
     item(30, 'Alias', 'use', {'source': 'sample::example::Record', 'name': 'Alias', 'id': 1, 'is_glob': False}, line=30)
     item(40, 'Token', 'struct', {'kind': 'unit', 'generics': EMPTY_GENERICS, 'impls': [41, 42, 43]}, line=40)
@@ -96,6 +96,21 @@ def fixture():
 
 
 class RenderDomainSpineTests(unittest.TestCase):
+    def test_provided_trait_methods_differ_from_required_methods(self):
+        document = fixture()
+        provided = copy.deepcopy(document['index']['17'])
+        provided.update(id=18, name='read_default')
+        provided['inner']['function']['has_body'] = True
+        document['index']['18'] = provided
+        document['index']['15']['inner']['trait']['items'].append(18)
+        renderer = Renderer(document)
+        block = renderer.block(renderer.item(15))
+        self.assertIn('    fn read() -> <Self as Read>::Output;', block)
+        self.assertIn('    fn read_default() -> <Self as Read>::Output {\n        /* provided */\n    }', block)
+        self.assertNotIn('provided', renderer.impl_block(renderer.item(6)))
+        self.assertIn('fn read(&self) -> T;', renderer.impl_block(renderer.item(6)))
+        self.assertEqual(renderer.declaration(renderer.item(20)), 'pub fn fetch() -> Record;')
+
     def test_caller_attributes_stay_above_types_variants_and_methods(self):
         document = fixture()
         document['index']['1']['attrs'] = [
@@ -237,6 +252,15 @@ impl Read for Record {
     second_parameter: second_module::SecondType,
     third_parameter: third_module::ThirdType,
 ) -> result::Result<response_module::ResponseType, failure_module::FailureType>;''')
+
+    def test_long_attribute_messages_survive_formatting_and_fallback(self):
+        reason = ('Discarding this value loses the handle needed to observe completion and '
+                  'report the operation result to the caller that requested the work.')
+        code = '#[must_use = "' + reason + '"]\npub fn handle() -> Handle;'
+        self.assertIn('"' + reason + '"', format_rust(code))
+        rejected = subprocess.CompletedProcess([], 1, stdout='', stderr='rejected declaration')
+        with patch('render_domain_spine.subprocess.run', return_value=rejected):
+            self.assertIn('"' + reason + '"', format_rust(code))
 
     def test_rejected_synthesized_block_keeps_hand_layout(self):
         renderer = Renderer(fixture())
