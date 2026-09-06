@@ -30,6 +30,7 @@ use signalbox_domain::{
     WorkflowName,
 };
 use signalbox_persistence::{
+    MIGRATOR,
     attention::AutomaticResumeAttemptBounds,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -90,7 +91,7 @@ const REVIEW_COMMENT_ID: u64 = 62;
 const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
     AutomaticResumeAttemptBounds::unbounded();
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
@@ -109,6 +110,11 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .max_connections(4)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
+    Ok((container, pool))
+}
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let (container, pool) = unmigrated_postgres().await?;
     migrate(&pool).await?;
     Ok((container, pool))
 }
@@ -478,6 +484,38 @@ fn next_generation_value(generation: RepoWatchCursorGeneration) -> u64 {
         .get()
         .checked_add(1)
         .expect("fixture generation has a successor")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn frontier_commit_columns_are_added_after_the_ingest_migration() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR.run_to(202609050102, &pool).await?;
+
+    let columns_before: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM information_schema.columns
+          WHERE table_schema = 'mod_repo_watch'
+            AND table_name = 'repository_state'
+            AND column_name = ANY (ARRAY['frontier_generation', 'last_frontier_commit_digest'])",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(columns_before, 0);
+
+    migrate(&pool).await?;
+    let columns_after: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM information_schema.columns
+          WHERE table_schema = 'mod_repo_watch'
+            AND table_name = 'repository_state'
+            AND column_name = ANY (ARRAY['frontier_generation', 'last_frontier_commit_digest'])",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(columns_after, 2);
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
