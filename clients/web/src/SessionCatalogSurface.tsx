@@ -1,21 +1,22 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Search, X } from 'lucide-react'
-import { type FormEvent, useEffect, useRef, useState } from 'react'
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
 import {
   admittedSessionSearch,
   ProductRequestError,
   type ProductSessionState,
   productTransport,
+  readSessionRates,
 } from './product'
-import { useAppSelector } from './state'
+import { actions, useAppDispatch, useAppSelector } from './state'
 
 type SessionSummary = WebSessionCatalogSnapshot['summaries'][number]
 
 const label = (value: string) => value.replaceAll('_', ' ')
 
 const activityTime = (unixMicroseconds: string) => {
-  const value = Number(BigInt(unixMicroseconds) / 1000n)
+  const value = Number(BigInt(unixMicroseconds) / BigInt(1000))
   if (!Number.isSafeInteger(value)) return unixMicroseconds
   return new Intl.DateTimeFormat('en-US', {
     dateStyle: 'medium',
@@ -34,10 +35,16 @@ const SessionTitle = ({ summary }: { summary: SessionSummary }) => (
 export function SessionCatalogSurface({
   state,
   onStateChange,
+  onTimelineIds,
 }: {
   state: ProductSessionState
+  onTimelineIds: (ids: readonly string[]) => void
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close') => void
 }) {
+  const dispatch = useAppDispatch()
+  const keyboardSelection = useAppSelector((root) => root.app.selectedTimeline)
+  const [lifecycleFilter, setLifecycleFilter] = useState('all')
+  const [pageOrder, setPageOrder] = useState('activity')
   const returnFocus = useRef<HTMLButtonElement>(null)
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
   const closeFocus = useRef<HTMLButtonElement>(null)
@@ -72,6 +79,62 @@ export function SessionCatalogSurface({
       ),
     gcTime: 0,
   })
+  const sessionIds = useMemo(
+    () => sessions.data?.summaries.map((row) => row.session_id) ?? [],
+    [sessions.data],
+  )
+  const rates = useQuery({
+    queryKey: ['production', 'session-rates', sessionIds],
+    queryFn: ({ signal }) => readSessionRates(sessionIds, signal),
+    enabled: sessions.data !== undefined,
+    gcTime: 0,
+  })
+  const rateById = useMemo(
+    () => new Map(rates.data?.sessions.map((row) => [row.session_id, row])),
+    [rates.data],
+  )
+  const listed = useMemo(() => {
+    const rows = (sessions.data?.summaries ?? []).filter(
+      (row) =>
+        lifecycleFilter === 'all' ||
+        rateById.get(row.session_id)?.lifecycle_state === lifecycleFilter,
+    )
+    if (pageOrder === 'failure')
+      rows.sort((a, b) => {
+        const left = BigInt(rateById.get(a.session_id)?.last_failure_sequence ?? '0')
+        const right = BigInt(rateById.get(b.session_id)?.last_failure_sequence ?? '0')
+        return left === right ? a.session_id.localeCompare(b.session_id) : left > right ? -1 : 1
+      })
+    return rows
+  }, [sessions.data, lifecycleFilter, pageOrder, rateById])
+  const totals = listed.reduce(
+    (sum, row) => {
+      const rate = rateById.get(row.session_id)
+      if (rate) {
+        sum.states[rate.lifecycle_state] = (sum.states[rate.lifecycle_state] ?? 0) + 1
+        sum.turns += BigInt(rate.turn_count)
+        sum.failed += BigInt(rate.failed_turn_count)
+        sum.retired += BigInt(rate.retired_turn_count)
+        sum.completed += BigInt(rate.completed_turn_count)
+      }
+      return sum
+    },
+    {
+      states: {} as Record<string, number>,
+      turns: BigInt(0),
+      failed: BigInt(0),
+      retired: BigInt(0),
+      completed: BigInt(0),
+    },
+  )
+  useEffect(() => {
+    onTimelineIds(listed.map((row) => row.session_id))
+    return () => onTimelineIds([])
+  }, [listed, onTimelineIds])
+  useEffect(() => {
+    if (keyboardSelection && overlay === null)
+      sessionButtons.current.get(keyboardSelection)?.focus()
+  }, [keyboardSelection, overlay])
   const selected = sessions.data?.summaries.find((summary) => summary.session_id === state.session)
   const selectedSessionId = selected?.session_id
 
@@ -235,6 +298,79 @@ export function SessionCatalogSurface({
       )}
 
       {sessions.data && (
+        <section className="catalog-rates" aria-label="Listed session rates">
+          <div className="catalog-rate-controls">
+            <label>
+              State on this page{' '}
+              <select
+                value={lifecycleFilter}
+                onChange={(event) => setLifecycleFilter(event.target.value)}
+              >
+                <option value="all">All states</option>
+                {[
+                  'created',
+                  'dispatched',
+                  'active',
+                  'waiting',
+                  'recovering',
+                  'blocked',
+                  'parked',
+                  'terminal',
+                ].map((state) => (
+                  <option key={state} value={state}>
+                    {label(state)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Order on this page{' '}
+              <select value={pageOrder} onChange={(event) => setPageOrder(event.target.value)}>
+                <option value="activity">Catalog order</option>
+                <option value="failure">Last failure</option>
+              </select>
+            </label>
+          </div>
+          {rates.isPending ? (
+            <p>Reading session outcomes…</p>
+          ) : rates.isError ? (
+            <p role="alert">
+              Session outcomes unavailable.{' '}
+              <button type="button" onClick={() => void rates.refetch()}>
+                Retry outcomes
+              </button>
+            </p>
+          ) : (
+            <>
+              <p>
+                <strong>{listed.length} listed</strong> ·{' '}
+                {[
+                  'created',
+                  'dispatched',
+                  'active',
+                  'waiting',
+                  'recovering',
+                  'blocked',
+                  'parked',
+                  'terminal',
+                ]
+                  .map((state) => `${totals.states[state] ?? 0} ${state}`)
+                  .join(' · ')}
+              </p>
+              <p>
+                <strong>
+                  {totals.turns === BigInt(0)
+                    ? 'No turns'
+                    : `${Number((totals.failed * BigInt(10000)) / totals.turns) / 100}% failed turns`}
+                </strong>{' '}
+                · {String(totals.failed)} failed / {String(totals.turns)} turns ·{' '}
+                {String(totals.completed)} completed turns · {String(totals.retired)} retired turns
+              </p>
+            </>
+          )}
+        </section>
+      )}
+      {sessions.data && (
         <div
           className={
             selected ? 'catalog-workbench catalog-workbench-selected' : 'catalog-workbench'
@@ -260,11 +396,11 @@ export function SessionCatalogSurface({
                 )}
               </div>
             </header>
-            {sessions.data.summaries.length === 0 ? (
+            {listed.length === 0 ? (
               <p className="catalog-notice">No sessions match the current filters.</p>
             ) : (
               <ol>
-                {sessions.data.summaries.map((summary) => (
+                {listed.map((summary) => (
                   <li key={summary.session_id}>
                     <button
                       ref={(button) => {
@@ -273,6 +409,7 @@ export function SessionCatalogSurface({
                       }}
                       type="button"
                       aria-pressed={state.session === summary.session_id}
+                      onFocus={() => dispatch(actions.timelineSelected(summary.session_id))}
                       onClick={(event) => openSession(summary, event.currentTarget)}
                     >
                       <span className="catalog-session-copy">
@@ -282,10 +419,31 @@ export function SessionCatalogSurface({
                         <code>{summary.session_id}</code>
                       </span>
                       <span className={`state-chip state-${summary.state}`}>
-                        {label(summary.state)}
+                        {label(rateById.get(summary.session_id)?.lifecycle_state ?? 'unavailable')}
                       </span>
                       <span>
-                        {summary.active_turn_count} active · {summary.queued_turn_count} queued
+                        {rateById.has(summary.session_id) ? (
+                          <>
+                            {rateById.get(summary.session_id)?.turn_count} turns ·{' '}
+                            {rateById.get(summary.session_id)?.failed_turn_count} failed
+                            <small>
+                              {label(
+                                rateById.get(summary.session_id)?.last_provider_cause ??
+                                  (rateById.get(summary.session_id)?.last_failure_sequence
+                                    ? 'no provider cause recorded'
+                                    : 'no failures'),
+                              )}
+                            </small>
+                            {rateById.get(summary.session_id)?.goal_disposition && (
+                              <small>
+                                Goal:{' '}
+                                {label(rateById.get(summary.session_id)?.goal_disposition ?? '')}
+                              </small>
+                            )}
+                          </>
+                        ) : (
+                          `${summary.active_turn_count} active · ${summary.queued_turn_count} queued`
+                        )}
                       </span>
                       <time>{activityTime(summary.last_activity.unix_microseconds)}</time>
                       <ArrowRight aria-hidden="true" />
@@ -334,7 +492,9 @@ export function SessionCatalogSurface({
                 </div>
                 <div>
                   <dt>State</dt>
-                  <dd>{label(selected.state)}</dd>
+                  <dd>
+                    {label(rateById.get(selected.session_id)?.lifecycle_state ?? 'unavailable')}
+                  </dd>
                 </div>
                 {selected.action && (
                   <div>

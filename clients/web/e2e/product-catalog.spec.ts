@@ -110,6 +110,23 @@ const watchBrowser = (page: Page) => {
   return problems
 }
 
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/sessions/rates?**', (route) =>
+    route.fulfill({
+      json: {
+        sessions: new URL(route.request().url()).searchParams.getAll('session_id').map((id) => ({
+          session_id: id,
+          lifecycle_state: 'created',
+          turn_count: '0',
+          failed_turn_count: '0',
+          retired_turn_count: '0',
+          completed_turn_count: '0',
+        })),
+      },
+    }),
+  )
+})
+
 const useCatalogFixture = async (page: Page) => {
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
   await page.route('**/api/attention/follow', (route) =>
@@ -122,6 +139,29 @@ const useCatalogFixture = async (page: Page) => {
   await page.route('**/api/sessions/**', (route) => {
     const pathname = new URL(route.request().url()).pathname
     const sessionId = decodeURIComponent(pathname.split('/')[3] ?? '')
+    if (pathname.endsWith('/rates')) {
+      const ids = new URL(route.request().url()).searchParams.getAll('session_id')
+      return route.fulfill({
+        json: {
+          sessions: ids.map((id) => ({
+            session_id: id,
+            lifecycle_state:
+              id === firstSessionId ? 'active' : id === secondSessionId ? 'parked' : 'terminal',
+            turn_count: id === firstSessionId ? '10' : '2',
+            failed_turn_count: id === secondSessionId ? '2' : '0',
+            completed_turn_count: id === firstSessionId ? '7' : '0',
+            retired_turn_count: '0',
+            ...(id === secondSessionId
+              ? {
+                  last_failure_sequence: '123',
+                  last_provider_cause: 'quota_exhausted',
+                  goal_disposition: 'blocked',
+                }
+              : {}),
+          })),
+        },
+      })
+    }
     if (pathname.endsWith('/timeline')) {
       return route.fulfill({
         json: {
@@ -539,6 +579,10 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
   await expect(
     page.getByRole('heading', { name: firstPage.summaries[0].title_summary, level: 2 }),
   ).toBeVisible()
+  await expect(page.getByLabel('Listed session rates')).toContainText('2 failed / 72 turns')
+  const ratesBounds = await page.getByLabel('Listed session rates').boundingBox()
+  const listBounds = await page.locator('.catalog-list').boundingBox()
+  expect(ratesBounds && listBounds && ratesBounds.y + ratesBounds.height <= listBounds.y).toBe(true)
   await expect(page).toHaveScreenshot('catalog-desktop-dark.png', { animations: 'disabled' })
 
   await page.getByRole('button', { name: 'Use light theme' }).click()
@@ -554,4 +598,27 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
   await expect(page.getByRole('button', { name: 'Open timeline workspace' })).toBeFocused()
   await expect(page).toHaveScreenshot('catalog-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('listed outcomes expose failures and lifecycle filtering', async ({ page }) => {
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await expect(page.getByLabel('Listed session rates')).toContainText('2 failed / 72 turns')
+  await page.getByLabel('Order on this page').selectOption('failure')
+  await expect(page.locator('.catalog-list li').first()).toContainText('Deployment decision')
+  await expect(page.locator('.catalog-list li').first()).toContainText('quota exhausted')
+  await page.getByLabel('State on this page').selectOption('parked')
+  await expect(page.locator('.catalog-list li')).toHaveCount(1)
+  await expect(page.getByLabel('Listed session rates')).toContainText('100% failed turns')
+})
+
+test('catalog keyboard selection opens a session', async ({ page }) => {
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await expect(page.getByRole('heading', { name: '48 sessions', exact: true })).toBeVisible()
+  await page.keyboard.press('j')
+  await expect(page.locator('.catalog-list li').first().getByRole('button')).toBeFocused()
+  await page.keyboard.press('j')
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('dialog', { name: 'Deployment decision' })).toBeVisible()
 })

@@ -681,8 +681,10 @@ export function ProductApp({
         return surfaceEscapeRef.current?.() ?? false
       },
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
-      loadTimelineWindow: (anchor) =>
-        setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
+      loadTimelineWindow: sessionState.workspace
+        ? (anchor) =>
+            setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
+        : undefined,
       navigate: (path) => {
         // A retained exact continuation command owns the surface until it is retried or abandoned.
         if (navigationDisabled) return
@@ -916,7 +918,11 @@ export function ProductApp({
         windowRequest={windowRequest}
       />
     ) : surface === 'sessions' && bootstrap.isSuccess ? (
-      <SessionCatalogSurface state={sessionState} onStateChange={updateSessionSearch} />
+      <SessionCatalogSurface
+        state={sessionState}
+        onStateChange={updateSessionSearch}
+        onTimelineIds={setTimelineIds}
+      />
     ) : surface === 'sessions' ? (
       <div className="catalog-notice">
         <p>Sessions are unavailable until the browser contract handshake succeeds.</p>

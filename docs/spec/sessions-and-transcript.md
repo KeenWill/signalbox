@@ -94,7 +94,9 @@ parent-chosen policy, messages in both directions, and the child's one result.
 The browser read plane serves a session catalog with attention states, a live
 projection and follow stream for one session, a timeline of durable events with
 typed detail, and lexical search. Its request and response shapes live in
-`crates/web-contract`.
+`crates/web-contract`. A bounded rates read reports lifecycle state, turn
+outcome counts, the latest failed turn and its provider cause, and goal
+disposition for up to 32 listed sessions.
 
 ## Design decisions
 

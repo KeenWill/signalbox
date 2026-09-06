@@ -91,19 +91,19 @@ use signalbox_web_contract::{
     WebSessionCatalogSnapshot, WebSessionCatalogSort, WebSessionCatalogSummary, WebSessionId,
     WebSessionLiveActiveState, WebSessionLiveActiveTurn, WebSessionLiveReconciliation,
     WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot,
-    WebSessionLiveStreamEvent, WebSessionTimelineDescriptor, WebSessionTimelineDetail,
-    WebSessionTimelineDetailBody, WebSessionTimelineDetailPage, WebSessionTimelineEventKind,
-    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
-    WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference, WebTimelineBodyContinuation,
-    WebTimelineBodyField, WebTimelineDetailContinuation, WebTimelineEventSequence,
-    WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
-    WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebTurnId, WebU64,
+    WebSessionLiveStreamEvent, WebSessionRate, WebSessionRates, WebSessionTimelineDescriptor,
+    WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
+    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference,
+    WebTimelineBodyContinuation, WebTimelineBodyField, WebTimelineDetailContinuation,
+    WebTimelineEventSequence, WebTimelineModelCallDisposition, WebTimelineModelCallState,
+    WebTimelineModelUsage, WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebTurnId, WebU64,
     WebUsageAggregateGroup, WebUsageAggregateTokenAxes, WebUsageCall, WebUsageCallCount,
     WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage, WebUsageCost, WebUsageCostLabel,
     WebUsageCostUnavailableReason, WebUsageInputSemantics, WebUsageProvenance, WebUsageRateVersion,
     WebUsageSummary, WebUsageTimestampMicros, WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
 };
-use sqlx::{PgPool, types::Uuid};
+use sqlx::{PgPool, Row as _, types::Uuid};
 use tokio::{
     io::AsyncReadExt as _,
     net::TcpListener,
@@ -914,6 +914,7 @@ fn production_router_with_budget(
     let automatic_resume_attempts =
         configured_automatic_resume_attempts(model_configuration.as_ref());
     let state = WebApiState {
+        pool: pool.clone(),
         attention: pool
             .clone()
             .map(|pool| AttentionRepository::new(pool, automatic_resume_attempts)),
@@ -942,6 +943,7 @@ fn production_router_with_budget(
         .route("/sessions/{session_id}/live", get(session_live_snapshot))
         .route("/sessions/{session_id}/follow", get(session_live_follow))
         .route("/sessions", get(session_catalog))
+        .route("/sessions/rates", get(session_rates))
         .route("/search", get(search))
         .route("/usage/summary", get(usage_summary))
         .route("/usage/calls", get(usage_calls))
@@ -1051,6 +1053,7 @@ fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
 
 #[derive(Clone, Debug)]
 struct WebApiState {
+    pool: Option<PgPool>,
     attention: Option<AttentionRepository>,
     timeline: Option<SessionTimelineRepository>,
     live: Option<SessionLiveRepository>,
@@ -1070,6 +1073,118 @@ struct SessionCatalogQuery {
     sort: Option<String>,
     after_session_id: Option<String>,
     after_activity_unix_microseconds: Option<String>,
+}
+
+async fn session_rates(State(state): State<WebApiState>, RawQuery(query): RawQuery) -> Response {
+    let mut sessions = Vec::new();
+    for (key, value) in url::form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes()) {
+        if key != "session_id"
+            || sessions.len() == usize::from(signalbox_application::max_attention_snapshot_items())
+        {
+            return invalid_attention_query();
+        }
+        let Ok(session) = parse_canonical_session_id(&value) else {
+            return invalid_attention_query();
+        };
+        let id = session.into_uuid();
+        if sessions.contains(&id) {
+            return invalid_attention_query();
+        }
+        sessions.push(id);
+    }
+    let (Some(pool), Some(budget)) = (state.pool, state.snapshot_reader_budget) else {
+        return attention_projection_error(None);
+    };
+    let Ok(_permit) = budget.acquire().await else {
+        return attention_projection_error(None);
+    };
+    match read_session_rates(&pool, &sessions).await {
+        Ok(sessions) => Json(WebSessionRates { sessions }).into_response(),
+        Err(_) => attention_projection_error(None),
+    }
+}
+
+async fn read_session_rates(
+    pool: &PgPool,
+    sessions: &[Uuid],
+) -> Result<Vec<WebSessionRate>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT lifecycle.session_id, lifecycle.state_kind,
+                  counts.turn_count, counts.failed_turn_count,
+                  counts.retired_turn_count, counts.completed_turn_count,
+                  failure.event_sequence::text AS last_failure_sequence,
+                  cause.terminal_provider_failure_cause AS last_provider_cause,
+                  goal.event_kind AS goal_disposition
+             FROM session_lifecycle AS lifecycle
+             CROSS JOIN LATERAL (
+                 SELECT count(*)::text AS turn_count,
+                        count(*) FILTER (WHERE terminal_disposition_kind = 'failed')::text AS failed_turn_count,
+                        count(*) FILTER (WHERE terminal_disposition_kind = 'retired')::text AS retired_turn_count,
+                        count(*) FILTER (WHERE terminal_disposition_kind = 'completed')::text AS completed_turn_count
+                   FROM turn_lifecycle WHERE session_id = lifecycle.session_id
+             ) AS counts
+             LEFT JOIN LATERAL (
+                 SELECT event_sequence, turn_id FROM turn_terminal_outbox_event
+                  WHERE session_id = lifecycle.session_id AND disposition_kind = 'failed'
+                  ORDER BY event_sequence DESC LIMIT 1
+             ) AS failure ON true
+             LEFT JOIN LATERAL (
+                 SELECT call.terminal_provider_failure_cause FROM model_call AS call
+                   JOIN model_call_transition_outbox_event AS transition USING (model_call_id)
+                  WHERE call.session_id = lifecycle.session_id AND call.turn_id = failure.turn_id
+                    AND transition.call_state_kind = 'terminal'
+                    AND transition.event_sequence < failure.event_sequence
+                  ORDER BY transition.event_sequence DESC LIMIT 1
+             ) AS cause ON true
+             LEFT JOIN LATERAL (
+                 SELECT event_kind FROM goal_event WHERE session_id = lifecycle.session_id
+                  ORDER BY event_ordinal DESC LIMIT 1
+             ) AS goal ON true
+            WHERE lifecycle.session_id = ANY($1)
+            ORDER BY lifecycle.session_id"#,
+    ).bind(sessions).fetch_all(pool).await?;
+    rows.iter()
+        .map(|row| {
+            let decode_error = |error| sqlx::Error::Decode(Box::new(error));
+            let count = |name| -> Result<WebU64, sqlx::Error> {
+                Ok(WebU64::from_u64(
+                    row.try_get::<String, _>(name)?
+                        .parse()
+                        .map_err(decode_error)?,
+                ))
+            };
+            let variant = |name| -> Result<Option<serde_json::Value>, sqlx::Error> {
+                Ok(row
+                    .try_get::<Option<String>, _>(name)?
+                    .map(serde_json::Value::String))
+            };
+            Ok(WebSessionRate {
+                session_id: WebSessionId::from_uuid_bytes(
+                    row.try_get::<Uuid, _>("session_id")?.into_bytes(),
+                ),
+                lifecycle_state: serde_json::from_value(serde_json::Value::String(
+                    row.try_get("state_kind")?,
+                ))
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                turn_count: count("turn_count")?,
+                failed_turn_count: count("failed_turn_count")?,
+                retired_turn_count: count("retired_turn_count")?,
+                completed_turn_count: count("completed_turn_count")?,
+                last_failure_sequence: row
+                    .try_get::<Option<String>, _>("last_failure_sequence")?
+                    .map(|value| value.parse().map(WebU64::from_u64).map_err(decode_error))
+                    .transpose()?,
+                last_provider_cause: variant("last_provider_cause")?
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                goal_disposition: variant("goal_disposition")?
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+            })
+        })
+        .collect()
 }
 
 async fn session_catalog(State(state): State<WebApiState>, RawQuery(query): RawQuery) -> Response {
@@ -5563,6 +5678,19 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["kind"], "transport");
         assert_eq!(body["error"]["code"], "invalid_query_parameters");
+    }
+
+    #[tokio::test]
+    async fn rates_reject_duplicate_session_ids_before_reading_storage() {
+        let request = Request::get("/api/sessions/rates?session_id=00000000-0000-0000-0000-000000000027&session_id=00000000-0000-0000-0000-000000000027")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the router responds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
