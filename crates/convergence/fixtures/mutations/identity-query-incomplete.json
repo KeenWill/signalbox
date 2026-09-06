@@ -1,0 +1,21 @@
+{
+  "source": "settled.json",
+  "edge": "the final identity query omits a required nullable field",
+  "mutations": [
+    {
+      "path": "/observations/1/2/response/data/node",
+      "value": {
+        "id": "PR_kwDOTWhy-88AAAABCVHcjw",
+        "state": "OPEN",
+        "baseRefName": "main",
+        "baseRefOid": "113746d23d6c7b398ef34464a071dca532791898",
+        "headRefName": "agent/domain-spine-generator",
+        "headRefOid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+        "isDraft": false,
+        "body": "",
+        "lastEditedAt": null,
+        "mergeable": "MERGEABLE"
+      }
+    }
+  ]
+}

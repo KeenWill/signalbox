@@ -544,6 +544,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "camino"
+version = "1.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb1307f12aa967b5a58416e87b3653360e0fd614a016b6e970db08fecbb1b80d"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "cargo-platform"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd0061da739915fae12ea00e16397555ed4371a6bb285431aab930f61b0aa4ba"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
+name = "cargo_metadata"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef987d17b0a113becdd19d3d0022d04d7ef41f9efe4f3fb63ac44ba61df3ade9"
+dependencies = [
+ "camino",
+ "cargo-platform",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "cbc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -823,6 +856,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "cssparser"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c9cdaae01d5ed7882b04d795e7f752f46ff52d2fa3b50a20d28c464510bba98"
+dependencies = [
+ "cssparser-macros",
+ "dtoa-short",
+ "itoa",
+ "phf",
+ "smallvec",
+]
+
+[[package]]
+name = "cssparser-macros"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a2a99df6e410a8ff4245aa2006499ea662245f967cc7c0a38c83ef8eb44dbf"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1197,6 +1253,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
+name = "dtoa"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590"
+
+[[package]]
+name = "dtoa-short"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87"
+dependencies = [
+ "dtoa",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1266,6 +1337,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "euclid"
+version = "0.22.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "event-listener"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1273,6 +1353,17 @@ checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
 dependencies = [
  "concurrent-queue",
  "parking",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "eventsource-stream"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
+dependencies = [
+ "futures-core",
+ "nom 7.1.3",
  "pin-project-lite",
 ]
 
@@ -1811,9 +1902,9 @@ checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "http"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+checksum = "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
 dependencies = [
  "bytes",
  "itoa",
@@ -2275,9 +2366,9 @@ dependencies = [
 
 [[package]]
 name = "ipnet"
-version = "2.12.0"
+version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "iri-string"
@@ -2430,6 +2521,18 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kurbo"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b60dfc32f652b926df6192e55525b16d186c69d47876c3ead4da5cc9f8450e2"
+dependencies = [
+ "arrayvec",
+ "euclid",
+ "polycool",
+ "smallvec",
 ]
 
 [[package]]
@@ -2946,6 +3049,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "phf"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
+dependencies = [
+ "phf_macros",
+ "phf_shared",
+ "serde",
+]
+
+[[package]]
+name = "phf_generator"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737"
+dependencies = [
+ "fastrand",
+ "phf_shared",
+]
+
+[[package]]
+name = "phf_macros"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef"
+dependencies = [
+ "phf_generator",
+ "phf_shared",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2988,6 +3134,15 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide 0.8.9",
+]
+
+[[package]]
+name = "polycool"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50596ddc09eb5ad5f75cacd40209568e66df71baf86e1499a0e99c4cff12a5a6"
+dependencies = [
+ "arrayvec",
 ]
 
 [[package]]
@@ -3791,6 +3946,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"
@@ -4036,6 +4195,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4055,6 +4224,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.11.0",
+ "signalbox-derive",
  "signalbox-domain",
  "tempfile",
  "tokio",
@@ -4124,6 +4294,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-cargo-bin-resolver"
+version = "0.0.0"
+dependencies = [
+ "cargo_metadata",
+]
+
+[[package]]
 name = "signalbox-client"
 version = "0.0.0"
 dependencies = [
@@ -4151,6 +4328,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-convergence"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "flate2",
+ "futures-executor",
+ "nix",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "signalbox-conversation-import-claude-code"
 version = "0.0.0"
 dependencies = [
@@ -4174,16 +4369,30 @@ dependencies = [
 name = "signalbox-conversation-import-json"
 version = "0.0.0"
 dependencies = [
+ "serde",
  "serde_json",
  "signalbox-domain",
+]
+
+[[package]]
+name = "signalbox-derive"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+ "trybuild",
 ]
 
 [[package]]
 name = "signalbox-domain"
 version = "0.0.0"
 dependencies = [
+ "bstr",
  "divan",
  "expect-test",
+ "gix-validate",
  "gungraun",
  "hex",
  "regex",
@@ -4193,6 +4402,7 @@ dependencies = [
  "serde_stacker",
  "sha2 0.11.0",
  "signalbox-expect-table",
+ "url",
  "uuid",
 ]
 
@@ -4257,11 +4467,13 @@ dependencies = [
 name = "signalbox-file-media-adapter-svg"
 version = "0.0.0"
 dependencies = [
+ "cssparser",
  "iri-string",
  "quick-xml",
  "serde_json",
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-runtime",
+ "svgtypes",
  "tokio",
 ]
 
@@ -4390,7 +4602,10 @@ dependencies = [
 name = "signalbox-model-runtime"
 version = "0.0.0"
 dependencies = [
+ "eventsource-stream",
  "expect-test",
+ "futures-channel",
+ "futures-util",
  "httpdate",
  "rustix 1.1.4",
  "schemars 1.2.2",
@@ -4421,6 +4636,7 @@ name = "signalbox-model-runtime-claude-cli"
 version = "0.0.0"
 dependencies = [
  "rustix 1.1.4",
+ "semver",
  "serde",
  "serde_json",
  "signalbox-model-runtime",
@@ -4435,6 +4651,7 @@ version = "0.0.0"
 dependencies = [
  "rustix 1.1.4",
  "schemars 1.2.2",
+ "semver",
  "serde",
  "serde_json",
  "signalbox-model-runtime",
@@ -4457,6 +4674,29 @@ dependencies = [
  "signalbox-expect-table",
  "signalbox-model-runtime",
  "tokio",
+]
+
+[[package]]
+name = "signalbox-module-repo-watch-v2"
+version = "0.0.0"
+dependencies = [
+ "rust_decimal",
+ "serde_json",
+ "sha2 0.11.0",
+ "signalbox-ownership-seam",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
+name = "signalbox-ownership-seam"
+version = "0.0.0"
+dependencies = [
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-persistence",
+ "sqlx",
+ "uuid",
 ]
 
 [[package]]
@@ -4488,9 +4728,9 @@ name = "signalbox-process-protocol"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "hex",
  "serde",
  "serde_json",
- "signalbox-blob-store",
  "signalbox-domain",
  "uuid",
 ]
@@ -4599,6 +4839,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-convergence",
  "signalbox-domain",
  "signalbox-egress-transport",
  "signalbox-model-runtime",
@@ -4771,10 +5012,13 @@ dependencies = [
 name = "signalbox-web-contract"
 version = "0.0.0"
 dependencies = [
+ "hex",
+ "rust_decimal",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "signalbox-application",
+ "uuid",
 ]
 
 [[package]]
@@ -4789,14 +5033,17 @@ dependencies = [
  "headers",
  "hex",
  "hmac",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
  "image",
+ "jiff",
  "mime",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "percent-encoding",
  "prometheus",
  "reqwest",
  "rust_decimal",
@@ -4810,6 +5057,7 @@ dependencies = [
  "signalbox-blob-store",
  "signalbox-blob-store-filesystem",
  "signalbox-blob-store-s3",
+ "signalbox-convergence",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
  "signalbox-domain",
@@ -4819,6 +5067,8 @@ dependencies = [
  "signalbox-model-runtime-claude-cli",
  "signalbox-model-runtime-codex-cli",
  "signalbox-model-runtime-openai",
+ "signalbox-module-repo-watch-v2",
+ "signalbox-ownership-seam",
  "signalbox-persistence",
  "signalbox-process-protocol",
  "signalbox-runner-wire",
@@ -4840,6 +5090,7 @@ dependencies = [
  "tempfile",
  "testcontainers-modules",
  "tokio",
+ "toml",
  "toml_edit",
  "tonic",
  "tower",
@@ -4871,6 +5122,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "siphasher"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "slab"
@@ -5214,6 +5471,16 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "svgtypes"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "695b5790b3131dafa99b3bbfd25a216edb3d216dad9ca208d4657bfb8f2abc3d"
+dependencies = [
+ "kurbo",
+ "siphasher",
+]
 
 [[package]]
 name = "symphonia"

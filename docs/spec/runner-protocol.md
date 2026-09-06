@@ -18,11 +18,11 @@ challenges. The daemon records each connection under a durable connection epoch,
 marks a runner suspect and then lost when heartbeats stop, and propagates the
 loss to the sessions pinned to that runner. This registration slice and the
 `signalbox-runner` binary are the whole of what is built. The runner advertises
-no capability class, tool, workspace capability, or sandbox profile, sends an
-empty reconnect inventory, and executes nothing. The daemon catalog that would
-admit such claims is empty; the runner advertises only the credential-profile
-names and repository entries its strict configuration carries. Leases, dispatch,
-workspaces, sandboxes, and recovery are listed under Planned.
+only the credential-profile names and repository entries its strict
+configuration carries, and no capability class, tool, workspace capability, or
+sandbox profile; the daemon catalog that would admit such claims is empty, and
+the runner sends an empty reconnect inventory and executes nothing. Leases,
+dispatch, workspaces, sandboxes, and recovery are listed under Planned.
 
 The domain lives in `crates/domain/src/runner.rs` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,
@@ -142,11 +142,11 @@ independently of the name.
 
 Omitting a formerly advertised capability removes its availability from the new
 registration and never changes daemon-side policy. Omitting a combined-locus
-tool disables runner dispatch for that tool and keeps the placement: when both
-loci are admissible and the attached runner does not advertise the tool, the
-domain keeps daemon-local admissibility while runner lease creation fails
-`ToolUnavailable`. Daemon fallback transfers neither the consumed runner
-authorization nor the credential-profile grant to daemon execution.
+tool, one admissible on both loci that the attached runner does not advertise,
+disables runner dispatch for that tool and keeps the placement: the domain keeps
+daemon-local admissibility while runner lease creation fails `ToolUnavailable`.
+Daemon fallback transfers neither the consumed runner authorization nor the
+credential-profile grant to daemon execution.
 
 `RunnerToolDeclaration` is the one daemon-authoritative runner-dispatch
 declaration, so every runner-advertisable tool has model-facing description and

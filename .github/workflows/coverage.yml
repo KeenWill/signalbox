@@ -5,9 +5,10 @@ name: Coverage
 # and every job carries `continue-on-error` so a coverage failure can never
 # block a merge — the same report-only shape rust.yml's instruction counts and
 # tool-smokes.yml's live smokes already use. What this produces is a job
-# summary, a downloadable HTML and LCOV report, one pull-request comment, and
-# an upload of that LCOV to Codecov under the `rust` flag. The upload changes
-# nothing about the posture: codecov.yml marks every status there
+# summary, a downloadable HTML and LCOV report, and an upload of that LCOV
+# to Codecov under the `rust` flag. Codecov updates a pull-request comment only
+# when coverage changes. The upload changes nothing about the posture:
+# codecov.yml marks every status there
 # `informational: true`, so what Codecov reports is another readout and not a
 # second opinion with a veto.
 #
@@ -159,15 +160,6 @@ jobs:
       - name: Report the numbers
         if: ${{ always() }}
         env:
-          # `github.sha` is the commit this job actually checked out. On a
-          # pull_request event that is the synthetic merge of the head into the
-          # base, which is the tree rust.yml gates on too — measuring anything
-          # else would make this number describe a different tree than
-          # `validate` does. The head is reported beside it rather than instead
-          # of it, because the merge commit is the one that was measured and
-          # the head is the one a reader recognises.
-          MEASURED_SHA: ${{ github.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           WORKSPACE_OUTCOME: ${{ steps.workspace.outcome }}
           PERSISTENCE_OUTCOME: ${{ steps.persistence.outcome }}
           SIGNALBOXD_OUTCOME: ${{ steps.signalboxd.outcome }}
@@ -227,18 +219,6 @@ jobs:
 
           cat "$report_dir/report.md" >> "$GITHUB_STEP_SUMMARY"
 
-          {
-            printf '%s\n\n' '<!-- signalbox-rust-coverage -->'
-            cat "$report_dir/report.md"
-            printf '\nMeasured at `%s`' "$MEASURED_SHA"
-            if [ -n "$HEAD_SHA" ]; then
-              printf ', the merge commit this pull request builds, whose head is `%s`' \
-                "$HEAD_SHA"
-            fi
-            printf ', by [run %s](%s/%s/actions/runs/%s), which uploads the HTML report and LCOV as an artifact.\n' \
-              "$GITHUB_RUN_ID" \
-              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-          } > "$report_dir/comment.md"
       - name: Upload the coverage report
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -281,90 +261,3 @@ jobs:
           # party. `continue-on-error` above would contain it anyway; this
           # keeps the step's own outcome honest rather than relying on that.
           fail_ci_if_error: false
-
-  # Holds the only write token in this workflow and never builds or executes
-  # anything, mirroring the token separation devenv-lock.yml already uses: the
-  # instrumented test run above cannot reach a token that can write to a pull
-  # request.
-  #
-  # A pull request from a fork is skipped rather than attempted. GitHub issues
-  # such a run a read-only token no matter what `permissions` requests, so the
-  # comment would fail; the job summary and the uploaded report are unaffected
-  # and remain the whole report for a fork contributor.
-  #
-  # It runs whenever the coverage job reached an end, not only when that job
-  # produced a report: a run that measured nothing must replace the previous
-  # run's numbers rather than leave them standing as the current readout. A
-  # cancelled run is the one exception, since a superseded run has a successor
-  # already on its way to overwrite the comment.
-  publish-comment:
-    name: Comment the coverage report
-    needs: rust-coverage
-    if: >-
-      always()
-      && needs.rust-coverage.result != 'cancelled'
-      && github.event_name == 'pull_request'
-      && github.event.pull_request.head.repo.full_name == github.repository
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      # `actions: read` lets the download step read this run's artifact; a
-      # job-level permissions block sets every scope it omits to none.
-      actions: read
-      pull-requests: write
-    steps:
-      # Continues on error so a run that uploaded no report still reaches the
-      # step below, which replaces the stale comment instead of leaving it.
-      - name: Download the coverage report
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rust-coverage
-          path: ${{ runner.temp }}/coverage
-      # One comment per pull request, rewritten in place on every push: a
-      # coverage report is a current-state readout, and a thread of superseded
-      # readouts would bury the review conversation.
-      - name: Post or update the coverage comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          body="$RUNNER_TEMP/coverage/comment.md"
-          payload="$RUNNER_TEMP/payload.json"
-
-          # No report means the run measured nothing. Saying so under the same
-          # marker retires the previous run's numbers, which would otherwise
-          # keep reading as this head's, and names the head that has none.
-          if [ ! -f "$body" ]; then
-            mkdir -p "$RUNNER_TEMP/coverage"
-            {
-              printf '%s\n\n' '<!-- signalbox-rust-coverage -->'
-              printf '## Rust coverage (report only)\n\n'
-              printf 'The coverage run for `%s` produced no report; see ' "$HEAD_SHA"
-              printf '[run %s](%s/%s/actions/runs/%s).\n\n' \
-                "$GITHUB_RUN_ID" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" \
-                "$GITHUB_RUN_ID"
-              printf 'Nothing is gated on this. The measurement is missing, '
-              printf 'not failing, and no merge waits on it.\n'
-            } > "$body"
-          fi
-          jq -n --rawfile body "$body" '{body: $body}' > "$payload"
-
-          # Paginated: a long-running pull request can hold more comments than
-          # one page, and the marker comment is the oldest of them.
-          existing="$(gh api --paginate \
-            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-            --jq '.[] | select(.body | startswith("<!-- signalbox-rust-coverage -->")) | .id')"
-          first="${existing%%$'\n'*}"
-
-          if [ -n "$first" ]; then
-            gh api -X PATCH \
-              "repos/$GITHUB_REPOSITORY/issues/comments/$first" \
-              --input "$payload" --silent
-          else
-            gh api -X POST \
-              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              --input "$payload" --silent
-          fi

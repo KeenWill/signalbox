@@ -20,12 +20,12 @@ through the record of the direct selection it currently resolves to. Inherit is
 offered for every setting; provider default is offered for reasoning level and
 service tier.
 
-A reasoning-level or service-tier member the screen submits is inherit, clear,
-or set(value); a fast-mode member is inherit or set(value). These are the
-overlay forms the settings-carrying commands accept. The screen displays an
-inherited value distinctly from an explicitly set value. It submits inherit for
-a member the user did not touch, and it never converts an inherited value into
-set(value) on the user's behalf.
+The screen submits each member in the overlay form the settings-carrying
+commands accept: inherit, clear, or set(value) for a reasoning-level or
+service-tier member, and inherit or set(value) for a fast-mode member. It
+displays an inherited value distinctly from an explicitly set value, submits
+inherit for a member the user did not touch, and never converts an inherited
+value into set(value) on the user's behalf.
 
 The screen shows the automatic adjustments carried on the settings events the
 daemon records; it derives none itself.

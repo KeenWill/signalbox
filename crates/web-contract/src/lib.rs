@@ -579,18 +579,14 @@ pub struct WebImportContinuationResponse {
 pub struct WebTimelineEventSequence(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
 
 fn canonical_u64(value: &str) -> Option<u64> {
-    let canonical = !value.is_empty()
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-        && (value == "0" || !value.starts_with('0'));
-    canonical.then(|| value.parse::<u64>().ok()).flatten()
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|parsed| parsed.to_string() == value)
 }
 
 fn canonical_session_id(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| match index {
-            8 | 13 | 18 | 23 => byte == b'-',
-            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
-        })
+    uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
 
 /// Checked canonical UUID used for browser-visible session identities.
@@ -614,25 +610,7 @@ impl WebSessionId {
     /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
     #[must_use]
     pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
-        Self(format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            bytes[0],
-            bytes[1],
-            bytes[2],
-            bytes[3],
-            bytes[4],
-            bytes[5],
-            bytes[6],
-            bytes[7],
-            bytes[8],
-            bytes[9],
-            bytes[10],
-            bytes[11],
-            bytes[12],
-            bytes[13],
-            bytes[14],
-            bytes[15],
-        ))
+        Self(uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
     }
 
     /// Constructs a session identity from its canonical lowercase UUID spelling.
@@ -1020,11 +998,9 @@ impl WebBlobId {
     #[must_use]
     pub fn from_canonical(value: String) -> Option<Self> {
         let digest = value.strip_prefix("sha256:")?;
-        (digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-        .then_some(Self(value))
+        let mut bytes = [0_u8; 32];
+        hex::decode_to_slice(digest, &mut bytes).ok()?;
+        (hex::encode(bytes) == digest).then_some(Self(value))
     }
 }
 
@@ -1561,26 +1537,12 @@ impl<'de> Deserialize<'de> for WebDollarAmount {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let (whole, fractional) = value
-            .split_once('.')
-            .map_or((value.as_str(), None), |(whole, fractional)| {
-                (whole, Some(fractional))
-            });
-        let whole_is_canonical = !whole.is_empty()
-            && whole.bytes().all(|byte| byte.is_ascii_digit())
-            && (whole == "0" || !whole.starts_with('0'));
-        let fractional_is_canonical = fractional.is_none_or(|fractional| {
-            !fractional.is_empty()
-                && fractional.len() <= 28
-                && fractional.bytes().all(|byte| byte.is_ascii_digit())
-                && !fractional.ends_with('0')
-        });
-        let coefficient = format!("{whole}{}", fractional.unwrap_or_default());
-        let significant_coefficient = coefficient.trim_start_matches('0');
-        let coefficient_fits = significant_coefficient.len() < 29
-            || (significant_coefficient.len() == 29
-                && significant_coefficient <= "79228162514264337593543950335");
-        if !whole_is_canonical || !fractional_is_canonical || !coefficient_fits {
+        let parsed = value.parse::<rust_decimal::Decimal>();
+        if parsed.is_err()
+            || parsed.is_ok_and(|parsed| {
+                parsed.is_sign_negative() || parsed.normalize().to_string() != value
+            })
+        {
             return Err(de::Error::custom(
                 "dollar amount must be a canonical nonnegative decimal",
             ));

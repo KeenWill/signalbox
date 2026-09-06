@@ -59,9 +59,9 @@ rows with locks recorded in the same inventory. A transaction takes the
 action-head row of every member of the policy it may select after the session's
 scheduler row and the admitted-set head, in profile-reference byte order, FOR
 SHARE for a member it only reads and FOR UPDATE for a member whose exclusion
-state it writes, and takes a capacity or cursor row FOR UPDATE only after every
-action head, taking multiple capacity rows in profile-reference byte order
-before any cursor row. An admission that will insert a contended wait takes the
+state it writes. It takes a capacity or cursor row FOR UPDATE only after every
+action head, and multiple capacity rows in profile-reference byte order before
+any cursor row. An admission that will insert a contended wait takes the
 capacity row of every bounded member the wait will name before it counts
 reservations and holds those locks through commit. A reservation release and the
 wake it grants commit in one transaction that holds that profile's capacity row.
@@ -85,13 +85,13 @@ OAuth material storage supplies three shapes: a per-generation
 refresh-in-progress marker that exactly one transaction can win; an atomic
 replace-and-clear that installs the new material and clears the marker in one
 commit; and a reread that reports whether a replacement committed and whether
-the marker is set. The replace-and-clear commit publishes the durable
-member-availability update that wakes a parked deadline-free exhausted wait, as
-every accepted exclusion clear does in its own transaction. A clear that removes
-no exclusion publishes nothing. The replace shape expresses an exchange that
-returns a new identity token and one that returns none, without a second commit
-and without mixing tokens from different exchanges. Provisioning locks its own
-profile row and every co-member profile row in one reference-ordered
+the marker is set. The replace shape expresses an exchange that returns a new
+identity token and one that returns none, without a second commit and without
+mixing tokens from different exchanges. The replace-and-clear commit publishes
+the durable member-availability update that wakes a parked deadline-free
+exhausted wait, as every accepted exclusion clear does in its own transaction,
+and a clear that removes no exclusion publishes nothing. Provisioning locks its
+own profile row and every co-member profile row in one reference-ordered
 acquisition, rereads membership under those locks and repeats when the set has
 grown, and interning a pool-policy revision locks every member's profile row in
 the same order. Delivery of OAuth material to a model call is owned by

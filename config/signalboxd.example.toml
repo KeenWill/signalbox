@@ -124,6 +124,8 @@ max_metadata_page_size = 100
 max_review_findings_per_run = 32
 # Automatic model tool rounds spent in one turn.
 max_automatic_tool_rounds_per_turn = 32
+# Recorded attempts allowed on one credential within a turn.
+max_same_credential_attempts_per_turn = 2
 # Required tags admitted by one metadata query.
 max_required_tags = 256
 # Time between scheduler reconciliation sweeps.
