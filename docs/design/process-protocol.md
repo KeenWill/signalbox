@@ -82,8 +82,14 @@ reaching the owner-private socket is the authority.
 
 Configuration reload is one `reload_configuration { command_id }` request
 carrying a user-global command identity. An equal command retry reports busy
-while pending or replays its stored result without re-reading configuration;
-rule reconciliation and the success receipt commit atomically. Success returns
+while pending or replays its stored result without re-reading configuration.
+Module rule reconciliation is idempotent, keyed by the configured rule-set
+digest and event tail, and commits first through the
+[ownership seam](../spec/ownership-seam.md); the core command result commits
+second. Startup re-runs the retained reconciliation for each pending reload
+claim before terminalizing it with
+`configuration_reload_failed { command_id, phase: "startup", reason: "abandoned" }`;
+another reload requires a new `command_id`. Success returns
 `configuration_reloaded { command_id, reloaded_sections }`, whose sections are
 an array of the closed values `model_catalog`, `session_templates`, and
 `repo_watch`. Failure returns

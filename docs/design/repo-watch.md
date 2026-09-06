@@ -14,6 +14,9 @@ fetch. The module runtime composes and reloads the webhook listener.
 
 ## Design
 
+Adding `[repository_watch.webhook]` on reload composes the listener; removing it
+stops the listener.
+
 Webhook listener: the module runtime composes the listener; a reload that keeps
 the bind address swaps the running listener's path and hook map atomically. Only
 an address change binds a replacement before retiring the running listener; a
