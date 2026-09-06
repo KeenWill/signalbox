@@ -3,8 +3,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use signalbox_model_runtime::{
-    CancellationSignal, ModelOperation, ModelRuntime, ObservationSink, PreparationDefect,
-    PreparationOutcome, TerminalReport,
+    CancellationSignal, InputTokenCountOutcome, ModelInputTokenCounter, ModelOperation,
+    ModelRuntime, ObservationSink, PreparationDefect, PreparationOutcome, TerminalReport,
 };
 use signalbox_model_runtime_claude_cli::{
     ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
@@ -35,6 +35,31 @@ pub enum ConfiguredPreparedRequest<C, A, P, O, Q> {
         runtime: Arc<CodexCliRuntime>,
         prepared: Box<CodexCliPreparedRequest<C>>,
     },
+}
+
+impl<C, A, O> ModelInputTokenCounter<C> for ConfiguredModelRuntime<A, O>
+where
+    C: Clone + Send + Sync,
+    A: ModelInputTokenCounter<C> + Send + Sync,
+    O: Send + Sync,
+{
+    async fn count_input_tokens(
+        &self,
+        operation: ModelOperation<C>,
+        cancellation: CancellationSignal,
+    ) -> InputTokenCountOutcome<C> {
+        if self.routes.get(operation.resolved_target.as_str()) != Some(&ModelAdapter::Anthropic) {
+            return InputTokenCountOutcome::Unavailable {
+                correlation: operation.correlation,
+            };
+        }
+        let Some(runtime) = self.anthropic.as_ref() else {
+            return InputTokenCountOutcome::Failed {
+                correlation: operation.correlation,
+            };
+        };
+        runtime.count_input_tokens(operation, cancellation).await
+    }
 }
 
 /// Why one configured CLI adapter could not be constructed at startup.
@@ -288,19 +313,27 @@ where
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::{
+        collections::HashMap,
+        os::unix::fs::PermissionsExt,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use signalbox_model_runtime::{
         AnthropicServiceTier, AssistantPart, CancellationSignal, CodexCliServiceTier,
         CompletionEvidence, CompletionFinish, ConversationMessage, CredentialReference,
-        ExchangeFacts, FastMode, ModelOperation, ModelRuntime, ModelSettings, Observation,
-        ObservationSink, OpenAiServiceTier, PreparationDefect, PreparationOutcome,
-        ProviderReportedModel, ReasoningLevel, RequestedTarget, ResolvedTarget, Script,
-        ScriptedModel, ServiceTier, TerminalEvidence, TokenUsage,
+        ExchangeFacts, FastMode, InputTokenCountOutcome, ModelInputTokenCounter, ModelOperation,
+        ModelRuntime, ModelSettings, Observation, ObservationSink, OpenAiServiceTier,
+        PreparationDefect, PreparationOutcome, ProviderReportedModel, ReasoningLevel,
+        RequestedTarget, ResolvedTarget, Script, ScriptedModel, ServiceTier, TerminalEvidence,
+        TokenUsage,
     };
     use signalbox_model_runtime_claude_cli::SUPPORTED_CLAUDE_CLI_VERSION;
 
-    use crate::configuration::HubModelConfiguration;
+    use crate::configuration::{HubModelConfiguration, ModelAdapter};
 
     use super::ConfiguredModelRuntime;
 
@@ -571,6 +604,66 @@ service_tiers = ["priority"]
             vec![ConversationMessage::user_text("respond")],
             settings,
         )
+    }
+
+    #[derive(Clone)]
+    struct RecordingInputCounter {
+        invocations: Arc<AtomicUsize>,
+    }
+
+    impl ModelInputTokenCounter<String> for RecordingInputCounter {
+        async fn count_input_tokens(
+            &self,
+            operation: ModelOperation<String>,
+            _cancellation: CancellationSignal,
+        ) -> InputTokenCountOutcome<String> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            InputTokenCountOutcome::Counted {
+                correlation: operation.correlation,
+                input_tokens: 17,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_input_estimate_routes_only_anthropic_targets() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let runtime = ConfiguredModelRuntime {
+            anthropic: Some(Arc::new(RecordingInputCounter {
+                invocations: Arc::clone(&invocations),
+            })),
+            openai: None::<Arc<()>>,
+            claude_cli: None,
+            codex_cli: None,
+            routes: HashMap::from([
+                (String::from("claude-example"), ModelAdapter::Anthropic),
+                (String::from("gpt-example"), ModelAdapter::OpenAi),
+            ]),
+        };
+        let mut anthropic = openai_operation();
+        anthropic.correlation = String::from("anthropic-count");
+        anthropic.resolved_target = ResolvedTarget::new("claude-example");
+        let anthropic_outcome = runtime
+            .count_input_tokens(anthropic, CancellationSignal::never())
+            .await;
+        let openai_outcome = runtime
+            .count_input_tokens(openai_operation(), CancellationSignal::never())
+            .await;
+
+        assert_eq!(
+            anthropic_outcome,
+            InputTokenCountOutcome::Counted {
+                correlation: String::from("anthropic-count"),
+                input_tokens: 17,
+            }
+        );
+        assert_eq!(
+            openai_outcome,
+            InputTokenCountOutcome::Unavailable {
+                correlation: String::from("openai-route"),
+            }
+        );
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
     }
 
     /// The OpenAI slot mirrors the Anthropic one: a configured route reaches
