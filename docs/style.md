@@ -120,28 +120,18 @@ helper signatures, where it is applied least consistently.
 ## Numeric bounds
 
 A production numeric bound stays in code only when removing it can break the
-process itself. Declare that structural **guard** with
-`// numeric-bound: guard - <pathological case prevented>`. A mechanically
-derived guard declares the guard it derives from. Configuration may lower a
-guard but not raise it.
+process itself. Configuration may lower such a guard but not raise it.
 
 Every other timeout, interval, attempt budget, concurrency or page bound, and
 retained-detail policy the task names is required deployment configuration, with
 no code default and no production constant; one the task does not name is not
 introduced at all ([minimum mechanism](../AGENTS.md)). Test-only constants may
-size or bound their fixture without a production declaration.
+size or bound their fixture.
 
-A constant whose name reads like a bound but states a fixed representation fact
-— a numeric type's exact maximum, UTF-8's continuation width, the basis points
-in full scale — is **not a bound**, and says so in place of a kind. Declaring it
-keeps the exception visible where silence would read as an undeclared cap.
-
-The test is whether the number could sensibly have been chosen differently. A
-representation fact has one correct value that no deployment raises or lowers; a
-number anyone could argue about is either a structural guard or deployment
-policy however its name reads. Checking live input against a representation fact
-does not convert it into a bound, and no amount of arithmetic converts a chosen
-allowance into a fact.
+A representation fact, such as a type's maximum or an encoding width, is not a
+bound. A literal that encodes an external limit cites its source in a plain
+comment; a non-obvious derivation gets a plain explanation. Omit comments that
+merely restate the name or surrounding code. Review enforces this rule.
 
 ## Conventions at component seams
 
