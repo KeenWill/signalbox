@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "COMMENTED review containing a body-only finding",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews/nodes/0/body",
+      "value": "A finding remains in this review."
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/nodes/0/body",
+      "value": "A finding remains in this review."
+    }
+  ]
+}

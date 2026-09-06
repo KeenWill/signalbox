@@ -1,0 +1,14 @@
+{
+  "source": "escalation-wave-5.json",
+  "edge": "the final escalation reply predates the latest reviewer edit and cannot dispose it",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/0/lastEditedAt",
+      "value": "2026-09-05T14:00:00Z"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/0/lastEditedAt",
+      "value": "2026-09-05T14:00:00Z"
+    }
+  ]
+}

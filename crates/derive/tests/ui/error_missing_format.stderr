@@ -1,0 +1,5 @@
+error: missing #[error]
+ --> tests/ui/error_missing_format.rs:5:5
+  |
+5 |     Missing,
+  |     ^^^^^^^
