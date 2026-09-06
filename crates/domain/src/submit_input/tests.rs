@@ -4,8 +4,7 @@ use std::collections::{BTreeSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
 use super::{
-    NonAcceptedTurnPredecessorReconstitutionInput, ReconstitutedSubmitInput,
-    StoredOriginConfigurationReconstitutionFacts, SubmitInput,
+    NonAcceptedTurnPredecessorReconstitutionInput, ReconstitutedSubmitInput, SubmitInput,
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
     SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
     SubmitInputPreparationFailure, SubmitInputReclassifiedTurnOriginConstructionInput,
@@ -22,7 +21,8 @@ use super::{
     SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
     SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
     SubmitInputTurnOriginReconstitutionInput, freeze_origin_configuration,
-    reconstruct_origin_configuration,
+    validation::StoredOriginConfigurationReconstitutionFacts,
+    validation::reconstruct_origin_configuration,
 };
 use crate::applied_interrupt::test_applied_interrupt_proof;
 use crate::test_support::{
@@ -378,8 +378,10 @@ fn applied_input() -> SubmitInputReconstitutionInput {
 
 fn applied_facts(
     input: &mut SubmitInputReconstitutionInput,
-) -> &mut super::SubmitInputTurnOriginAppliedReconstitutionFacts {
-    let super::SubmitInputReconstitutionFacts::AppliedTurnOrigin(facts) = &mut input.facts else {
+) -> &mut super::reconstitution::SubmitInputTurnOriginAppliedReconstitutionFacts {
+    let super::reconstitution::SubmitInputReconstitutionFacts::AppliedTurnOrigin(facts) =
+        &mut input.facts
+    else {
         panic!("the base reconstitution input is applied");
     };
     facts
@@ -387,7 +389,7 @@ fn applied_facts(
 
 fn terminal_source_facts(
     input: &mut SubmitInputTurnOriginReconstitutionInput,
-) -> &mut super::SubmitInputTerminalFacts {
+) -> &mut super::reconstitution_input::SubmitInputTerminalFacts {
     let Some(source_terminal) = &mut turn_origin_facts(input).source_terminal else {
         panic!("the origin must come from reclassified steering");
     };
@@ -396,7 +398,7 @@ fn terminal_source_facts(
 
 fn turn_origin_facts(
     input: &mut SubmitInputTurnOriginReconstitutionInput,
-) -> &mut super::SubmitInputTurnOriginReconstitutionFacts {
+) -> &mut super::reconstitution_input::SubmitInputTurnOriginReconstitutionFacts {
     input.chain.last_mut().expect("an origin chain is nonempty")
 }
 
@@ -428,20 +430,21 @@ fn append_unchecked_reclassified_origin(
         },
     );
     let accepted_input = accepted_input_id(accepted_input_value);
-    source
-        .chain
-        .push(super::SubmitInputTurnOriginReconstitutionFacts {
-            provenance: super::TurnOriginProvenance::Submit(Box::new(ReconstitutedSubmitInput {
-                command,
-                result: SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
-                    super::SubmitInputPendingSteeringAppliedResult {
-                        accepted_input,
-                        session: session_id(1),
-                        acceptance_position: position,
-                        binding: SteeringBinding::new(source_turn),
-                    },
-                )),
-            })),
+    source.chain.push(
+        super::reconstitution_input::SubmitInputTurnOriginReconstitutionFacts {
+            provenance: super::reconstitution_input::TurnOriginProvenance::Submit(Box::new(
+                ReconstitutedSubmitInput {
+                    command,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
+                        super::SubmitInputPendingSteeringAppliedResult {
+                            accepted_input,
+                            session: session_id(1),
+                            acceptance_position: position,
+                            binding: SteeringBinding::new(source_turn),
+                        },
+                    )),
+                },
+            )),
             lifecycle: AcceptedInputLifecycle::new(
                 accepted_input,
                 AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
@@ -453,11 +456,12 @@ fn append_unchecked_reclassified_origin(
             queue_session: session_id(1),
             queue_turn: turn,
             queue_order: AcceptedInputQueueOrder::ordinary(position),
-            source_terminal: Some(super::SubmitInputTerminalFacts {
+            source_terminal: Some(super::reconstitution_input::SubmitInputTerminalFacts {
                 turn: source_turn,
                 disposition: TurnDisposition::Completed,
             }),
-        });
+        },
+    );
     source
 }
 
@@ -758,8 +762,9 @@ fn pending_steering_input_with_chained_source(
 
 fn pending_facts(
     input: &mut SubmitInputReconstitutionInput,
-) -> &mut super::SubmitInputPendingSteeringAppliedReconstitutionFacts {
-    let super::SubmitInputReconstitutionFacts::AppliedPendingSteering(facts) = &mut input.facts
+) -> &mut super::reconstitution::SubmitInputPendingSteeringAppliedReconstitutionFacts {
+    let super::reconstitution::SubmitInputReconstitutionFacts::AppliedPendingSteering(facts) =
+        &mut input.facts
     else {
         panic!("the base reconstitution input is pending steering");
     };
@@ -2699,7 +2704,7 @@ fn reclassified_origin_chain_ending_at(
 fn s08_reclassified_origin_validation_is_iterative() {
     let origin = reclassified_origin_chain_ending_at(16_384);
 
-    let validated = super::validate_turn_origin_reconstitution_input(&origin)
+    let validated = super::validation::validate_turn_origin_reconstitution_input(&origin)
         .expect("a long coherent origin chain validates without recursion");
     assert_eq!(validated.turn, turn_id(16_390));
 }
@@ -2715,7 +2720,7 @@ fn s08_reclassified_origin_rejects_ancestor_identity_reuse() {
         0x70,
         0x203,
     );
-    assert!(super::validate_turn_origin_reconstitution_input(&command_reuse).is_none());
+    assert!(super::validation::validate_turn_origin_reconstitution_input(&command_reuse).is_none());
 
     let accepted_input_reuse = append_unchecked_reclassified_origin(
         append_unchecked_reclassified_origin(source_turn_origin(), 2, 0x102, 0x202),
@@ -2723,7 +2728,10 @@ fn s08_reclassified_origin_rejects_ancestor_identity_reuse() {
         0x103,
         0x71,
     );
-    assert!(super::validate_turn_origin_reconstitution_input(&accepted_input_reuse).is_none());
+    assert!(
+        super::validation::validate_turn_origin_reconstitution_input(&accepted_input_reuse)
+            .is_none()
+    );
 
     let mut turn_reuse = append_unchecked_reclassified_origin(
         append_unchecked_reclassified_origin(source_turn_origin(), 2, 0x102, 0x202),
@@ -2740,7 +2748,7 @@ fn s08_reclassified_origin_rejects_ancestor_identity_reuse() {
         },
     );
     facts.queue_turn = turn_id(7);
-    assert!(super::validate_turn_origin_reconstitution_input(&turn_reuse).is_none());
+    assert!(super::validation::validate_turn_origin_reconstitution_input(&turn_reuse).is_none());
 }
 
 /// Validates a reclassified origin whose source turn ended with the given
@@ -2752,7 +2760,7 @@ fn assert_terminal_proof_command_is_tracked(
     proof_command: crate::DurableCommandId,
 ) {
     let origin = reclassified_turn_origin_with_disposition(disposition);
-    let validated = super::validate_turn_origin_reconstitution_input(&origin)
+    let validated = super::validation::validate_turn_origin_reconstitution_input(&origin)
         .expect("a unique terminal proof command is valid");
     assert!(
         validated.command_ids.contains(&proof_command),
@@ -2823,7 +2831,7 @@ fn s08_reclassified_origin_tracks_terminal_proof_commands() {
         cause: test_applied_interrupt_proof(command_id(0x72), turn_id(7)),
     };
     assert!(
-        super::validate_turn_origin_reconstitution_input(
+        super::validation::validate_turn_origin_reconstitution_input(
             &reclassified_turn_origin_with_disposition(colliding_disposition)
         )
         .is_none(),
