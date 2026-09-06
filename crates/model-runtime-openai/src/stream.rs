@@ -364,7 +364,15 @@ impl StreamDecoder {
                 layout.complete = true;
             }
             "message" => {
-                for (position, part) in item.content.iter().flatten().enumerate() {
+                let parts = item.content.as_deref().unwrap_or_default();
+                if complete {
+                    let part_count =
+                        u32::try_from(parts.len()).map_err(|error| error.to_string())?;
+                    if layout.nonempty.range(part_count..).next().is_some() {
+                        return Err("completed message omits an observed content index".to_string());
+                    }
+                }
+                for (position, part) in parts.iter().enumerate() {
                     let text = part.text().ok_or("unrecognized output content type")?;
                     if complete || !text.is_empty() {
                         layout.nonempty.insert(
@@ -709,6 +717,48 @@ mod tests {
                 index: 0,
                 text: "ready".to_string()
             }));
+    }
+
+    #[test]
+    fn completed_message_layout_rejects_observed_content_outside_its_final_bounds() {
+        for terminal_snapshot in [false, true] {
+            for stale_index in [1, 7] {
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                assert!(matches!(
+                    apply(
+                        &mut decoder,
+                        json!({
+                            "type":"response.output_text.delta","output_index":0,
+                            "content_index":stale_index,"item_id":"msg_fixture","delta":"orphan"
+                        }),
+                        &mut sink
+                    ),
+                    StreamStep::Continue
+                ));
+                assert!(sink.is_empty());
+                let event = if terminal_snapshot {
+                    terminal()
+                } else {
+                    json!({"type":"response.output_item.done","output_index":0,
+                        "item":terminal()["response"]["output"][0]})
+                };
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                    panic!("a stale content index must terminate at layout completion");
+                };
+                assert!(matches!(
+                    *evidence,
+                    TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                        cause: LossCause::StreamProtocolViolation { .. },
+                        ..
+                    })
+                ));
+                assert!(!sink.iter().any(|observation| matches!(
+                    observation.fact,
+                    ObservationFact::TextDelta { .. } | ObservationFact::FinishReported(_)
+                )));
+            }
+        }
     }
 
     #[test]
