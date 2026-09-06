@@ -7,7 +7,6 @@
 ```rust
 pub struct GitStatusArguments {}
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for GitStatusArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## GitDiffArguments
@@ -21,7 +20,6 @@ pub enum GitDiffArguments {
     },
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for GitDiffArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## GitLogArguments
@@ -29,7 +27,6 @@ impl<T> de::DeserializeOwned for GitDiffArguments where T: for<'de> de::Deserial
 ```rust
 pub struct GitLogArguments {/* private */}
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for GitLogArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## GitStageArguments
@@ -37,7 +34,6 @@ impl<T> de::DeserializeOwned for GitLogArguments where T: for<'de> de::Deseriali
 ```rust
 pub struct GitStageArguments {/* private */}
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for GitStageArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## GitCommitArguments
@@ -45,7 +41,6 @@ impl<T> de::DeserializeOwned for GitStageArguments where T: for<'de> de::Deseria
 ```rust
 pub struct GitCommitArguments {/* private */}
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for GitCommitArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## GitBranchCreateArguments
@@ -53,7 +48,6 @@ impl<T> de::DeserializeOwned for GitCommitArguments where T: for<'de> de::Deseri
 ```rust
 pub struct GitBranchCreateArguments {/* private */}
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for GitBranchCreateArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## GitBranchSwitchArguments
@@ -61,7 +55,6 @@ impl<T> de::DeserializeOwned for GitBranchCreateArguments where T: for<'de> de::
 ```rust
 pub struct GitBranchSwitchArguments {/* private */}
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for GitBranchSwitchArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## InvalidGitArguments
@@ -69,12 +62,6 @@ impl<T> de::DeserializeOwned for GitBranchSwitchArguments where T: for<'de> de::
 ```rust
 pub struct InvalidGitArguments;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for InvalidGitArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for InvalidGitArguments {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

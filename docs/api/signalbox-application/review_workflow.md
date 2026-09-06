@@ -23,31 +23,31 @@ impl ReviewWorkflowCommand {
 
 ```rust
 pub enum ReviewWorkflowOperation {
-    CreateTarget(review_workflow::ReviewTarget),
+    CreateTarget(signalbox_domain::ReviewTarget),
     StartRun {
-        run: review_workflow::ReviewRun,
-        pass: review_workflow::ReviewPass,
+        run: signalbox_domain::ReviewRun,
+        pass: signalbox_domain::ReviewPass,
     },
     ActivatePass {
-        run: review_workflow::ReviewRun,
-        pass: review_workflow::ReviewPass,
+        run: signalbox_domain::ReviewRun,
+        pass: signalbox_domain::ReviewPass,
     },
     CompletePass {
-        run: review_workflow::ReviewRun,
-        pass: review_workflow::ReviewPass,
+        run: signalbox_domain::ReviewRun,
+        pass: signalbox_domain::ReviewPass,
     },
     RecordFindings {
-        pass: review_workflow::ReviewPassEvidence,
-        findings: vec::Vec<review_workflow::ReviewFinding>,
+        pass: signalbox_domain::ReviewPassEvidence,
+        findings: vec::Vec<signalbox_domain::ReviewFinding>,
     },
     RecordFindingEvent {
-        pass: review_workflow::ReviewPassEvidence,
-        event: review_workflow::ReviewFindingEvent,
+        pass: signalbox_domain::ReviewPassEvidence,
+        event: signalbox_domain::ReviewFindingEvent,
     },
-    ReserveExternalLink(review_workflow::ReviewExternalLink),
+    ReserveExternalLink(signalbox_domain::ReviewExternalLink),
     AttachExternalLink {
         link: signalbox_domain::ReviewExternalLinkId,
-        attachment: review_workflow::ReviewExternalLinkAttachment,
+        attachment: signalbox_domain::ReviewExternalLinkAttachment,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -83,7 +83,7 @@ pub enum ReviewPassCompletionStatus {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewPassCompletionStatus {
-    pub const fn from_state(state: &review_workflow::ReviewPassState) -> option::Option<Self>;
+    pub const fn from_state(state: &signalbox_domain::ReviewPassState) -> option::Option<Self>;
 }
 ```
 
@@ -114,14 +114,14 @@ pub enum ReviewWorkflowCommandResult {
     },
     FindingEventRecorded {
         finding: signalbox_domain::ReviewFindingId,
-        status: review_workflow::ReviewFindingStatus,
+        status: signalbox_domain::ReviewFindingStatus,
     },
     ExternalLinkReserved {
         link: signalbox_domain::ReviewExternalLinkId,
     },
     ExternalLinkAttached {
         link: signalbox_domain::ReviewExternalLinkId,
-        external_object: review_workflow::ReviewKey,
+        external_object: signalbox_domain::ReviewKey,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -185,7 +185,7 @@ pub trait ReviewWorkflowReader {
         target: signalbox_domain::ReviewTargetId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<review_workflow::ReviewTarget>,
+            option::Option<signalbox_domain::ReviewTarget>,
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
@@ -194,7 +194,7 @@ pub trait ReviewWorkflowReader {
         run: signalbox_domain::ReviewRunId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<review_workflow::ReviewRun>,
+            option::Option<signalbox_domain::ReviewRun>,
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
@@ -204,8 +204,8 @@ pub trait ReviewWorkflowReader {
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<(
-                review_workflow::ReviewRun,
-                option::Option<review_workflow::ReviewPass>,
+                signalbox_domain::ReviewRun,
+                option::Option<signalbox_domain::ReviewPass>,
             )>,
             <Self as ReviewWorkflowReader>::Error,
         >,
@@ -215,7 +215,7 @@ pub trait ReviewWorkflowReader {
         pass: signalbox_domain::ReviewPassId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<review_workflow::ReviewPass>,
+            option::Option<signalbox_domain::ReviewPass>,
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
@@ -224,7 +224,7 @@ pub trait ReviewWorkflowReader {
         finding: signalbox_domain::ReviewFindingId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<review_workflow::ReviewFinding>,
+            option::Option<signalbox_domain::ReviewFinding>,
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
@@ -233,7 +233,7 @@ pub trait ReviewWorkflowReader {
         run: signalbox_domain::ReviewRunId,
     ) -> impl future::Future<
         Output = result::Result<
-            vec::Vec<review_workflow::ReviewFinding>,
+            vec::Vec<signalbox_domain::ReviewFinding>,
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;

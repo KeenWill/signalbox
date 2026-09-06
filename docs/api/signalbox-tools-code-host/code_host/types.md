@@ -7,37 +7,14 @@
 ```rust
 pub struct CodeHostRepository {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for code_host::arguments::CodeHostRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::arguments::CodeHostRepository where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::arguments::CodeHostRepository
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::arguments::CodeHostRepository {
+impl CodeHostRepository {
     pub fn as_str(&self) -> &str;
 }
-impl convert::TryFrom<string::String> for code_host::arguments::CodeHostRepository {
+impl convert::TryFrom<string::String> for CodeHostRepository {
     type Error = InvalidCodeHostArguments;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl schemars::JsonSchema for code_host::arguments::CodeHostRepository {
+impl schemars::JsonSchema for CodeHostRepository {
     fn schema_name() -> borrow::Cow<'static, str>;
     fn json_schema(_generator: &mut generate::SchemaGenerator) -> schema::Schema;
     fn inline_schema() -> bool;
@@ -49,37 +26,14 @@ impl schemars::JsonSchema for code_host::arguments::CodeHostRepository {
 ```rust
 pub struct CodeHostChangeRequestNumber(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for code_host::arguments::CodeHostChangeRequestNumber
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::arguments::CodeHostChangeRequestNumber where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::arguments::CodeHostChangeRequestNumber
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::arguments::CodeHostChangeRequestNumber {
+impl CodeHostChangeRequestNumber {
     pub const fn get(self) -> u32;
 }
-impl convert::TryFrom<u64> for code_host::arguments::CodeHostChangeRequestNumber {
+impl convert::TryFrom<u64> for CodeHostChangeRequestNumber {
     type Error = InvalidCodeHostArguments;
     fn try_from(value: u64) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl schemars::JsonSchema for code_host::arguments::CodeHostChangeRequestNumber {
+impl schemars::JsonSchema for CodeHostChangeRequestNumber {
     fn schema_name() -> borrow::Cow<'static, str>;
     fn json_schema(_generator: &mut generate::SchemaGenerator) -> schema::Schema;
     fn inline_schema() -> bool;
@@ -91,37 +45,14 @@ impl schemars::JsonSchema for code_host::arguments::CodeHostChangeRequestNumber 
 ```rust
 pub struct CodeHostRevision(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for code_host::arguments::CodeHostRevision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::arguments::CodeHostRevision where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::arguments::CodeHostRevision
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::arguments::CodeHostRevision {
+impl CodeHostRevision {
     pub fn as_str(&self) -> &str;
 }
-impl convert::TryFrom<string::String> for code_host::arguments::CodeHostRevision {
+impl convert::TryFrom<string::String> for CodeHostRevision {
     type Error = InvalidCodeHostArguments;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl schemars::JsonSchema for code_host::arguments::CodeHostRevision {
+impl schemars::JsonSchema for CodeHostRevision {
     fn schema_name() -> borrow::Cow<'static, str>;
     fn json_schema(_generator: &mut generate::SchemaGenerator) -> schema::Schema;
     fn inline_schema() -> bool;
@@ -133,37 +64,14 @@ impl schemars::JsonSchema for code_host::arguments::CodeHostRevision {
 ```rust
 pub struct CodeHostFilePath(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for code_host::arguments::CodeHostFilePath
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::arguments::CodeHostFilePath where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::arguments::CodeHostFilePath
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::arguments::CodeHostFilePath {
+impl CodeHostFilePath {
     pub fn as_str(&self) -> &str;
 }
-impl convert::TryFrom<string::String> for code_host::arguments::CodeHostFilePath {
+impl convert::TryFrom<string::String> for CodeHostFilePath {
     type Error = InvalidCodeHostArguments;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl schemars::JsonSchema for code_host::arguments::CodeHostFilePath {
+impl schemars::JsonSchema for CodeHostFilePath {
     fn schema_name() -> borrow::Cow<'static, str>;
     fn json_schema(_generator: &mut generate::SchemaGenerator) -> schema::Schema;
     fn inline_schema() -> bool;
@@ -175,37 +83,14 @@ impl schemars::JsonSchema for code_host::arguments::CodeHostFilePath {
 ```rust
 pub struct CodeHostCommentBody(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for code_host::arguments::CodeHostCommentBody
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::arguments::CodeHostCommentBody where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::arguments::CodeHostCommentBody
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::arguments::CodeHostCommentBody {
+impl CodeHostCommentBody {
     pub fn as_str(&self) -> &str;
 }
-impl convert::TryFrom<string::String> for code_host::arguments::CodeHostCommentBody {
+impl convert::TryFrom<string::String> for CodeHostCommentBody {
     type Error = InvalidCodeHostArguments;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl schemars::JsonSchema for code_host::arguments::CodeHostCommentBody {
+impl schemars::JsonSchema for CodeHostCommentBody {
     fn schema_name() -> borrow::Cow<'static, str>;
     fn json_schema(_generator: &mut generate::SchemaGenerator) -> schema::Schema;
     fn inline_schema() -> bool;
@@ -217,37 +102,14 @@ impl schemars::JsonSchema for code_host::arguments::CodeHostCommentBody {
 ```rust
 pub struct CodeHostOpaqueId(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for code_host::arguments::CodeHostOpaqueId
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::arguments::CodeHostOpaqueId where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::arguments::CodeHostOpaqueId
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::arguments::CodeHostOpaqueId {
+impl CodeHostOpaqueId {
     pub fn as_str(&self) -> &str;
 }
-impl convert::TryFrom<string::String> for code_host::arguments::CodeHostOpaqueId {
+impl convert::TryFrom<string::String> for CodeHostOpaqueId {
     type Error = InvalidCodeHostArguments;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl schemars::JsonSchema for code_host::arguments::CodeHostOpaqueId {
+impl schemars::JsonSchema for CodeHostOpaqueId {
     fn schema_name() -> borrow::Cow<'static, str>;
     fn json_schema(_generator: &mut generate::SchemaGenerator) -> schema::Schema;
     fn inline_schema() -> bool;
@@ -259,37 +121,14 @@ impl schemars::JsonSchema for code_host::arguments::CodeHostOpaqueId {
 ```rust
 pub struct CodeHostCursor(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>
-impl<T> dyn_clone::DynClone for code_host::arguments::CodeHostCursor
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::arguments::CodeHostCursor where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::arguments::CodeHostCursor
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::arguments::CodeHostCursor {
+impl CodeHostCursor {
     pub fn as_str(&self) -> &str;
 }
-impl convert::TryFrom<string::String> for code_host::arguments::CodeHostCursor {
+impl convert::TryFrom<string::String> for CodeHostCursor {
     type Error = InvalidCodeHostArguments;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl schemars::JsonSchema for code_host::arguments::CodeHostCursor {
+impl schemars::JsonSchema for CodeHostCursor {
     fn schema_name() -> borrow::Cow<'static, str>;
     fn json_schema(_generator: &mut generate::SchemaGenerator) -> schema::Schema;
     fn inline_schema() -> bool;
@@ -301,32 +140,9 @@ impl schemars::JsonSchema for code_host::arguments::CodeHostCursor {
 ```rust
 pub struct ChangedFilesArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_changed_files::ChangedFilesArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_changed_files::ChangedFilesArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_changed_files::ChangedFilesArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_changed_files::ChangedFilesArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
+impl ChangedFilesArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
 }
 ```
 
@@ -335,32 +151,9 @@ impl code_host::change_request_changed_files::ChangedFilesArguments {
 ```rust
 pub struct ChecksStatusArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_checks_status::ChecksStatusArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_checks_status::ChecksStatusArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_checks_status::ChecksStatusArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_checks_status::ChecksStatusArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub fn revision(&self) -> &code_host::arguments::CodeHostRevision;
+impl ChecksStatusArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub fn revision(&self) -> &CodeHostRevision;
 }
 ```
 
@@ -369,31 +162,8 @@ impl code_host::change_request_checks_status::ChecksStatusArguments {
 ```rust
 pub struct CiJobLogArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_ci_job_log::CiJobLogArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_ci_job_log::CiJobLogArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_ci_job_log::CiJobLogArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_ci_job_log::CiJobLogArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
+impl CiJobLogArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
     pub const fn job_id(&self) -> u64;
 }
 ```
@@ -403,33 +173,10 @@ impl code_host::change_request_ci_job_log::CiJobLogArguments {
 ```rust
 pub struct ChangeRequestCommentArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_comment::ChangeRequestCommentArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_comment::ChangeRequestCommentArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_comment::ChangeRequestCommentArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_comment::ChangeRequestCommentArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
-    pub fn body(&self) -> &code_host::arguments::CodeHostCommentBody;
+impl ChangeRequestCommentArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
+    pub fn body(&self) -> &CodeHostCommentBody;
 }
 ```
 
@@ -438,35 +185,9 @@ impl code_host::change_request_comment::ChangeRequestCommentArguments {
 ```rust
 pub struct ConvergenceStateArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone
-    for code_host::change_request_convergence_state::ConvergenceStateArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned
-    for code_host::change_request_convergence_state::ConvergenceStateArguments
-where
-    T: for<'de> de::Deserialize<'de>,
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_convergence_state::ConvergenceStateArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_convergence_state::ConvergenceStateArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
+impl ConvergenceStateArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
 }
 ```
 
@@ -475,33 +196,10 @@ impl code_host::change_request_convergence_state::ConvergenceStateArguments {
 ```rust
 pub struct FilePatchArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_file_patch::FilePatchArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_file_patch::FilePatchArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_file_patch::FilePatchArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_file_patch::FilePatchArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
-    pub fn path(&self) -> &code_host::arguments::CodeHostFilePath;
+impl FilePatchArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
+    pub fn path(&self) -> &CodeHostFilePath;
 }
 ```
 
@@ -510,34 +208,8 @@ impl code_host::change_request_file_patch::FilePatchArguments {
 ```rust
 pub struct RerunFailedJobsArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone
-    for code_host::change_request_rerun_failed_jobs::RerunFailedJobsArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned
-    for code_host::change_request_rerun_failed_jobs::RerunFailedJobsArguments
-where
-    T: for<'de> de::Deserialize<'de>,
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_rerun_failed_jobs::RerunFailedJobsArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_rerun_failed_jobs::RerunFailedJobsArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
+impl RerunFailedJobsArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
     pub const fn run_id(&self) -> u64;
 }
 ```
@@ -547,32 +219,9 @@ impl code_host::change_request_rerun_failed_jobs::RerunFailedJobsArguments {
 ```rust
 pub struct ReviewThreadsArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_review_threads::ReviewThreadsArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_review_threads::ReviewThreadsArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_review_threads::ReviewThreadsArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_review_threads::ReviewThreadsArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
+impl ReviewThreadsArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
 }
 ```
 
@@ -581,33 +230,10 @@ impl code_host::change_request_review_threads::ReviewThreadsArguments {
 ```rust
 pub struct StackStateArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_stack_state::StackStateArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_stack_state::StackStateArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_stack_state::StackStateArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_stack_state::StackStateArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
-    pub fn cursor(&self) -> option::Option<&code_host::arguments::CodeHostCursor>;
+impl StackStateArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
+    pub fn cursor(&self) -> option::Option<&CodeHostCursor>;
 }
 ```
 
@@ -616,32 +242,9 @@ impl code_host::change_request_stack_state::StackStateArguments {
 ```rust
 pub struct ChangeRequestSummaryArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_summary::ChangeRequestSummaryArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_summary::ChangeRequestSummaryArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_summary::ChangeRequestSummaryArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_summary::ChangeRequestSummaryArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
+impl ChangeRequestSummaryArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
 }
 ```
 
@@ -650,35 +253,10 @@ impl code_host::change_request_summary::ChangeRequestSummaryArguments {
 ```rust
 pub struct ThreadInventoryArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_thread_inventory::ThreadInventoryArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned
-    for code_host::change_request_thread_inventory::ThreadInventoryArguments
-where
-    T: for<'de> de::Deserialize<'de>,
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_thread_inventory::ThreadInventoryArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_thread_inventory::ThreadInventoryArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
-    pub fn cursor(&self) -> option::Option<&code_host::arguments::CodeHostCursor>;
+impl ThreadInventoryArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
+    pub fn cursor(&self) -> option::Option<&CodeHostCursor>;
 }
 ```
 
@@ -687,34 +265,11 @@ impl code_host::change_request_thread_inventory::ThreadInventoryArguments {
 ```rust
 pub struct ThreadReplyArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_thread_reply::ThreadReplyArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_thread_reply::ThreadReplyArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_thread_reply::ThreadReplyArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_thread_reply::ThreadReplyArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
-    pub fn thread_id(&self) -> &code_host::arguments::CodeHostOpaqueId;
-    pub fn body(&self) -> &code_host::arguments::CodeHostCommentBody;
+impl ThreadReplyArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
+    pub fn thread_id(&self) -> &CodeHostOpaqueId;
+    pub fn body(&self) -> &CodeHostCommentBody;
 }
 ```
 
@@ -723,33 +278,10 @@ impl code_host::change_request_thread_reply::ThreadReplyArguments {
 ```rust
 pub struct ThreadResolveArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::change_request_thread_resolve::ThreadResolveArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::change_request_thread_resolve::ThreadResolveArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::change_request_thread_resolve::ThreadResolveArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::change_request_thread_resolve::ThreadResolveArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
-    pub fn thread_id(&self) -> &code_host::arguments::CodeHostOpaqueId;
+impl ThreadResolveArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
+    pub fn thread_id(&self) -> &CodeHostOpaqueId;
 }
 ```
 
@@ -758,29 +290,10 @@ impl code_host::change_request_thread_resolve::ThreadResolveArguments {
 ```rust
 pub struct ConvergenceReadResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::convergence_read::ConvergenceReadResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::convergence_read::ConvergenceReadResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::convergence_read::ConvergenceReadResult {
+impl ConvergenceReadResult {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
-        evaluation: evidence::Evaluation,
+        bounds: CodeHostNumericBounds,
+        evaluation: signalbox_convergence::Evaluation,
     ) -> option::Option<Self>;
 }
 ```
@@ -790,41 +303,22 @@ impl code_host::convergence_read::ConvergenceReadResult {
 ```rust
 pub struct GitHubCodeHostTransport {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for code_host::github::GitHubCodeHostTransport
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::github::GitHubCodeHostTransport
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::github::GitHubCodeHostTransport {
+impl GitHubCodeHostTransport {
     pub fn try_new(
-        configured_bounds: code_host::CodeHostNumericBounds,
-    ) -> result::Result<Self, code_host::github::GitHubCodeHostConstructionError>;
+        configured_bounds: CodeHostNumericBounds,
+    ) -> result::Result<Self, GitHubCodeHostConstructionError>;
     pub fn with_convergence_policy(
         self,
         policy: option::Option<signalbox_convergence::ConvergencePolicy>,
     ) -> Self;
 }
-impl code_host::CodeHostTransport for code_host::github::GitHubCodeHostTransport {
-    fn numeric_bounds(&self) -> code_host::CodeHostNumericBounds;
+impl CodeHostTransport for GitHubCodeHostTransport {
+    fn numeric_bounds(&self) -> CodeHostNumericBounds;
     async fn execute(
         &mut self,
-        operation: code_host::CodeHostOperation,
-        credential: &credential::CredentialValue,
-    ) -> result::Result<code_host::result::CodeHostResult, code_host::CodeHostTransportFailure>;
+        operation: CodeHostOperation,
+        credential: &signalbox_model_runtime::CredentialValue,
+    ) -> result::Result<CodeHostResult, CodeHostTransportFailure>;
 }
 ```
 
@@ -833,29 +327,10 @@ impl code_host::CodeHostTransport for code_host::github::GitHubCodeHostTransport
 ```rust
 pub struct GitHubCodeHostConstructionError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::github::GitHubCodeHostConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::github::GitHubCodeHostConstructionError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl fmt::Display for code_host::github::GitHubCodeHostConstructionError {
+impl fmt::Display for GitHubCodeHostConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for code_host::github::GitHubCodeHostConstructionError {
+impl error::Error for GitHubCodeHostConstructionError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
@@ -865,26 +340,7 @@ impl error::Error for code_host::github::GitHubCodeHostConstructionError {
 ```rust
 pub struct CodeHostNumericBounds {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::CodeHostNumericBounds
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::CodeHostNumericBounds
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::CodeHostNumericBounds {
+impl CodeHostNumericBounds {
     pub const fn new(
         request_timeout: option::Option<time::Duration>,
         job_log_bytes: option::Option<usize>,
@@ -900,44 +356,25 @@ impl code_host::CodeHostNumericBounds {
 
 ```rust
 pub enum CodeHostOperation {
-    Summary(code_host::change_request_summary::ChangeRequestSummaryArguments),
-    ChangedFiles(code_host::change_request_changed_files::ChangedFilesArguments),
-    FilePatch(code_host::change_request_file_patch::FilePatchArguments),
-    ListDirectory(code_host::repository_list_directory::RepositoryListDirectoryArguments),
-    ReadFile(code_host::repository_read_file::RepositoryReadFileArguments),
-    ChecksStatus(code_host::change_request_checks_status::ChecksStatusArguments),
-    Comment(code_host::change_request_comment::ChangeRequestCommentArguments),
-    ConvergenceState(code_host::change_request_convergence_state::ConvergenceStateArguments),
-    ReviewThreads(code_host::change_request_review_threads::ReviewThreadsArguments),
-    StackState(code_host::change_request_stack_state::StackStateArguments),
-    ThreadInventory(code_host::change_request_thread_inventory::ThreadInventoryArguments),
-    ThreadReply(code_host::change_request_thread_reply::ThreadReplyArguments),
-    ThreadResolve(code_host::change_request_thread_resolve::ThreadResolveArguments),
-    CiJobLog(code_host::change_request_ci_job_log::CiJobLogArguments),
-    RerunFailedJobs(code_host::change_request_rerun_failed_jobs::RerunFailedJobsArguments),
-    ReviewGateCheck(code_host::review_gate_check::ReviewGateCheckArguments),
+    Summary(ChangeRequestSummaryArguments),
+    ChangedFiles(ChangedFilesArguments),
+    FilePatch(FilePatchArguments),
+    ListDirectory(RepositoryListDirectoryArguments),
+    ReadFile(RepositoryReadFileArguments),
+    ChecksStatus(ChecksStatusArguments),
+    Comment(ChangeRequestCommentArguments),
+    ConvergenceState(ConvergenceStateArguments),
+    ReviewThreads(ReviewThreadsArguments),
+    StackState(StackStateArguments),
+    ThreadInventory(ThreadInventoryArguments),
+    ThreadReply(ThreadReplyArguments),
+    ThreadResolve(ThreadResolveArguments),
+    CiJobLog(CiJobLogArguments),
+    RerunFailedJobs(RerunFailedJobsArguments),
+    ReviewGateCheck(ReviewGateCheckArguments),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::CodeHostOperation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::CodeHostOperation
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::CodeHostOperation {
+impl CodeHostOperation {
     pub const fn tool_name(&self) -> &'static str;
 }
 ```
@@ -957,25 +394,6 @@ pub enum CodeHostTransportFailure {
     DispatchUnknown,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::CodeHostTransportFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::CodeHostTransportFailure
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## CodeHostTools
@@ -983,35 +401,16 @@ where
 ```rust
 pub struct CodeHostTools<Credentials, Transport> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for code_host::CodeHostTools<Credentials, Transport>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::CodeHostTools<Credentials, Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<Credentials, Transport> code_host::CodeHostTools<Credentials, Transport> {
+impl<Credentials, Transport> CodeHostTools<Credentials, Transport> {
     pub fn try_new(
         credentials: Credentials,
         transport: Transport,
-    ) -> result::Result<Self, code_host::CodeHostToolsConstructionError>;
+    ) -> result::Result<Self, CodeHostToolsConstructionError>;
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
-        code_host::CodeHostExecutor<Credentials, Transport>,
+        signalbox_application::CompiledToolCatalog,
+        CodeHostExecutor<Credentials, Transport>,
     );
 }
 ```
@@ -1026,29 +425,10 @@ pub enum CodeHostToolsConstructionError {
     Duplicate,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::CodeHostToolsConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::CodeHostToolsConstructionError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl fmt::Display for code_host::CodeHostToolsConstructionError {
+impl fmt::Display for CodeHostToolsConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for code_host::CodeHostToolsConstructionError {
+impl error::Error for CodeHostToolsConstructionError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
@@ -1058,38 +438,19 @@ impl error::Error for code_host::CodeHostToolsConstructionError {
 ```rust
 pub struct CodeHostExecutor<Credentials, Transport> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for code_host::CodeHostExecutor<Credentials, Transport>
+impl<Credentials, Transport> signalbox_application::ToolExecutor
+    for CodeHostExecutor<Credentials, Transport>
 where
-    T: clone::Clone,
+    Credentials: signalbox_model_runtime::CredentialAccess,
+    Transport: CodeHostTransport,
 {
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::CodeHostExecutor<Credentials, Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<Credentials, Transport> tool_loop::ToolExecutor
-    for code_host::CodeHostExecutor<Credentials, Transport>
-where
-    Credentials: credential::CredentialAccess,
-    Transport: code_host::CodeHostTransport,
-{
-    type Error = code_host::CodeHostExecutorError;
+    type Error = CodeHostExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -1099,33 +460,14 @@ where
 ```rust
 pub struct CodeHostExecutorError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::CodeHostExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::CodeHostExecutorError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl fmt::Display for code_host::CodeHostExecutorError {
+impl fmt::Display for CodeHostExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for code_host::CodeHostExecutorError {
+impl error::Error for CodeHostExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for code_host::CodeHostExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for CodeHostExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -1134,36 +476,10 @@ impl operator_failure::ClassifyOperatorFailure for code_host::CodeHostExecutorEr
 ```rust
 pub struct RepositoryListDirectoryArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone
-    for code_host::repository_list_directory::RepositoryListDirectoryArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned
-    for code_host::repository_list_directory::RepositoryListDirectoryArguments
-where
-    T: for<'de> de::Deserialize<'de>,
-{
-}
-impl<T> policy::PolicyExt for code_host::repository_list_directory::RepositoryListDirectoryArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::repository_list_directory::RepositoryListDirectoryArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub fn path(&self) -> &code_host::arguments::CodeHostFilePath;
-    pub fn revision(&self) -> &code_host::arguments::CodeHostRevision;
+impl RepositoryListDirectoryArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub fn path(&self) -> &CodeHostFilePath;
+    pub fn revision(&self) -> &CodeHostRevision;
 }
 ```
 
@@ -1172,37 +488,14 @@ impl code_host::repository_list_directory::RepositoryListDirectoryArguments {
 ```rust
 pub struct RepositoryLineRange {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::repository_read_file::RepositoryLineRange
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::repository_read_file::RepositoryLineRange where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::repository_read_file::RepositoryLineRange
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<'de> de::Deserialize<'de> for code_host::repository_read_file::RepositoryLineRange {
+impl<'de> de::Deserialize<'de> for RepositoryLineRange {
     fn deserialize<Deserializer>(
         deserializer: Deserializer,
     ) -> result::Result<Self, <Deserializer as de::Deserializer>::Error>
     where
         Deserializer: de::Deserializer<'de>;
 }
-impl code_host::repository_read_file::RepositoryLineRange {
+impl RepositoryLineRange {
     pub const fn start(self) -> u32;
     pub const fn end(self) -> u32;
 }
@@ -1213,36 +506,11 @@ impl code_host::repository_read_file::RepositoryLineRange {
 ```rust
 pub struct RepositoryReadFileArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::repository_read_file::RepositoryReadFileArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::repository_read_file::RepositoryReadFileArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::repository_read_file::RepositoryReadFileArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::repository_read_file::RepositoryReadFileArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub fn path(&self) -> &code_host::arguments::CodeHostFilePath;
-    pub fn revision(&self) -> &code_host::arguments::CodeHostRevision;
-    pub const fn line_range(
-        &self,
-    ) -> option::Option<code_host::repository_read_file::RepositoryLineRange>;
+impl RepositoryReadFileArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub fn path(&self) -> &CodeHostFilePath;
+    pub fn revision(&self) -> &CodeHostRevision;
+    pub const fn line_range(&self) -> option::Option<RepositoryLineRange>;
 }
 ```
 
@@ -1256,25 +524,6 @@ pub enum RepositoryObjectKind {
     Submodule,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::repository_result::RepositoryObjectKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::repository_result::RepositoryObjectKind
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## RepositoryFileContentFields
@@ -1288,28 +537,9 @@ pub struct RepositoryFileContentFields {
     pub returned_lines: u32,
     pub last_line_complete: bool,
     pub content: string::String,
-    pub completeness: code_host::result::CodeHostResultCompleteness,
+    pub completeness: CodeHostResultCompleteness,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::repository_result::RepositoryFileContentFields
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::repository_result::RepositoryFileContentFields
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## RepositoryReadFileResult
@@ -1317,47 +547,24 @@ where
 ```rust
 pub struct RepositoryReadFileResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::repository_result::RepositoryReadFileResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::repository_result::RepositoryReadFileResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::repository_result::RepositoryReadFileResult {
+impl RepositoryReadFileResult {
     pub fn try_content(
-        bounds: code_host::CodeHostNumericBounds,
-        arguments: &code_host::repository_read_file::RepositoryReadFileArguments,
-        fields: code_host::repository_result::RepositoryFileContentFields,
+        bounds: CodeHostNumericBounds,
+        arguments: &RepositoryReadFileArguments,
+        fields: RepositoryFileContentFields,
     ) -> option::Option<Self>;
-    pub fn try_path_not_found(
-        arguments: &code_host::repository_read_file::RepositoryReadFileArguments,
-    ) -> option::Option<Self>;
-    pub fn revision_not_found(
-        arguments: &code_host::repository_read_file::RepositoryReadFileArguments,
-    ) -> Self;
+    pub fn try_path_not_found(arguments: &RepositoryReadFileArguments) -> option::Option<Self>;
+    pub fn revision_not_found(arguments: &RepositoryReadFileArguments) -> Self;
     pub fn try_not_a_file(
-        arguments: &code_host::repository_read_file::RepositoryReadFileArguments,
-        kind: code_host::repository_result::RepositoryObjectKind,
+        arguments: &RepositoryReadFileArguments,
+        kind: RepositoryObjectKind,
     ) -> option::Option<Self>;
     pub fn try_binary(
-        arguments: &code_host::repository_read_file::RepositoryReadFileArguments,
+        arguments: &RepositoryReadFileArguments,
         source_bytes: u64,
     ) -> option::Option<Self>;
     pub fn try_line_range_unavailable(
-        arguments: &code_host::repository_read_file::RepositoryReadFileArguments,
+        arguments: &RepositoryReadFileArguments,
         source_bytes: u64,
     ) -> option::Option<Self>;
 }
@@ -1368,29 +575,10 @@ impl code_host::repository_result::RepositoryReadFileResult {
 ```rust
 pub struct RepositoryDirectoryEntry {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::repository_result::RepositoryDirectoryEntry
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::repository_result::RepositoryDirectoryEntry
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::repository_result::RepositoryDirectoryEntry {
+impl RepositoryDirectoryEntry {
     pub fn try_new(
         path: string::String,
-        kind: code_host::repository_result::RepositoryObjectKind,
+        kind: RepositoryObjectKind,
         size_bytes: option::Option<u64>,
     ) -> option::Option<Self>;
 }
@@ -1401,42 +589,20 @@ impl code_host::repository_result::RepositoryDirectoryEntry {
 ```rust
 pub struct RepositoryListDirectoryResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::repository_result::RepositoryListDirectoryResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::repository_result::RepositoryListDirectoryResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::repository_result::RepositoryListDirectoryResult {
+impl RepositoryListDirectoryResult {
     pub fn try_entries(
-        bounds: code_host::CodeHostNumericBounds,
-        arguments: &code_host::repository_list_directory::RepositoryListDirectoryArguments,
-        entries: vec::Vec<code_host::repository_result::RepositoryDirectoryEntry>,
+        bounds: CodeHostNumericBounds,
+        arguments: &RepositoryListDirectoryArguments,
+        entries: vec::Vec<RepositoryDirectoryEntry>,
         observed_entries: usize,
-        completeness: code_host::result::CodeHostResultCompleteness,
+        completeness: CodeHostResultCompleteness,
     ) -> option::Option<Self>;
-    pub fn try_path_not_found(
-        arguments: &code_host::repository_list_directory::RepositoryListDirectoryArguments,
-    ) -> option::Option<Self>;
-    pub fn revision_not_found(
-        arguments: &code_host::repository_list_directory::RepositoryListDirectoryArguments,
-    ) -> Self;
+    pub fn try_path_not_found(arguments: &RepositoryListDirectoryArguments)
+        -> option::Option<Self>;
+    pub fn revision_not_found(arguments: &RepositoryListDirectoryArguments) -> Self;
     pub fn try_not_a_directory(
-        arguments: &code_host::repository_list_directory::RepositoryListDirectoryArguments,
-        kind: code_host::repository_result::RepositoryObjectKind,
+        arguments: &RepositoryListDirectoryArguments,
+        kind: RepositoryObjectKind,
     ) -> option::Option<Self>;
 }
 ```
@@ -1449,25 +615,6 @@ pub enum CodeHostResultCompleteness {
     Truncated,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::CodeHostResultCompleteness
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::CodeHostResultCompleteness
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## ReviewThreadResolution
@@ -1478,25 +625,6 @@ pub enum ReviewThreadResolution {
     Resolved,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ReviewThreadResolution
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ReviewThreadResolution
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## CodeHostUrl
@@ -1504,29 +632,10 @@ where
 ```rust
 pub struct CodeHostUrl(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::CodeHostUrl
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::CodeHostUrl
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::CodeHostUrl {
+impl CodeHostUrl {
     pub fn as_str(&self) -> &str;
 }
-impl schemars::JsonSchema for code_host::result::CodeHostUrl {
+impl schemars::JsonSchema for CodeHostUrl {
     fn schema_name() -> borrow::Cow<'static, str>;
     fn json_schema(_generator: &mut generate::SchemaGenerator) -> schema::Schema;
     fn inline_schema() -> bool;
@@ -1538,29 +647,10 @@ impl schemars::JsonSchema for code_host::result::CodeHostUrl {
 ```rust
 pub struct ChangeRequestSummaryResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ChangeRequestSummaryResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ChangeRequestSummaryResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ChangeRequestSummaryResult {
+impl ChangeRequestSummaryResult {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
-        fields: code_host::result::ChangeRequestSummaryFields,
+        bounds: CodeHostNumericBounds,
+        fields: ChangeRequestSummaryFields,
     ) -> option::Option<Self>;
 }
 ```
@@ -1581,25 +671,6 @@ pub struct ChangeRequestSummaryFields {
     pub url: string::String,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ChangeRequestSummaryFields
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ChangeRequestSummaryFields
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## ChangedFile
@@ -1607,31 +678,12 @@ where
 ```rust
 pub struct ChangedFile {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ChangedFile
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ChangedFile
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ChangedFile {
+impl ChangedFile {
     pub fn path(&self) -> &str;
 }
-impl code_host::result::ChangedFile {
+impl ChangedFile {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
+        bounds: CodeHostNumericBounds,
         path: string::String,
         status: string::String,
         additions: u64,
@@ -1645,30 +697,11 @@ impl code_host::result::ChangedFile {
 ```rust
 pub struct ChangedFilesResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ChangedFilesResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ChangedFilesResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ChangedFilesResult {
+impl ChangedFilesResult {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
-        files: vec::Vec<code_host::result::ChangedFile>,
-        completeness: code_host::result::CodeHostResultCompleteness,
+        bounds: CodeHostNumericBounds,
+        files: vec::Vec<ChangedFile>,
+        completeness: CodeHostResultCompleteness,
     ) -> option::Option<Self>;
 }
 ```
@@ -1678,29 +711,10 @@ impl code_host::result::ChangedFilesResult {
 ```rust
 pub struct FilePatchResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::FilePatchResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::FilePatchResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::FilePatchResult {
+impl FilePatchResult {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
-        file: code_host::result::ChangedFile,
+        bounds: CodeHostNumericBounds,
+        file: ChangedFile,
         patch: option::Option<string::String>,
     ) -> option::Option<Self>;
 }
@@ -1711,28 +725,9 @@ impl code_host::result::FilePatchResult {
 ```rust
 pub struct CheckStatus {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::CheckStatus
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::CheckStatus
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::CheckStatus {
+impl CheckStatus {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
+        bounds: CodeHostNumericBounds,
         id: u64,
         name: string::String,
         status: string::String,
@@ -1747,31 +742,12 @@ impl code_host::result::CheckStatus {
 ```rust
 pub struct ChecksStatusResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ChecksStatusResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ChecksStatusResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ChecksStatusResult {
+impl ChecksStatusResult {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
+        bounds: CodeHostNumericBounds,
         revision: string::String,
-        checks: vec::Vec<code_host::result::CheckStatus>,
-        completeness: code_host::result::CodeHostResultCompleteness,
+        checks: vec::Vec<CheckStatus>,
+        completeness: CodeHostResultCompleteness,
     ) -> option::Option<Self>;
 }
 ```
@@ -1781,26 +757,7 @@ impl code_host::result::ChecksStatusResult {
 ```rust
 pub struct ChangeRequestCommentResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ChangeRequestCommentResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ChangeRequestCommentResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ChangeRequestCommentResult {
+impl ChangeRequestCommentResult {
     pub fn try_new(id: u64, url: string::String) -> option::Option<Self>;
 }
 ```
@@ -1810,28 +767,9 @@ impl code_host::result::ChangeRequestCommentResult {
 ```rust
 pub struct ReviewThreadComment {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ReviewThreadComment
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ReviewThreadComment
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ReviewThreadComment {
+impl ReviewThreadComment {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
+        bounds: CodeHostNumericBounds,
         id: string::String,
         author: option::Option<string::String>,
         body: string::String,
@@ -1845,29 +783,10 @@ impl code_host::result::ReviewThreadComment {
 ```rust
 pub struct ReviewThread {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ReviewThread
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ReviewThread
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ReviewThread {
+impl ReviewThread {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
-        fields: code_host::result::ReviewThreadFields,
+        bounds: CodeHostNumericBounds,
+        fields: ReviewThreadFields,
     ) -> option::Option<Self>;
 }
 ```
@@ -1881,29 +800,10 @@ pub struct ReviewThreadFields {
     pub outdated: bool,
     pub path: string::String,
     pub line: option::Option<u64>,
-    pub comments: vec::Vec<code_host::result::ReviewThreadComment>,
+    pub comments: vec::Vec<ReviewThreadComment>,
     pub comments_truncated: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ReviewThreadFields
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ReviewThreadFields
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## ReviewThreadsResult
@@ -1911,30 +811,11 @@ where
 ```rust
 pub struct ReviewThreadsResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ReviewThreadsResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ReviewThreadsResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ReviewThreadsResult {
+impl ReviewThreadsResult {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
-        threads: vec::Vec<code_host::result::ReviewThread>,
-        completeness: code_host::result::CodeHostResultCompleteness,
+        bounds: CodeHostNumericBounds,
+        threads: vec::Vec<ReviewThread>,
+        completeness: CodeHostResultCompleteness,
     ) -> option::Option<Self>;
 }
 ```
@@ -1944,26 +825,7 @@ impl code_host::result::ReviewThreadsResult {
 ```rust
 pub struct ThreadReplyResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ThreadReplyResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ThreadReplyResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ThreadReplyResult {
+impl ThreadReplyResult {
     pub fn try_new(id: string::String, url: string::String) -> option::Option<Self>;
 }
 ```

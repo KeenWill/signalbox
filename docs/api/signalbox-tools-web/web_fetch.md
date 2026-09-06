@@ -13,26 +13,6 @@ pub const WEB_FETCH_NAME: &str;
 ```rust
 pub struct WebFetchEgressPolicy {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebFetchEgressPolicy
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebFetchEgressPolicy
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebFetchEgressPolicy where T: 'static {}
 impl WebFetchEgressPolicy {
     pub const fn deny_all() -> Self;
     pub fn try_from_allowed_origins(
@@ -53,26 +33,6 @@ pub enum WebFetchEgressPolicyError {
     InvalidOrigin,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebFetchEgressPolicyError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebFetchEgressPolicyError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebFetchEgressPolicyError where T: 'static {}
 impl fmt::Display for WebFetchEgressPolicyError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -92,26 +52,6 @@ pub enum WebFetchToolConstructionError {
     Transport,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebFetchToolConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebFetchToolConstructionError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebFetchToolConstructionError where T: 'static {}
 impl fmt::Display for WebFetchToolConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -125,26 +65,6 @@ impl error::Error for WebFetchToolConstructionError {
 ```rust
 pub struct WebFetchTool<Transport> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for WebFetchTool<Transport>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebFetchTool<Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebFetchTool<Transport> where T: 'static {}
 impl<Transport> signalbox_tool_contract::ToolContract for WebFetchTool<Transport> {
     type Arguments = web_fetch::WebFetchArguments;
     const NAME: &'static str;
@@ -160,7 +80,12 @@ impl<Transport> WebFetchTool<Transport> {
         transport: Transport,
         egress_policy: WebFetchEgressPolicy,
     ) -> result::Result<Self, WebFetchToolConstructionError>;
-    pub fn into_parts(self) -> (tool_loop::CompiledToolCatalog, WebFetchExecutor<Transport>);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_application::CompiledToolCatalog,
+        WebFetchExecutor<Transport>,
+    );
 }
 ```
 
@@ -169,26 +94,6 @@ impl<Transport> WebFetchTool<Transport> {
 ```rust
 pub struct WebFetchRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebFetchRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebFetchRequest
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebFetchRequest where T: 'static {}
 impl WebFetchRequest {
     pub fn url(&self) -> &url::Url;
 }
@@ -199,26 +104,6 @@ impl WebFetchRequest {
 ```rust
 pub struct WebFetchResponse {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebFetchResponse
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebFetchResponse
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebFetchResponse where T: 'static {}
 impl WebFetchResponse {
     pub fn new(
         status: u16,
@@ -237,26 +122,6 @@ pub enum WebFetchBodyCompleteness {
     Truncated,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebFetchBodyCompleteness
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebFetchBodyCompleteness
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebFetchBodyCompleteness where T: 'static {}
 ```
 
 ## WebFetchTransport
@@ -280,26 +145,6 @@ pub trait WebFetchTransport: marker::Send {
 ```rust
 pub struct ReqwestWebFetchTransport {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for ReqwestWebFetchTransport
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for ReqwestWebFetchTransport
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for ReqwestWebFetchTransport where T: 'static {}
 impl ReqwestWebFetchTransport {
     pub fn try_new(
         exchange_timeout: time::Duration,
@@ -318,37 +163,17 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
 ```rust
 pub struct WebFetchExecutor<Transport> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for WebFetchExecutor<Transport>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebFetchExecutor<Transport>
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebFetchExecutor<Transport> where T: 'static {}
-impl<Transport> tool_loop::ToolExecutor for WebFetchExecutor<Transport>
+impl<Transport> signalbox_application::ToolExecutor for WebFetchExecutor<Transport>
 where
     Transport: WebFetchTransport,
 {
     type Error = WebFetchExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -362,33 +187,13 @@ pub enum WebFetchExecutorError {
     DispatchUnknown,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WebFetchExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for WebFetchExecutorError
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl<T> erased::ErasedDestructor for WebFetchExecutorError where T: 'static {}
 impl fmt::Display for WebFetchExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for WebFetchExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for WebFetchExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for WebFetchExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```

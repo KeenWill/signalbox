@@ -7,14 +7,13 @@
 ```rust
 pub struct RunnerProjection {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for RunnerProjection where T: for<'de> de::Deserialize<'de> {}
 impl RunnerProjection {
     pub const fn selector(&self) -> &RunnerProjectionSelector;
 }
 impl RunnerProjection {
     pub fn try_new(
         selector: RunnerProjectionSelector,
-        runner_id: option::Option<scalars::CanonicalUuid>,
+        runner_id: option::Option<CanonicalUuid>,
         placement_revision: RunnerPlacementRevision,
         sandbox_profile: RunnerSandboxProfile,
         credential_profile: option::Option<RunnerCredentialProfileName>,
@@ -22,8 +21,8 @@ impl RunnerProjection {
         working_directory: option::Option<RunnerWorkingDirectory>,
         connection_health: option::Option<RunnerConnectionHealth>,
         state: RunnerProjectionState,
-    ) -> result::Result<Self, scalars::CanonicalValueError>;
-    pub const fn runner_id(&self) -> option::Option<scalars::CanonicalUuid>;
+    ) -> result::Result<Self, CanonicalValueError>;
+    pub const fn runner_id(&self) -> option::Option<CanonicalUuid>;
     pub const fn placement_revision(&self) -> RunnerPlacementRevision;
     pub const fn sandbox_profile(&self) -> RunnerSandboxProfile;
     pub const fn credential_profile(&self) -> option::Option<&RunnerCredentialProfileName>;
@@ -39,16 +38,15 @@ impl RunnerProjection {
 ```rust
 pub struct RunnerWorkingDirectory(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for RunnerWorkingDirectory where T: for<'de> de::Deserialize<'de> {}
 impl RunnerWorkingDirectory {
     pub fn as_str(&self) -> &str;
 }
 impl RunnerWorkingDirectory {
     pub const MAX_UTF8_BYTES: usize;
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
+    pub fn try_new(value: string::String) -> result::Result<Self, CanonicalValueError>;
 }
 impl convert::TryFrom<string::String> for RunnerWorkingDirectory {
-    type Error = scalars::CanonicalValueError;
+    type Error = CanonicalValueError;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
 impl convert::From<RunnerWorkingDirectory> for string::String {
@@ -61,7 +59,6 @@ impl convert::From<RunnerWorkingDirectory> for string::String {
 ```rust
 pub struct RunnerPlacementRevision(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> de::DeserializeOwned for RunnerPlacementRevision where T: for<'de> de::Deserialize<'de> {}
 impl RunnerPlacementRevision {
     pub const fn try_new(value: u64) -> option::Option<Self>;
     pub const fn value(self) -> u64;
@@ -89,7 +86,6 @@ pub enum RunnerStateTransitionState {
     Abandoned,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for RunnerStateTransitionState where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## BoundChildAction
@@ -101,7 +97,6 @@ pub enum BoundChildAction {
     Cancel,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for BoundChildAction where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## DelegationPolicy
@@ -115,7 +110,6 @@ pub enum DelegationPolicy {
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for DelegationPolicy where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## DelegationWaitMode
@@ -126,7 +120,6 @@ pub enum DelegationWaitMode {
     Background,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for DelegationWaitMode where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## DelegationMessageDirection
@@ -137,7 +130,6 @@ pub enum DelegationMessageDirection {
     ChildToParent,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for DelegationMessageDirection where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## DelegationToolRequestState
@@ -152,7 +144,6 @@ pub enum DelegationToolRequestState {
     AttemptEnded,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for DelegationToolRequestState where T: for<'de> de::Deserialize<'de> {}
 impl DelegationToolRequestState {
     pub const fn as_str(self) -> &'static str;
 }
@@ -170,7 +161,6 @@ pub enum DelegationOutcome {
     AlreadyTerminal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for DelegationOutcome where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## DelegationReason
@@ -185,7 +175,6 @@ pub enum DelegationReason {
     ParentCancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for DelegationReason where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## DelegationProvenance
@@ -193,29 +182,28 @@ impl<T> de::DeserializeOwned for DelegationReason where T: for<'de> de::Deserial
 ```rust
 pub enum DelegationProvenance {
     ChildTurn {
-        child_session_id: scalars::CanonicalUuid,
-        child_turn_id: scalars::CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        child_turn_id: CanonicalUuid,
     },
     ParentTurnCommand {
-        parent_session_id: scalars::CanonicalUuid,
-        parent_turn_id: scalars::CanonicalUuid,
-        command_id: scalars::CanonicalUuid,
+        parent_session_id: CanonicalUuid,
+        parent_turn_id: CanonicalUuid,
+        command_id: CanonicalUuid,
         descendant_scope: DescendantTerminationScope,
     },
     ParentGoalCommand {
-        parent_session_id: scalars::CanonicalUuid,
-        goal_generation: scalars::CanonicalU64,
-        command_id: scalars::CanonicalUuid,
+        parent_session_id: CanonicalUuid,
+        goal_generation: CanonicalU64,
+        command_id: CanonicalUuid,
         descendant_scope: DescendantTerminationScope,
     },
     ParentLifecycleCommand {
-        parent_session_id: scalars::CanonicalUuid,
-        command_id: scalars::CanonicalUuid,
+        parent_session_id: CanonicalUuid,
+        command_id: CanonicalUuid,
         descendant_scope: DescendantTerminationScope,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for DelegationProvenance where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ToolApprovalEventDecision
@@ -228,7 +216,6 @@ pub enum ToolApprovalEventDecision {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for ToolApprovalEventDecision where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ToolApprovalEventDecider
@@ -236,19 +223,18 @@ impl<T> de::DeserializeOwned for ToolApprovalEventDecision where T: for<'de> de:
 ```rust
 pub enum ToolApprovalEventDecider {
     User {
-        command_id: scalars::CanonicalUuid,
+        command_id: CanonicalUuid,
     },
     Delegate {
-        model_selection_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
+        model_selection_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
     },
     UserOverride {
-        command_id: scalars::CanonicalUuid,
-        overridden_tool_request_id: scalars::CanonicalUuid,
+        command_id: CanonicalUuid,
+        overridden_tool_request_id: CanonicalUuid,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for ToolApprovalEventDecider where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## TranscriptToolApproval
@@ -260,7 +246,6 @@ pub struct TranscriptToolApproval {
     pub rationale: option::Option<string::String>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for TranscriptToolApproval where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## SessionEvent
@@ -269,9 +254,9 @@ impl<T> de::DeserializeOwned for TranscriptToolApproval where T: for<'de> de::De
 pub enum SessionEvent {
     SessionCreated {},
     SessionModelSettingsChanged {
-        command_id: scalars::CommandId,
-        prior_defaults_version: scalars::CanonicalU64,
-        installed_defaults_version: scalars::CanonicalU64,
+        command_id: CommandId,
+        prior_defaults_version: CanonicalU64,
+        installed_defaults_version: CanonicalU64,
         prior_model: ModelSelection,
         installed_model: ModelSelection,
         prior_settings: ModelSettingsSnapshot,
@@ -280,129 +265,128 @@ pub enum SessionEvent {
         adjustments: vec::Vec<ModelChangeAdjustment>,
     },
     TurnModelSettingsResolved {
-        accepted_input_id: scalars::CanonicalUuid,
-        turn_id: scalars::CanonicalUuid,
-        defaults_version: scalars::CanonicalU64,
+        accepted_input_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
         requested_model: ModelSelection,
-        selected_direct_id: scalars::CanonicalUuid,
+        selected_direct_id: CanonicalUuid,
         per_call_override: ModelSettingsOverlay,
         settings: ModelSettingsSnapshot,
-        adjusted_from_selection_id: option::Option<scalars::CanonicalUuid>,
+        adjusted_from_selection_id: option::Option<CanonicalUuid>,
         adjustments: vec::Vec<ModelChangeAdjustment>,
     },
     InputAccepted {
-        accepted_input_id: scalars::CanonicalUuid,
-        turn_id: scalars::CanonicalUuid,
-        acceptance_position: scalars::CanonicalU64,
+        accepted_input_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        acceptance_position: CanonicalU64,
         content: UserInputContent,
     },
     GoalTurnRetired {
-        turn_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
     },
     TurnActivated {
-        turn_id: scalars::CanonicalUuid,
-        current_attempt_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        current_attempt_id: CanonicalUuid,
     },
     ModelCallTransition {
-        turn_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
         state: ModelCallState,
     },
     ToolBatchTransition {
-        turn_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
         state: ToolBatchState,
     },
     RunnerStateTransition {
-        runner_id: scalars::CanonicalUuid,
+        runner_id: CanonicalUuid,
         placement_revision: RunnerPlacementRevision,
         sandbox_profile: RunnerSandboxProfile,
         working_directory: option::Option<RunnerWorkingDirectory>,
         state: RunnerStateTransitionState,
     },
     ToolApprovalDecided {
-        turn_id: scalars::CanonicalUuid,
-        tool_request_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
         decision: ToolApprovalEventDecision,
         decider: ToolApprovalEventDecider,
         rationale: option::Option<string::String>,
     },
     ContextCompacted {
-        context_compaction_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
-        through_position: scalars::CanonicalU64,
-        summary_entry_id: scalars::CanonicalUuid,
-        result_frontier_id: scalars::CanonicalUuid,
+        context_compaction_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        through_position: CanonicalU64,
+        summary_entry_id: CanonicalUuid,
+        result_frontier_id: CanonicalUuid,
     },
     TurnCompleted {
-        turn_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
-        completion_entry_id: scalars::CanonicalUuid,
-        terminal_frontier_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        completion_entry_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
     },
     TurnFailed {
-        turn_id: scalars::CanonicalUuid,
-        failure_entry_id: scalars::CanonicalUuid,
-        terminal_frontier_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        failure_entry_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
     },
     TurnRefused {
-        turn_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
-        terminal_frontier_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
     },
     TurnCancelled {
-        turn_id: scalars::CanonicalUuid,
-        cancellation_entry_id: scalars::CanonicalUuid,
-        terminal_frontier_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        cancellation_entry_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
     },
     TurnReconciliationRequired {
-        turn_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
-        terminal_frontier_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
     },
     TurnToolReconciliationRequired {
-        turn_id: scalars::CanonicalUuid,
-        tool_attempt_id: scalars::CanonicalUuid,
-        terminal_frontier_id: scalars::CanonicalUuid,
+        turn_id: CanonicalUuid,
+        tool_attempt_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
     },
     ChildSpawned {
-        spawning_request_id: scalars::CanonicalUuid,
-        child_session_id: scalars::CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
         relationship: DelegationPolicy,
     },
     ChildWaiting {
-        await_request_id: scalars::CanonicalUuid,
-        spawning_request_id: scalars::CanonicalUuid,
-        child_session_id: scalars::CanonicalUuid,
+        await_request_id: CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
         mode: DelegationWaitMode,
     },
     SessionMessage {
-        spawning_request_id: scalars::CanonicalUuid,
-        message_id: scalars::CanonicalUuid,
-        sender_session_id: scalars::CanonicalUuid,
-        recipient_session_id: scalars::CanonicalUuid,
-        ordinal: scalars::CanonicalU64,
-        delivery_sequence: scalars::CanonicalU64,
+        spawning_request_id: CanonicalUuid,
+        message_id: CanonicalUuid,
+        sender_session_id: CanonicalUuid,
+        recipient_session_id: CanonicalUuid,
+        ordinal: CanonicalU64,
+        delivery_sequence: CanonicalU64,
         content: string::String,
     },
     ChildResult {
-        spawning_request_id: scalars::CanonicalUuid,
-        child_session_id: scalars::CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
         outcome: DelegationOutcome,
         content: option::Option<string::String>,
         reason: DelegationReason,
         provenance: DelegationProvenance,
     },
     ChildLifecycleDisposition {
-        spawning_request_id: scalars::CanonicalUuid,
-        child_session_id: scalars::CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
         outcome: DelegationOutcome,
         reason: DelegationReason,
         provenance: DelegationProvenance,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for SessionEvent where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ServerMessage
@@ -410,115 +394,115 @@ impl<T> de::DeserializeOwned for SessionEvent where T: for<'de> de::Deserialize<
 ```rust
 pub enum ServerMessage {
     SessionCreated {
-        session_id: scalars::CanonicalUuid,
+        session_id: CanonicalUuid,
         model_settings: ModelSettingsSnapshot,
     },
     SessionCommissioned {
-        session_id: scalars::CanonicalUuid,
-        dispatch_id: scalars::CanonicalUuid,
+        session_id: CanonicalUuid,
+        dispatch_id: CanonicalUuid,
     },
     SessionLifecycleCommandApplied {
-        session_id: scalars::CanonicalUuid,
+        session_id: CanonicalUuid,
         effect: SessionLifecycleEffect,
     },
     SessionSpawned {
-        tool_request_id: scalars::CanonicalUuid,
-        child_session_id: scalars::CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
         relationship: DelegationPolicy,
     },
     SessionAwaitRegistered {
-        tool_request_id: scalars::CanonicalUuid,
-        child_session_id: scalars::CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
         mode: DelegationWaitMode,
     },
     ChildResult {
-        await_request_id: scalars::CanonicalUuid,
-        spawning_request_id: scalars::CanonicalUuid,
-        child_session_id: scalars::CanonicalUuid,
+        await_request_id: CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
         outcome: DelegationOutcome,
         content: option::Option<string::String>,
         reason: DelegationReason,
         provenance: DelegationProvenance,
     },
     SessionMessageSent {
-        tool_request_id: scalars::CanonicalUuid,
-        message_id: scalars::CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        message_id: CanonicalUuid,
         direction: DelegationMessageDirection,
-        ordinal: scalars::CanonicalU64,
-        delivery_sequence: scalars::CanonicalU64,
+        ordinal: CanonicalU64,
+        delivery_sequence: CanonicalU64,
     },
     SessionPlacementUpdated {
-        session_id: scalars::CanonicalUuid,
-        placement_version: scalars::CanonicalU64,
+        session_id: CanonicalUuid,
+        placement_version: CanonicalU64,
         placement: SessionPlacement,
     },
     InputSubmitted {
-        session_id: scalars::CanonicalUuid,
-        accepted_input_id: scalars::CanonicalUuid,
-        acceptance_position: scalars::CanonicalU64,
-        turn_id: scalars::CanonicalUuid,
+        session_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+        acceptance_position: CanonicalU64,
+        turn_id: CanonicalUuid,
         model_settings: ModelSettingsSnapshot,
     },
     SteeringSubmitted {
-        session_id: scalars::CanonicalUuid,
-        accepted_input_id: scalars::CanonicalUuid,
-        acceptance_position: scalars::CanonicalU64,
-        source_turn_id: scalars::CanonicalUuid,
+        session_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+        acceptance_position: CanonicalU64,
+        source_turn_id: CanonicalUuid,
     },
     GoalTransitionApplied {
-        session_id: scalars::CanonicalUuid,
-        event_ordinal: scalars::CanonicalU64,
-        generation: scalars::CanonicalU64,
+        session_id: CanonicalUuid,
+        event_ordinal: CanonicalU64,
+        generation: CanonicalU64,
     },
     GoalHistoryStart {
-        session_id: scalars::CanonicalUuid,
-        current_generation: scalars::CanonicalU64,
+        session_id: CanonicalUuid,
+        current_generation: CanonicalU64,
         current_statement: string::String,
     },
     GoalHistoryState {
         current_state: GoalLifecycleState,
     },
     GoalHistoryItem {
-        event_ordinal: scalars::CanonicalU64,
-        generation: scalars::CanonicalU64,
+        event_ordinal: CanonicalU64,
+        generation: CanonicalU64,
         event: GoalHistoryEvent,
     },
     GoalHistoryEnd {
-        event_count: scalars::CanonicalU64,
+        event_count: CanonicalU64,
     },
     SessionsStart {},
     SessionSummary {
-        session_id: scalars::CanonicalUuid,
-        defaults_version: scalars::CanonicalU64,
+        session_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
         model_selection: ModelSelection,
-        placement_version: scalars::CanonicalU64,
+        placement_version: CanonicalU64,
         placement: SessionPlacement,
         runner: option::Option<RunnerProjection>,
     },
     SessionsEnd {
-        session_count: scalars::CanonicalU64,
+        session_count: CanonicalU64,
     },
-    OperatorStatus(boxed::Box<operator_status::OperatorStatusMessage>),
+    OperatorStatus(boxed::Box<OperatorStatusMessage>),
     TemplatesStart {},
     TemplateSummary {
         name: string::String,
-        version: scalars::CanonicalU64,
+        version: CanonicalU64,
     },
     TemplatesEnd {
-        template_count: scalars::CanonicalU64,
+        template_count: CanonicalU64,
     },
     DeploymentLimits {
-        max_message_utf8_bytes: option::Option<scalars::CanonicalU64>,
-        max_system_prompt_utf8_bytes: option::Option<scalars::CanonicalU64>,
-        terminal_input_channel_capacity: option::Option<scalars::CanonicalU64>,
-        min_metadata_page_size: option::Option<scalars::CanonicalU64>,
-        max_metadata_page_size: option::Option<scalars::CanonicalU64>,
-        max_review_findings_per_run: option::Option<scalars::CanonicalU64>,
+        max_message_utf8_bytes: option::Option<CanonicalU64>,
+        max_system_prompt_utf8_bytes: option::Option<CanonicalU64>,
+        terminal_input_channel_capacity: option::Option<CanonicalU64>,
+        min_metadata_page_size: option::Option<CanonicalU64>,
+        max_metadata_page_size: option::Option<CanonicalU64>,
+        max_review_findings_per_run: option::Option<CanonicalU64>,
     },
     SessionMetadataPageStart {},
     SessionMetadataSummary {
-        session_id: scalars::CanonicalUuid,
-        defaults_version: scalars::CanonicalU64,
+        session_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
         model_selection: ModelSelection,
         dangerous_tool_auto_approval: bool,
         title: option::Option<string::String>,
@@ -527,253 +511,253 @@ pub enum ServerMessage {
         last_writer: option::Option<MetadataLastWriter>,
     },
     SessionMetadataPageEnd {
-        session_count: scalars::CanonicalU64,
-        next_after_session_id: option::Option<scalars::CanonicalUuid>,
+        session_count: CanonicalU64,
+        next_after_session_id: option::Option<CanonicalUuid>,
     },
     ConversationPageStart {},
     ConversationSummary {
         conversation: ConversationSummary,
     },
     ConversationPageEnd {
-        conversation_count: scalars::CanonicalU64,
+        conversation_count: CanonicalU64,
         next_after: option::Option<ConversationCursor>,
     },
     ModelAliasesStart {},
     ModelAliasSummary {
-        alias_id: scalars::CanonicalUuid,
-        selection_id: scalars::CanonicalUuid,
+        alias_id: CanonicalUuid,
+        selection_id: CanonicalUuid,
     },
     ModelAliasesEnd {
-        alias_count: scalars::CanonicalU64,
+        alias_count: CanonicalU64,
     },
     ModelCapabilitiesStart {},
     ModelCapabilityItem {
-        selection_id: scalars::CanonicalUuid,
+        selection_id: CanonicalUuid,
         capabilities: ModelCapabilities,
     },
     ModelCapabilitiesEnd {
-        capability_count: scalars::CanonicalU64,
+        capability_count: CanonicalU64,
     },
     SessionMetadata {
-        session_id: scalars::CanonicalUuid,
+        session_id: CanonicalUuid,
         metadata: SessionMetadata,
         last_writer: option::Option<MetadataLastWriter>,
     },
     SessionMetadataReplaced {
-        session_id: scalars::CanonicalUuid,
+        session_id: CanonicalUuid,
         metadata: SessionMetadata,
         last_writer: MetadataLastWriter,
     },
     SessionDefaultsReplaced {
-        session_id: scalars::CanonicalUuid,
-        defaults_version: scalars::CanonicalU64,
+        session_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
         model_selection: ModelSelection,
         model_settings: ModelSettingsSnapshot,
         dangerous_tool_auto_approval: bool,
-        system_prompt: scalars::SystemPromptMember,
+        system_prompt: SystemPromptMember,
     },
     SessionDefaults {
-        session_id: scalars::CanonicalUuid,
-        defaults_version: scalars::CanonicalU64,
+        session_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
         model_selection: ModelSelection,
         model_settings: ModelSettingsSnapshot,
         dangerous_tool_auto_approval: bool,
-        system_prompt: option::Option<scalars::SystemPromptText>,
+        system_prompt: option::Option<SystemPromptText>,
     },
     ToolRequestDecided {
-        tool_request_id: scalars::CanonicalUuid,
+        tool_request_id: CanonicalUuid,
         decision: ToolDecision,
     },
     ToolDenialOverridden {
-        tool_request_id: scalars::CanonicalUuid,
+        tool_request_id: CanonicalUuid,
     },
     SessionCompacted {
-        session_id: scalars::CanonicalUuid,
-        context_compaction_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
-        through_position: scalars::CanonicalU64,
-        summary_entry_id: scalars::CanonicalUuid,
-        result_frontier_id: scalars::CanonicalUuid,
+        session_id: CanonicalUuid,
+        context_compaction_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        through_position: CanonicalU64,
+        summary_entry_id: CanonicalUuid,
+        result_frontier_id: CanonicalUuid,
     },
     ConversationImportInserted {
-        imported_conversation_id: scalars::CanonicalUuid,
+        imported_conversation_id: CanonicalUuid,
     },
     ConversationImportAlreadyImported {
-        imported_conversation_id: scalars::CanonicalUuid,
+        imported_conversation_id: CanonicalUuid,
     },
     ConversationImportBegun {
-        declared_size_bytes: scalars::CanonicalU64,
+        declared_size_bytes: CanonicalU64,
     },
     ConversationImportAppended {
-        assembled_size_bytes: scalars::CanonicalU64,
+        assembled_size_bytes: CanonicalU64,
     },
     ConversationImportAborted {},
     BlobUploadBegun {
-        expected_digest: scalars::CanonicalBlobDigest,
-        expected_length_bytes: scalars::CanonicalU64,
+        expected_digest: CanonicalBlobDigest,
+        expected_length_bytes: CanonicalU64,
     },
     BlobUploadAlreadyPresent {
-        digest: scalars::CanonicalBlobDigest,
-        byte_length: scalars::CanonicalU64,
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
     },
     BlobUploadAppended {
-        assembled_length_bytes: scalars::CanonicalU64,
+        assembled_length_bytes: CanonicalU64,
     },
     BlobUploadCommitted {
-        digest: scalars::CanonicalBlobDigest,
-        byte_length: scalars::CanonicalU64,
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
     },
     BlobUploadAborted {},
     BlobMetadata {
-        digest: scalars::CanonicalBlobDigest,
-        byte_length: scalars::CanonicalU64,
-        replica_count: scalars::CanonicalU64,
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
+        replica_count: CanonicalU64,
     },
     BlobChunkRead {
-        digest: scalars::CanonicalBlobDigest,
-        offset_bytes: scalars::CanonicalU64,
-        bytes: scalars::BlobChunk,
+        digest: CanonicalBlobDigest,
+        offset_bytes: CanonicalU64,
+        bytes: BlobChunk,
     },
     ImportedConversationStart {
-        imported_conversation_id: scalars::CanonicalUuid,
+        imported_conversation_id: CanonicalUuid,
     },
     ImportedConversationEntry {
-        position: scalars::CanonicalU64,
-        imported_entry_id: scalars::CanonicalUuid,
+        position: CanonicalU64,
+        imported_entry_id: CanonicalUuid,
         source_speaker: ImportedSourceSpeaker,
         content_kind: ImportedContentKind,
         text_preview: option::Option<ImportedTextPreview>,
     },
     ImportedConversationEnd {
-        imported_conversation_id: scalars::CanonicalUuid,
-        entry_count: scalars::CanonicalU64,
+        imported_conversation_id: CanonicalUuid,
+        entry_count: CanonicalU64,
     },
     TranscriptSnapshotStart {
-        session_id: scalars::CanonicalUuid,
-        cursor: scalars::CanonicalU64,
+        session_id: CanonicalUuid,
+        cursor: CanonicalU64,
         runner: option::Option<RunnerProjection>,
     },
     TranscriptTurn {
-        turn_id: scalars::CanonicalUuid,
-        acceptance_position: scalars::CanonicalU64,
+        turn_id: CanonicalUuid,
+        acceptance_position: CanonicalU64,
         model_settings: option::Option<TurnModelSettingsSnapshot>,
         state: TurnState,
     },
     TranscriptModelCallUsage {
-        model_call_index: scalars::CanonicalU64,
-        turn_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
-        usage_provenance: scalars::UsageProvenance,
-        usage: scalars::ModelCallTokenUsage,
-        cost: option::Option<scalars::ModelCallDollarCost>,
+        model_call_index: CanonicalU64,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        usage_provenance: UsageProvenance,
+        usage: ModelCallTokenUsage,
+        cost: option::Option<ModelCallDollarCost>,
     },
     TranscriptModelCallsEnd {
-        model_call_count: scalars::CanonicalU64,
+        model_call_count: CanonicalU64,
     },
     TranscriptEntry {
-        entry_index: scalars::CanonicalU64,
-        source_session_id: scalars::CanonicalUuid,
-        entry_id: scalars::CanonicalUuid,
+        entry_index: CanonicalU64,
+        source_session_id: CanonicalUuid,
+        entry_id: CanonicalUuid,
         entry: TranscriptEntry,
     },
     TranscriptUserEntry {
-        entry_index: scalars::CanonicalU64,
-        source_session_id: scalars::CanonicalUuid,
-        entry_id: scalars::CanonicalUuid,
-        accepted_input_id: scalars::CanonicalUuid,
-        turn_id: scalars::CanonicalUuid,
+        entry_index: CanonicalU64,
+        source_session_id: CanonicalUuid,
+        entry_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
         content: UserInputContent,
     },
     TranscriptTextEntry {
-        entry_index: scalars::CanonicalU64,
-        source_session_id: scalars::CanonicalUuid,
-        entry_id: scalars::CanonicalUuid,
+        entry_index: CanonicalU64,
+        source_session_id: CanonicalUuid,
+        entry_id: CanonicalUuid,
         entry: TranscriptTextEntry,
     },
     TranscriptContent {
-        entry_index: scalars::CanonicalU64,
-        fragment_index: scalars::CanonicalU64,
+        entry_index: CanonicalU64,
+        fragment_index: CanonicalU64,
         final_fragment: bool,
-        content_fragment: scalars::ContentFragment,
+        content_fragment: ContentFragment,
     },
     TranscriptSnapshotEnd {
-        session_id: scalars::CanonicalUuid,
-        cursor: scalars::CanonicalU64,
-        turn_count: scalars::CanonicalU64,
-        entry_count: scalars::CanonicalU64,
+        session_id: CanonicalUuid,
+        cursor: CanonicalU64,
+        turn_count: CanonicalU64,
+        entry_count: CanonicalU64,
     },
     SessionEvent {
-        cursor: scalars::CanonicalU64,
-        session_id: scalars::CanonicalUuid,
+        cursor: CanonicalU64,
+        session_id: CanonicalUuid,
         event: SessionEvent,
     },
     ProviderTextDelta {
-        session_id: scalars::CanonicalUuid,
-        turn_id: scalars::CanonicalUuid,
-        model_call_id: scalars::CanonicalUuid,
-        part_index: scalars::CanonicalU64,
-        content: scalars::ContentFragment,
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        part_index: CanonicalU64,
+        content: ContentFragment,
     },
     ReviewTargetCreated {
-        target_id: scalars::CanonicalUuid,
+        target_id: CanonicalUuid,
     },
     ReviewRunStarted {
-        run_id: scalars::CanonicalUuid,
-        pass_id: scalars::CanonicalUuid,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
     },
     ReviewPassActivated {
-        run_id: scalars::CanonicalUuid,
-        pass_id: scalars::CanonicalUuid,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
     },
     ReviewPassCompleted {
-        run_id: scalars::CanonicalUuid,
-        pass_id: scalars::CanonicalUuid,
-        state: review::ReviewPassLifecycle,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        state: ReviewPassLifecycle,
     },
     ReviewFindingsRecorded {
-        run_id: scalars::CanonicalUuid,
-        pass_id: scalars::CanonicalUuid,
-        finding_count: scalars::CanonicalU64,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        finding_count: CanonicalU64,
     },
     ReviewFindingEventRecorded {
-        finding_id: scalars::CanonicalUuid,
-        status: review::ReviewFindingStatus,
+        finding_id: CanonicalUuid,
+        status: ReviewFindingStatus,
     },
     ReviewExternalLinkReserved {
-        external_link_id: scalars::CanonicalUuid,
+        external_link_id: CanonicalUuid,
     },
     ReviewExternalLinkAttached {
-        external_link_id: scalars::CanonicalUuid,
+        external_link_id: CanonicalUuid,
         external_object: string::String,
     },
     ReviewTarget {
-        target: review::ReviewTargetSnapshot,
+        target: ReviewTargetSnapshot,
     },
     ReviewRun {
-        run: review::ReviewRunSnapshot,
-        pass: option::Option<review::ReviewPassSnapshot>,
+        run: ReviewRunSnapshot,
+        pass: option::Option<ReviewPassSnapshot>,
     },
     ReviewFinding {
-        finding: review::ReviewFindingSnapshot,
+        finding: ReviewFindingSnapshot,
     },
     ReviewFindingsStart {
-        run_id: scalars::CanonicalUuid,
+        run_id: CanonicalUuid,
     },
     ReviewFindingItem {
-        finding: review::ReviewFindingSnapshot,
+        finding: ReviewFindingSnapshot,
     },
     ReviewFindingsEnd {
-        finding_count: scalars::CanonicalU64,
+        finding_count: CanonicalU64,
     },
     ReviewOrchestrationStarted {
-        attempt_id: scalars::CanonicalUuid,
+        attempt_id: CanonicalUuid,
     },
     ReviewOrchestrationAdvanced {
-        attempt_id: scalars::CanonicalUuid,
-        state: review::ReviewOrchestrationState,
+        attempt_id: CanonicalUuid,
+        state: ReviewOrchestrationState,
     },
     ReviewOrchestration {
-        snapshot: review::ReviewOrchestrationSnapshot,
+        snapshot: ReviewOrchestrationSnapshot,
     },
     Error {
         code: ErrorCode,
@@ -782,7 +766,6 @@ pub enum ServerMessage {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for ServerMessage where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ServerFrame
@@ -790,22 +773,21 @@ impl<T> de::DeserializeOwned for ServerMessage where T: for<'de> de::Deserialize
 ```rust
 pub struct ServerFrame {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> de::DeserializeOwned for ServerFrame where T: for<'de> de::Deserialize<'de> {}
 impl ServerFrame {
     pub const fn message(&self) -> &ServerMessage;
 }
 impl ServerFrame {
     pub fn try_new(
-        request_id: scalars::RequestId,
+        request_id: RequestId,
         message: ServerMessage,
-    ) -> result::Result<Self, scalars::FrameValidationError>;
+    ) -> result::Result<Self, FrameValidationError>;
     pub fn try_new_for_version(
-        version: scalars::ProtocolVersion,
-        request_id: scalars::RequestId,
+        version: ProtocolVersion,
+        request_id: RequestId,
         message: ServerMessage,
-    ) -> result::Result<Self, scalars::FrameValidationError>;
-    pub const fn version(&self) -> scalars::ProtocolVersion;
-    pub const fn request_id(&self) -> scalars::RequestId;
+    ) -> result::Result<Self, FrameValidationError>;
+    pub const fn version(&self) -> ProtocolVersion;
+    pub const fn request_id(&self) -> RequestId;
 }
 impl<'de> de::Deserialize<'de> for ServerFrame {
     fn deserialize<DeserializerT>(

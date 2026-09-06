@@ -47,7 +47,6 @@ pub struct ReadFileArguments {
     pub offset: u64,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for ReadFileArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ListDirectoryArguments
@@ -58,7 +57,6 @@ pub struct ListDirectoryArguments {
     pub max_results: usize,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for ListDirectoryArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## GlobFilesArguments
@@ -70,7 +68,6 @@ pub struct GlobFilesArguments {
     pub max_results: usize,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for GlobFilesArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## SearchFilesArguments
@@ -83,7 +80,6 @@ pub struct SearchFilesArguments {
     pub max_results: usize,
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for SearchFilesArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceReadToolConstructionError
@@ -110,12 +106,6 @@ impl error::Error for WorkspaceReadToolConstructionError {
 ```rust
 pub struct WorkspaceReadTools<FileSystem> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for WorkspaceReadTools<FileSystem>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<FileSystem: WorkspaceFileSystem> WorkspaceReadTools<FileSystem> {
     pub fn try_new(
         filesystem: FileSystem,
@@ -124,7 +114,7 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadTools<FileSystem> {
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         WorkspaceReadExecutor<FileSystem>,
     );
 }
@@ -135,22 +125,16 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadTools<FileSystem> {
 ```rust
 pub struct WorkspaceReadExecutor<FileSystem> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for WorkspaceReadExecutor<FileSystem>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<FileSystem: WorkspaceFileSystem> tool_loop::ToolExecutor
+impl<FileSystem: WorkspaceFileSystem> signalbox_application::ToolExecutor
     for WorkspaceReadExecutor<FileSystem>
 {
     type Error = WorkspaceReadExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -163,20 +147,14 @@ pub enum WorkspaceReadExecutorError {
     ResultEncoding,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspaceReadExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for WorkspaceReadExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for WorkspaceReadExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for WorkspaceReadExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for WorkspaceReadExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -193,12 +171,6 @@ pub struct ReadFileResult {
     pub truncated: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for ReadFileResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## GlobMatch
@@ -209,12 +181,6 @@ pub struct GlobMatch {
     pub kind: WorkspaceEntryKind,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for GlobMatch
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ListDirectoryResult
@@ -225,12 +191,6 @@ pub struct ListDirectoryResult {
     pub truncated: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for ListDirectoryResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## GlobFilesResult
@@ -241,12 +201,6 @@ pub struct GlobFilesResult {
     pub truncated: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for GlobFilesResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## SearchMatch
@@ -261,12 +215,6 @@ pub struct SearchMatch {
     pub line_truncated: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for SearchMatch
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## SearchFilesResult
@@ -277,10 +225,4 @@ pub struct SearchFilesResult {
     pub truncated: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for SearchFilesResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```

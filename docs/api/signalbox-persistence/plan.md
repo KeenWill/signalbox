@@ -21,60 +21,6 @@ pub enum SessionPlanCorruption {
     UntrustedProvenance,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for plan::SessionPlanCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for plan::SessionPlanCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for plan::SessionPlanCorruption {}
-impl<T> parse_display::IntoResult<T> for plan::SessionPlanCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for plan::SessionPlanCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for plan::SessionPlanCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for plan::SessionPlanCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for plan::SessionPlanCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for plan::SessionPlanCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for plan::SessionPlanCorruption
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for plan::SessionPlanCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -96,48 +42,6 @@ pub enum SessionPlanRepositoryError {
     DuplicateAppendAttempt,
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for plan::SessionPlanRepositoryError {}
-impl<T> parse_display::IntoResult<T> for plan::SessionPlanRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for plan::SessionPlanRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for plan::SessionPlanRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for plan::SessionPlanRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for plan::SessionPlanRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for plan::SessionPlanRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for plan::SessionPlanRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for plan::SessionPlanRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -150,8 +54,8 @@ impl convert::From<error::Error> for plan::SessionPlanRepositoryError {
 impl convert::From<plan::SessionPlanCorruption> for plan::SessionPlanRepositoryError {
     fn from(error: plan::SessionPlanCorruption) -> Self;
 }
-impl operator_failure::ClassifyOperatorFailure for plan::SessionPlanRepositoryError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for plan::SessionPlanRepositoryError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -160,60 +64,6 @@ impl operator_failure::ClassifyOperatorFailure for plan::SessionPlanRepositoryEr
 ```rust
 pub struct SessionPlanRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for plan::SessionPlanRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for plan::SessionPlanRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for plan::SessionPlanRepository {}
-impl<T> parse_display::IntoResult<T> for plan::SessionPlanRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for plan::SessionPlanRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for plan::SessionPlanRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for plan::SessionPlanRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for plan::SessionPlanRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for plan::SessionPlanRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for plan::SessionPlanRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl plan::SessionPlanRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn append(

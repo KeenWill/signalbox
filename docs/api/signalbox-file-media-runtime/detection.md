@@ -79,7 +79,6 @@ pub enum ValidationEvidence {
     StreamingTextValidation,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for ValidationEvidence where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ValidatedFile
@@ -210,7 +209,6 @@ pub enum ProcessorProbeOutput {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for ProcessorProbeOutput where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ProcessorValidationOutput
@@ -232,7 +230,6 @@ pub enum ProcessorValidationOutput {
     NoMatch,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for ProcessorValidationOutput where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ProcessorReadOutput
@@ -260,7 +257,6 @@ pub enum ProcessorReadOutput {
     OutputUnitTooLarge,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for ProcessorReadOutput where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ProcessorFailure
@@ -274,7 +270,6 @@ pub enum ProcessorFailure {
     Protocol,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for ProcessorFailure where T: for<'de> de::Deserialize<'de> {}
 impl fmt::Display for ProcessorFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

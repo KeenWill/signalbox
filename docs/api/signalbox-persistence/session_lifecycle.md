@@ -14,60 +14,6 @@ pub enum SessionLifecycleCorruption {
     Inconsistent(&'static str),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_lifecycle::SessionLifecycleCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for session_lifecycle::SessionLifecycleCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_lifecycle::SessionLifecycleCorruption {}
-impl<T> parse_display::IntoResult<T> for session_lifecycle::SessionLifecycleCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_lifecycle::SessionLifecycleCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for session_lifecycle::SessionLifecycleCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle::SessionLifecycleCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_lifecycle::SessionLifecycleCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_lifecycle::SessionLifecycleCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_lifecycle::SessionLifecycleCorruption
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for session_lifecycle::SessionLifecycleCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -94,60 +40,6 @@ pub enum SessionLifecycleRejection {
     FinishConditionAlreadyDeclared,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_lifecycle::SessionLifecycleRejection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for session_lifecycle::SessionLifecycleRejection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_lifecycle::SessionLifecycleRejection {}
-impl<T> parse_display::IntoResult<T> for session_lifecycle::SessionLifecycleRejection {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_lifecycle::SessionLifecycleRejection
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for session_lifecycle::SessionLifecycleRejection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle::SessionLifecycleRejection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_lifecycle::SessionLifecycleRejection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_lifecycle::SessionLifecycleRejection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_lifecycle::SessionLifecycleRejection
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for session_lifecycle::SessionLifecycleRejection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -165,48 +57,6 @@ pub enum SessionLifecycleRepositoryError {
     Corruption(session_lifecycle::SessionLifecycleCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for session_lifecycle::SessionLifecycleRepositoryError {}
-impl<T> parse_display::IntoResult<T> for session_lifecycle::SessionLifecycleRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_lifecycle::SessionLifecycleRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for session_lifecycle::SessionLifecycleRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle::SessionLifecycleRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_lifecycle::SessionLifecycleRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_lifecycle::SessionLifecycleRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_lifecycle::SessionLifecycleRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for session_lifecycle::SessionLifecycleRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -233,73 +83,16 @@ impl convert::From<goal::GoalRepositoryError>
 ```rust
 pub struct SessionLifecycleRecord {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_lifecycle::SessionLifecycleRecord
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for session_lifecycle::SessionLifecycleRecord
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_lifecycle::SessionLifecycleRecord {}
-impl<T> parse_display::IntoResult<T> for session_lifecycle::SessionLifecycleRecord {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_lifecycle::SessionLifecycleRecord
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for session_lifecycle::SessionLifecycleRecord {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle::SessionLifecycleRecord {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_lifecycle::SessionLifecycleRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_lifecycle::SessionLifecycleRecord
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_lifecycle::SessionLifecycleRecord
-where
-    T: ?marker::Sized,
-{
-}
 impl session_lifecycle::SessionLifecycleRecord {
     pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub const fn state(&self) -> session_lifecycle::SessionLifecycleState;
-    pub const fn ownership(&self) -> session_lifecycle::SessionOwnership;
-    pub const fn actor(&self) -> session_lifecycle::LifecycleActor;
+    pub const fn state(&self) -> signalbox_domain::SessionLifecycleState;
+    pub const fn ownership(&self) -> signalbox_domain::SessionOwnership;
+    pub const fn actor(&self) -> signalbox_domain::LifecycleActor;
     pub const fn pending_terminal(
         &self,
-    ) -> option::Option<session_lifecycle::SessionTerminalOutcome>;
-    pub const fn pending_terminal_actor(&self)
-        -> option::Option<session_lifecycle::LifecycleActor>;
-    pub const fn finish_condition(
-        &self,
-    ) -> option::Option<&session_lifecycle_command::FinishCondition>;
+    ) -> option::Option<signalbox_domain::SessionTerminalOutcome>;
+    pub const fn pending_terminal_actor(&self) -> option::Option<signalbox_domain::LifecycleActor>;
+    pub const fn finish_condition(&self) -> option::Option<&signalbox_domain::FinishCondition>;
 }
 ```
 
@@ -308,60 +101,6 @@ impl session_lifecycle::SessionLifecycleRecord {
 ```rust
 pub struct SessionLifecycleRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for session_lifecycle::SessionLifecycleRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for session_lifecycle::SessionLifecycleRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_lifecycle::SessionLifecycleRepository {}
-impl<T> parse_display::IntoResult<T> for session_lifecycle::SessionLifecycleRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_lifecycle::SessionLifecycleRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for session_lifecycle::SessionLifecycleRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle::SessionLifecycleRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_lifecycle::SessionLifecycleRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_lifecycle::SessionLifecycleRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_lifecycle::SessionLifecycleRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl session_lifecycle::SessionLifecycleRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn load(
@@ -374,52 +113,52 @@ impl session_lifecycle::SessionLifecycleRepository {
     pub async fn park(
         &self,
         session: signalbox_domain::SessionId,
-        cause: session_lifecycle::SessionParkCause,
-        responder: session_lifecycle::SessionParkResponder,
-        standing: option::Option<session_lifecycle::SessionFailureCause>,
-        actor: session_lifecycle::LifecycleActor,
+        cause: signalbox_domain::SessionParkCause,
+        responder: signalbox_domain::SessionParkResponder,
+        standing: option::Option<signalbox_domain::SessionFailureCause>,
+        actor: signalbox_domain::LifecycleActor,
     ) -> result::Result<
-        session_lifecycle::SessionLifecycleState,
+        signalbox_domain::SessionLifecycleState,
         session_lifecycle::SessionLifecycleRepositoryError,
     >;
     pub async fn resume(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        session_lifecycle::SessionLifecycleState,
+        signalbox_domain::SessionLifecycleState,
         session_lifecycle::SessionLifecycleRepositoryError,
     >;
     pub async fn close(
         &self,
         session: signalbox_domain::SessionId,
-        outcome: session_lifecycle::SessionTerminalOutcome,
-        actor: session_lifecycle::LifecycleActor,
+        outcome: signalbox_domain::SessionTerminalOutcome,
+        actor: signalbox_domain::LifecycleActor,
     ) -> result::Result<
-        session_lifecycle::SessionLifecycleState,
+        signalbox_domain::SessionLifecycleState,
         session_lifecycle::SessionLifecycleRepositoryError,
     >;
     pub async fn commit_pending_terminal(
         &self,
         session: signalbox_domain::SessionId,
-        outcome: session_lifecycle::SessionTerminalOutcome,
-        actor: session_lifecycle::LifecycleActor,
+        outcome: signalbox_domain::SessionTerminalOutcome,
+        actor: signalbox_domain::LifecycleActor,
     ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>;
     pub async fn settle_pending_terminal(
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        session_lifecycle::SessionLifecycleState,
+        signalbox_domain::SessionLifecycleState,
         session_lifecycle::SessionLifecycleRepositoryError,
     >;
     pub async fn adopt(
         &self,
         session: signalbox_domain::SessionId,
-        actor: session_lifecycle::LifecycleActor,
+        actor: signalbox_domain::LifecycleActor,
     ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>;
     pub async fn release(
         &self,
         session: signalbox_domain::SessionId,
-        actor: session_lifecycle::LifecycleActor,
+        actor: signalbox_domain::LifecycleActor,
     ) -> result::Result<(), session_lifecycle::SessionLifecycleRepositoryError>;
 }
 ```

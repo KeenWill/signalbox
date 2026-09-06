@@ -15,8 +15,7 @@ pub enum ProtocolVersion {
     One,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> de::DeserializeOwned for scalars::ProtocolVersion where T: for<'de> de::Deserialize<'de> {}
-impl ser::Serialize for scalars::ProtocolVersion {
+impl ser::Serialize for ProtocolVersion {
     fn serialize<SerializerT>(
         &self,
         serializer: SerializerT,
@@ -24,7 +23,7 @@ impl ser::Serialize for scalars::ProtocolVersion {
     where
         SerializerT: ser::Serializer;
 }
-impl<'de> de::Deserialize<'de> for scalars::ProtocolVersion {
+impl<'de> de::Deserialize<'de> for ProtocolVersion {
     fn deserialize<DeserializerT>(
         deserializer: DeserializerT,
     ) -> result::Result<Self, <DeserializerT as de::Deserializer>::Error>
@@ -116,17 +115,16 @@ pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize;
 ```rust
 pub struct CanonicalUuid(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> de::DeserializeOwned for scalars::CanonicalUuid where T: for<'de> de::Deserialize<'de> {}
-impl scalars::CanonicalUuid {
+impl CanonicalUuid {
     pub const fn into_uuid(self) -> uuid::Uuid;
 }
-impl scalars::CanonicalUuid {
+impl CanonicalUuid {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
 }
-impl fmt::Display for scalars::CanonicalUuid {
+impl fmt::Display for CanonicalUuid {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl ser::Serialize for scalars::CanonicalUuid {
+impl ser::Serialize for CanonicalUuid {
     fn serialize<SerializerT>(
         &self,
         serializer: SerializerT,
@@ -134,7 +132,7 @@ impl ser::Serialize for scalars::CanonicalUuid {
     where
         SerializerT: ser::Serializer;
 }
-impl<'de> de::Deserialize<'de> for scalars::CanonicalUuid {
+impl<'de> de::Deserialize<'de> for CanonicalUuid {
     fn deserialize<DeserializerT>(
         deserializer: DeserializerT,
     ) -> result::Result<Self, <DeserializerT as de::Deserializer>::Error>
@@ -148,15 +146,14 @@ impl<'de> de::Deserialize<'de> for scalars::CanonicalUuid {
 ```rust
 pub struct CommandId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> de::DeserializeOwned for scalars::CommandId where T: for<'de> de::Deserialize<'de> {}
-impl scalars::CommandId {
-    pub fn try_from_uuid(value: uuid::Uuid) -> result::Result<Self, scalars::CanonicalValueError>;
+impl CommandId {
+    pub fn try_from_uuid(value: uuid::Uuid) -> result::Result<Self, CanonicalValueError>;
     pub const fn into_uuid(self) -> uuid::Uuid;
 }
-impl fmt::Display for scalars::CommandId {
+impl fmt::Display for CommandId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl ser::Serialize for scalars::CommandId {
+impl ser::Serialize for CommandId {
     fn serialize<SerializerT>(
         &self,
         serializer: SerializerT,
@@ -164,7 +161,7 @@ impl ser::Serialize for scalars::CommandId {
     where
         SerializerT: ser::Serializer;
 }
-impl<'de> de::Deserialize<'de> for scalars::CommandId {
+impl<'de> de::Deserialize<'de> for CommandId {
     fn deserialize<DeserializerT>(
         deserializer: DeserializerT,
     ) -> result::Result<Self, <DeserializerT as de::Deserializer>::Error>
@@ -178,19 +175,18 @@ impl<'de> de::Deserialize<'de> for scalars::CommandId {
 ```rust
 pub struct CanonicalU64(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::CanonicalU64 where T: for<'de> de::Deserialize<'de> {}
-impl scalars::CanonicalU64 {
+impl CanonicalU64 {
     pub const fn value(self) -> u64;
 }
-impl scalars::CanonicalU64 {
+impl CanonicalU64 {
     pub const fn new(value: u64) -> Self;
 }
-impl convert::TryFrom<string::String> for scalars::CanonicalU64 {
-    type Error = scalars::CanonicalValueError;
+impl convert::TryFrom<string::String> for CanonicalU64 {
+    type Error = CanonicalValueError;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl convert::From<scalars::CanonicalU64> for string::String {
-    fn from(value: scalars::CanonicalU64) -> Self;
+impl convert::From<CanonicalU64> for string::String {
+    fn from(value: CanonicalU64) -> Self;
 }
 ```
 
@@ -199,23 +195,21 @@ impl convert::From<scalars::CanonicalU64> for string::String {
 ```rust
 pub struct PositiveCanonicalU64(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::PositiveCanonicalU64 where T: for<'de> de::Deserialize<'de>
-{}
-impl scalars::PositiveCanonicalU64 {
+impl PositiveCanonicalU64 {
     pub const fn value(self) -> u64;
 }
-impl scalars::PositiveCanonicalU64 {
-    pub const fn try_new(value: u64) -> result::Result<Self, scalars::CanonicalValueError>;
+impl PositiveCanonicalU64 {
+    pub const fn try_new(value: u64) -> result::Result<Self, CanonicalValueError>;
 }
-impl convert::TryFrom<string::String> for scalars::PositiveCanonicalU64 {
-    type Error = scalars::CanonicalValueError;
+impl convert::TryFrom<string::String> for PositiveCanonicalU64 {
+    type Error = CanonicalValueError;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl convert::From<scalars::PositiveCanonicalU64> for string::String {
-    fn from(value: scalars::PositiveCanonicalU64) -> Self;
+impl convert::From<PositiveCanonicalU64> for string::String {
+    fn from(value: PositiveCanonicalU64) -> Self;
 }
-impl convert::From<runner::RunnerGeneration> for scalars::PositiveCanonicalU64 {
-    fn from(value: runner::RunnerGeneration) -> Self;
+impl convert::From<signalbox_domain::RunnerGeneration> for PositiveCanonicalU64 {
+    fn from(value: signalbox_domain::RunnerGeneration) -> Self;
 }
 ```
 
@@ -224,20 +218,19 @@ impl convert::From<runner::RunnerGeneration> for scalars::PositiveCanonicalU64 {
 ```rust
 pub struct CanonicalDigest(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::CanonicalDigest where T: for<'de> de::Deserialize<'de> {}
-impl scalars::CanonicalDigest {
+impl CanonicalDigest {
     pub fn as_str(&self) -> &str;
 }
-impl scalars::CanonicalDigest {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
+impl CanonicalDigest {
+    pub fn try_new(value: string::String) -> result::Result<Self, CanonicalValueError>;
     pub fn into_string(self) -> string::String;
 }
-impl convert::TryFrom<string::String> for scalars::CanonicalDigest {
-    type Error = scalars::CanonicalValueError;
+impl convert::TryFrom<string::String> for CanonicalDigest {
+    type Error = CanonicalValueError;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl convert::From<scalars::CanonicalDigest> for string::String {
-    fn from(value: scalars::CanonicalDigest) -> Self;
+impl convert::From<CanonicalDigest> for string::String {
+    fn from(value: CanonicalDigest) -> Self;
 }
 ```
 
@@ -246,22 +239,21 @@ impl convert::From<scalars::CanonicalDigest> for string::String {
 ```rust
 pub struct CanonicalBlobDigest(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for scalars::CanonicalBlobDigest where T: for<'de> de::Deserialize<'de> {}
-impl scalars::CanonicalBlobDigest {
-    pub const fn into_digest(self) -> blob::BlobDigest;
+impl CanonicalBlobDigest {
+    pub const fn into_digest(self) -> signalbox_domain::BlobDigest;
 }
-impl scalars::CanonicalBlobDigest {
+impl CanonicalBlobDigest {
     pub const fn from_bytes(bytes: [u8; 32]) -> Self;
-    pub const fn from_digest(value: blob::BlobDigest) -> Self;
+    pub const fn from_digest(value: signalbox_domain::BlobDigest) -> Self;
 }
-impl traits::FromStr for scalars::CanonicalBlobDigest {
-    type Err = blob::BlobDigestParseError;
+impl traits::FromStr for CanonicalBlobDigest {
+    type Err = signalbox_domain::BlobDigestParseError;
     fn from_str(value: &str) -> result::Result<Self, <Self as traits::FromStr>::Err>;
 }
-impl fmt::Display for scalars::CanonicalBlobDigest {
+impl fmt::Display for CanonicalBlobDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl ser::Serialize for scalars::CanonicalBlobDigest {
+impl ser::Serialize for CanonicalBlobDigest {
     fn serialize<SerializerT>(
         &self,
         serializer: SerializerT,
@@ -269,7 +261,7 @@ impl ser::Serialize for scalars::CanonicalBlobDigest {
     where
         SerializerT: ser::Serializer;
 }
-impl<'de> de::Deserialize<'de> for scalars::CanonicalBlobDigest {
+impl<'de> de::Deserialize<'de> for CanonicalBlobDigest {
     fn deserialize<DeserializerT>(
         deserializer: DeserializerT,
     ) -> result::Result<Self, <DeserializerT as de::Deserializer>::Error>
@@ -283,20 +275,19 @@ impl<'de> de::Deserialize<'de> for scalars::CanonicalBlobDigest {
 ```rust
 pub struct RequestId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::RequestId where T: for<'de> de::Deserialize<'de> {}
-impl scalars::RequestId {
+impl RequestId {
     pub const fn value(self) -> u64;
 }
-impl scalars::RequestId {
-    pub fn try_new(value: u64) -> result::Result<Self, scalars::CanonicalValueError>;
+impl RequestId {
+    pub fn try_new(value: u64) -> result::Result<Self, CanonicalValueError>;
     pub const fn uncorrelated() -> Self;
 }
-impl convert::TryFrom<string::String> for scalars::RequestId {
-    type Error = scalars::CanonicalValueError;
+impl convert::TryFrom<string::String> for RequestId {
+    type Error = CanonicalValueError;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl convert::From<scalars::RequestId> for string::String {
-    fn from(value: scalars::RequestId) -> Self;
+impl convert::From<RequestId> for string::String {
+    fn from(value: RequestId) -> Self;
 }
 ```
 
@@ -305,11 +296,10 @@ impl convert::From<scalars::RequestId> for string::String {
 ```rust
 pub struct InputContent(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::InputContent where T: for<'de> de::Deserialize<'de> {}
-impl scalars::InputContent {
+impl InputContent {
     pub fn as_str(&self) -> &str;
 }
-impl scalars::InputContent {
+impl InputContent {
     pub fn new(value: string::String) -> Self;
     pub fn into_string(self) -> string::String;
 }
@@ -320,19 +310,18 @@ impl scalars::InputContent {
 ```rust
 pub struct ContentFragment(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::ContentFragment where T: for<'de> de::Deserialize<'de> {}
-impl scalars::ContentFragment {
+impl ContentFragment {
     pub fn as_str(&self) -> &str;
 }
-impl scalars::ContentFragment {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
+impl ContentFragment {
+    pub fn try_new(value: string::String) -> result::Result<Self, CanonicalValueError>;
 }
-impl convert::TryFrom<string::String> for scalars::ContentFragment {
-    type Error = scalars::CanonicalValueError;
+impl convert::TryFrom<string::String> for ContentFragment {
+    type Error = CanonicalValueError;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl convert::From<scalars::ContentFragment> for string::String {
-    fn from(value: scalars::ContentFragment) -> Self;
+impl convert::From<ContentFragment> for string::String {
+    fn from(value: ContentFragment) -> Self;
 }
 ```
 
@@ -340,13 +329,12 @@ impl convert::From<scalars::ContentFragment> for string::String {
 
 ```rust
 pub struct ModelCallTokenUsage {
-    pub input_tokens: option::Option<scalars::CanonicalU64>,
-    pub output_tokens: option::Option<scalars::CanonicalU64>,
-    pub cache_creation_input_tokens: option::Option<scalars::CanonicalU64>,
-    pub cache_read_input_tokens: option::Option<scalars::CanonicalU64>,
+    pub input_tokens: option::Option<CanonicalU64>,
+    pub output_tokens: option::Option<CanonicalU64>,
+    pub cache_creation_input_tokens: option::Option<CanonicalU64>,
+    pub cache_read_input_tokens: option::Option<CanonicalU64>,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::ModelCallTokenUsage where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## UsageProvenance
@@ -357,7 +345,6 @@ pub enum UsageProvenance {
     Estimated,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::UsageProvenance where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ModelCallCostLabel
@@ -368,7 +355,6 @@ pub enum ModelCallCostLabel {
     MeteredEquivalent,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::ModelCallCostLabel where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## CanonicalDollarAmount
@@ -376,22 +362,18 @@ impl<T> de::DeserializeOwned for scalars::ModelCallCostLabel where T: for<'de> d
 ```rust
 pub struct CanonicalDollarAmount(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::CanonicalDollarAmount where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl scalars::CanonicalDollarAmount {
+impl CanonicalDollarAmount {
     pub fn as_str(&self) -> &str;
 }
-impl scalars::CanonicalDollarAmount {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
+impl CanonicalDollarAmount {
+    pub fn try_new(value: string::String) -> result::Result<Self, CanonicalValueError>;
 }
-impl convert::TryFrom<string::String> for scalars::CanonicalDollarAmount {
-    type Error = scalars::CanonicalValueError;
+impl convert::TryFrom<string::String> for CanonicalDollarAmount {
+    type Error = CanonicalValueError;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl convert::From<scalars::CanonicalDollarAmount> for string::String {
-    fn from(value: scalars::CanonicalDollarAmount) -> Self;
+impl convert::From<CanonicalDollarAmount> for string::String {
+    fn from(value: CanonicalDollarAmount) -> Self;
 }
 ```
 
@@ -400,19 +382,18 @@ impl convert::From<scalars::CanonicalDollarAmount> for string::String {
 ```rust
 pub struct BillingRateVersion(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::BillingRateVersion where T: for<'de> de::Deserialize<'de> {}
-impl scalars::BillingRateVersion {
+impl BillingRateVersion {
     pub fn as_str(&self) -> &str;
 }
-impl scalars::BillingRateVersion {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
+impl BillingRateVersion {
+    pub fn try_new(value: string::String) -> result::Result<Self, CanonicalValueError>;
 }
-impl convert::TryFrom<string::String> for scalars::BillingRateVersion {
-    type Error = scalars::CanonicalValueError;
+impl convert::TryFrom<string::String> for BillingRateVersion {
+    type Error = CanonicalValueError;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl convert::From<scalars::BillingRateVersion> for string::String {
-    fn from(value: scalars::BillingRateVersion) -> Self;
+impl convert::From<BillingRateVersion> for string::String {
+    fn from(value: BillingRateVersion) -> Self;
 }
 ```
 
@@ -420,12 +401,11 @@ impl convert::From<scalars::BillingRateVersion> for string::String {
 
 ```rust
 pub struct ModelCallDollarCost {
-    pub amount_usd: scalars::CanonicalDollarAmount,
-    pub rate_version: scalars::BillingRateVersion,
-    pub label: scalars::ModelCallCostLabel,
+    pub amount_usd: CanonicalDollarAmount,
+    pub rate_version: BillingRateVersion,
+    pub label: ModelCallCostLabel,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::ModelCallDollarCost where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## SystemPromptText
@@ -433,20 +413,19 @@ impl<T> de::DeserializeOwned for scalars::ModelCallDollarCost where T: for<'de> 
 ```rust
 pub struct SystemPromptText(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::SystemPromptText where T: for<'de> de::Deserialize<'de> {}
-impl scalars::SystemPromptText {
+impl SystemPromptText {
     pub fn as_str(&self) -> &str;
 }
-impl scalars::SystemPromptText {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
+impl SystemPromptText {
+    pub fn try_new(value: string::String) -> result::Result<Self, CanonicalValueError>;
     pub fn into_string(self) -> string::String;
 }
-impl convert::TryFrom<string::String> for scalars::SystemPromptText {
-    type Error = scalars::CanonicalValueError;
+impl convert::TryFrom<string::String> for SystemPromptText {
+    type Error = CanonicalValueError;
     fn try_from(value: string::String) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
-impl convert::From<scalars::SystemPromptText> for string::String {
-    fn from(value: scalars::SystemPromptText) -> Self;
+impl convert::From<SystemPromptText> for string::String {
+    fn from(value: SystemPromptText) -> Self;
 }
 ```
 
@@ -455,13 +434,12 @@ impl convert::From<scalars::SystemPromptText> for string::String {
 ```rust
 pub struct SystemPromptMember(/* private */);
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl<T> de::DeserializeOwned for scalars::SystemPromptMember where T: for<'de> de::Deserialize<'de> {}
-impl scalars::SystemPromptMember {
+impl SystemPromptMember {
     pub const fn absent() -> Self;
-    pub const fn present(value: option::Option<scalars::SystemPromptText>) -> Self;
-    pub const fn value(&self) -> option::Option<&option::Option<scalars::SystemPromptText>>;
+    pub const fn present(value: option::Option<SystemPromptText>) -> Self;
+    pub const fn value(&self) -> option::Option<&option::Option<SystemPromptText>>;
 }
-impl ser::Serialize for scalars::SystemPromptMember {
+impl ser::Serialize for SystemPromptMember {
     fn serialize<SerializerT>(
         &self,
         serializer: SerializerT,
@@ -469,7 +447,7 @@ impl ser::Serialize for scalars::SystemPromptMember {
     where
         SerializerT: ser::Serializer;
 }
-impl<'de> de::Deserialize<'de> for scalars::SystemPromptMember {
+impl<'de> de::Deserialize<'de> for SystemPromptMember {
     fn deserialize<DeserializerT>(
         deserializer: DeserializerT,
     ) -> result::Result<Self, <DeserializerT as de::Deserializer>::Error>
@@ -481,7 +459,7 @@ impl<'de> de::Deserialize<'de> for scalars::SystemPromptMember {
 ## content_fragments
 
 ```rust
-pub fn content_fragments(value: &str) -> scalars::ContentFragments<'_>;
+pub fn content_fragments(value: &str) -> ContentFragments<'_>;
 ```
 
 ## ContentFragments
@@ -489,16 +467,8 @@ pub fn content_fragments(value: &str) -> scalars::ContentFragments<'_>;
 ```rust
 pub struct ContentFragments<'a> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<I> collect::IntoIterator for scalars::ContentFragments<'a>
-where
-    I: iterator::Iterator,
-{
-    type Item = <I as iterator::Iterator>::Item;
-    type IntoIter = I;
-    fn into_iter(self) -> I;
-}
-impl iterator::Iterator for scalars::ContentFragments<'_> {
-    type Item = scalars::ContentFragment;
+impl iterator::Iterator for ContentFragments<'_> {
+    type Item = ContentFragment;
     fn next(&mut self) -> option::Option<<Self as iterator::Iterator>::Item>;
 }
 ```
@@ -523,10 +493,10 @@ pub enum CanonicalValueError {
     RateVersion,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for scalars::CanonicalValueError {
+impl fmt::Display for CanonicalValueError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for scalars::CanonicalValueError {
+impl error::Error for CanonicalValueError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
@@ -539,10 +509,6 @@ pub enum ConversationImportFormat {
     CodexRolloutJsonlV1,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::ConversationImportFormat where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ConversationImportRejectionClass
@@ -568,10 +534,6 @@ pub enum ConversationImportRejectionClass {
     InvalidToolResult,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::ConversationImportRejectionClass where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ConversationImportSource
@@ -579,18 +541,14 @@ impl<T> de::DeserializeOwned for scalars::ConversationImportRejectionClass where
 ```rust
 pub struct ConversationImportSource(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> de::DeserializeOwned for scalars::ConversationImportSource where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl scalars::ConversationImportSource {
+impl ConversationImportSource {
     pub fn as_bytes(&self) -> &[u8];
 }
-impl scalars::ConversationImportSource {
+impl ConversationImportSource {
     pub fn new(bytes: vec::Vec<u8>) -> Self;
     pub fn into_bytes(self) -> vec::Vec<u8>;
 }
-impl ser::Serialize for scalars::ConversationImportSource {
+impl ser::Serialize for ConversationImportSource {
     fn serialize<SerializerT>(
         &self,
         serializer: SerializerT,
@@ -598,7 +556,7 @@ impl ser::Serialize for scalars::ConversationImportSource {
     where
         SerializerT: ser::Serializer;
 }
-impl<'de> de::Deserialize<'de> for scalars::ConversationImportSource {
+impl<'de> de::Deserialize<'de> for ConversationImportSource {
     fn deserialize<DeserializerT>(
         deserializer: DeserializerT,
     ) -> result::Result<Self, <DeserializerT as de::Deserializer>::Error>
@@ -612,8 +570,7 @@ impl<'de> de::Deserialize<'de> for scalars::ConversationImportSource {
 ```rust
 pub struct BlobChunk(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for scalars::BlobChunk where T: for<'de> de::Deserialize<'de> {}
-impl scalars::BlobChunk {
+impl BlobChunk {
     pub fn new(bytes: vec::Vec<u8>) -> Self;
     pub fn as_bytes(&self) -> &[u8];
     pub fn into_bytes(self) -> vec::Vec<u8>;
@@ -655,10 +612,10 @@ pub enum FrameValidationError {
     DispatchFenceShape,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for scalars::FrameValidationError {
+impl fmt::Display for FrameValidationError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for scalars::FrameValidationError {
+impl error::Error for FrameValidationError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
@@ -679,35 +636,35 @@ pub enum FrameDecodeErrorKind {
 ```rust
 pub struct FrameDecodeError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl scalars::FrameDecodeError {
-    pub const fn kind(&self) -> scalars::FrameDecodeErrorKind;
-    pub const fn request_id(&self) -> scalars::RequestId;
+impl FrameDecodeError {
+    pub const fn kind(&self) -> FrameDecodeErrorKind;
+    pub const fn request_id(&self) -> RequestId;
 }
-impl fmt::Display for scalars::FrameDecodeError {
+impl fmt::Display for FrameDecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for scalars::FrameDecodeError {}
+impl error::Error for FrameDecodeError {}
 ```
 
 ## FrameEncodeError
 
 ```rust
 pub enum FrameEncodeError {
-    Validation(scalars::FrameValidationError),
+    Validation(FrameValidationError),
     Json(error::Error),
     OversizedFrame,
 }
 // derives: fmt::Debug
-impl fmt::Display for scalars::FrameEncodeError {
+impl fmt::Display for FrameEncodeError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for scalars::FrameEncodeError {
+impl error::Error for FrameEncodeError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl convert::From<scalars::FrameValidationError> for scalars::FrameEncodeError {
-    fn from(error: scalars::FrameValidationError) -> Self;
+impl convert::From<FrameValidationError> for FrameEncodeError {
+    fn from(error: FrameValidationError) -> Self;
 }
-impl convert::From<error::Error> for scalars::FrameEncodeError {
+impl convert::From<error::Error> for FrameEncodeError {
     fn from(error: error::Error) -> Self;
 }
 ```
@@ -715,13 +672,11 @@ impl convert::From<error::Error> for scalars::FrameEncodeError {
 ## recover_bounded_client_request_id
 
 ```rust
-pub fn recover_bounded_client_request_id(content: &[u8]) -> scalars::RequestId;
+pub fn recover_bounded_client_request_id(content: &[u8]) -> RequestId;
 ```
 
 ## recover_bounded_client_protocol_version
 
 ```rust
-pub fn recover_bounded_client_protocol_version(
-    content: &[u8],
-) -> option::Option<scalars::ProtocolVersion>;
+pub fn recover_bounded_client_protocol_version(content: &[u8]) -> option::Option<ProtocolVersion>;
 ```

@@ -10,12 +10,6 @@ pub struct TerminalReport<C> {
     pub evidence: TerminalEvidence,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for TerminalReport<C>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## TerminalEvidence
@@ -35,12 +29,6 @@ pub enum TerminalEvidence {
     BoundaryLoss(BoundaryLossEvidence),
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for TerminalEvidence
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ExchangeFacts
@@ -52,12 +40,6 @@ pub struct ExchangeFacts {
     pub retry_after: option::Option<time::Duration>,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, default::Default
-impl<T> dyn_clone::DynClone for ExchangeFacts
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## parse_retry_after
@@ -71,12 +53,6 @@ pub fn parse_retry_after(value: &str, now: time::SystemTime) -> option::Option<t
 ```rust
 pub struct ProviderRequestId(/* private */);
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ProviderRequestId
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ProviderRequestId {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -88,12 +64,6 @@ impl ProviderRequestId {
 ```rust
 pub struct ProviderMessageId(/* private */);
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ProviderMessageId
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ProviderMessageId {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -117,12 +87,6 @@ pub enum FinishReason {
     },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for FinishReason
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl FinishReason {
     pub fn completion_finish(self) -> option::Option<CompletionFinish>;
 }
@@ -147,12 +111,6 @@ pub enum CompletionFinish {
     },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for CompletionFinish
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CompletionEvidence
@@ -167,12 +125,6 @@ pub struct CompletionEvidence {
     pub usage: TokenUsage,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for CompletionEvidence
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## RefusalEvidence
@@ -188,12 +140,6 @@ pub struct RefusalEvidence {
     pub retained_output_tokens: option::Option<u64>,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for RefusalEvidence
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProviderErrorEvidence
@@ -208,12 +154,6 @@ pub struct ProviderErrorEvidence {
     pub usage: TokenUsage,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ProviderErrorEvidence
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProviderErrorKind
@@ -232,12 +172,6 @@ pub enum ProviderErrorKind {
     Unrecognized,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ProviderErrorKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## NativeErrorFacts
@@ -249,12 +183,6 @@ pub struct NativeErrorFacts {
     pub message: option::Option<string::String>,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, default::Default
-impl<T> dyn_clone::DynClone for NativeErrorFacts
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CancellationConfirmedEvidence
@@ -266,12 +194,6 @@ pub struct CancellationConfirmedEvidence {
     pub native: NativeErrorFacts,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for CancellationConfirmedEvidence
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProvenUnsentEvidence
@@ -281,12 +203,6 @@ pub struct ProvenUnsentEvidence {
     pub cause: UnsentCause,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ProvenUnsentEvidence
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## UnsentCause
@@ -298,12 +214,6 @@ pub enum UnsentCause {
     SendIncompleteProvenUnacceptable(TransportFacts),
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for UnsentCause
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## BoundaryLossEvidence
@@ -318,12 +228,6 @@ pub struct BoundaryLossEvidence {
     pub usage: TokenUsage,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for BoundaryLossEvidence
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ToolCallsAtLoss
@@ -335,12 +239,6 @@ pub enum ToolCallsAtLoss {
     Unobserved,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ToolCallsAtLoss
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## LossCause
@@ -357,12 +255,6 @@ pub enum LossCause {
     StreamProtocolViolation { detail: string::String },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for LossCause
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## StreamInterruption
@@ -374,12 +266,6 @@ pub enum StreamInterruption {
     TimedOut(TransportFacts),
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for StreamInterruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## TransportFacts
@@ -389,12 +275,6 @@ pub struct TransportFacts {
     pub detail: string::String,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for TransportFacts
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl TransportFacts {
     pub fn new(detail: impl convert::Into<string::String>) -> Self;
 }

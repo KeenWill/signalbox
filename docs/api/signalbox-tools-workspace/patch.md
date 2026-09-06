@@ -25,12 +25,6 @@ pub const MAX_PATCH_HUNKS: usize;
 ```rust
 pub struct WorkspacePatch {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for WorkspacePatch
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl WorkspacePatch {
     pub fn parse(input: &str) -> result::Result<Self, PatchParseError>;
     pub fn operations(&self) -> &[PatchOperation];
@@ -58,12 +52,6 @@ pub enum PatchOperation {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PatchOperation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PatchOperation {
     pub fn path(&self) -> &str;
 }
@@ -74,12 +62,6 @@ impl PatchOperation {
 ```rust
 pub struct PatchHunk {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PatchHunk
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PatchHunk {
     pub fn before(&self) -> &str;
     pub fn after(&self) -> &str;
@@ -95,12 +77,6 @@ pub struct PatchLocation {
     pub hunk: option::Option<usize>,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PatchLocation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ExpectedPatchSyntax
@@ -115,12 +91,6 @@ pub enum ExpectedPatchSyntax {
     EndPatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ExpectedPatchSyntax
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## MalformedPatchReason
@@ -137,12 +107,6 @@ pub enum MalformedPatchReason {
     DeleteHasBody,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for MalformedPatchReason
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PatchPathRejection
@@ -154,12 +118,6 @@ pub enum PatchPathRejection {
     Invalid,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PatchPathRejection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PatchParseErrorKind
@@ -188,12 +146,6 @@ pub enum PatchParseErrorKind {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PatchParseErrorKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PatchParseError
@@ -204,12 +156,6 @@ pub struct PatchParseError {
     pub kind: PatchParseErrorKind,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PatchParseError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for PatchParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -227,12 +173,6 @@ pub fn parse_patch(input: &str) -> result::Result<WorkspacePatch, PatchParseErro
 ```rust
 pub struct PatchPlan {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PatchPlan
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PatchPlan {
     pub fn operations(&self) -> &[PlannedPatchOperation];
 }
@@ -255,12 +195,6 @@ pub enum PlannedPatchOperation {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlannedPatchOperation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlannedPatchOperation {
     pub fn path(&self) -> &str;
 }
@@ -277,12 +211,6 @@ pub enum PatchApplyErrorKind {
     OverlappingHunks { first_hunk: usize },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PatchApplyErrorKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PatchApplyError
@@ -295,12 +223,6 @@ pub struct PatchApplyError {
     pub kind: PatchApplyErrorKind,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PatchApplyError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for PatchApplyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

@@ -7,16 +7,16 @@
 ```rust
 pub struct LocalGitExecutor<FileSystem> {/* private */}
 // derives: fmt::Debug
-impl<FileSystem: path::WorkspaceFileSystem> tool_loop::ToolExecutor
+impl<FileSystem: signalbox_tools_workspace::WorkspaceFileSystem> signalbox_application::ToolExecutor
     for LocalGitExecutor<FileSystem>
 {
     type Error = LocalGitExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -26,19 +26,13 @@ impl<FileSystem: path::WorkspaceFileSystem> tool_loop::ToolExecutor
 ```rust
 pub struct LocalGitExecutorError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for LocalGitExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for LocalGitExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for LocalGitExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for LocalGitExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for LocalGitExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```

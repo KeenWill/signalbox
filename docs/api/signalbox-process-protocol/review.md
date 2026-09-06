@@ -6,27 +6,25 @@
 
 ```rust
 pub enum ReviewTargetSubject {
-    ChangeRequest { number: scalars::CanonicalU64 },
+    ChangeRequest { number: CanonicalU64 },
     Commit {},
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewTargetSubject where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewTargetSnapshot
 
 ```rust
 pub struct ReviewTargetSnapshot {
-    pub target_id: scalars::CanonicalUuid,
+    pub target_id: CanonicalUuid,
     pub provider: string::String,
     pub repository: string::String,
-    pub subject: review::ReviewTargetSubject,
+    pub subject: ReviewTargetSubject,
     pub head_revision: string::String,
     pub base_revision: option::Option<string::String>,
-    pub stack_parent_target_id: option::Option<scalars::CanonicalUuid>,
+    pub stack_parent_target_id: option::Option<CanonicalUuid>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewTargetSnapshot where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewWorkflow
@@ -42,7 +40,6 @@ pub enum ReviewWorkflow {
     PropagateStack,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewWorkflow where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewPassKind
@@ -58,7 +55,6 @@ pub enum ReviewPassKind {
     PropagateStack,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewPassKind where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewRunLifecycle
@@ -73,7 +69,6 @@ pub enum ReviewRunLifecycle {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewRunLifecycle where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewPassLifecycle
@@ -88,43 +83,40 @@ pub enum ReviewPassLifecycle {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewPassLifecycle where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewRunSnapshot
 
 ```rust
 pub struct ReviewRunSnapshot {
-    pub target_id: scalars::CanonicalUuid,
-    pub run_id: scalars::CanonicalUuid,
-    pub workflow: review::ReviewWorkflow,
-    pub policy_version: scalars::CanonicalU64,
-    pub minimum_judge_confidence: scalars::CanonicalU64,
-    pub minimum_publication_confidence: scalars::CanonicalU64,
-    pub state: review::ReviewRunLifecycle,
-    pub pass_id: option::Option<scalars::CanonicalUuid>,
+    pub target_id: CanonicalUuid,
+    pub run_id: CanonicalUuid,
+    pub workflow: ReviewWorkflow,
+    pub policy_version: CanonicalU64,
+    pub minimum_judge_confidence: CanonicalU64,
+    pub minimum_publication_confidence: CanonicalU64,
+    pub state: ReviewRunLifecycle,
+    pub pass_id: option::Option<CanonicalUuid>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewRunSnapshot where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewPassSnapshot
 
 ```rust
 pub struct ReviewPassSnapshot {
-    pub pass_id: scalars::CanonicalUuid,
-    pub run_id: scalars::CanonicalUuid,
-    pub target_id: scalars::CanonicalUuid,
-    pub kind: review::ReviewPassKind,
-    pub session_id: scalars::CanonicalUuid,
-    pub accepted_input_id: scalars::CanonicalUuid,
-    pub origin_turn_id: scalars::CanonicalUuid,
-    pub state: review::ReviewPassLifecycle,
-    pub turn_id: option::Option<scalars::CanonicalUuid>,
-    pub output_frontier_id: option::Option<scalars::CanonicalUuid>,
+    pub pass_id: CanonicalUuid,
+    pub run_id: CanonicalUuid,
+    pub target_id: CanonicalUuid,
+    pub kind: ReviewPassKind,
+    pub session_id: CanonicalUuid,
+    pub accepted_input_id: CanonicalUuid,
+    pub origin_turn_id: CanonicalUuid,
+    pub state: ReviewPassLifecycle,
+    pub turn_id: option::Option<CanonicalUuid>,
+    pub output_frontier_id: option::Option<CanonicalUuid>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewPassSnapshot where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewDiffSide
@@ -135,7 +127,6 @@ pub enum ReviewDiffSide {
     Right,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewDiffSide where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewSeverity
@@ -149,28 +140,26 @@ pub enum ReviewSeverity {
     Critical,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewSeverity where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewFindingInput
 
 ```rust
 pub struct ReviewFindingInput {
-    pub finding_id: scalars::CanonicalUuid,
+    pub finding_id: CanonicalUuid,
     pub file_path: string::String,
-    pub line_start: option::Option<scalars::CanonicalU64>,
-    pub line_end: option::Option<scalars::CanonicalU64>,
-    pub diff_side: option::Option<review::ReviewDiffSide>,
+    pub line_start: option::Option<CanonicalU64>,
+    pub line_end: option::Option<CanonicalU64>,
+    pub diff_side: option::Option<ReviewDiffSide>,
     pub title: string::String,
     pub body: string::String,
-    pub severity: review::ReviewSeverity,
-    pub is_real_confidence: scalars::CanonicalU64,
-    pub severity_label_confidence: scalars::CanonicalU64,
+    pub severity: ReviewSeverity,
+    pub is_real_confidence: CanonicalU64,
+    pub severity_label_confidence: CanonicalU64,
     pub category: string::String,
     pub recommended_fix: option::Option<string::String>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewFindingInput where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewFindingStatus
@@ -188,23 +177,20 @@ pub enum ReviewFindingStatus {
     BlockedWithReason,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewFindingStatus where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewFindingSnapshot
 
 ```rust
 pub struct ReviewFindingSnapshot {
-    pub target_id: scalars::CanonicalUuid,
-    pub run_id: scalars::CanonicalUuid,
-    pub producing_pass_id: scalars::CanonicalUuid,
-    pub finding: review::ReviewFindingInput,
-    pub status: review::ReviewFindingStatus,
-    pub event_count: scalars::CanonicalU64,
+    pub target_id: CanonicalUuid,
+    pub run_id: CanonicalUuid,
+    pub producing_pass_id: CanonicalUuid,
+    pub finding: ReviewFindingInput,
+    pub status: ReviewFindingStatus,
+    pub event_count: CanonicalU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewFindingSnapshot where T: for<'de> de::Deserialize<'de>
-{}
 ```
 
 ## ReviewFindingEvent
@@ -216,20 +202,19 @@ pub enum ReviewFindingEvent {
         reason: string::String,
     },
     Duplicate {
-        canonical_finding_id: scalars::CanonicalUuid,
+        canonical_finding_id: CanonicalUuid,
     },
     Superseded {
-        successor_finding_id: scalars::CanonicalUuid,
+        successor_finding_id: CanonicalUuid,
     },
     Stale {},
     Fixed {},
     BlockedWithReason {
         reason: string::String,
-        external_link_id: option::Option<scalars::CanonicalUuid>,
+        external_link_id: option::Option<CanonicalUuid>,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewFindingEvent where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewPassTerminalOutcome
@@ -242,10 +227,6 @@ pub enum ReviewPassTerminalOutcome {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewPassTerminalOutcome where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewOrchestrationConcernInput
@@ -256,10 +237,6 @@ pub struct ReviewOrchestrationConcernInput {
     pub template_name: string::String,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewOrchestrationConcernInput where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewImportTerminalOutcome
@@ -272,10 +249,6 @@ pub enum ReviewImportTerminalOutcome {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewImportTerminalOutcome where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewConcernTerminalOutcome
@@ -288,10 +261,6 @@ pub enum ReviewConcernTerminalOutcome {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewConcernTerminalOutcome where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewJudgmentDisposition
@@ -299,36 +268,22 @@ impl<T> de::DeserializeOwned for review::ReviewConcernTerminalOutcome where
 ```rust
 pub enum ReviewJudgmentDisposition {
     Accepted {},
-    Rejected {
-        reason: string::String,
-    },
-    Duplicate {
-        canonical_finding_id: scalars::CanonicalUuid,
-    },
-    Superseded {
-        successor_finding_id: scalars::CanonicalUuid,
-    },
+    Rejected { reason: string::String },
+    Duplicate { canonical_finding_id: CanonicalUuid },
+    Superseded { successor_finding_id: CanonicalUuid },
     Stale {},
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewJudgmentDisposition where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewJudgmentPlanMember
 
 ```rust
 pub struct ReviewJudgmentPlanMember {
-    pub finding_id: scalars::CanonicalUuid,
-    pub disposition: review::ReviewJudgmentDisposition,
+    pub finding_id: CanonicalUuid,
+    pub disposition: ReviewJudgmentDisposition,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewJudgmentPlanMember where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewJudgmentEffectTerminalOutcome
@@ -341,10 +296,6 @@ pub enum ReviewJudgmentEffectTerminalOutcome {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewJudgmentEffectTerminalOutcome where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewRepairTerminalOutcome
@@ -357,22 +308,17 @@ pub enum ReviewRepairTerminalOutcome {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewRepairTerminalOutcome where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewRepairOutcome
 
 ```rust
 pub struct ReviewRepairOutcome {
-    pub finding_id: scalars::CanonicalUuid,
-    pub event_pass_id: option::Option<scalars::CanonicalUuid>,
-    pub outcome: review::ReviewRepairTerminalOutcome,
+    pub finding_id: CanonicalUuid,
+    pub event_pass_id: option::Option<CanonicalUuid>,
+    pub outcome: ReviewRepairTerminalOutcome,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewRepairOutcome where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReviewPublicationTerminalOutcome
@@ -385,25 +331,17 @@ pub enum ReviewPublicationTerminalOutcome {
     Cancelled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewPublicationTerminalOutcome where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewPublicationOutcome
 
 ```rust
 pub struct ReviewPublicationOutcome {
-    pub finding_id: scalars::CanonicalUuid,
-    pub external_link_id: option::Option<scalars::CanonicalUuid>,
-    pub outcome: review::ReviewPublicationTerminalOutcome,
+    pub finding_id: CanonicalUuid,
+    pub external_link_id: option::Option<CanonicalUuid>,
+    pub outcome: ReviewPublicationTerminalOutcome,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewPublicationOutcome where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewOrchestrationState
@@ -424,10 +362,6 @@ pub enum ReviewOrchestrationState {
     Complete,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewOrchestrationState where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewOrchestrationConcernStatus
@@ -442,26 +376,18 @@ pub enum ReviewOrchestrationConcernStatus {
     Superseded,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewOrchestrationConcernStatus where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewOrchestrationStageTemplateDigests
 
 ```rust
 pub struct ReviewOrchestrationStageTemplateDigests {
-    pub import: scalars::CanonicalDigest,
-    pub judgment: scalars::CanonicalDigest,
-    pub repair: scalars::CanonicalDigest,
-    pub publication: scalars::CanonicalDigest,
+    pub import: CanonicalDigest,
+    pub judgment: CanonicalDigest,
+    pub repair: CanonicalDigest,
+    pub publication: CanonicalDigest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewOrchestrationStageTemplateDigests where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewOrchestrationConcernSnapshot
@@ -469,51 +395,39 @@ impl<T> de::DeserializeOwned for review::ReviewOrchestrationStageTemplateDigests
 ```rust
 pub struct ReviewOrchestrationConcernSnapshot {
     pub key: string::String,
-    pub template_digest: scalars::CanonicalDigest,
-    pub status: review::ReviewOrchestrationConcernStatus,
-    pub pass_id: option::Option<scalars::CanonicalUuid>,
+    pub template_digest: CanonicalDigest,
+    pub status: ReviewOrchestrationConcernStatus,
+    pub pass_id: option::Option<CanonicalUuid>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewOrchestrationConcernSnapshot where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewOrchestrationCounts
 
 ```rust
 pub struct ReviewOrchestrationCounts {
-    pub finding_count: scalars::CanonicalU64,
-    pub judgment_member_count: scalars::CanonicalU64,
-    pub judgment_effect_applied_count: scalars::CanonicalU64,
-    pub repair_fixed_count: scalars::CanonicalU64,
-    pub publication_published_count: scalars::CanonicalU64,
+    pub finding_count: CanonicalU64,
+    pub judgment_member_count: CanonicalU64,
+    pub judgment_effect_applied_count: CanonicalU64,
+    pub repair_fixed_count: CanonicalU64,
+    pub publication_published_count: CanonicalU64,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewOrchestrationCounts where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewOrchestrationSnapshot
 
 ```rust
 pub struct ReviewOrchestrationSnapshot {
-    pub attempt_id: scalars::CanonicalUuid,
-    pub target_id: scalars::CanonicalUuid,
-    pub state: review::ReviewOrchestrationState,
+    pub attempt_id: CanonicalUuid,
+    pub target_id: CanonicalUuid,
+    pub state: ReviewOrchestrationState,
     pub concern_set_version: string::String,
-    pub stage_template_digests: review::ReviewOrchestrationStageTemplateDigests,
-    pub concerns: vec::Vec<review::ReviewOrchestrationConcernSnapshot>,
-    pub counts: review::ReviewOrchestrationCounts,
+    pub stage_template_digests: ReviewOrchestrationStageTemplateDigests,
+    pub concerns: vec::Vec<ReviewOrchestrationConcernSnapshot>,
+    pub counts: ReviewOrchestrationCounts,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewOrchestrationSnapshot where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## ReviewExternalObjectKind
@@ -526,8 +440,4 @@ pub enum ReviewExternalObjectKind {
     ChangeRequestComment,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for review::ReviewExternalObjectKind where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
