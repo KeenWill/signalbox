@@ -14,12 +14,12 @@ use signalbox_domain::{
 };
 use signalbox_module_repo_watch_v2::{
     CreateSessionCommandFactory, DispatchAdmission, DispatchReferenceGenerator, EventAdmission,
-    EventProducer, FrontierEventAdmission, FrontierReleaseAdmission, LifecycleReactionError,
-    PullRequestLifecycle, PullRequestState, RepoWatchStore, RepositoryProjection,
-    RepositoryRuleSet, RepositoryState, RuleAdmission, RuleReconciliationAdmission,
-    SessionCommandCodec, StoreError, WebhookAdmission, WebhookDelivery, WebhookDisposition,
-    matching_rules, plan_lifecycle_reaction_for_test, plan_repository_event,
-    plan_retained_lifecycle_reaction_for_test,
+    EventCandidate, EventProducer, FrontierEventAdmission, FrontierReleaseAdmission,
+    LifecycleReactionError, PullRequestLifecycle, PullRequestState, RepoWatchStore,
+    RepositoryProjection, RepositoryRuleSet, RepositoryState, RuleAdmission,
+    RuleReconciliationAdmission, SessionCommandCodec, StoreError, WebhookAdmission,
+    WebhookDelivery, WebhookDisposition, matching_rules, plan_lifecycle_reaction_for_test,
+    plan_repository_event, plan_retained_lifecycle_reaction_for_test,
 };
 use signalbox_ownership_seam::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, CreateSession,
@@ -30,8 +30,8 @@ use signalbox_ownership_seam::{
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchDispatchId, RepoWatchEvent,
     RepoWatchEventContentIdentityV1, RepoWatchEventId, RepoWatchEventIdentityFrontierEntryV1,
-    RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1,
-    RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchObservation,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
+    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState as ComparisonPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRule,
@@ -54,6 +54,22 @@ use testcontainers_modules::{
 use uuid::Uuid;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+
+fn event_candidate<'a>(
+    event: &'a RepoWatchEvent,
+    content_identity: RepoWatchEventContentIdentityV1,
+) -> EventCandidate<'a> {
+    EventCandidate {
+        event,
+        content_identity,
+    }
+}
+
+fn frontier_entries(
+    frontier: &RepoWatchEventIdentityFrontierV1,
+) -> Vec<RepoWatchEventIdentityFrontierEntryV1> {
+    frontier.entries().collect()
+}
 const DATABASE_NAME: &str = "signalbox_repo_watch_v2";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
@@ -548,7 +564,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     );
     assert_eq!(matching_rules(std::slice::from_ref(&rule), &event), [&rule]);
     let identity = RepoWatchEventContentIdentityV1::from_bytes([15; 32]);
-    let occurrence = RepoWatchEventOccurrenceV1::from_parts(event.clone(), identity);
+    let occurrence = event_candidate(&event, identity);
     let earlier_event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(13)),
         repository.clone(),
@@ -557,14 +573,13 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         signalbox_ownership_seam::CheckConclusion::Success,
     );
     let earlier_identity = RepoWatchEventContentIdentityV1::from_bytes([14; 32]);
-    let earlier_occurrence =
-        RepoWatchEventOccurrenceV1::from_parts(earlier_event.clone(), earlier_identity);
+    let earlier_occurrence = event_candidate(&earlier_event, earlier_identity);
     assert_eq!(
         store
             .commit_frontier_candidate(
                 &projection,
                 0,
-                &frontier,
+                &frontier_entries(&frontier),
                 &[earlier_occurrence, occurrence],
                 EventProducer::Poll,
                 observed_at,
@@ -748,7 +763,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         WorkflowName::try_new(String::from("ci"))?,
         signalbox_ownership_seam::CheckConclusion::Success,
     );
-    let replayed_occurrence = RepoWatchEventOccurrenceV1::from_parts(replayed_event, identity);
+    let replayed_occurrence = event_candidate(&replayed_event, identity);
     let replayed_earlier_event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(18)),
         repository.clone(),
@@ -756,14 +771,13 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         WorkflowName::try_new(String::from("build"))?,
         signalbox_ownership_seam::CheckConclusion::Success,
     );
-    let replayed_earlier_occurrence =
-        RepoWatchEventOccurrenceV1::from_parts(replayed_earlier_event, earlier_identity);
+    let replayed_earlier_occurrence = event_candidate(&replayed_earlier_event, earlier_identity);
     assert_eq!(
         store
             .commit_frontier_candidate(
                 &projection,
                 0,
-                &frontier,
+                &frontier_entries(&frontier),
                 &[replayed_earlier_occurrence, replayed_occurrence],
                 EventProducer::Webhook,
                 observed_at + Duration::from_secs(1),
@@ -790,7 +804,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 1,
-                &frontier,
+                &frontier_entries(&frontier),
                 &[],
                 EventProducer::Poll,
                 observed_at + Duration::from_secs(1),
@@ -821,7 +835,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 1,
-                &frontier,
+                &frontier_entries(&frontier),
                 &[],
                 EventProducer::Poll,
                 observed_at + Duration::from_secs(2),
@@ -850,7 +864,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 2,
-                &frontier,
+                &frontier_entries(&frontier),
                 &[],
                 EventProducer::Poll,
                 observed_at + Duration::from_secs(3),
@@ -874,8 +888,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         WorkflowName::try_new(String::from("lint"))?,
         signalbox_ownership_seam::CheckConclusion::Success,
     );
-    let eventful_projection_occurrence = RepoWatchEventOccurrenceV1::from_parts(
-        eventful_projection_event.clone(),
+    let eventful_projection_occurrence = event_candidate(
+        &eventful_projection_event,
         RepoWatchEventContentIdentityV1::from_bytes([18; 32]),
     );
     let eventful_projection_title = PullRequestTitle::try_new(String::from("Eventful projection"))?;
@@ -888,7 +902,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 3,
-                &frontier,
+                &frontier_entries(&frontier),
                 std::slice::from_ref(&eventful_projection_occurrence),
                 EventProducer::Webhook,
                 observed_at + Duration::from_secs(4),
@@ -966,7 +980,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &complete_projection,
                 0,
-                &complete_frontier,
+                &frontier_entries(&complete_frontier),
                 &[],
                 EventProducer::Poll,
                 observed_at,
@@ -987,8 +1001,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         WorkflowName::try_new(String::from("complete-frontier"))?,
         signalbox_ownership_seam::CheckConclusion::Success,
     );
-    let incomplete_occurrence = RepoWatchEventOccurrenceV1::from_parts(
-        incomplete_event.clone(),
+    let incomplete_occurrence = event_candidate(
+        &incomplete_event,
         RepoWatchEventContentIdentityV1::from_bytes([22; 32]),
     );
     assert_eq!(
@@ -996,7 +1010,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &complete_projection,
                 1,
-                &incomplete_frontier,
+                &frontier_entries(&incomplete_frontier),
                 std::slice::from_ref(&incomplete_occurrence),
                 EventProducer::Poll,
                 observed_at,
@@ -1034,7 +1048,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 0,
-                &incompatible_frontier,
+                &frontier_entries(&incompatible_frontier),
                 &[],
                 EventProducer::Poll,
                 observed_at,
@@ -1559,12 +1573,12 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         WorkflowName::try_new(String::from("build"))?,
         signalbox_ownership_seam::CheckConclusion::Success,
     );
-    let preceding_occurrence = RepoWatchEventOccurrenceV1::from_parts(
-        preceding_event.clone(),
+    let preceding_occurrence = event_candidate(
+        &preceding_event,
         RepoWatchEventContentIdentityV1::from_bytes([17; 32]),
     );
-    let conflicting_occurrence = RepoWatchEventOccurrenceV1::from_parts(
-        event.clone(),
+    let conflicting_occurrence = event_candidate(
+        &event,
         RepoWatchEventContentIdentityV1::from_bytes([16; 32]),
     );
     assert_eq!(
@@ -1572,7 +1586,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 4,
-                &next_frontier,
+                &frontier_entries(&next_frontier),
                 &[preceding_occurrence, conflicting_occurrence],
                 EventProducer::Poll,
                 observed_at,
@@ -1607,7 +1621,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 4,
-                &stale_frontier,
+                &frontier_entries(&stale_frontier),
                 &[],
                 EventProducer::Poll,
                 observed_at,
@@ -1626,7 +1640,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 4,
-                &frontier,
+                &frontier_entries(&frontier),
                 &[],
                 EventProducer::Poll,
                 observed_at,
@@ -1675,7 +1689,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .commit_frontier_candidate(
                 &projection,
                 1,
-                &frontier,
+                &frontier_entries(&frontier),
                 &[],
                 EventProducer::Poll,
                 observed_at,
