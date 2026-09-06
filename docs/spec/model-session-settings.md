@@ -33,7 +33,9 @@ including clear, or the stored settings were validated for a different model;
 provider defaults carry no validation selection, so an all-inherit overlay over
 them needs none even when the selection changes. A model change carries the
 inherited settings to the new model, adjusts those the new model does not
-support, and records each adjustment.
+support, and records each adjustment. When supported reasoning levels exist, a
+model change moves an unsupported inherited level to the greatest supported
+level at or below it, or the lowest supported level when none lies below.
 
 Two durable events record settings outcomes: `SessionModelSettingsChanged` when
 a defaults replacement changes a setting or model, and
@@ -102,7 +104,10 @@ mode serves from a mapped target.
 Compatibility is decided before credential access, file creation, subprocess
 spawn, or HTTP traffic. An adapter never relies on provider rejection, provider
 clamping, an open CLI enum, or silent field dropping. An adapter-specific
-unsupported combination is also a preparation-time error.
+unsupported combination is also a preparation-time error. Configuration rejects
+unequal capability records for one provider spelling, a fast target matching the
+model's own target or using another adapter, and disagreement between
+`fast_mode` and `fast_target_id`.
 
 An incompatibility counts as model-change-induced, and is adjusted instead of
 rejected, only when the affected setting is inherited.
