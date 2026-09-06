@@ -428,6 +428,7 @@ impl<T> de::DeserializeOwned for WebSessionRate where T: for<'de> de::Deserializ
 
 ```rust
 pub enum WebSessionGoalDisposition {
+    SessionClosed,
     Commissioned,
     Blocked,
     Resumed,

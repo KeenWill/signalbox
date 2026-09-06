@@ -282,7 +282,7 @@ export type WebSessionCatalogSummary = {
   readonly title_truncated: boolean;
 };
 
-export type WebSessionGoalDisposition = "commissioned" | "blocked" | "resumed" | "achieved" | "user_stopped" | "superseded";
+export type WebSessionGoalDisposition = "session_closed" | "commissioned" | "blocked" | "resumed" | "achieved" | "user_stopped" | "superseded";
 
 export type WebSessionId = string;
 

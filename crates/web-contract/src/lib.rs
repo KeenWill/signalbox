@@ -1972,6 +1972,7 @@ pub struct WebSessionRate {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSessionGoalDisposition {
+    SessionClosed,
     Commissioned,
     Blocked,
     Resumed,
@@ -3899,6 +3900,17 @@ mod tests {
             .expect("generated web-contract artifact is checked in");
 
         assert_eq!(checked_in, artifact.contents);
+    }
+
+    #[test]
+    fn rates_decode_a_session_closed_with_a_live_goal() {
+        let rates: super::WebSessionRates =
+            serde_json::from_str(include_str!("../tests/fixtures/session-closed-rates.json"))
+                .expect("stored session-closed disposition is a valid browser fact");
+        assert_eq!(
+            rates.sessions[0].goal_disposition,
+            Some(super::WebSessionGoalDisposition::SessionClosed)
+        );
     }
 
     #[test]

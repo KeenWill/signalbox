@@ -96,6 +96,7 @@ export function SessionCatalogSurface({
   const listed = useMemo(() => {
     const rows = (sessions.data?.summaries ?? []).filter(
       (row) =>
+        rates.data === undefined ||
         lifecycleFilter === 'all' ||
         rateById.get(row.session_id)?.lifecycle_state === lifecycleFilter,
     )
@@ -106,7 +107,7 @@ export function SessionCatalogSurface({
         return left === right ? a.session_id.localeCompare(b.session_id) : left > right ? -1 : 1
       })
     return rows
-  }, [sessions.data, lifecycleFilter, pageOrder, rateById])
+  }, [sessions.data, rates.data, lifecycleFilter, pageOrder, rateById])
   const totals = listed.reduce(
     (sum, row) => {
       const rate = rateById.get(row.session_id)
@@ -135,8 +136,12 @@ export function SessionCatalogSurface({
     if (keyboardSelection && overlay === null)
       sessionButtons.current.get(keyboardSelection)?.focus()
   }, [keyboardSelection, overlay])
-  const selected = sessions.data?.summaries.find((summary) => summary.session_id === state.session)
+  const selected = listed.find((summary) => summary.session_id === state.session)
   const selectedSessionId = selected?.session_id
+  useEffect(() => {
+    if (sessions.data && state.session && !listed.some((row) => row.session_id === state.session))
+      onStateChange({ ...state, session: undefined }, 'close')
+  }, [sessions.data, listed, state, onStateChange])
 
   useEffect(() => {
     const query = window.matchMedia('(max-width: 760px)')
@@ -151,7 +156,11 @@ export function SessionCatalogSurface({
       returnFocus.current = sessionButtons.current.get(selectedSessionId) ?? null
     }
     const focusTarget = selectedSessionId ? closeFocus : returnFocus
-    const frame = requestAnimationFrame(() => focusTarget.current?.focus())
+    const frame = requestAnimationFrame(() => {
+      const target = focusTarget.current
+      if (target?.isConnected) target.focus()
+      else if (target) pageHeading.current?.focus()
+    })
     return () => cancelAnimationFrame(frame)
   }, [selectedSessionId])
 
@@ -418,7 +427,9 @@ export function SessionCatalogSurface({
                         </strong>
                         <code>{summary.session_id}</code>
                       </span>
-                      <span className={`state-chip state-${summary.state}`}>
+                      <span
+                        className={`state-chip state-${rateById.get(summary.session_id)?.lifecycle_state ?? 'unavailable'}`}
+                      >
                         {label(rateById.get(summary.session_id)?.lifecycle_state ?? 'unavailable')}
                       </span>
                       <span>

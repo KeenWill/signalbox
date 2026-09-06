@@ -3530,6 +3530,7 @@ const schemas = {
       },
       "WebSessionGoalDisposition": {
         "enum": [
+          "session_closed",
           "commissioned",
           "blocked",
           "resumed",

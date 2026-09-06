@@ -622,3 +622,47 @@ test('catalog keyboard selection opens a session', async ({ page }) => {
   await page.keyboard.press('Enter')
   await expect(page.getByRole('dialog', { name: 'Deployment decision' })).toBeVisible()
 })
+
+test('keeps catalog rows when a lifecycle filter has no rates yet or rates fail', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  let finish = () => {}
+  const pending = new Promise<void>((resolve) => {
+    finish = resolve
+  })
+  await page.route('**/api/sessions/rates?**', async (route) => {
+    await pending
+    return route.fulfill({
+      status: 503,
+      json: {
+        error: { kind: 'application', code: 'unavailable', message: 'Outcomes unavailable' },
+      },
+    })
+  })
+  await page.goto('/sessions')
+  await expect(page.locator('.catalog-list li')).toHaveCount(32)
+  await page.getByLabel('State on this page').selectOption('parked')
+  await expect(page.locator('.catalog-list li')).toHaveCount(32)
+  finish()
+  await expect(page.getByText('Session outcomes unavailable.')).toBeVisible()
+  await expect(page.locator('.catalog-list li')).toHaveCount(32)
+})
+
+test('filters out an inspected row and keeps lifecycle chip styling consistent', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await expect(page.getByLabel('Listed session rates')).toContainText('2 failed / 72 turns')
+  const parked = page.getByRole('button', { name: firstPage.summaries[1].title_summary })
+  await expect(parked.locator('.state-chip')).toHaveClass('state-chip state-parked')
+  await parked.click()
+  await expect(
+    page.getByRole('dialog', { name: firstPage.summaries[1].title_summary }),
+  ).toBeVisible()
+  await page.getByLabel('State on this page').selectOption('active')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page).not.toHaveURL(/session=/)
+  await expect(page.getByRole('heading', { name: '48 sessions', exact: true })).toBeFocused()
+})
