@@ -1163,18 +1163,6 @@ impl GitHubCodeHostTransport {
         arguments: ReviewGateCheckArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
-        with_read_operation_timeout(
-            self.bounds.request_timeout(),
-            self.review_gate_transaction(arguments, credential),
-        )
-        .await
-    }
-
-    async fn review_gate_transaction(
-        &self,
-        arguments: ReviewGateCheckArguments,
-        credential: &CredentialValue,
-    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         self.convergence_state_for(arguments.repository(), arguments.number(), credential)
             .await
             .map(CodeHostResult::ReviewGateCheck)
@@ -2998,6 +2986,65 @@ mod tests {
                     .await
                     .err(),
                 Some(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn both_convergence_tools_wait_for_history_outside_the_request_timeout() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
+        )
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let arguments = serde_json::json!({
+            "repository": recording.repository,
+            "number": recording.number,
+        });
+        let bounds = CodeHostNumericBounds::new(
+            Some(Duration::from_millis(5)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let transport = GitHubCodeHostTransport::try_new(bounds)
+            .expect("transport constructs")
+            .with_convergence_policy(Some(policy));
+        let credential = CredentialValue::new(b"invalid\nheader".to_vec());
+        for review_gate in [false, true] {
+            let history = transport.convergence_history.lock().await;
+            let release = async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                drop(history);
+            };
+            let census = async {
+                if review_gate {
+                    transport
+                        .review_gate_check(
+                            serde_json::from_value(arguments.clone())
+                                .expect("recorded arguments decode"),
+                            &credential,
+                        )
+                        .await
+                } else {
+                    transport
+                        .convergence_state(
+                            serde_json::from_value(arguments.clone())
+                                .expect("recorded arguments decode"),
+                            &credential,
+                        )
+                        .await
+                }
+            };
+            let (_, result) = tokio::join!(release, census);
+            assert_eq!(
+                result.err(),
+                Some(CodeHostTransportFailure::InvalidCredential)
             );
         }
     }
