@@ -1601,7 +1601,7 @@ pub(crate) const fn test_frontier(value: u128) -> TranscriptFrontier {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::{
         CreateSession, CreateSessionFromImportedFrontier, CreateSessionPreparationFailure,
@@ -1642,11 +1642,7 @@ mod tests {
         )
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct ReconstitutionFailureRow {
         perturbed_stored_fact: &'static str,
         failure: String,
@@ -2189,7 +2185,7 @@ mod tests {
             │ pointer and record versions torn │ CurrentDefaultsVersionMismatch │
             └──────────────────────────────────┴────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "requested session differs",
                 failure: format!("{requested_other_session:?}"),
@@ -2748,7 +2744,7 @@ mod tests {
             │ stored defaults differ             │ DefaultsMismatch              │
             └────────────────────────────────────┴───────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "result session cross-wired",
                 failure: format!("{cross_wired_result:?}"),

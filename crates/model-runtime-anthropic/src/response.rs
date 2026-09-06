@@ -630,7 +630,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
         ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderMessageId, ProviderReportedModel,
@@ -1619,11 +1619,7 @@ mod tests {
         assert_eq!(completion.finish, CompletionFinish::ContextWindowExceeded);
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct FinishRow {
         token: &'static str,
         finish: String,
@@ -1654,18 +1650,18 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌───────────────────────────────┬─────────────────────────────────────────────────┐
-            │ token                         │ finish                                          │
-            ├───────────────────────────────┼─────────────────────────────────────────────────┤
-            │ end_turn                      │ EndTurn                                         │
-            │ max_tokens                    │ MaxOutputTokens                                 │
-            │ model_context_window_exceeded │ ContextWindowExceeded                           │
-            │ stop_sequence                 │ StopSequence { sequence: Some(\"END\") }        │
-            │ tool_use                      │ ToolUse                                         │
-            │ refusal                       │ Refusal                                         │
-            │ pause_turn                    │ Unrecognized { provider_token: \"pause_turn\" } │
-            └───────────────────────────────┴─────────────────────────────────────────────────┘
+            ┌───────────────────────────────┬───────────────────────────────────────────────┐
+            │ token                         │ finish                                        │
+            ├───────────────────────────────┼───────────────────────────────────────────────┤
+            │ end_turn                      │ EndTurn                                       │
+            │ max_tokens                    │ MaxOutputTokens                               │
+            │ model_context_window_exceeded │ ContextWindowExceeded                         │
+            │ stop_sequence                 │ StopSequence { sequence: Some("END") }        │
+            │ tool_use                      │ ToolUse                                       │
+            │ refusal                       │ Refusal                                       │
+            │ pause_turn                    │ Unrecognized { provider_token: "pause_turn" } │
+            └───────────────────────────────┴───────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 }

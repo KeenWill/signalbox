@@ -449,7 +449,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::{
         AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
@@ -541,11 +541,7 @@ mod tests {
     /// One derived slot's snapshot row: only the acceptance ordinal and
     /// priority fact the derivation depends on (TS-12). The field names are
     /// the rendered column headers.
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct DerivedSlotRow {
         derived: usize,
         accepted: u64,
@@ -583,7 +579,7 @@ mod tests {
             })
             .collect();
 
-        table(rows)
+        print(&rows)
     }
 
     /// The rendering helper contains lookup and branching logic, so it gets
