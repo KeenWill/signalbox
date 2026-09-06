@@ -62,7 +62,10 @@ strictly increasing, unique action-ordinal order. A created session indexes its
 retained rule revision, event, dispatch, and action ordinal, so lifecycle
 reaction planning survives rule removal and process restart. Equal evaluation
 recovery finds the retained batch before considering newly reserved dispatch or
-command identities.
+command identities. A lifecycle reaction targets the session named by its
+trigger. Before submitting a later action, the dispatcher records a synchronous
+create-session command-identity conflict as rejected; an applied creation
+settles from its `SessionCreated` event.
 
 The module schema contains twelve tables:
 

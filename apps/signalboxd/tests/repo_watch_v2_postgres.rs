@@ -13,16 +13,16 @@ use signalbox_domain::{
 };
 use signalbox_module_repo_watch_v2::{
     CreateSessionCommandFactory, DispatchAdmission, DispatchReferenceGenerator, EventAdmission,
-    FrontierEventAdmission, FrontierReleaseAdmission, PullRequestLifecycle, PullRequestState,
-    RepoWatchStore, RepositoryProjection, RepositoryState, RuleAdmission, SessionCommandCodec,
-    StoreError, WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules,
-    plan_lifecycle_reaction_for_test, plan_repository_event,
+    FrontierEventAdmission, FrontierReleaseAdmission, LifecycleReactionError, PullRequestLifecycle,
+    PullRequestState, RepoWatchStore, RepositoryProjection, RepositoryState, RuleAdmission,
+    SessionCommandCodec, StoreError, WebhookAdmission, WebhookDelivery, WebhookDisposition,
+    matching_rules, plan_lifecycle_reaction_for_test, plan_repository_event,
     plan_retained_lifecycle_reaction_for_test,
 };
 use signalbox_ownership_seam::{
-    BranchName, CommitSha, CreateSession, DescendantTerminationScope, DurableCommandId,
-    FinishCondition, LifecycleEvent, OffsetDateTime, PullRequestBody, PullRequestNumber,
-    PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
+    BranchName, CommitSha, CreateSession, CreateSessionOutcome, DescendantTerminationScope,
+    DurableCommandId, FinishCondition, LifecycleEvent, OffsetDateTime, PullRequestBody,
+    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
     RepoWatchEventContentIdentityV1, RepoWatchEventId, RepoWatchEventIdentityFrontierEntryV1,
     RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1,
     RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
@@ -806,8 +806,26 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let lifecycle_command_id = Uuid::from_u128(83);
     let trigger_sequence = NonZeroU64::new(42).expect("forty-two is positive");
     let reaction_session = SessionId::from_uuid(created_session);
+    let mismatched_reaction = plan_lifecycle_reaction_for_test(
+        NonZeroU64::new(40).expect("forty is positive"),
+        SessionId::from_uuid(Uuid::from_u128(81)),
+        retained_dispatch,
+        &rule,
+        &event,
+        NonZeroU64::MIN,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(88)),
+            reaction_session,
+            SessionLifecycleOperation::ReleaseStart,
+        ),
+    );
+    assert!(matches!(
+        mismatched_reaction,
+        Err(LifecycleReactionError::MismatchedSession)
+    ));
     let unowned_reaction = [plan_lifecycle_reaction_for_test(
         NonZeroU64::new(41).expect("forty-one is positive"),
+        reaction_session,
         retained_dispatch,
         &rule,
         &event,
@@ -826,6 +844,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     ));
     let ordered_reaction_one = plan_lifecycle_reaction_for_test(
         trigger_sequence,
+        reaction_session,
         retained_dispatch,
         &rule,
         &event,
@@ -838,6 +857,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     )?;
     let ordered_reaction_two = plan_lifecycle_reaction_for_test(
         trigger_sequence,
+        reaction_session,
         retained_dispatch,
         &rule,
         &event,
@@ -870,6 +890,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     ));
     let reaction_commands = [plan_lifecycle_reaction_for_test(
         trigger_sequence,
+        reaction_session,
         retained_dispatch,
         &rule,
         &event,
@@ -905,6 +926,19 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         .find(|planned| planned.command().command_id().into_uuid() == lifecycle_command_id)
         .expect("the reaction owed by action two remains queued for submission");
     assert_eq!(recovered_reaction.action_ordinal(), 2);
+    let conflicting_create = CreateSessionOutcome::ConflictingReuse {
+        command_id: retained_command_ids[0],
+    };
+    assert!(
+        store
+            .apply_create_session_outcome(&conflicting_create, observed_at + Duration::from_secs(1))
+            .await?
+    );
+    assert!(
+        !store
+            .apply_create_session_outcome(&conflicting_create, observed_at + Duration::from_secs(1))
+            .await?
+    );
     let created_event = LifecycleEvent::session_created_for_test(
         43,
         observed_at + Duration::from_secs(1),
@@ -922,23 +956,53 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert!(!store.apply_lifecycle_event(&created_event).await?);
     let linked_session: Uuid =
         sqlx::query_scalar("SELECT created_session_id FROM dispatch_ledger WHERE command_id = $1")
-            .bind(retained_command_ids[0].into_uuid())
+            .bind(retained_command_ids[1].into_uuid())
             .fetch_one(&module_pool)
             .await?;
     assert_eq!(linked_session, created_session);
+    let rejected_create: (String, Option<String>) =
+        sqlx::query_as("SELECT status, rejection_kind FROM dispatch_ledger WHERE command_id = $1")
+            .bind(retained_command_ids[0].into_uuid())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(
+        rejected_create,
+        (
+            String::from("rejected"),
+            Some(String::from("conflicting_reuse"))
+        )
+    );
     let restarted_store = RepoWatchStore::new(module_pool.clone());
     let retained_origin = restarted_store
         .reaction_origin_for_session(reaction_session)
         .await?
         .expect("a created module session retains its reaction origin");
     assert_eq!(retained_origin.dispatch(), retained_dispatch);
-    assert_eq!(retained_origin.action_ordinal(), NonZeroU64::MIN);
+    assert_eq!(
+        retained_origin.action_ordinal(),
+        NonZeroU64::new(2).expect("two is positive")
+    );
     assert_eq!(retained_origin.repository(), &repository);
     assert_eq!(retained_origin.rule_id(), rule.id());
     assert_eq!(retained_origin.rule_revision(), rule.version());
     assert_eq!(retained_origin.event_id(), event.id());
+    let mismatched_retained_reaction = plan_retained_lifecycle_reaction_for_test(
+        NonZeroU64::new(44).expect("forty-four is positive"),
+        SessionId::from_uuid(Uuid::from_u128(81)),
+        &retained_origin,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(89)),
+            reaction_session,
+            SessionLifecycleOperation::ReleaseStart,
+        ),
+    );
+    assert!(matches!(
+        mismatched_retained_reaction,
+        Err(LifecycleReactionError::MismatchedSession)
+    ));
     let restarted_reaction = [plan_retained_lifecycle_reaction_for_test(
         NonZeroU64::new(44).expect("forty-four is positive"),
+        reaction_session,
         &retained_origin,
         SessionLifecycleCommand::new(
             DurableCommandId::from_uuid(Uuid::from_u128(87)),
@@ -959,7 +1023,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .bind(retained_dispatch.into_uuid())
     .fetch_one(&module_pool)
     .await?;
-    assert_eq!(still_pending_creates, 1);
+    assert_eq!(still_pending_creates, 0);
     let invalid_lifecycle_link = sqlx::query(
         "UPDATE dispatch_ledger
             SET status = 'applied', settled_at = $2, created_session_id = $3
