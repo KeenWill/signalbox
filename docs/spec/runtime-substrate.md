@@ -24,12 +24,24 @@ that counts a prospective operation's rendered input without a generation
 request, sending the same prompt- and cache-affecting controls the generation
 request would carry.
 
+Anthropic Messages generation and input-count requests do not enable tool-result
+context editing; no durable model-call fact represents its applied edits.
+
 Caller identity crosses the boundary as an opaque correlation parameter carried
 by `ModelOperation`, every `Observation` and the final `TerminalReport`; the
 runtime imports no domain identifier. An operation names its target as two
 caller-supplied facts, the requested selection and the resolved target. The
 provider-reported model is a third fact, which the adapter surfaces through an
 observation and the terminal evidence.
+
+`ConversationMessage` is the closed typed history of text, tool calls and
+results, thinking with an optional signature, redacted thinking, and opaque
+provider-compaction blocks. Completed terminal evidence uses the same ordered
+response-part vocabulary for text, thinking, redacted thinking, tool proposals,
+suppressed tool calls, and provider compaction. A provider-compaction part
+carries one complete raw JSON content block unchanged across the runtime and
+bridge; adapters that cannot replay that provider-qualified part reject the
+operation before send.
 
 `ModelRuntime` has two stages. `prepare` does all work that needs no provider
 traffic and returns an opaque one-shot capability or a typed failure.

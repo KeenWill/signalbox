@@ -82,12 +82,13 @@ names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 `executable`, `mcp_bridge_executable`, and `working_directory`. The required
 `[numeric_bounds]` table holds the central numeric-bound inventory and the
 loader supplies no default for any member, while other tables carry their own
-configured limits. `codex_cli_version_probe_bound` bounds a credential-free
-startup probe of the configured Codex executable, and a missing, malformed,
-zero, unsuccessful, or mismatched probe fails configuration before the socket
-opens. One valid document yields correlated immutable in-memory catalogs: the
-domain `ModelTargetCatalog` for execution-time target resolution and the
-`RuntimeModelCatalog` for the provider bridge.
+configured limits. Numeric-bound duration policies use Jiff's friendly
+unsigned-duration syntax. `codex_cli_version_probe_bound` bounds a
+credential-free startup probe of the configured Codex executable, and a missing,
+malformed, zero, unsuccessful, or mismatched probe fails configuration before
+the socket opens. One valid document yields correlated immutable in-memory
+catalogs: the domain `ModelTargetCatalog` for execution-time target resolution
+and the `RuntimeModelCatalog` for the provider bridge.
 
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
 binds one configured workspace root. Each session's workspace root is derived

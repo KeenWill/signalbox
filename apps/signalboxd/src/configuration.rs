@@ -995,16 +995,9 @@ impl NumericBoundsConfiguration {
 }
 
 fn parse_numeric_bound_duration(value: &str) -> Option<Duration> {
-    value
-        .strip_suffix("ms")
-        .and_then(|amount| amount.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .or_else(|| {
-            value
-                .strip_suffix('s')
-                .and_then(|amount| amount.parse::<u64>().ok())
-                .map(Duration::from_secs)
-        })
+    jiff::fmt::friendly::SpanParser::new()
+        .parse_unsigned_duration(value)
+        .ok()
 }
 
 /// Validated static model and alias definitions used by hub composition.
@@ -1899,6 +1892,17 @@ impl HubModelConfiguration {
             .iter()
             .filter_map(|(target, adapter)| {
                 adapter.reports_cache_inclusive_input().then_some(*target)
+            })
+            .collect()
+    }
+
+    /// Returns the exact targets whose adapters issue prospective count
+    /// interactions before turn activation.
+    pub fn provider_input_count_targets(&self) -> HashSet<ResolvedProviderTarget> {
+        self.target_adapters
+            .iter()
+            .filter_map(|(target, adapter)| {
+                (*adapter == ModelAdapter::Anthropic).then_some(*target)
             })
             .collect()
     }
@@ -4926,6 +4930,19 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 .duration("turn_liveness_scan_interval"),
             Some(None)
         );
+    }
+
+    #[test]
+    fn numeric_bound_durations_accept_jiff_friendly_input() {
+        assert_eq!(
+            super::parse_numeric_bound_duration("2 minutes 30 seconds"),
+            Some(Duration::from_secs(150))
+        );
+        assert_eq!(
+            super::parse_numeric_bound_duration("1.5s"),
+            Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(super::parse_numeric_bound_duration("-1s"), None);
     }
 
     const OPENAI_PROFILE: &str = "openai-primary";
