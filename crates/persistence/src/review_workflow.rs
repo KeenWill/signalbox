@@ -5100,26 +5100,20 @@ pub enum ReserveExternalLinkOutcome {
     Existing(ReviewExternalLink),
 }
 
-#[derive(signalbox_derive::OperatorError)]
+#[derive(signalbox_derive::Accessors, signalbox_derive::OperatorError)]
 #[error("review external-link identity was reused for a different canonical reservation")]
 /// Conflicting reuse of a review external-link reservation identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewExternalLinkReservationConflict {
+    /// Borrows the retained canonical aggregate.
+    #[get(unbox)]
     existing: Box<ReviewExternalLink>,
+    /// Borrows the rejected reservation request.
+    #[get(unbox)]
     requested: Box<ReviewExternalLink>,
 }
 
 impl ReviewExternalLinkReservationConflict {
-    /// Borrows the retained canonical aggregate.
-    pub fn existing(&self) -> &ReviewExternalLink {
-        &self.existing
-    }
-
-    /// Borrows the rejected reservation request.
-    pub fn requested(&self) -> &ReviewExternalLink {
-        &self.requested
-    }
-
     /// Returns both complete aggregates.
     pub fn into_parts(self) -> (ReviewExternalLink, ReviewExternalLink) {
         (*self.existing, *self.requested)
@@ -5174,12 +5168,14 @@ pub enum ReviewWorkflowTransitionError {
     ExternalLink(signalbox_domain::ReviewExternalLinkTransitionError),
 }
 
-#[derive(signalbox_derive::OperatorError)]
+#[derive(signalbox_derive::Accessors, signalbox_derive::OperatorError)]
 #[error("{} durable facts are corrupt: {}", aggregate, detail)]
 /// Stored workflow facts could not form one domain aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewWorkflowCorruption {
     aggregate: &'static str,
+    /// Borrows the content-safe diagnostic detail.
+    #[get(str)]
     detail: String,
 }
 
@@ -5187,11 +5183,6 @@ impl ReviewWorkflowCorruption {
     /// Returns the aggregate family that failed.
     pub const fn aggregate(&self) -> &'static str {
         self.aggregate
-    }
-
-    /// Borrows the content-safe diagnostic detail.
-    pub fn detail(&self) -> &str {
-        &self.detail
     }
 }
 

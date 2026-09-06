@@ -46,16 +46,12 @@ use crate::{
 
 const STORAGE_VERSION: i16 = 1;
 
+#[derive(signalbox_derive::Accessors)]
 /// One successful await registration, equal replay included.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecordedDelegationWait {
+    #[get(copy)]
     wait: DelegationWait,
-}
-
-impl RecordedDelegationWait {
-    pub const fn wait(self) -> DelegationWait {
-        self.wait
-    }
 }
 
 /// One successful peer-message receipt, equal replay included.
@@ -68,16 +64,12 @@ pub struct RecordedDelegationMessage {
     delivery_sequence: NonZeroU64,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One exact foreground delivery selected from durable relationship state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordedDelegationDelivery {
+    #[get]
     outcome: DelegationOutcome,
-}
-
-impl RecordedDelegationDelivery {
-    pub const fn outcome(&self) -> &DelegationOutcome {
-        &self.outcome
-    }
 }
 
 impl RecordedDelegationMessage {

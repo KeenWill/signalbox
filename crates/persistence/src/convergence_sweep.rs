@@ -24,9 +24,11 @@ use crate::mapping::{
     convergence_sweep_state_from_str, convergence_sweep_state_to_str, session_id_from_uuid,
 };
 
+#[derive(signalbox_derive::Accessors)]
 /// The exact pull-request observation used for movement and dispatch-effect checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConvergenceSweepObservation {
+    #[get]
     head_sha: CommitSha,
     unresolved_threads: u64,
 }
@@ -37,10 +39,6 @@ impl ConvergenceSweepObservation {
             head_sha,
             unresolved_threads,
         }
-    }
-
-    pub const fn head_sha(&self) -> &CommitSha {
-        &self.head_sha
     }
 
     pub const fn unresolved_threads(&self) -> u64 {

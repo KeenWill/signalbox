@@ -84,12 +84,17 @@ impl fmt::Debug for ImportedRawBlobInput {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Verified publication facts registered with the importing aggregate.
 #[derive(Clone, Debug)]
 pub struct ImportedRawBlobPublication {
     expected: ExpectedBlob,
+    /// Returns the deployment store holding the verified object.
+    #[get]
     store: BlobStoreName,
     namespace_id: Uuid,
+    /// Returns the verified immutable object key.
+    #[get]
     object_key: BlobObjectKey,
 }
 
@@ -114,19 +119,9 @@ impl ImportedRawBlobPublication {
         self.expected
     }
 
-    /// Returns the deployment store holding the verified object.
-    pub const fn store(&self) -> &BlobStoreName {
-        &self.store
-    }
-
     /// Returns the deployment namespace bound to the store.
     pub const fn namespace_id(&self) -> Uuid {
         self.namespace_id
-    }
-
-    /// Returns the verified immutable object key.
-    pub const fn object_key(&self) -> &BlobObjectKey {
-        &self.object_key
     }
 }
 

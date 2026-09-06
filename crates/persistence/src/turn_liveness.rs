@@ -621,9 +621,12 @@ fn decode_durable_observation(
     ))
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One page of the quiescent inventory, and where the rotation continues.
 #[derive(Clone, Debug)]
 pub struct QuiescentActiveTurnPage {
+    /// Returns the quiescent turns this page observed.
+    #[get(unbox)]
     candidates: Box<[StaleTurnCandidate]>,
     rows: usize,
     resume_after: Option<SessionId>,
@@ -653,11 +656,6 @@ impl QuiescentActiveTurnPage {
             rows: fetched.rows,
             resume_after,
         }
-    }
-
-    /// Returns the quiescent turns this page observed.
-    pub fn candidates(&self) -> &[StaleTurnCandidate] {
-        &self.candidates
     }
 
     /// Returns how many rows the statement returned, dropped ones included.

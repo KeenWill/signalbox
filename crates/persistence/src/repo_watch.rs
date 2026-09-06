@@ -64,16 +64,13 @@ const EVENT_CONTENT_IDENTITY_VERSION_V1: i16 = 1;
 const EVENT_VERSION_V1: i16 = 1;
 const MAX_EVENT_PAGE_SIZE: u16 = 100;
 
+#[derive(signalbox_derive::Accessors)]
 /// One positive append-only cursor generation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct RepoWatchCursorGeneration(NonZeroU64);
+pub struct RepoWatchCursorGeneration(#[get(inner, as = "get")] NonZeroU64);
 
 impl RepoWatchCursorGeneration {
     pub const INITIAL: Self = Self(NonZeroU64::MIN);
-
-    pub const fn get(self) -> u64 {
-        self.0.get()
-    }
 
     fn try_from_stored(value: i64) -> Result<Self, RepoWatchPersistenceCorruption> {
         let value = u64::try_from(value)
@@ -93,11 +90,15 @@ impl RepoWatchCursorGeneration {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical cursor payload prepared by one complete successful poll.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCursorCandidate {
+    #[get]
     observation: RepoWatchObservation,
+    #[get]
     event_identity_frontier: RepoWatchEventIdentityFrontierV1,
+    #[get(unbox)]
     merged_pull_request_baselines: Box<[RepoWatchMergedPullRequestBaselineV1]>,
 }
 
@@ -169,39 +170,22 @@ impl RepoWatchCursorCandidate {
             merged_pull_request_baselines: merged_pull_request_baselines.into_boxed_slice(),
         })
     }
-
-    pub const fn observation(&self) -> &RepoWatchObservation {
-        &self.observation
-    }
-
-    pub const fn event_identity_frontier(&self) -> &RepoWatchEventIdentityFrontierV1 {
-        &self.event_identity_frontier
-    }
-
-    pub fn merged_pull_request_baselines(&self) -> &[RepoWatchMergedPullRequestBaselineV1] {
-        &self.merged_pull_request_baselines
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Latest accepted durable cursor for one repository.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCursor {
+    #[get]
     repository: RepositorySlug,
     generation: RepoWatchCursorGeneration,
+    #[get]
     candidate: RepoWatchCursorCandidate,
 }
 
 impl RepoWatchCursor {
-    pub const fn repository(&self) -> &RepositorySlug {
-        &self.repository
-    }
-
     pub const fn generation(&self) -> RepoWatchCursorGeneration {
         self.generation
-    }
-
-    pub const fn candidate(&self) -> &RepoWatchCursorCandidate {
-        &self.candidate
     }
 }
 
@@ -216,11 +200,14 @@ pub enum RepoWatchEventProducer {
     Webhook,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One optimistic atomic cursor-and-event commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCommitRequest {
     expected_generation: Option<RepoWatchCursorGeneration>,
+    #[get]
     candidate: RepoWatchCursorCandidate,
+    #[get(unbox)]
     events: Box<[RepoWatchEventOccurrenceV1]>,
     producer: RepoWatchEventProducer,
 }
@@ -261,14 +248,6 @@ impl RepoWatchCommitRequest {
         self.expected_generation
     }
 
-    pub const fn candidate(&self) -> &RepoWatchCursorCandidate {
-        &self.candidate
-    }
-
-    pub fn events(&self) -> &[RepoWatchEventOccurrenceV1] {
-        &self.events
-    }
-
     pub const fn producer(&self) -> RepoWatchEventProducer {
         self.producer
     }
@@ -285,10 +264,13 @@ pub enum RepoWatchCommitOutcome {
     },
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Positive position of one event within its cursor generation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RepoWatchEventPosition {
+    #[get(copy)]
     generation: RepoWatchCursorGeneration,
+    #[get(copy)]
     ordinal: NonZeroU32,
 }
 
@@ -299,19 +281,12 @@ impl RepoWatchEventPosition {
             ordinal,
         }
     }
-
-    pub const fn generation(self) -> RepoWatchCursorGeneration {
-        self.generation
-    }
-
-    pub const fn ordinal(self) -> NonZeroU32 {
-        self.ordinal
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded durable event-page size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RepoWatchEventPageSize(NonZeroU16);
+pub struct RepoWatchEventPageSize(#[get(inner, as = "get")] NonZeroU16);
 
 impl RepoWatchEventPageSize {
     pub fn try_new(value: NonZeroU16) -> Result<Self, RepoWatchPageSizeError> {
@@ -321,10 +296,6 @@ impl RepoWatchEventPageSize {
             Ok(Self(value))
         }
     }
-
-    pub const fn get(self) -> u16 {
-        self.0.get()
-    }
 }
 
 #[derive(signalbox_derive::OperatorError)]
@@ -333,10 +304,12 @@ impl RepoWatchEventPageSize {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchPageSizeError;
 
+#[derive(signalbox_derive::Accessors)]
 /// One positioned durable repository-watch fact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PositionedRepoWatchEvent {
     position: RepoWatchEventPosition,
+    #[get]
     event: RepoWatchEvent,
     producer: RepoWatchEventProducer,
 }
@@ -344,10 +317,6 @@ pub struct PositionedRepoWatchEvent {
 impl PositionedRepoWatchEvent {
     pub const fn position(&self) -> RepoWatchEventPosition {
         self.position
-    }
-
-    pub const fn event(&self) -> &RepoWatchEvent {
-        &self.event
     }
 
     /// The intake whose commit wrote this row.
@@ -359,18 +328,16 @@ impl PositionedRepoWatchEvent {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded keyset-ordered page of durable facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchEventPage {
+    #[get(unbox)]
     events: Box<[PositionedRepoWatchEvent]>,
     next_after: Option<RepoWatchEventPosition>,
 }
 
 impl RepoWatchEventPage {
-    pub fn events(&self) -> &[PositionedRepoWatchEvent] {
-        &self.events
-    }
-
     pub const fn next_after(&self) -> Option<RepoWatchEventPosition> {
         self.next_after
     }
@@ -450,39 +417,33 @@ impl From<sqlx::Error> for RepoWatchStoreError {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One stale-review clearance intent's durable identity.
 ///
 /// Distinct from its claim token so the two cannot be transposed at a call
 /// site: they are both UUIDs, and swapping them turns a valid renewal, record,
 /// or release into a silent no-op against a row that does not exist.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RepoWatchStaleReviewClearanceId(Uuid);
+pub struct RepoWatchStaleReviewClearanceId(#[get(copy, as = "get")] Uuid);
 
 impl RepoWatchStaleReviewClearanceId {
     pub const fn new(value: Uuid) -> Self {
         Self(value)
     }
-
-    pub const fn get(self) -> Uuid {
-        self.0
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One clearance claim's ownership token.
 ///
 /// Every write that acts on a claimed intent carries this token, so a watcher
 /// whose lease expired and was taken over cannot act on the newer claimant's
 /// intent.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RepoWatchStaleReviewClearanceClaimToken(Uuid);
+pub struct RepoWatchStaleReviewClearanceClaimToken(#[get(copy, as = "get")] Uuid);
 
 impl RepoWatchStaleReviewClearanceClaimToken {
     pub const fn new(value: Uuid) -> Self {
         Self(value)
-    }
-
-    pub const fn get(self) -> Uuid {
-        self.0
     }
 }
 
@@ -495,17 +456,23 @@ pub enum RepoWatchStaleReviewClearanceRenewal {
     Lost,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Durable intent created before one stale review dismissal request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchPlannedStaleReviewClearance {
     clearance_id: RepoWatchStaleReviewClearanceId,
     claim_token: RepoWatchStaleReviewClearanceClaimToken,
     number: PullRequestNumber,
+    #[get]
     current_head_sha: CommitSha,
+    #[get]
     base_branch: BranchName,
+    #[get]
     base_revision: CommitSha,
     review_node_id: Box<str>,
+    #[get]
     reviewer: RepoWatchAuthorLogin,
+    #[get]
     reviewed_head_sha: CommitSha,
     dismissal_message: Box<str>,
 }
@@ -564,28 +531,8 @@ impl RepoWatchPlannedStaleReviewClearance {
         self.number
     }
 
-    pub const fn current_head_sha(&self) -> &CommitSha {
-        &self.current_head_sha
-    }
-
-    pub const fn base_branch(&self) -> &BranchName {
-        &self.base_branch
-    }
-
-    pub const fn base_revision(&self) -> &CommitSha {
-        &self.base_revision
-    }
-
     pub const fn review_node_id(&self) -> &str {
         &self.review_node_id
-    }
-
-    pub const fn reviewer(&self) -> &RepoWatchAuthorLogin {
-        &self.reviewer
-    }
-
-    pub const fn reviewed_head_sha(&self) -> &CommitSha {
-        &self.reviewed_head_sha
     }
 
     pub const fn dismissal_message(&self) -> &str {

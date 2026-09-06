@@ -54,6 +54,7 @@ pub struct PrepareContextCompactionRequest {
     pub result_frontier: ContextFrontierId,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact durable facts committed before provider preparation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedContextCompaction {
@@ -64,22 +65,31 @@ pub struct PreparedContextCompaction {
     call: ModelCallId,
     selection: DirectModelSelection,
     target: ResolvedProviderTarget,
+    /// Returns the pinned non-secret credential reference.
+    #[get(str)]
     credential_reference: String,
     source_frontier: ContextFrontierId,
     first_position: u64,
     through_position: u64,
     first: SemanticTranscriptEntryRef,
     through: SemanticTranscriptEntryRef,
+    /// Returns the exact model-visible range supplied to the summary call.
+    #[get(unbox)]
     summarized_entries: Box<[SemanticTranscriptEntryRef]>,
+    /// Returns each summarized entry's one-based physical frontier position.
+    #[get(unbox)]
     summarized_positions: Box<[u64]>,
     summary_entry: SemanticTranscriptEntryId,
     result_frontier: ContextFrontierId,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Read-only model-visible inventory used to choose an automatic boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutomaticContextCompactionPreview {
     source_frontier: ContextFrontierId,
+    /// Returns projected members in model-visible order.
+    #[get(unbox)]
     members: Box<[AutomaticContextCompactionPreviewMember]>,
 }
 
@@ -88,36 +98,21 @@ impl AutomaticContextCompactionPreview {
     pub const fn source_frontier(&self) -> ContextFrontierId {
         self.source_frontier
     }
-
-    /// Returns projected members in model-visible order.
-    pub fn members(&self) -> &[AutomaticContextCompactionPreviewMember] {
-        &self.members
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One projected entry and whether it closes every preceding tool exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AutomaticContextCompactionPreviewMember {
-    position: u64,
-    reference: SemanticTranscriptEntryRef,
-    safe_boundary: bool,
-}
-
-impl AutomaticContextCompactionPreviewMember {
     /// Returns the entry's one-based physical frontier position.
-    pub const fn position(self) -> u64 {
-        self.position
-    }
-
+    #[get(copy)]
+    position: u64,
     /// Returns the exact semantic entry reference.
-    pub const fn reference(self) -> SemanticTranscriptEntryRef {
-        self.reference
-    }
-
+    #[get(copy)]
+    reference: SemanticTranscriptEntryRef,
     /// Reports whether a summary through this entry closes all tool exchanges.
-    pub const fn is_safe_boundary(self) -> bool {
-        self.safe_boundary
-    }
+    #[get(copy, as = "is_safe_boundary")]
+    safe_boundary: bool,
 }
 
 impl PreparedContextCompaction {
@@ -149,10 +144,7 @@ impl PreparedContextCompaction {
     pub const fn target(&self) -> ResolvedProviderTarget {
         self.target
     }
-    /// Returns the pinned non-secret credential reference.
-    pub fn credential_reference(&self) -> &str {
-        &self.credential_reference
-    }
+
     /// Returns the complete source-frontier identity.
     pub const fn source_frontier(&self) -> ContextFrontierId {
         self.source_frontier
@@ -173,14 +165,7 @@ impl PreparedContextCompaction {
     pub const fn through(&self) -> SemanticTranscriptEntryRef {
         self.through
     }
-    /// Returns the exact model-visible range supplied to the summary call.
-    pub fn summarized_entries(&self) -> &[SemanticTranscriptEntryRef] {
-        &self.summarized_entries
-    }
-    /// Returns each summarized entry's one-based physical frontier position.
-    pub fn summarized_positions(&self) -> &[u64] {
-        &self.summarized_positions
-    }
+
     /// Returns the fresh summary-entry identity.
     pub const fn summary_entry(&self) -> SemanticTranscriptEntryId {
         self.summary_entry

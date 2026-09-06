@@ -167,18 +167,14 @@ impl ClassifyOperatorFailure for CommitActivationPreviewError {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Read-only exact activation candidate retained for guarded commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedActivationPreview {
     identities: AcceptedInputTurnActivationIdentities,
-    prepared: PreparedTurnActivation,
-}
-
-impl PreparedActivationPreview {
     /// Borrows the exact checked candidate used for prospective model rendering.
-    pub const fn prepared(&self) -> &PreparedTurnActivation {
-        &self.prepared
-    }
+    #[get]
+    prepared: PreparedTurnActivation,
 }
 
 /// Outcome of committing a previously counted activation preview.

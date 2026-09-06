@@ -130,11 +130,13 @@ pub enum RepoWatchObligationParkRelease {
     ActorRejected,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One latest-state delivery obligation retained after singleton refusal.
 #[derive(Clone, Debug)]
 pub struct RepoWatchDispatchObligation {
     id: Uuid,
     first_event_id: RepoWatchEventId,
+    #[get]
     latest_event: RepoWatchEvent,
     matched_event_count: u64,
     failed_attempts: u64,
@@ -148,10 +150,6 @@ impl RepoWatchDispatchObligation {
 
     pub const fn first_event_id(&self) -> RepoWatchEventId {
         self.first_event_id
-    }
-
-    pub const fn latest_event(&self) -> &RepoWatchEvent {
-        &self.latest_event
     }
 
     pub const fn matched_event_count(&self) -> u64 {

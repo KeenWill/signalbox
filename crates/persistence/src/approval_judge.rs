@@ -102,24 +102,33 @@ impl SessionAuthorityContext {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact durable facts committed before approval-judge provider preparation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedApprovalJudge {
+    /// Borrows the exact parked request being judged.
+    #[get]
     request: ToolRequest,
     call: ModelCallId,
     selection: DirectModelSelection,
     target: ResolvedProviderTarget,
+    /// Borrows the pinned non-secret credential reference.
+    #[get(str)]
     credential_reference: String,
     input_includes_cache_tokens: bool,
+    /// Borrows the session authority this request was produced under.
+    ///
+    /// The context is read fresh on every preparation and is deliberately
+    /// absent from the durable judge binding, so it never participates in the
+    /// exact-call recheck that guards authorization and completion. Completion
+    /// does compare the goal it carries against the statement in force at that
+    /// moment, but by resolving that statement again rather than by binding
+    /// this value durably.
+    #[get]
     session_context: SessionAuthorityContext,
 }
 
 impl PreparedApprovalJudge {
-    /// Borrows the exact parked request being judged.
-    pub const fn request(&self) -> &ToolRequest {
-        &self.request
-    }
-
     /// Returns the dedicated model-call identity.
     pub const fn call(&self) -> ModelCallId {
         self.call
@@ -135,26 +144,9 @@ impl PreparedApprovalJudge {
         self.target
     }
 
-    /// Borrows the pinned non-secret credential reference.
-    pub fn credential_reference(&self) -> &str {
-        &self.credential_reference
-    }
-
     /// Reports whether the provider's input total includes cache axes.
     pub const fn input_includes_cache_tokens(&self) -> bool {
         self.input_includes_cache_tokens
-    }
-
-    /// Borrows the session authority this request was produced under.
-    ///
-    /// The context is read fresh on every preparation and is deliberately
-    /// absent from the durable judge binding, so it never participates in the
-    /// exact-call recheck that guards authorization and completion. Completion
-    /// does compare the goal it carries against the statement in force at that
-    /// moment, but by resolving that statement again rather than by binding
-    /// this value durably.
-    pub const fn session_context(&self) -> &SessionAuthorityContext {
-        &self.session_context
     }
 }
 
