@@ -9233,6 +9233,21 @@ context_window_tokens = 200000
     }
 
     #[test]
+    fn configuration_rejects_unknown_convergence_policy_fields() {
+        let example = include_str!("../../../crates/convergence/examples/repository.toml");
+        let policy = example.replace("[[reviewers]]", "[[convergence.reviewers]]");
+        for configured in [
+            format!("{CONFIGURATION}\n[convergence]\nobsolete = true\n{policy}"),
+            format!("{CONFIGURATION}\n[convergence]\n{policy}\nobsolete = true"),
+        ] {
+            assert_eq!(
+                HubModelConfiguration::parse(&configured).err(),
+                Some(HubModelConfigurationError::InvalidDocument)
+            );
+        }
+    }
+
+    #[test]
     fn configuration_rejects_unknown_fields_and_dangling_aliases() {
         assert_eq!(
             HubModelConfiguration::parse(&CONFIGURATION.replace(

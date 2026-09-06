@@ -822,6 +822,8 @@ impl GitHubCodeHostTransport {
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         let repository_name = format!("{}/{}", repository.owner(), repository.name());
+        let transport_failure = std::sync::Mutex::new(None);
+        let failure = &transport_failure;
         let mut send = |request| -> signalbox_convergence::fetch::RequestFuture<'_> {
             Box::pin(async move {
                 let result = match request {
@@ -844,7 +846,10 @@ impl GitHubCodeHostTransport {
                         }
                     }
                 };
-                result.map_err(|_| {
+                result.map_err(|error| {
+                    *failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
                     signalbox_convergence::Error::Evidence(
                         "GitHub convergence request failed".into(),
                     )
@@ -859,7 +864,12 @@ impl GitHubCodeHostTransport {
             policy,
         )
         .await
-        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        .map_err(|_| {
+            transport_failure
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or(CodeHostTransportFailure::InvalidResponse)
+        })?;
         let snapshot = recording
             .snapshot(policy)
             .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
@@ -2951,6 +2961,45 @@ mod tests {
     fn repository() -> CodeHostRepository {
         CodeHostRepository::try_new(String::from("owner/repository"))
             .expect("fixture repository is admitted")
+    }
+
+    #[tokio::test]
+    async fn convergence_fetch_preserves_credential_and_dispatch_failures() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
+        )
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let repository = CodeHostRepository::try_new(recording.repository)
+            .expect("the recorded repository is admitted");
+        let number = CodeHostChangeRequestNumber::try_new(recording.number)
+            .expect("the recorded number is admitted");
+        let (transport, listener) = repository_test_transport().await;
+        let mut transport = transport.with_convergence_policy(Some(policy));
+        transport.graphql_url = transport
+            .rest_base
+            .join("graphql")
+            .expect("local URL joins");
+        // Closing the listener exercises a real connection failure without provider responses.
+        drop(listener);
+        for (credential, expected) in [
+            (
+                CredentialValue::new(b"invalid\nheader".to_vec()),
+                CodeHostTransportFailure::InvalidCredential,
+            ),
+            (test_credential(), CodeHostTransportFailure::DispatchUnknown),
+        ] {
+            assert_eq!(
+                transport
+                    .convergence_state_for(&repository, number, &credential)
+                    .await
+                    .err(),
+                Some(expected)
+            );
+        }
     }
 
     /// REST paths and pagination are derived only from checked typed segments.

@@ -28,6 +28,7 @@ pub enum Error {
 
 /// Repository and reviewer configuration shared by every consumer.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConvergencePolicy {
     pub repository: String,
     pub reviewers: Vec<ReviewerPolicy>,
@@ -40,6 +41,7 @@ pub struct ConvergencePolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewerPolicy {
     pub login: String,
     pub bot: bool,
