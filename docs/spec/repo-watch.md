@@ -85,6 +85,11 @@ template and the timing policy, and each repository lists its
 predicate described in [review workflows](review-workflows.md). The sweep
 evaluates one revalidated snapshot and uses that verdict for its decision.
 
+The v2 module is not composed into the daemon runtime: the daemon starts no
+module worker and exposes no module operator route. Planned dispatch actions and
+lifecycle reactions are retained in strictly increasing, unique action-ordinal
+order; no submitter is composed and no submission behavior is specified.
+
 ## Design decisions
 
 Each repository frontier commit includes the complete current repository and
@@ -160,15 +165,8 @@ command behavior, and the module event/command/database boundary in the
 
 ## Planned
 
-The v2 module is not dispatched: the daemon starts no module poller, webhook
-listener, command worker, lease-expiry task, or operator projection route.
-Enabling dispatch requires an owner-approved code change that composes a worker;
-there is no latent runtime switch.
+Repository-watch dispatch provenance is planned in the
+[repository watch design](../design/repo-watch.md).
 
-Planned dispatch actions and lifecycle reactions are retained in strictly
-increasing, unique action-ordinal order. No submitter is composed. Command
-submission will be specified when the module runtime lands.
-
-The module-owned projection and command ledger are built; the poller, webhook
-listener, command worker, lease-expiry task, operator routes, and public-schema
-persistence surface are not.
+Restart-persistent poll caching is planned in the
+[repository watch design](../design/repo-watch.md).
