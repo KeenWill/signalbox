@@ -3196,8 +3196,8 @@ mod tests {
         );
     }
 
-    /// a scheduling-aware executor's durable
-    /// foreground wait is reread before the service accepts the parked turn.
+    /// a scheduling-aware executor's durable foreground wait is reread before the service accepts
+    /// the parked turn.
     #[tokio::test]
     async fn durable_child_wait_is_authenticated_without_second_observation() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
@@ -3250,8 +3250,8 @@ mod tests {
         );
     }
 
-    /// terminal evidence committed atomically with a
-    /// tool effect is authenticated and never sent through a second commit.
+    /// terminal evidence committed atomically with a tool effect is authenticated and never sent
+    /// through a second commit.
     #[tokio::test]
     async fn durable_completion_is_authenticated_without_second_commit() {
         let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
@@ -3416,8 +3416,8 @@ mod tests {
         );
     }
 
-    /// a transient durable-wait reread failure keeps
-    /// the exact evidence and dispatch permit for same-incarnation retry.
+    /// a transient durable-wait reread failure keeps the exact evidence and dispatch permit for
+    /// same-incarnation retry.
     #[tokio::test]
     async fn durable_child_wait_retries_only_its_authentication() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
@@ -4087,10 +4087,9 @@ mod tests {
         )
     }
 
-    /// a result past the admission bound is replaced by the
-    /// typed `ResultTooLarge` error. The observation compared here is the whole
-    /// value handed to the commit boundary, so equality with a detail-less
-    /// typed failure is also the proof that no oversized byte survives into it.
+    /// a result past the admission bound is replaced by the typed `ResultTooLarge` error. The
+    /// observation compared here is the whole value handed to the commit boundary, so equality with
+    /// a detail-less typed failure is also the proof that no oversized byte survives into it.
     #[test]
     fn oversized_result_is_replaced_by_result_too_large() {
         let observation = completed_text_admission("r".repeat(OVERSIZED_RESULT_BYTES));
@@ -4103,10 +4102,9 @@ mod tests {
         );
     }
 
-    /// a result carrying U+0000 is admitted as a detail-less
-    /// `ExecutionFailed`. The tool-loop specification names a replacement kind
-    /// for the size bound only, so this test pins the implemented mapping for
-    /// the null-bearing arm rather than a specified one.
+    /// a result carrying U+0000 is admitted as a detail-less `ExecutionFailed`. The tool-loop
+    /// specification names a replacement kind for the size bound only, so this test pins the
+    /// implemented mapping for the null-bearing arm rather than a specified one.
     #[test]
     fn result_containing_null_is_replaced_by_execution_failed() {
         let observation = completed_text_admission(String::from("head\0tail"));
@@ -4159,9 +4157,8 @@ mod tests {
         );
     }
 
-    /// the substitution is what the hub durably commits — the
-    /// ended attempt carries the typed `ResultTooLarge` failure, so oversized
-    /// executor bytes never become durable result evidence.
+    /// the substitution is what the hub durably commits — the ended attempt carries the typed
+    /// `ResultTooLarge` failure, so oversized executor bytes never become durable result evidence.
     #[tokio::test]
     async fn committed_oversized_result_ends_the_attempt_known_failed() {
         let effect_class = ToolEffectClass::EffectFree;
