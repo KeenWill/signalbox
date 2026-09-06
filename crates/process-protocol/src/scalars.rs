@@ -962,14 +962,6 @@ pub(crate) fn parse_decimal_u64(value: &str) -> Result<u64, CanonicalValueError>
     Ok(parsed)
 }
 
-pub(crate) fn values_are_distinct<ValueT>(values: &[ValueT]) -> bool
-where
-    ValueT: Eq + std::hash::Hash,
-{
-    let mut distinct = HashSet::with_capacity(values.len());
-    values.iter().all(|value| distinct.insert(value))
-}
-
 pub(crate) fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
     deserializer: DeserializerT,
 ) -> Result<Option<ValueT>, DeserializerT::Error>
@@ -1022,7 +1014,7 @@ pub enum FrameValidationError {
     /// A unified conversation-listing frame carried an invalid shape.
     ConversationListShape,
     #[error("operator-status frame shape is inconsistent")]
-    /// A repository-watch operator-status row carried an invalid shape.
+    /// An operator-status row carried an invalid shape.
     OperatorStatusShape,
     #[error("frame omits its required system-prompt member")]
     SystemPromptShape,

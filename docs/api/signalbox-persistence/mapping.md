@@ -352,38 +352,6 @@ where
 }
 ```
 
-## repo_watch_review_decision_from_str
-
-```rust
-pub fn repo_watch_review_decision_from_str(
-    value: &str,
-) -> option::Option<repo_watch::RepoWatchReviewDecision>;
-```
-
-## repo_watch_stale_review_clearance_outcome_from_str
-
-```rust
-pub fn repo_watch_stale_review_clearance_outcome_from_str(
-    value: &str,
-) -> option::Option<repo_watch::RepoWatchStaleReviewClearanceOutcome>;
-```
-
-## repo_watch_observed_review_state_from_str
-
-```rust
-pub fn repo_watch_observed_review_state_from_str(
-    value: &str,
-) -> option::Option<repo_watch::RepoWatchObservedReviewState>;
-```
-
-## repo_watch_convergence_verdict_from_str
-
-```rust
-pub fn repo_watch_convergence_verdict_from_str(
-    value: &str,
-) -> option::Option<repo_watch::RepoWatchConvergenceVerdict>;
-```
-
 ## PositiveOrdinalMappingError
 
 ```rust

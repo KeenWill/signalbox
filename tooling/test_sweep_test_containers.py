@@ -157,9 +157,10 @@ MARKED_START = ".with_labels(disposable_test_container_labels())"
 # rather than reaching into whatever precedes an unrecognized statement.
 CHAIN_LINE_LIMIT = 40
 
-# A scan that silently matched nothing would otherwise satisfy the marking
-# test with no evidence at all.
-CONTAINER_START_SITES = 38
+# Re-verified against the head: the current integration suites contain 33
+# marked starts. A scan that silently matched nothing would otherwise satisfy
+# the marking test with no evidence at all.
+CONTAINER_START_SITES = 33
 
 
 def container_start_sites() -> tuple[list[str], list[str]]:

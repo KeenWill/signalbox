@@ -1465,14 +1465,6 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
-            let dispatch_start_lease_expired: bool =
-                sqlx::query_scalar(crate::lock_inventory::EXPIRED_DISPATCH_START_LEASE)
-                    .bind(session_id_to_uuid(session))
-                    .fetch_one(&mut *transaction)
-                    .await?;
-            if dispatch_start_lease_expired {
-                return Ok((false, PrepareInitialModelCallOutcome::NoWork));
-            }
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
             if execution.current_call().is_none()
@@ -6378,10 +6370,10 @@ async fn load_origin_contents(
         let command: Option<Uuid> = row.try_get("accepting_command_id")?;
         let goal_turn: Option<Uuid> = row.try_get("goal_turn_id")?;
         // An accepting command decides provenance whether or not a generation
-        // owns the turn. A goal turn bound to a turn a command already accepted
-        // — the shape repository-watch dispatch commits — has both, and its
-        // text was authored by that command; the `goal_turn` row records which
-        // generation the turn runs under, not where its input came from.
+        // owns the turn. A commissioned dispatch binds its goal to a turn its
+        // input command already accepted, so both rows exist and the text was
+        // authored by that command; the `goal_turn` row records which generation
+        // the turn runs under, not where its input came from.
         let provenance = match (command, goal_turn) {
             (Some(command), _) => {
                 let command = durable_command_id_from_uuid(command)
@@ -7287,7 +7279,6 @@ pub(crate) async fn insert_prepared_call(
     input_includes_cache_tokens: bool,
     effective_target: ResolvedProviderTarget,
 ) -> Result<(), ModelCallRepositoryError> {
-    crate::convergence_sweep::lock_model_activity_fence(connection, prepared.session()).await?;
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
     for steering in prepared.consumed_steering() {

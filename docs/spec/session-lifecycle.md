@@ -125,17 +125,9 @@ classifier, and a read that encounters a state it does not recognize returns an
 error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
-daemon core; no module implements any of them except the core-integrated
-[convergence](repo-watch.md) sweep, which owns its dispatch failure budget and
-parks the session as a module when that budget is exhausted, and
-[repo-watch](repo-watch.md), which owns a dispatch-attempt budget and holds a
-start lease. An obligation that exhausts the dispatch-attempt budget parks the
-owned sessions it wraps as the module. The start lease covers a dispatched
-session's wait for its first model call, and an expired lease ends the
-commissioned goal generation through a composed goal stop rather than a
-lifecycle deadline, leaving the session non-terminal. Lifecycle behavior or an
-event kind a module needs and core does not provide is added to core, and
-modules never reconstruct events by joining core tables.
+daemon core. Lifecycle behavior or an event kind a module needs and core does
+not provide is added to core, and modules never reconstruct events by joining
+core tables.
 
 The attention classifier that
 [sessions and the transcript](sessions-and-transcript.md) owns is a projection
@@ -158,11 +150,9 @@ no finish condition. Attaching a goal to an unmonitored session records it as
 owned, with the adoption journaled to the attaching actor, in the same
 transaction.
 
-An unmonitored session has no deadlines and no automatic resumption; no external
-sweep other than the repo-watch start lease acts on it, and it is excluded from
-occupancy accounting only on the passes the reconciliation sweep admits under
-its ownership marker. Turn-liveness recovery covers its turns, because a dead
-turn left active would block its next input.
+An unmonitored session has no deadlines and no automatic resumption.
+Turn-liveness recovery covers its turns, because a dead turn left active would
+block its next input.
 
 Release never interrupts a live operation: a running turn completes to its
 boundary under the resources already held.
@@ -203,9 +193,6 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
   or an exhausted retry budget on a live owned session parks it with the typed
   cause instead of terminalizing it or stopping silently; see
   [session lifecycle design](../design/session-lifecycle.md).
-- Supersession by redispatch: a module redispatch that owns the retry closes the
-  parked predecessor, a structurally failed one included, as superseded by the
-  successor; see [session lifecycle design](../design/session-lifecycle.md).
 - Deadline events for modules: modules and the program substrate subscribe to
   deadline expiries instead of running their own watchdogs; see
   [session lifecycle design](../design/session-lifecycle.md).
@@ -221,12 +208,9 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
 - Active-stall expiry: the configured active-stall bound and the deadline pass
   that parks an active or recovering session on it; see
   [session lifecycle design](../design/session-lifecycle.md).
-- [Repo-watch](repo-watch.md) finish verification: a finish check that re-tests
-  the external gate on the exact head, so a declared achievement can settle as
-  verified; see [session lifecycle design](../design/session-lifecycle.md).
 - Sticky-stop suppression: re-dispatch of stopped work stays suppressed until
-  the dispatch source is updated; see
-  [session lifecycle design](../design/session-lifecycle.md).
+  the dispatch source is updated; see the
+  [repository-watch reaction contract](repo-watch.md#reducer-and-dispatch-ledger).
 - Worktree and container cleanup on closure: a closed session's worktree and
   container are removed; see
   [session lifecycle design](../design/session-lifecycle.md).

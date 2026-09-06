@@ -4683,7 +4683,9 @@ dependencies = [
 name = "signalbox-module-repo-watch-v2"
 version = "0.0.0"
 dependencies = [
+ "reqwest",
  "rust_decimal",
+ "rustls",
  "serde_json",
  "sha2 0.11.0",
  "signalbox-ownership-seam",
@@ -5054,11 +5056,8 @@ dependencies = [
  "git2",
  "headers",
  "hex",
- "hmac",
  "http",
  "http-body-util",
- "hyper",
- "hyper-util",
  "image",
  "jiff",
  "mime",

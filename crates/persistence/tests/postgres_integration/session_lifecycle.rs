@@ -471,7 +471,7 @@ async fn a_parked_session_leaves_the_eligibility_sweep() -> Result<(), Box<dyn E
         .await?;
     queue_first_turn(&pool, session, 4).await?;
 
-    let (before_park, _, _) = PostgresEligibilitySweep::new(pool.clone())
+    let (before_park, _) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -484,7 +484,7 @@ async fn a_parked_session_leaves_the_eligibility_sweep() -> Result<(), Box<dyn E
     // test is about, and it reads the state column either way.
     park_by_statement(&pool, session).await?;
 
-    let (after_park, _, _) = PostgresEligibilitySweep::new(pool.clone())
+    let (after_park, _) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();

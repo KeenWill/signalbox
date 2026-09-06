@@ -56,7 +56,7 @@ Configuration reload is one `reload_configuration` request with no members and
 no `command_id`, because the swap changes process memory alone and a repeat
 re-reads and re-validates. Success returns
 `configuration_reloaded { reloaded_sections }`, an array of the closed values
-`model_catalog`, `session_templates`, and `repository_watch`. Failure returns
+`model_catalog` and `session_templates`. Failure returns
 `configuration_reload_failed { phase, reason }`, sanitized as startup logs are,
 and leaves the running configuration unchanged. Which sections reload and the
 validate-then-swap rule belong to

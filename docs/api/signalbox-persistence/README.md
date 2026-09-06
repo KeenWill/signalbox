@@ -22,19 +22,14 @@
 | goal_turn | 2 | 0 | 0 | [goal_turn](goal_turn.md) |
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
-| mapping | 6 | 0 | 33 | [mapping](mapping.md) |
+| mapping | 6 | 0 | 29 | [mapping](mapping.md) |
 | model_execution | 14 | 0 | 0 | [model_execution](model_execution.md) |
-| operator_status | 18 | 0 | 0 | [operator_status](operator_status.md) |
+| operator_status | 6 | 0 | 0 | [operator_status](operator_status.md) |
 | outbox | 31 | 0 | 7 | [types](outbox/types.md), [types-2](outbox/types-2.md), [functions](outbox/functions.md) |
 | plan | 3 | 0 | 0 | [plan](plan.md) |
 | process_read | 36 | 0 | 0 | [types](process_read/types.md), [types-2](process_read/types-2.md) |
 | program_journal | 3 | 0 | 0 | [program_journal](program_journal.md) |
 | replace_session_defaults | 5 | 0 | 0 | [replace_session_defaults](replace_session_defaults.md) |
-| repo_watch | 21 | 0 | 0 | [repo_watch](repo_watch.md) |
-| repo_watch_dispatch | 2 | 0 | 0 | [repo_watch_dispatch](repo_watch_dispatch.md) |
-| repo_watch_dispatch_obligation | 3 | 0 | 0 | [repo_watch_dispatch_obligation](repo_watch_dispatch_obligation.md) |
-| repo_watch_operations | 3 | 0 | 0 | [repo_watch_operations](repo_watch_operations.md) |
-| repo_watch_webhook | 20 | 0 | 0 | [repo_watch_webhook](repo_watch_webhook.md) |
 | review_orchestration | 11 | 0 | 0 | [review_orchestration](review_orchestration.md) |
 | review_workflow | 10 | 0 | 0 | [review_workflow](review_workflow.md) |
 | runner_protocol | 27 | 0 | 0 | [types](runner_protocol/types.md), [types-2](runner_protocol/types-2.md) |
@@ -53,7 +48,7 @@
 | start_eligible_turn | 9 | 0 | 0 | [start_eligible_turn](start_eligible_turn.md) |
 | startup | 4 | 0 | 0 | [startup](startup.md) |
 | submit_input | 5 | 0 | 0 | [submit_input](submit_input.md) |
-| test_support | 5 | 0 | 0 | [test_support](test_support.md) |
+| test_support | 2 | 0 | 0 | [test_support](test_support.md) |
 | tool_loop | 3 | 0 | 0 | [tool_loop](tool_loop.md) |
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |
