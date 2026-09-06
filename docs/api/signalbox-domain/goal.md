@@ -164,9 +164,6 @@ pub enum GoalModelBlockedReasonKind {
     AuthorizationRequired,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl convert::From<GoalModelBlockedReasonKind> for GoalBlockedReasonKind {
-    fn from(value: GoalModelBlockedReasonKind) -> Self;
-}
 ```
 
 ## GoalBlockedReasonKind

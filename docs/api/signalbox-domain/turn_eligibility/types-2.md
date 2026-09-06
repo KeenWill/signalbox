@@ -172,9 +172,6 @@ impl ActivatedAcceptedInputTurn {
     pub fn pending_steering(&self) -> &[PendingSteeringInput];
     pub fn consumed_steering(&self) -> &[ConsumedSteeringInput];
 }
-impl convert::From<ActivatedAcceptedInputTurn> for ActivatedTurn {
-    fn from(value: ActivatedAcceptedInputTurn) -> Self;
-}
 ```
 
 ## ActivatedDelegatedTurn
@@ -203,9 +200,6 @@ impl ActivatedDelegatedTurn {
     ) -> option::Option<Self>;
     pub fn pending_steering(&self) -> &[PendingSteeringInput];
     pub fn consumed_steering(&self) -> &[ConsumedSteeringInput];
-}
-impl convert::From<ActivatedDelegatedTurn> for ActivatedTurn {
-    fn from(value: ActivatedDelegatedTurn) -> Self;
 }
 ```
 
@@ -342,9 +336,6 @@ impl PreparedDelegatedTurnActivation {
         ResolvedContextFrontierSnapshot,
     )>;
 }
-impl convert::From<PreparedDelegatedTurnActivation> for PreparedTurnActivation {
-    fn from(value: PreparedDelegatedTurnActivation) -> Self;
-}
 ```
 
 ## PreparedTurnActivation
@@ -373,9 +364,6 @@ impl PreparedTurnActivation {
 ```rust
 pub struct PreparedAcceptedInputTurnActivation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl convert::From<PreparedAcceptedInputTurnActivation> for PreparedTurnActivation {
-    fn from(value: PreparedAcceptedInputTurnActivation) -> Self;
-}
 impl PreparedAcceptedInputTurnActivation {
     pub const fn turn(&self) -> &ActivatedAcceptedInputTurn;
     pub fn origin_entry(&self) -> SemanticTranscriptEntry;

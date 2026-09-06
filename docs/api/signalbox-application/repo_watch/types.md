@@ -69,9 +69,6 @@ impl fmt::Display for RepoWatchEventIdentityFrontierError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchEventIdentityFrontierError {}
-impl convert::From<RepoWatchEventIdentityFrontierError> for RepoWatchDifferError {
-    fn from(value: RepoWatchEventIdentityFrontierError) -> Self;
-}
 ```
 
 ## RepoWatchEventOccurrenceV1
@@ -535,9 +532,6 @@ impl fmt::Display for RepoWatchRepositoryStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchRepositoryStateError {}
-impl convert::From<RepoWatchRepositoryStateError> for RepoWatchWebhookApplyError {
-    fn from(value: RepoWatchRepositoryStateError) -> Self;
-}
 ```
 
 ## RepoWatchDifferFailureKind

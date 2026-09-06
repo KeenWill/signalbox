@@ -267,9 +267,6 @@ pub enum ChecksOutcome {
     Failure,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl convert::From<ChecksOutcome> for CheckConclusion {
-    fn from(value: ChecksOutcome) -> Self;
-}
 ```
 
 ## CheckConclusion

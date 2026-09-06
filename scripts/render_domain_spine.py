@@ -219,7 +219,7 @@ class Renderer:
         if abi != 'Rust':
             if isinstance(abi, dict):
                 name, options = next(iter(abi.items()))
-                abi = options if name == 'Other' else name.lower() + ('-unwind' if options['unwind'] else '')
+                abi = options if name == 'Other' else ('C' if name == 'C' else name.lower()) + ('-unwind' if options['unwind'] else '')
             result += f'extern "{abi}" '
         return result
 
@@ -326,7 +326,13 @@ class Renderer:
         kind, body = next(iter(item['inner'].items()))
         declarations = [self.declaration(item)]
         derives = []
-        implementations = [self.item(i) for i in body.get('impls', [])]
+        implementations = []
+        for identity in body.get('impls', []):
+            implementation = self.item(identity)
+            subject = implementation['inner']['impl']['for'].get('resolved_path')
+            owner = self.index.get(str(subject['id'])) if subject else None
+            if not owner or owner['crate_id'] != self.crate_id or owner['id'] == item['id']:
+                implementations.append(implementation)
         if kind == 'trait':
             for identity in body['implementations']:
                 implementation = self.item(identity)

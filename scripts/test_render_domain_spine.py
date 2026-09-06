@@ -148,6 +148,37 @@ impl Read for Record {
         self.assertEqual(command[command.index('--manifest-path') + 1], '/tmp/baseline/Cargo.toml')
         self.assertEqual(result, Path('/tmp/output/doc/sample_crate.json'))
 
+    def test_conversion_impl_stays_with_its_subject_or_local_argument(self):
+        document = fixture()
+        implementation = copy.deepcopy(document['index']['4'])
+        implementation['id'] = 50
+        implementation['inner']['impl'].update(
+            trait=path('From', 104, {'angle_bracketed': {
+                'args': [{'type': {'resolved_path': path('Record', 1)}}], 'constraints': []}}),
+            **{'for': {'resolved_path': path('Token', 40)}, 'items': []},
+        )
+        document['index']['50'] = implementation
+        document['paths']['104'] = {'crate_id': 1, 'path': ['core', 'convert', 'From']}
+        document['index']['1']['inner']['struct']['impls'].append(50)
+        document['index']['40']['inner']['struct']['impls'].append(50)
+        renderer = Renderer(document)
+        declaration = 'impl convert::From<Record> for Token {}'
+        self.assertNotIn(declaration, renderer.block(renderer.item(1)))
+        self.assertEqual(renderer.block(renderer.item(40)).count(declaration), 1)
+        document['paths']['105'] = {'crate_id': 1, 'path': ['alloc', 'string', 'String']}
+        implementation['inner']['impl']['for'] = {'resolved_path': path('String', 105)}
+        document['index']['40']['inner']['struct']['impls'].remove(50)
+        renderer = Renderer(document)
+        self.assertIn('impl convert::From<Record> for string::String {}', renderer.block(renderer.item(1)))
+
+    def test_c_abi_retains_its_required_capitalization(self):
+        renderer = Renderer(fixture())
+        for unwind, abi in [(False, 'C'), (True, 'C-unwind')]:
+            with self.subTest(abi=abi):
+                item = copy.deepcopy(renderer.item(20))
+                item['inner']['function']['header']['abi'] = {'C': {'unwind': unwind}}
+                self.assertEqual(renderer.declaration(item), f'pub extern "{abi}" fn fetch() -> Record;')
+
     def test_rustfmt_wraps_long_function_signatures(self):
         code = (
             'pub fn very_long_method_name_with_long_parameters('
