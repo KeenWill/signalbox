@@ -7,13 +7,14 @@ from the terminal client's existing `spawn_session` half.
 
 ## Goal
 
-Seven surfaces land under protocol version 1, each with its daemon handler and
-its terminal-client consumer in the same change: credential-exclusion
-administration, configuration reload, program-run cancellation, runner placement
-facts, `spawn_session`, cascade metadata on stop receipts, and the typed
-projection of credential-pool exhaustion and of the credential-availability
-wait. The terminal client already sends `spawn_session` and validates its
-receipt, so that surface needs only its daemon transaction.
+Ten surfaces land under protocol version 1, each with its daemon handler and its
+terminal-client consumer in the same change: provisioning an `oauth` credential
+profile, re-provisioning it after a rejected daemon-owned refresh, deleting it,
+credential-exclusion administration, configuration reload, program-run
+cancellation, runner placement facts, `spawn_session`, cascade metadata on stop
+receipts, and the typed projection of credential-pool exhaustion and of the
+credential-availability wait. The terminal client already sends `spawn_session`
+and validates its receipt, so that surface needs only its daemon transaction.
 
 ## Design
 
@@ -56,7 +57,7 @@ Configuration reload is one `reload_configuration` request with no members and
 no `command_id`, because the swap changes process memory alone and a repeat
 re-reads and re-validates. Success returns
 `configuration_reloaded { reloaded_sections }`, an array of the closed values
-`model_catalog` and `session_templates`. Failure returns
+`model_catalog`, `session_templates`, and `repo_watch`. Failure returns
 `configuration_reload_failed { phase, reason }`, sanitized as startup logs are,
 and leaves the running configuration unchanged. Which sections reload and the
 validate-then-swap rule belong to

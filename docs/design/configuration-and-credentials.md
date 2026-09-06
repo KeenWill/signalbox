@@ -21,10 +21,13 @@ Reload is one admin verb, `reload_configuration`, owned by
 [process protocol](../spec/process-protocol.md). It re-reads the configured
 paths, validates the complete replacement exactly as startup does, and swaps the
 in-memory catalogs atomically on success. The reloadable sections are the model
-and alias catalog with its rate windows and the session-template catalog; every
-other section is startup-only. Any failure, and any replacement whose
-startup-only sections differ, leaves the running configuration in place. File
-watching and polling are external tooling that calls the verb.
+and alias catalog with its rate windows, the session-template catalog, and
+repository-watch configuration; every other section is startup-only. Any
+failure, and any replacement whose startup-only sections differ, leaves the
+running configuration in place. File watching and polling are external tooling
+that calls the verb. A repository-watch reload that changes the webhook
+listener's bind address, path, or hook map closes and reopens the listener with
+the new settings; deliveries in flight are retried.
 
 A model entry carries zero or more `[[models.rate_windows]]` entries, each one
 dated price window over that entry's own `provider_model`. A window names the
