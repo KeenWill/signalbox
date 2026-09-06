@@ -103,17 +103,17 @@
   "mutations/escalation-followed-by-reply.json": {
     "converged": false,
     "reasons": [
+      "unresolved-review-threads:1",
       "undispositioned-review-threads:1",
-      "quiet-review-not-completed-for-current-head",
-      "unresolved-review-threads:1"
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/escalation-wave-4.json": {
     "converged": false,
     "reasons": [
+      "unresolved-review-threads:1",
       "undispositioned-review-threads:1",
-      "quiet-review-not-completed-for-current-head",
-      "unresolved-review-threads:1"
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/escalation-wave-5.json": {
@@ -126,9 +126,9 @@
   "mutations/escalation-wave-6.json": {
     "converged": false,
     "reasons": [
+      "unresolved-review-threads:1",
       "undispositioned-review-threads:1",
-      "quiet-review-not-completed-for-current-head",
-      "unresolved-review-threads:1"
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/escalation-wave-8.json": {
@@ -340,8 +340,8 @@
   "mutations/unresolved-finding.json": {
     "converged": false,
     "reasons": [
-      "quiet-review-not-completed-for-current-head",
-      "unresolved-review-threads:1"
+      "unresolved-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/wave-census-after-rerun.json": {
@@ -430,14 +430,14 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
+      "unresolved-review-threads:1",
       "undispositioned-review-threads:20",
       "quiet-review-not-completed-for-current-head",
       "check-not-green:Rust coverage (report only):QUEUED",
       "check-not-green:git tool eval (report only):QUEUED",
       "check-not-green:workspace tool eval (report only):QUEUED",
       "check-not-green:web tool eval (report only):QUEUED",
-      "check-not-green:postgres-integration (build):QUEUED",
-      "unresolved-review-threads:1"
+      "check-not-green:postgres-integration (build):QUEUED"
     ]
   },
   "pr-1577.json.gz": {
@@ -447,14 +447,14 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
+      "unresolved-review-threads:3",
       "undispositioned-review-threads:19",
       "quiet-review-not-completed-for-current-head",
       "check-not-green:Rust coverage (report only):QUEUED",
       "check-not-green:git tool eval (report only):QUEUED",
       "check-not-green:workspace tool eval (report only):QUEUED",
       "check-not-green:web tool eval (report only):QUEUED",
-      "check-not-green:postgres-integration (build):QUEUED",
-      "unresolved-review-threads:3"
+      "check-not-green:postgres-integration (build):QUEUED"
     ]
   },
   "pr-1580.json.gz": {
@@ -491,6 +491,7 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
+      "unresolved-review-threads:1",
       "undispositioned-review-threads:12",
       "quiet-review-not-completed-for-current-head",
       "check-not-green:Rust coverage (report only):QUEUED",
@@ -501,8 +502,7 @@
       "check-not-green:checker-and-format-tests:FAILURE",
       "check-not-green:postgres-integration (build):QUEUED",
       "check-not-green:validate-checks:FAILURE",
-      "check-not-green:validate:FAILURE",
-      "unresolved-review-threads:1"
+      "check-not-green:validate:FAILURE"
     ]
   },
   "pr-1585.json.gz": {
@@ -526,6 +526,7 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
+      "unresolved-review-threads:3",
       "undispositioned-review-threads:10",
       "quiet-review-not-completed-for-current-head",
       "check-not-green:Rust coverage (report only):IN_PROGRESS",
@@ -535,8 +536,7 @@
       "check-not-green:checker-and-format-tests:FAILURE",
       "check-not-green:postgres-integration (build):QUEUED",
       "check-not-green:validate-checks:FAILURE",
-      "check-not-green:validate:FAILURE",
-      "unresolved-review-threads:3"
+      "check-not-green:validate:FAILURE"
     ]
   },
   "pr-1588.json.gz": {
@@ -566,14 +566,14 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
+      "unresolved-review-threads:2",
       "undispositioned-review-threads:13",
       "quiet-review-not-completed-for-current-head",
       "check-not-green:Rust coverage (report only):QUEUED",
       "check-not-green:git tool eval (report only):QUEUED",
       "check-not-green:workspace tool eval (report only):QUEUED",
       "check-not-green:web tool eval (report only):QUEUED",
-      "check-not-green:postgres-integration (build):QUEUED",
-      "unresolved-review-threads:2"
+      "check-not-green:postgres-integration (build):QUEUED"
     ]
   },
   "pr-1594.json.gz": {

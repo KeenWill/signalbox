@@ -140,10 +140,12 @@ def reference_evaluation(recording):
     result = reference.evaluate_convergence(pr)
     # A disposition does not close the provider's review thread.
     unresolved = sum(not thread["isResolved"] for thread in pr["review_threads"])
-    result["reasons"] = [reason for reason in result["reasons"] if not reason.startswith("unresolved-review-threads:")]
+    unresolved_reason = f"unresolved-review-threads:{unresolved}"
+    result["reasons"] = [unresolved_reason if reason.startswith("unresolved-review-threads:") else reason for reason in result["reasons"]]
     if unresolved:
         result["converged"] = False
-        result["reasons"].append(f"unresolved-review-threads:{unresolved}")
+        if unresolved_reason not in result["reasons"]:
+            result["reasons"].append(unresolved_reason)
     # The repository-watch contract additionally requires at least one gating check.
     if not any(not reference.is_non_gating_check(check) for check in pr["checks"]):
         result["converged"] = False
