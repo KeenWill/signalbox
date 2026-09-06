@@ -22,7 +22,7 @@
 | goal_turn | 2 | 0 | 0 | [goal_turn](goal_turn.md) |
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
-| mapping | 7 | 0 | 35 | [mapping](mapping.md) |
+| mapping | 6 | 0 | 33 | [mapping](mapping.md) |
 | model_execution | 14 | 0 | 0 | [model_execution](model_execution.md) |
 | operator_status | 18 | 0 | 0 | [operator_status](operator_status.md) |
 | outbox | 31 | 0 | 7 | [types](outbox/types.md), [types-2](outbox/types-2.md), [functions](outbox/functions.md) |
