@@ -647,6 +647,58 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
     Ok(())
 }
 
+/// A provider compaction beside a tool proposal occupies its response ordinal
+/// in the committed tool-round boundary frontier.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn provider_compaction_and_tool_proposal_commit_the_ordered_round_frontier()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efa_0800;
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"retained summary"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let (fixture, _, _, _) = checkpoint_tool_batch_with_approval_and_usage_and_attachment(
+        &pool,
+        seed,
+        &[("current_time", "{}")],
+        InitialToolApproval::Confirm,
+        ProviderReportedTokenUsage::unreported(),
+        None,
+        Some(compaction),
+    )
+    .await?;
+
+    let ordered_payloads: Vec<String> = sqlx::query_scalar(
+        "SELECT entry.payload_kind
+           FROM tool_round AS round
+           JOIN context_frontier_member AS member
+             ON member.owning_session_id = round.session_id
+            AND member.context_frontier_id = round.boundary_frontier_id
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+          WHERE round.producing_model_call_id = $1
+            AND entry.producing_model_call_id = $1
+          ORDER BY member.member_position",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        ordered_payloads,
+        [
+            String::from("provider_compaction"),
+            String::from("assistant_tool_use")
+        ]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A provider compaction with retained content replaces the producing call's
 /// pre-compaction input for same-turn continuation headroom.
 #[tokio::test(flavor = "multi_thread")]
