@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -220,16 +221,23 @@ def evaluate_current(config: Config, number: int, previous: dict[str, Any]) -> d
     with tempfile.TemporaryDirectory(prefix="convergence-evaluation-") as directory:
         state = Path(directory) / "state.json"
         state.write_text(json.dumps(previous), encoding="utf-8")
-        try:
-            completed = subprocess.run(
+        with subprocess.Popen(
                 ["signalbox-converge", "evaluate", "--pr", str(number),
                  "--repo", config.repository, "--policy", str(config.convergence_policy),
                  "--state", str(state)],
-                text=True, capture_output=True, check=False,
-                timeout=config.command_timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("convergence evaluation timed out") from error
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True,
+        ) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=config.command_timeout_seconds)
+            except subprocess.TimeoutExpired as error:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                raise RuntimeError("convergence evaluation timed out") from error
+            completed = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
         if completed.returncode not in (0, 1):
             raise RuntimeError(f"convergence evaluation failed: {command_detail(completed)}")
         try:

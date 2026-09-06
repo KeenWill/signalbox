@@ -92,7 +92,8 @@ command. Standard output or error from a failing command, and standard output
 from a successful dispatch, is truncated to 512 characters and attached to the
 decision log. The configurable command timeout bounds GitHub listing,
 convergence evaluation, and operator-command subprocesses to protect tick
-latency; its default is 60 seconds.
+latency; its default is 60 seconds. An evaluation timeout terminates the CLI's
+process group, including its GitHub subprocesses.
 
 An unconverged observation starts `unconverged_since`. An inactive result starts
 `idle_since`; active work or a successful dispatch clears it after the

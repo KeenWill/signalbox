@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -312,10 +316,58 @@ class CliDriverTests(unittest.TestCase):
                 self.assertEqual(command[command.index("--policy")+1], str(POLICY))
                 state = Path(command[command.index("--state")+1])
                 self.assertEqual(json.loads(state.read_text()), previous)
-                return subprocess.CompletedProcess(command, 1, json.dumps(evaluation), "")
-            with mock.patch("reconcile.subprocess.run", side_effect=completed):
+                process = mock.MagicMock(args=command, returncode=1)
+                process.communicate.return_value = (json.dumps(evaluation), "")
+                process.__enter__.return_value = process
+                return process
+            with mock.patch("reconcile.subprocess.Popen", side_effect=completed):
                 result = evaluate_current(config, evaluation["pull_request"]["number"], previous)
         self.assertEqual(result["_evaluation"], evaluation)
+
+    def test_evaluation_timeout_terminates_the_cli_and_its_child(self):
+        popen = subprocess.Popen
+        processes = []
+        with tempfile.TemporaryDirectory() as directory:
+            child_file = Path(directory) / "child.pid"
+            config = Config(
+                repository="OWNER/REPOSITORY", head_pattern="agent/*",
+                interval_seconds=300, cool_off_seconds=1800,
+                command_timeout_seconds=0.05, state_file=Path(directory)/"state.json",
+                log_file=None, active_command=None, dispatch_command=None,
+                summary="none", dry_run=False, once=True, convergence_policy=POLICY,
+            )
+            # A real descendant retains the CLI's output pipes while both processes wait.
+            program = (
+                "import pathlib, subprocess, sys, time; "
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+                "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(600)"
+            )
+            def launch(_command, **kwargs):
+                process = popen([sys.executable, "-c", program, str(child_file)], **kwargs)
+                processes.append(process)
+                deadline = time.monotonic() + 5
+                while not child_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(child_file.exists(), "the descendant must start before the timeout")
+                return process
+            try:
+                with mock.patch("reconcile.subprocess.Popen", side_effect=launch):
+                    with self.assertRaisesRegex(RuntimeError, "evaluation timed out"):
+                        evaluate_current(config, 1566, {})
+                self.assertEqual(processes[0].returncode, -signal.SIGKILL)
+                child_pid = int(child_file.read_text())
+                status = subprocess.run(
+                    ["ps", "-o", "stat=", "-p", str(child_pid)],
+                    text=True, capture_output=True, check=False,
+                ).stdout.strip()
+                self.assertTrue(not status or status.startswith("Z"), status)
+            finally:
+                for process in processes:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
 
     def test_graphql_subprocess_timeout_uses_tick_failure_path(self):
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
