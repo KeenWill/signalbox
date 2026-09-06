@@ -25,9 +25,11 @@ and alias catalog with its rate windows, the session-template catalog, and
 repository-watch configuration; every other section is startup-only. Any
 failure, and any replacement whose startup-only sections differ, leaves the
 running configuration in place. File watching and polling are external tooling
-that calls the verb. A repository-watch reload that changes the webhook
-listener's bind address, path, or hook map closes and reopens the listener with
-the new settings; deliveries in flight are retried.
+that calls the verb; webhook listener reload belongs to
+[repository watch](repo-watch.md). A reload that adds, edits, or removes
+`repository_watch.rules` commits activations and deactivations in the
+[reconciliation transaction](../spec/repo-watch.md) that records each
+activation's repository event tail, inside the reload boundary.
 
 A model entry carries zero or more `[[models.rate_windows]]` entries, each one
 dated price window over that entry's own `provider_model`. A window names the

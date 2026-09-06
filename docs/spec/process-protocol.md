@@ -373,6 +373,8 @@ opaque caller-supplied file-path key.
 
 ## Planned
 
+- OAuth credential provisioning, re-provisioning after rejected refresh, and
+  deletion: [design](../design/process-protocol.md).
 - Credential-exclusion administration, a listing read and a clear mutation over
   active exclusions: [design](../design/process-protocol.md).
 - Configuration reload request: [design](../design/process-protocol.md).

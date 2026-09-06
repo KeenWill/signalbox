@@ -6,13 +6,17 @@ when no planned capability remains.
 
 ## Goal
 
-Two capabilities are committed. Dispatched sessions record repository watch as
+Three capabilities are committed. Dispatched sessions record repository watch as
 their cause and actor, with durable provenance that resolves the dispatch they
 came from. The poll cache survives a daemon restart, so the first complete poll
 after a restart sends conditional requests instead of one complete unconditional
-fetch.
+fetch. The module runtime composes and reloads the webhook listener.
 
 ## Design
+
+Webhook listener: the module runtime composes the listener; a reload that
+changes its bind address, path, or hook map closes and reopens it with the new
+settings, and deliveries in flight are retried.
 
 Provenance: session creation accepts a repository-watch creation cause and
 module actor identity. A durable provenance record is linked to

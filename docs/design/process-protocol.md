@@ -18,6 +18,24 @@ and validates its receipt, so that surface needs only its daemon transaction.
 
 ## Design
 
+OAuth administration has three requests, `provision_oauth_credential`,
+`reprovision_oauth_credential`, and `delete_oauth_credential`, each carrying
+`profile` and a user-global `command_id`. Provisioning and re-provisioning emit
+`oauth_credential_authorization { command_id, profile, user_code, verification_uri }`
+for the device-authorization exchange owned by
+[configuration and credentials](configuration-and-credentials.md). Each request
+ends with `oauth_credential_receipt { command_id, profile, outcome }`, whose
+outcome is `provisioned`, `reprovisioned`, `deleted`, `already_deleted`, or
+`failed { reason }` carrying the typed credential failure. Provisioning stores
+the authorization; re-provisioning replaces it and clears its refresh quarantine
+only on success. Deletion removes stored authorization and cached access tokens,
+preventing later use while retaining the configured registration and referenced
+history. An equal request with the same `command_id` joins the pending operation
+or returns its stored receipt without repeating the exchange or deletion;
+conflicting reuse is rejected. The credential mutation and terminal receipt
+commit atomically under the command claim protocol in
+[identity and commands](../spec/identity-and-commands.md).
+
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
 carrying a user-global `command_id` and one closed `target` object. The target
@@ -54,8 +72,7 @@ state is evaluated. Both operations are authorized as every other request is:
 reaching the owner-private socket is the authority.
 
 Configuration reload is one `reload_configuration` request with no members and
-no `command_id`, because the swap changes process memory alone and a repeat
-re-reads and re-validates. Success returns
+no `command_id`; a repeat re-reads and re-validates. Success returns
 `configuration_reloaded { reloaded_sections }`, an array of the closed values
 `model_catalog`, `session_templates`, and `repo_watch`. Failure returns
 `configuration_reload_failed { phase, reason }`, sanitized as startup logs are,
