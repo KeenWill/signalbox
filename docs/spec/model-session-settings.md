@@ -105,9 +105,9 @@ Compatibility is decided before credential access, file creation, subprocess
 spawn, or HTTP traffic. An adapter never relies on provider rejection, provider
 clamping, an open CLI enum, or silent field dropping. An adapter-specific
 unsupported combination is also a preparation-time error. Configuration rejects
-unequal capability records for one provider spelling, a fast target matching the
-model's own target or using another adapter, and disagreement between
-`fast_mode` and `fast_target_id`.
+unequal provider-projected capability records for one provider spelling, a fast
+target matching the model's own target or using another adapter, and
+disagreement between `fast_mode` and `fast_target_id`.
 
 An incompatibility counts as model-change-induced, and is adjusted instead of
 rejected, only when the affected setting is inherited.
