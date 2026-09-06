@@ -9653,6 +9653,7 @@ impl ModelCallInputTokenCounter for CommitAmbiguousCounter {
 #[derive(Clone, Debug)]
 struct CountingProbe {
     interactions: Arc<AtomicUsize>,
+    outcome: ModelCallInputTokenCount,
 }
 
 impl ModelCallInputTokenCounter for CountingProbe {
@@ -9667,7 +9668,7 @@ impl ModelCallInputTokenCounter for CountingProbe {
         Cancellation: std::future::Future<Output = ()> + Send + 'static,
     {
         self.interactions.fetch_add(1, Ordering::SeqCst);
-        std::future::ready(Ok(ModelCallInputTokenCount::Counted(1)))
+        std::future::ready(Ok(self.outcome))
     }
 }
 
@@ -9719,6 +9720,7 @@ async fn inv062_attachment_verification_precedes_provider_counting() -> Result<(
     let counter = AttachmentPreparingModelCallProvider::for_counting(
         CountingProbe {
             interactions: Arc::clone(&interactions),
+            outcome: ModelCallInputTokenCount::Counted(1),
         },
         fixture.runtime.pool.clone(),
         Some(fixture.runtime.blob_store_registry()),
@@ -9788,6 +9790,133 @@ async fn inv062_attachment_verification_precedes_provider_counting() -> Result<(
             Some(String::from("missing")),
         )
     );
+
+    fixture.stop().await
+}
+
+/// INV-062: transient attachment unavailability leaves the prospective call
+/// uncommitted, so recovery re-verifies the attachment and performs the exact
+/// provider count before activation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CommittedBlobReadFixture::start(b"transient count guard attachment").await?;
+    let session_id = create_alias_session(&mut fixture.connection).await?;
+    fixture
+        .connection
+        .request(
+            4,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::from_parts(vec![UserInputPart::Attachment {
+                    digest: fixture.wire_digest,
+                    kind: UserAttachmentKind::File,
+                    media_type: String::from("application/octet-stream"),
+                    display_filename: None,
+                }]),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut fixture.connection, session_id, 1).await?;
+    let object_path = fixture.object_path();
+    fs::set_permissions(&object_path, fs::Permissions::from_mode(0o000))?;
+
+    let model_configuration = support::parse_model_configuration(
+        &fixture
+            .runtime
+            .blob_storage_root
+            .as_ref()
+            .expect("the fixture owns blob configuration")
+            .model_configuration(),
+    )?;
+    let runtime_models = model_configuration.runtime_model_catalog();
+    let provider = RuntimeModelCallProvider::new(
+        ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
+        runtime_models.clone(),
+        None,
+    )
+    .with_text_delta_sink(fixture.runtime.provider_text_delta_sink());
+    let interactions = Arc::new(AtomicUsize::new(0));
+    let counter = AttachmentPreparingModelCallProvider::for_counting(
+        CountingProbe {
+            interactions: Arc::clone(&interactions),
+            outcome: ModelCallInputTokenCount::Cancelled,
+        },
+        fixture.runtime.pool.clone(),
+        Some(fixture.runtime.blob_store_registry()),
+        model_configuration.provider_input_count_targets(),
+    );
+    let repository = PostgresModelCallRepository::new(
+        fixture.runtime.pool.clone(),
+        model_configuration.target_catalog(),
+        ModelCallCredentialReference::new("attachment-count-recovery-fixture"),
+    )
+    .with_session_credentials(model_configuration.credential_family_catalog());
+    let guarded_repository = repository.clone();
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(
+                fixture.runtime.pool.clone(),
+                None,
+                Vec::new(),
+            ),
+        ));
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
+            runtime_models.clone(),
+        ));
+    let mut pass = ContextGuardedTurnPass::new(
+        StartEligibleTurnRepository::new(fixture.runtime.pool.clone()),
+        guarded_repository,
+        counter,
+        NoToolCatalog,
+        runtime_models,
+        model_configuration,
+        compaction_model,
+        execution,
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        fixture.runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
+    let session = SessionId::from_uuid(session_id.into_uuid());
+
+    pass.run(session).await?;
+    assert_eq!(interactions.load(Ordering::SeqCst), 0);
+    let call_count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+        .bind(queued_turn.into_uuid())
+        .fetch_one(&fixture.runtime.pool)
+        .await?;
+    assert_eq!(call_count, 0);
+
+    fs::set_permissions(&object_path, fs::Permissions::from_mode(0o600))?;
+    let recovered = pass.run(session).await;
+
+    assert!(matches!(
+        recovered,
+        Err(ContextGuardedTurnPassError::CountCancelled(turn))
+            if turn == TurnId::from_uuid(queued_turn.into_uuid())
+    ));
+    assert_eq!(interactions.load(Ordering::SeqCst), 1);
+    assert!(!fatal_execution.is_triggered());
+    let call_count: i64 = sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+        .bind(queued_turn.into_uuid())
+        .fetch_one(&fixture.runtime.pool)
+        .await?;
+    assert_eq!(call_count, 0);
 
     fixture.stop().await
 }
