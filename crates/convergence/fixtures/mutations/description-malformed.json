@@ -13,6 +13,18 @@
       "value": {
         "text": ""
       }
+    },
+    {
+      "path": "/observations/0/2/response/data/node/body",
+      "value": {
+        "text": ""
+      }
+    },
+    {
+      "path": "/observations/1/2/response/data/node/body",
+      "value": {
+        "text": ""
+      }
     }
   ]
 }

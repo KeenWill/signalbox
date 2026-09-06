@@ -148,6 +148,22 @@
           "behind_by": 0
         }
       }
+    },
+    {
+      "path": "/observations/0/2/response/data/node/headRefOid",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    },
+    {
+      "path": "/observations/1/2/response/data/node/headRefOid",
+      "value": "113746d23d6c7b398ef34464a071dca532791898"
+    },
+    {
+      "path": "/observations/0/2/response/data/node/baseRefOid",
+      "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "path": "/observations/1/2/response/data/node/baseRefOid",
+      "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     }
   ]
 }

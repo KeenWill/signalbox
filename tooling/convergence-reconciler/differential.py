@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime as dt
 import gzip
 import json
 from pathlib import Path
@@ -16,6 +17,32 @@ import reference
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "crates/convergence/fixtures"
 POLICY = ROOT / "crates/convergence/examples/repository.toml"
+
+def instant(value):
+    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+baseline_normalize_threads = reference.normalize_review_threads
+
+
+def normalize_threads(nodes, author_login=None):
+    normalized = baseline_normalize_threads(nodes, author_login)
+    # The active disposition contract requires the final escalation reply to
+    # follow the finding's latest edit, just like an ordinary disposition.
+    for index, (raw, thread) in enumerate(zip(nodes, normalized)):
+        latest = thread.get("latestReviewerAt")
+        if thread.get("isEscalated") and latest:
+            reply = raw["comments"]["nodes"][-1]
+            at = reference.comment_effective_at(reply)
+            if not at or instant(at) <= instant(latest):
+                without_stale_marker = copy.deepcopy(raw)
+                without_stale_marker["comments"]["nodes"][-1]["body"] = ""
+                normalized[index] = baseline_normalize_threads([without_stale_marker], author_login)[0]
+    return normalized
+
+
+reference.normalize_review_threads = normalize_threads
+
 
 def append_page(connection, page):
     if connection["totalCount"] != page["totalCount"]:
@@ -51,6 +78,11 @@ def assemble(responses):
             else:
                 thread = next(t for t in node["reviewThreads"]["nodes"] if t["id"] == page_node["id"])
                 append_page(thread["comments"], page_node["comments"])
+    identity = responses[-1]["response"]["data"].get("node", {})
+    fields = ("state", "baseRefName", "baseRefOid", "headRefName", "headRefOid", "isDraft", "body", "lastEditedAt", "mergeable", "reviewDecision")
+    expected_query = "query($id:ID!) { node(id:$id) { ... on PullRequest { id state baseRefName baseRefOid headRefName headRefOid isDraft body lastEditedAt mergeable reviewDecision } } }"
+    if responses[-1]["query"] != expected_query or not identity.get("id") or identity.get("id") != node["id"] or any(key not in identity for key in fields):
+        raise RuntimeError("final identity query missing from observation")
     for kind in ("reviewThreads", "comments", "reviews", "reactions", "files"):
         complete(node[kind])
     for thread in node["reviewThreads"]["nodes"]:
@@ -73,6 +105,34 @@ class RecordedGitHub(reference.GitHubGraphQL):
         super().__init__(recording["repository"], 1)
         self.recording = recording
         self.current = current
+
+    def _finalize_review_evidence(self, pull_requests):
+        evidence = [(pr, pr["_reviews"], pr["_review_comments"]) for pr in pull_requests]
+        super()._finalize_review_evidence(pull_requests)
+        for pr, reviews, comments in evidence:
+            findings = {}
+            for review in pr["_codex_reviews"]:
+                if review["state"] == "COMMENTED" and review.get("body", "").strip():
+                    oid = review["commit"]["oid"]
+                    at = instant(review["submittedAt"])
+                    findings[oid] = max(at, findings.get(oid, at))
+            times = {review["id"]: instant(review["submittedAt"]) for review in reviews if review.get("submittedAt")}
+            for comment in comments:
+                match = reference.CODEX_COMPLETED_REVIEW.search(comment.get("body", ""))
+                if match:
+                    times[comment["id"]] = instant(match[1])
+            live = pr["live_codex_review_oids"]
+            invalid = {identity for identity, oid in live.items() if oid in findings and (identity not in times or times[identity] < findings[oid])}
+            for identity in invalid:
+                live.pop(identity)
+            qualified = set(pr["observed_codex_reviews"]) | set(pr["authenticated_review_ids"].values())
+            valid_oids = {oid for identity, oid in live.items() if identity in qualified}
+            for key in ("authenticated_quiet_review_oids", "quiet_review_head_oids"):
+                pr[key] = [oid for oid in pr[key] if oid in valid_oids]
+            for oid, identity in list(pr["authenticated_review_ids"].items()):
+                if identity in invalid:
+                    del pr["authenticated_review_ids"][oid]
+                    pr["authenticated_review_requests"].pop(oid, None)
 
     def execute_rest(self, path):
         key = path.split("/compare/", 1)[1]

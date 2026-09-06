@@ -100,6 +100,14 @@
       "unresolved-review-threads:1"
     ]
   },
+  "mutations/escalation-before-reviewer-edit.json": {
+    "converged": false,
+    "reasons": [
+      "unresolved-review-threads:1",
+      "undispositioned-review-threads:1",
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
   "mutations/escalation-followed-by-reply.json": {
     "converged": false,
     "reasons": [
@@ -157,6 +165,15 @@
   "mutations/head-change-during-census.json": {
     "error": "pull request changed after its convergence snapshot"
   },
+  "mutations/identity-query-incomplete.json": {
+    "error": "'reviewDecision'"
+  },
+  "mutations/identity-query-missing-0.json": {
+    "error": "final identity query missing from observation"
+  },
+  "mutations/identity-query-missing-1.json": {
+    "error": "final identity query missing from observation"
+  },
   "mutations/informational-answer.json": {
     "converged": true,
     "reasons": []
@@ -172,6 +189,12 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled"
+    ]
+  },
+  "mutations/later-body-finding.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/live-exempt-comparison.json": {
@@ -355,19 +378,17 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
-      "undispositioned-review-threads:25",
+      "unresolved-review-threads:2",
+      "undispositioned-review-threads:36",
       "quiet-review-not-completed-for-current-head",
-      "check-not-green:postgres-integration (persistence 1/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 2/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 3/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 4/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 5/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 6/6):QUEUED",
-      "check-not-green:postgres-integration (runner 1/1):QUEUED",
-      "check-not-green:postgres-integration (program-runtime 1/1):QUEUED",
-      "check-not-green:postgres-integration (signalboxd 1/1):QUEUED",
-      "check-not-green:postgres-integration (terminal-client 1/1):QUEUED",
-      "check-not-green:postgres-integration (approval-judge-eval 1/1):QUEUED"
+      "check-not-green:Anthropic smoke eligibility:QUEUED",
+      "check-not-green:Claude smoke eligibility:QUEUED",
+      "check-not-green:Codex smoke eligibility:QUEUED",
+      "check-not-green:OpenAI smoke eligibility:QUEUED",
+      "check-not-green:Rust change scope:QUEUED",
+      "check-not-green:cargo-deny:QUEUED",
+      "check-not-green:contract-checks:QUEUED",
+      "check-not-green:checker-and-format-tests:QUEUED"
     ]
   },
   "pr-1567.json.gz": {
@@ -380,45 +401,16 @@
     "error": "pull request changed after its convergence snapshot"
   },
   "pr-1570.json.gz": {
-    "converged": false,
-    "reasons": [
-      "check-inventory-unsettled",
-      "undispositioned-review-threads:12",
-      "quiet-review-not-completed-for-current-head",
-      "check-not-green:Rust coverage (report only):IN_PROGRESS",
-      "check-not-green:postgres-integration (persistence 1/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 2/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 6/6):QUEUED",
-      "check-not-green:postgres-integration (runner 1/1):QUEUED",
-      "check-not-green:postgres-integration (program-runtime 1/1):QUEUED",
-      "check-not-green:postgres-integration (signalboxd 1/1):QUEUED",
-      "check-not-green:postgres-integration (terminal-client 1/1):QUEUED",
-      "check-not-green:postgres-integration (approval-judge-eval 1/1):QUEUED"
-    ]
+    "error": "pull request changed after its convergence snapshot"
   },
   "pr-1571.json.gz": {
-    "converged": false,
-    "reasons": [
-      "check-inventory-unsettled",
-      "undispositioned-review-threads:3",
-      "quiet-review-not-completed-for-current-head",
-      "check-not-green:postgres-integration (persistence 3/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 4/6):FAILURE",
-      "check-not-green:postgres-integration (runner 1/1):QUEUED",
-      "check-not-green:postgres-integration (signalboxd 1/1):FAILURE"
-    ]
+    "error": "pull request changed after its convergence snapshot"
   },
   "pr-1572.json.gz": {
     "error": "pull request changed after its convergence snapshot"
   },
   "pr-1573.json.gz": {
-    "converged": false,
-    "reasons": [
-      "check-inventory-unsettled",
-      "undispositioned-review-threads:14",
-      "quiet-review-not-completed-for-current-head",
-      "check-not-green:postgres-integration (build):QUEUED"
-    ]
+    "error": "pull request changed after its convergence snapshot"
   },
   "pr-1574.json.gz": {
     "error": "pull request changed after its convergence snapshot"
@@ -430,14 +422,13 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
-      "unresolved-review-threads:1",
-      "undispositioned-review-threads:20",
+      "undispositioned-review-threads:37",
       "quiet-review-not-completed-for-current-head",
       "check-not-green:Rust coverage (report only):QUEUED",
-      "check-not-green:git tool eval (report only):QUEUED",
-      "check-not-green:workspace tool eval (report only):QUEUED",
-      "check-not-green:web tool eval (report only):QUEUED",
-      "check-not-green:postgres-integration (build):QUEUED"
+      "check-not-green:Tool eval eligibility:QUEUED",
+      "check-not-green:OpenAI smoke eligibility:QUEUED",
+      "check-not-green:cargo-deny:QUEUED",
+      "check-not-green:Swift native change scope:QUEUED"
     ]
   },
   "pr-1577.json.gz": {
@@ -447,30 +438,35 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
-      "unresolved-review-threads:3",
-      "undispositioned-review-threads:19",
+      "undispositioned-review-threads:23",
       "quiet-review-not-completed-for-current-head",
-      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:Rust change scope:QUEUED",
+      "check-not-green:Rust coverage (report only):IN_PROGRESS",
       "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:contract-checks:QUEUED",
       "check-not-green:workspace tool eval (report only):QUEUED",
       "check-not-green:web tool eval (report only):QUEUED",
-      "check-not-green:postgres-integration (build):QUEUED"
+      "check-not-green:Claude smoke compatibility:QUEUED",
+      "check-not-green:Codex smoke compatibility:QUEUED",
+      "check-not-green:OpenAI smoke compatibility:QUEUED",
+      "check-not-green:checker-and-format-tests:QUEUED"
     ]
   },
   "pr-1580.json.gz": {
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
-      "undispositioned-review-threads:3",
+      "undispositioned-review-threads:5",
       "quiet-review-not-completed-for-current-head",
-      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:Anthropic smoke eligibility:QUEUED",
+      "check-not-green:Rust change scope:QUEUED",
+      "check-not-green:Rust coverage (report only):IN_PROGRESS",
       "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:contract-checks:QUEUED",
       "check-not-green:workspace tool eval (report only):QUEUED",
       "check-not-green:web tool eval (report only):QUEUED",
-      "check-not-green:checker-and-format-tests:FAILURE",
-      "check-not-green:postgres-integration (build):QUEUED",
-      "check-not-green:validate-checks:FAILURE",
-      "check-not-green:validate:FAILURE"
+      "check-not-green:Claude smoke compatibility:QUEUED",
+      "check-not-green:Codex smoke compatibility:QUEUED"
     ]
   },
   "pr-1581.json.gz": {
@@ -478,7 +474,10 @@
     "reasons": [
       "check-inventory-unsettled",
       "quiet-review-not-completed-for-current-head",
-      "check-not-green:postgres-integration (build):QUEUED"
+      "check-not-green:postgres-integration (persistence 1/6):FAILURE",
+      "check-not-green:postgres-integration (persistence 2/6):FAILURE",
+      "check-not-green:postgres-integration (persistence 4/6):FAILURE",
+      "check-not-green:postgres-integration:FAILURE"
     ]
   },
   "pr-1582.json.gz": {
@@ -491,18 +490,20 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
-      "unresolved-review-threads:1",
-      "undispositioned-review-threads:12",
+      "unresolved-review-threads:2",
+      "undispositioned-review-threads:17",
       "quiet-review-not-completed-for-current-head",
+      "check-not-green:Anthropic smoke eligibility:QUEUED",
+      "check-not-green:Codex smoke eligibility:QUEUED",
       "check-not-green:Rust coverage (report only):QUEUED",
-      "check-not-green:contract-checks:FAILURE",
+      "check-not-green:OpenAI smoke eligibility:QUEUED",
+      "check-not-green:Rust change scope:QUEUED",
       "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:contract-checks:QUEUED",
       "check-not-green:workspace tool eval (report only):QUEUED",
       "check-not-green:web tool eval (report only):QUEUED",
-      "check-not-green:checker-and-format-tests:FAILURE",
-      "check-not-green:postgres-integration (build):QUEUED",
-      "check-not-green:validate-checks:FAILURE",
-      "check-not-green:validate:FAILURE"
+      "check-not-green:Claude smoke compatibility:QUEUED",
+      "check-not-green:checker-and-format-tests:QUEUED"
     ]
   },
   "pr-1585.json.gz": {
@@ -514,12 +515,11 @@
       "check-inventory-unsettled",
       "undispositioned-review-threads:8",
       "quiet-review-not-completed-for-current-head",
-      "check-not-green:Rust coverage (report only):QUEUED",
-      "check-not-green:git tool eval (report only):QUEUED",
-      "check-not-green:workspace tool eval (report only):QUEUED",
-      "check-not-green:web tool eval (report only):QUEUED",
       "check-not-green:exec tool eval (report only):FAILURE",
-      "check-not-green:postgres-integration (build):QUEUED"
+      "check-not-green:postgres-integration (persistence 1/6):FAILURE",
+      "check-not-green:postgres-integration (persistence 2/6):FAILURE",
+      "check-not-green:postgres-integration (signalboxd 1/1):FAILURE",
+      "check-not-green:postgres-integration:FAILURE"
     ]
   },
   "pr-1587.json.gz": {
@@ -527,16 +527,19 @@
     "reasons": [
       "check-inventory-unsettled",
       "unresolved-review-threads:3",
-      "undispositioned-review-threads:10",
+      "undispositioned-review-threads:19",
       "quiet-review-not-completed-for-current-head",
-      "check-not-green:Rust coverage (report only):IN_PROGRESS",
+      "check-not-green:Codex smoke eligibility:QUEUED",
+      "check-not-green:Rust coverage (report only):QUEUED",
+      "check-not-green:OpenAI smoke eligibility:QUEUED",
+      "check-not-green:Rust change scope:QUEUED",
       "check-not-green:git tool eval (report only):QUEUED",
+      "check-not-green:contract-checks:QUEUED",
       "check-not-green:workspace tool eval (report only):QUEUED",
-      "check-not-green:web tool eval (report only):IN_PROGRESS",
-      "check-not-green:checker-and-format-tests:FAILURE",
-      "check-not-green:postgres-integration (build):QUEUED",
-      "check-not-green:validate-checks:FAILURE",
-      "check-not-green:validate:FAILURE"
+      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:Anthropic smoke compatibility:QUEUED",
+      "check-not-green:Claude smoke compatibility:QUEUED",
+      "check-not-green:checker-and-format-tests:IN_PROGRESS"
     ]
   },
   "pr-1588.json.gz": {
@@ -566,13 +569,13 @@
     "converged": false,
     "reasons": [
       "check-inventory-unsettled",
-      "unresolved-review-threads:2",
-      "undispositioned-review-threads:13",
+      "undispositioned-review-threads:15",
       "quiet-review-not-completed-for-current-head",
-      "check-not-green:Rust coverage (report only):QUEUED",
-      "check-not-green:git tool eval (report only):QUEUED",
-      "check-not-green:workspace tool eval (report only):QUEUED",
-      "check-not-green:web tool eval (report only):QUEUED",
+      "check-not-green:Claude live compatibility:QUEUED",
+      "check-not-green:checker-and-format-tests:IN_PROGRESS",
+      "check-not-green:rust-checks:QUEUED",
+      "check-not-green:workspace-tests:IN_PROGRESS",
+      "check-not-green:Domain instruction counts (report only):QUEUED",
       "check-not-green:postgres-integration (build):QUEUED"
     ]
   },
@@ -583,18 +586,9 @@
       "undispositioned-review-threads:3",
       "quiet-review-not-completed-for-current-head",
       "check-not-green:workspace-tests:FAILURE",
-      "check-not-green:postgres-integration (persistence 1/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 2/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 3/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 4/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 5/6):QUEUED",
-      "check-not-green:postgres-integration (persistence 6/6):QUEUED",
-      "check-not-green:postgres-integration (runner 1/1):QUEUED",
-      "check-not-green:postgres-integration (program-runtime 1/1):QUEUED",
-      "check-not-green:postgres-integration (signalboxd 1/1):QUEUED",
-      "check-not-green:postgres-integration (terminal-client 1/1):QUEUED",
-      "check-not-green:postgres-integration (approval-judge-eval 1/1):QUEUED",
+      "check-not-green:postgres-integration (persistence 1/6):FAILURE",
       "check-not-green:validate:FAILURE",
+      "check-not-green:postgres-integration:FAILURE",
       "base-commits-not-in-head:80"
     ]
   },

@@ -5,6 +5,10 @@
     {
       "path": "/observations/0/0/response/data/repository/pullRequest/state",
       "value": "CLOSED"
+    },
+    {
+      "path": "/observations/0/2/response/data/node/state",
+      "value": "CLOSED"
     }
   ]
 }

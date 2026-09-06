@@ -24,8 +24,9 @@ next state after evaluation. Use one state file per pull request. A missing file
 starts a new history; repeating the command allows its check inventory to
 settle. The option also works with recorded fixtures. Live recordings timestamp
 resolved threads so later review requests can authenticate their dispositions.
-The final identity read follows pagination and checks; `checks_green` describes
-those refreshed checks.
+Every recorded observation must end with a complete identity query. The final
+identity read follows pagination and checks; `checks_green` describes those
+refreshed checks.
 
 State records the complete policy value as its identity. A policy change
 discards retained review authentication and wave counts and qualifies current
@@ -99,11 +100,16 @@ writing expectations.
 [Fixtures](fixtures/) contain losslessly compressed, unredacted provider
 responses for thirty real pull requests. Each [mutation](fixtures/mutations/)
 names its source, the evidence edge it exercises, and explicit JSON-pointer
-replacements. Recorded responses remain unchanged. Mutations cover request edits
-and deletions, body-only findings, completion summaries, pre-green requests,
-review edits after disposition, wave boundaries and check reruns, rename-only
-and comment-only heads requiring a fresh review, clean and material base
-forwards, 101-thread pagination, and disappearing checks.
+replacements. The historical settled scenario retains its recorded ancestry
+responses while the thirty provider recordings include fresh final identity
+reads. Recorded responses remain unchanged. Mutations cover request edits and
+deletions, body-only findings, completion summaries, pre-green requests, review
+edits after disposition, wave boundaries and check reruns, rename-only and
+comment-only heads requiring a fresh review, clean and material base forwards,
+101-thread pagination, and disappearing checks. Later authenticated body
+findings invalidate earlier quiet reviews on the same head; an escalation must
+follow the latest reviewer edit. The harness applies these disposition and
+revalidation contracts while keeping the reference implementation frozen.
 
 Not built: consumer changes, provider abstractions, new convergence gates,
 schedulers, storage tables, or migrations.

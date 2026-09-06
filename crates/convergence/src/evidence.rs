@@ -110,7 +110,11 @@ fn normalize_threads(node: &Value, policy: &ConvergencePolicy) -> Result<Vec<Thr
             .map(|c| disposition(text(&c["body"]), policy))
             .collect::<Result<Vec<_>, _>>()?;
         let escalation = match replies.last() {
-            Some(c) => trusted(c) && disposition(text(&c["body"]), policy)? == Some("escalated"),
+            Some(c) => {
+                trusted(c)
+                    && (latest.is_empty() || timestamp(effective_at(c)) > timestamp(latest))
+                    && disposition(text(&c["body"]), policy)? == Some("escalated")
+            }
             None => false,
         };
         let kind = if escalation {
@@ -452,6 +456,33 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
     let mut authenticated_ids = BTreeMap::new();
     let mut authenticated_requests = BTreeMap::new();
     let persisted_head = text(&previous["authenticated_review_head"]);
+    let mut finding_times = BTreeMap::new();
+    for reviewer in &policy.reviewers {
+        for review in reviews {
+            let oid = text(&review["commit"]["oid"]);
+            let at = text(&review["submittedAt"]);
+            if reviewer_matches(review, reviewer)
+                && !text(&review["id"]).is_empty()
+                && !oid.is_empty()
+                && review["state"] == "COMMENTED"
+                && !text(&review["body"]).trim().is_empty()
+                && (text(&node["lastEditedAt"]).is_empty()
+                    || timestamp_not_after(text(&node["lastEditedAt"]), at))
+                && qualifying_request(comments, oid, at, reviewer, &facts, policy)?.is_some()
+                && let Some(at) = timestamp(at)
+            {
+                finding_times
+                    .entry(oid)
+                    .and_modify(|latest| *latest = std::cmp::max(*latest, at))
+                    .or_insert(at);
+            }
+        }
+    }
+    let no_later_finding = |oid: &str, at: &str| {
+        finding_times
+            .get(oid)
+            .is_none_or(|finding| timestamp(at).is_some_and(|quiet| quiet >= *finding))
+    };
     for reviewer in &policy.reviewers {
         for review in reviews {
             let oid = text(&review["commit"]["oid"]);
@@ -483,7 +514,8 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
                 && associated
                     .iter()
                     .all(|t| t.is_resolved && t.is_dispositioned && t.is_informational);
-            let quiet = review["state"] != "CHANGES_REQUESTED"
+            let quiet = no_later_finding(oid, at)
+                && review["state"] != "CHANGES_REQUESTED"
                 && text(&review["body"]).trim().is_empty()
                 && (review["comments"]["totalCount"] == 0 || declined || informational);
             if live && quiet {
@@ -513,7 +545,10 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
                 continue;
             }
             for oid in [head, persisted_head] {
-                if oid.is_empty() || !oid.starts_with(revision.as_str()) {
+                if oid.is_empty()
+                    || !oid.starts_with(revision.as_str())
+                    || !no_later_finding(oid, at)
+                {
                     continue;
                 }
                 let reaction = array(&node["reactions"]["nodes"]).iter().any(|r| {

@@ -18,6 +18,7 @@ pub type RequestFuture<'a> =
 type SendRequest<'a> = dyn FnMut(GitHubRequest) -> RequestFuture<'a> + Send + 'a;
 
 const PAGE_SIZE: usize = 100;
+const IDENTITY_QUERY: &str = "query($id:ID!) { node(id:$id) { ... on PullRequest { id state baseRefName baseRefOid headRefName headRefOid isDraft body lastEditedAt mergeable reviewDecision } } }";
 const COMMENT_FIELDS: &str =
     "id author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id }";
 const ISSUE_FIELDS: &str = "id author { login } authorAssociation body createdAt lastEditedAt";
@@ -254,11 +255,22 @@ async fn observation(
         )
         .await?;
     }
-    query(send, &mut responses, "query($id:ID!) { node(id:$id) { ... on PullRequest { id state baseRefName baseRefOid headRefName headRefOid isDraft body lastEditedAt mergeable reviewDecision } } }".into(), json!({"id":id})).await?;
+    query(
+        send,
+        &mut responses,
+        IDENTITY_QUERY.into(),
+        json!({"id":id}),
+    )
+    .await?;
     Ok(responses)
 }
 
 fn assemble(responses: &[Response], policy: &ConvergencePolicy) -> Result<Value, Error> {
+    let final_identity = responses
+        .last()
+        .filter(|item| item.query == IDENTITY_QUERY)
+        .and_then(|item| item.response["data"].get("node"))
+        .ok_or_else(|| Error::Evidence("final identity query missing from observation".into()))?;
     let mut node = Value::Null;
     for item in responses {
         if item.response.get("errors").is_some() {
@@ -315,6 +327,28 @@ fn assemble(responses: &[Response], policy: &ConvergencePolicy) -> Result<Value,
                 append_page(&mut thread["comments"], &page_node["comments"])?;
             }
         }
+    }
+    if !final_identity["id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty() && node["id"] == id)
+        || [
+            "state",
+            "baseRefName",
+            "baseRefOid",
+            "headRefName",
+            "headRefOid",
+            "isDraft",
+            "body",
+            "lastEditedAt",
+            "mergeable",
+            "reviewDecision",
+        ]
+        .iter()
+        .any(|key| final_identity.get(*key).is_none())
+    {
+        return Err(Error::Evidence(
+            "final identity query missing from observation".into(),
+        ));
     }
     for kind in ["reviewThreads", "comments", "reviews", "reactions", "files"] {
         complete_connection(&node[kind])?;
