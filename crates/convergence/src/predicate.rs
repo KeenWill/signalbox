@@ -74,7 +74,7 @@ pub struct Facts {
     #[serde(default)]
     pub is_draft: bool,
     pub review_decision: Option<String>,
-    pub check_inventory_stable: Option<bool>,
+    pub check_inventory_stable: bool,
     pub review_threads: Vec<Thread>,
     pub quiet_review_head_oids: Vec<String>,
     #[serde(default)]
@@ -156,7 +156,7 @@ pub fn evaluate_facts(facts: &Facts, policy: &ConvergencePolicy) -> Verdict {
     if facts.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
         reasons.push(Reason::ReviewChangesRequested);
     }
-    if facts.check_inventory_stable == Some(false) {
+    if !facts.check_inventory_stable {
         reasons.push(Reason::CheckInventoryUnsettled);
     }
     let unresolved = facts

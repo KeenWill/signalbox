@@ -1,0 +1,10 @@
+{
+  "source": "settled.json",
+  "edge": "a closed first census followed by a reopened final census invalidates identity",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/state",
+      "value": "CLOSED"
+    }
+  ]
+}

@@ -103,6 +103,176 @@ fn advancing_head_during_pagination_invalidates_the_snapshot() -> Result<(), Box
 }
 
 #[test]
+fn inventory_stability_requires_an_explicit_boolean() -> Result<(), Box<dyn Error>> {
+    let policy = policy()?;
+    let recording = Recording::read(&root().join("fixtures/mutations/settled.json"))?;
+    let mut facts = evaluate(&recording.snapshot(&policy)?, &policy)?.facts;
+    assert!(evaluate_facts(&facts, &policy).is_converged());
+    facts.check_inventory_stable = false;
+    assert!(!evaluate_facts(&facts, &policy).is_converged());
+    let mut value = serde_json::to_value(facts)?;
+    value["check_inventory_stable"] = Value::Null;
+    assert!(serde_json::from_value::<signalbox_convergence::Facts>(value.clone()).is_err());
+    value
+        .as_object_mut()
+        .ok_or("facts must be an object")?
+        .remove("check_inventory_stable");
+    assert!(serde_json::from_value::<signalbox_convergence::Facts>(value).is_err());
+    Ok(())
+}
+
+#[test]
+fn unknown_cli_options_fail_before_policy_or_evidence_io() -> Result<(), Box<dyn Error>> {
+    let repository = policy()?.repository;
+    for command in ["record", "evaluate"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-converge"))
+            .args([
+                command,
+                "--policy",
+                "/does-not-exist/policy.toml",
+                "--repo",
+                &repository,
+                "--polciy",
+                "alternate.toml",
+            ])
+            .output()?;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8(output.stderr)?.contains("unknown option --polciy"));
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-converge"))
+        .args([
+            "evalute",
+            "--policy",
+            "/does-not-exist/policy.toml",
+            "--pr",
+            "1566",
+        ])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8(output.stderr)?.contains("expected record or evaluate"));
+    Ok(())
+}
+
+#[test]
+fn policy_load_rejects_incomplete_reviewer_rules() -> Result<(), Box<dyn Error>> {
+    let path = std::env::temp_dir().join(format!("convergence-policy-{}.json", std::process::id()));
+    let original = policy()?;
+    for pattern in ["complete", "(complete)"] {
+        let mut policy = original.clone();
+        policy.reviewers[0].verdict_pattern = pattern.into();
+        std::fs::write(&path, serde_json::to_vec(&policy)?)?;
+        let error = ConvergencePolicy::read(&path).expect_err("both verdict captures are required");
+        assert!(error.to_string().contains("verdict_pattern must capture"));
+    }
+    for login in ["", " ", "\t"] {
+        let mut policy = original.clone();
+        policy.reviewers[0].login = login.into();
+        std::fs::write(&path, serde_json::to_vec(&policy)?)?;
+        let error = ConvergencePolicy::read(&path).expect_err("a reviewer needs an identity");
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer login must not be blank")
+        );
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn tightened_policy_requalifies_state_without_reviving_old_authentication()
+-> Result<(), Box<dyn Error>> {
+    let strict = policy()?;
+    let mut loose = strict.clone();
+    loose.reviewers[0].post_green_requests = false;
+    let recording = Recording::read(&root().join("fixtures/mutations/request-pre-green.json"))?;
+    let mut snapshot = recording.snapshot(&loose)?;
+    let authenticated = evaluate(&snapshot, &loose)?;
+    assert!(
+        authenticated.converged,
+        "the loose policy admits the pre-green request"
+    );
+    assert_eq!(
+        authenticated.state["policy_identity"],
+        serde_json::to_value(&loose)?
+    );
+    snapshot.previous = authenticated.state.clone();
+    assert!(
+        evaluate(&snapshot, &loose)?.converged,
+        "unchanged policy retains its evidence"
+    );
+    let requalified = evaluate(&snapshot, &strict)?;
+    assert!(
+        !requalified.converged,
+        "the strict policy must reject the old request"
+    );
+    assert!(requalified.state["authenticated_review_id"].is_null());
+    assert_eq!(
+        requalified.state["policy_identity"],
+        serde_json::to_value(&strict)?
+    );
+    let mut retained = authenticated
+        .state
+        .as_object()
+        .ok_or("state must be an object")?
+        .clone();
+    retained.extend(
+        requalified
+            .state
+            .as_object()
+            .ok_or("state must be an object")?
+            .clone(),
+    );
+    snapshot.previous = Value::Object(retained);
+    assert!(
+        !evaluate(&snapshot, &strict)?.converged,
+        "merging returned state cannot revive invalidated authentication"
+    );
+    Ok(())
+}
+
+#[test]
+fn comment_only_head_stays_unreviewed_after_inventory_settles() -> Result<(), Box<dyn Error>> {
+    let policy = policy()?;
+    let recording = Recording::read(&root().join("fixtures/mutations/comment-only-head.json"))?;
+    let mut snapshot = recording.snapshot(&policy)?;
+    snapshot.previous = evaluate(&snapshot, &policy)?.state;
+    let result = evaluate(&snapshot, &policy)?;
+    assert!(result.facts.check_inventory_stable);
+    assert!(!result.facts.review_exempt_since_quiet_review);
+    assert!(!result.converged);
+    assert!(
+        result
+            .reasons
+            .iter()
+            .any(|reason| reason == "quiet-review-not-completed-for-current-head")
+    );
+    Ok(())
+}
+
+#[test]
+fn selected_differential_fixtures_cannot_replace_the_full_expectations()
+-> Result<(), Box<dyn Error>> {
+    let expectations = root().join("fixtures/expected.json");
+    let before = std::fs::read(&expectations)?;
+    let output = std::process::Command::new("python3")
+        .arg(root().join("../../tooling/convergence-reconciler/differential.py"))
+        .args([
+            "--write-expectations",
+            "--binary",
+            "/does-not-exist/signalbox-converge",
+        ])
+        .arg(root().join("fixtures/mutations/settled.json"))
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8(output.stderr)?.contains("requires the complete fixture corpus"));
+    assert_eq!(std::fs::read(expectations)?, before);
+    Ok(())
+}
+
+#[test]
 fn refreshed_checks_determine_both_verdict_and_projection() -> Result<(), Box<dyn Error>> {
     let policy = policy()?;
     for (fixture, green) in [

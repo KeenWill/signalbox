@@ -58,10 +58,14 @@
       "check-inventory-unsettled"
     ]
   },
+  "mutations/closed-then-reopened.json": {
+    "error": "pull request changed after its convergence snapshot"
+  },
   "mutations/comment-only-head.json": {
     "converged": false,
     "reasons": [
-      "check-inventory-unsettled"
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/completed-summary.json": {
@@ -209,6 +213,18 @@
       "quiet-review-not-completed-for-current-head"
     ]
   },
+  "mutations/policy-tightened.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
+  "mutations/policy-unbound.json": {
+    "converged": false,
+    "reasons": [
+      "quiet-review-not-completed-for-current-head"
+    ]
+  },
   "mutations/python-acknowledged-finding.json": {
     "converged": false,
     "reasons": [
@@ -335,7 +351,8 @@
   "mutations/python-python-hash-comments.json": {
     "converged": false,
     "reasons": [
-      "check-inventory-unsettled"
+      "check-inventory-unsettled",
+      "quiet-review-not-completed-for-current-head"
     ]
   },
   "mutations/python-python-hunk-content-that-looks-like-a-header.json": {
