@@ -341,8 +341,8 @@ mod tests {
         .expect("the fixture catalog has one exact target")
     }
 
-    /// validation uses the exact target record and rejects an
-    /// unsupported explicit level before an adapter can prepare traffic.
+    /// validation uses the exact target record and rejects an unsupported explicit level before an
+    /// adapter can prepare traffic.
     #[test]
     fn exact_target_capability_rejects_unsupported_reasoning() {
         let mut settings = ModelSettings::new(128);
@@ -360,8 +360,7 @@ mod tests {
         );
     }
 
-    /// a mapped fast target is returned only from its exact
-    /// declared capability record.
+    /// a mapped fast target is returned only from its exact declared capability record.
     #[test]
     fn capability_returns_only_the_declared_fast_target() {
         let selected = ResolvedTarget::new("fixture-standard");
@@ -411,8 +410,7 @@ mod tests {
             .assert_eq(&tier.to_string());
     }
 
-    /// a same-target request control cannot masquerade as a
-    /// distinct serving-identity mapping.
+    /// a same-target request control cannot masquerade as a distinct serving-identity mapping.
     #[test]
     fn capability_catalog_rejects_self_mapped_fast_target() {
         let selected = ResolvedTarget::new("fixture-model");
