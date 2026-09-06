@@ -66,6 +66,7 @@ mod lifecycle_metrics_runtime;
 mod local_socket;
 pub mod model_adapter;
 mod process_runtime;
+mod repo_watch_credentials;
 mod review_orchestration_runtime;
 pub mod runner_protocol_runtime;
 mod session_delegation;
@@ -133,6 +134,7 @@ pub use process_runtime::{
     ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError,
     shared_snapshot_reader_budget,
 };
+pub use repo_watch_credentials::{RepositoryWatchClientLoadError, RepositoryWatchClientLoader};
 pub use session_delegation::{PostgresSessionDelegationPort, PostgresSessionDelegationPortError};
 pub use session_template_configuration::{
     ResolvedSessionTemplate, SessionTemplateConfiguration, SessionTemplateConfigurationError,

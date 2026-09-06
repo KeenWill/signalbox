@@ -3254,10 +3254,10 @@ mod tests {
         ));
     }
 
-    /// S30: model replacement recovery accepts only the complete set of
+    /// model replacement recovery accepts only the complete set of
     /// pre-mutation facts printed by the client.
     #[test]
-    fn s30_model_recovery_flags_are_one_complete_defaults_observation() {
+    fn model_recovery_flags_are_one_complete_defaults_observation() {
         let session = "00000000-0000-0000-0000-000000000001";
         let selection = "00000000-0000-0000-0000-000000000002";
         assert!(
@@ -3304,10 +3304,10 @@ mod tests {
         ));
     }
 
-    /// S07: stop recovery accepts only the complete printed observation —
+    /// stop recovery accepts only the complete printed observation —
     /// command identity, defaults version, and the exact expected turn.
     #[test]
-    fn s07_stop_recovery_flags_are_one_complete_observation() {
+    fn stop_recovery_flags_are_one_complete_observation() {
         let session = "00000000-0000-0000-0000-000000000001";
         let turn = "00000000-0000-0000-0000-000000000002";
 
@@ -3364,9 +3364,9 @@ mod tests {
         ));
     }
 
-    /// S19: the stop verb exposes the explicit descendant-cascade choice.
+    /// the stop verb exposes the explicit descendant-cascade choice.
     #[test]
-    fn s19_stop_descendants_flag_selects_cascade() {
+    fn stop_descendants_flag_selects_cascade() {
         let session = "00000000-0000-0000-0000-000000000001";
         let parsed = parse(["stop", session, "--descendants"].map(Into::into))
             .expect("the descendant-cascade choice parses");
@@ -3381,9 +3381,9 @@ mod tests {
         assert!(descendants);
     }
 
-    /// S19: goal stop exposes the same explicit descendant-cascade choice.
+    /// goal stop exposes the same explicit descendant-cascade choice.
     #[test]
-    fn s19_goal_stop_descendants_flag_selects_cascade() {
+    fn goal_stop_descendants_flag_selects_cascade() {
         let session = "00000000-0000-0000-0000-000000000001";
         let parsed = parse(["goal", "stop", session, "--descendants"].map(Into::into))
             .expect("the goal descendant-cascade choice parses");
@@ -3398,10 +3398,10 @@ mod tests {
         assert!(descendants);
     }
 
-    /// S10: both decision verbs bind the session and the exact pending
+    /// both decision verbs bind the session and the exact pending
     /// request, and deny requires its explicit reason.
     #[test]
-    fn s10_decision_verbs_bind_session_request_and_deny_reason() {
+    fn decision_verbs_bind_session_request_and_deny_reason() {
         let session = "00000000-0000-0000-0000-000000000001";
         let tool_request = "00000000-0000-0000-0000-000000000002";
 

@@ -186,11 +186,11 @@ fn imported_command(
     )
 }
 
-/// S28: first handling commits the exact imported prefix,
+/// first handling commits the exact imported prefix,
 /// seed, command result, session, and outbox event atomically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_first_imported_frontier_creation_commits_exact_seed_atomically()
+async fn first_imported_frontier_creation_commits_exact_seed_atomically()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
@@ -248,12 +248,11 @@ async fn s28_first_imported_frontier_creation_commits_exact_seed_atomically()
     Ok(())
 }
 
-/// S28: an imported-creation command predating settings
+/// an imported-creation command predating settings
 /// cannot replay with an explicit settings document.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_legacy_imported_creation_rejects_explicit_model_settings() -> Result<(), Box<dyn Error>>
-{
+async fn legacy_imported_creation_rejects_explicit_model_settings() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x13a, 0x23a, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -320,11 +319,11 @@ async fn s28_legacy_imported_creation_rejects_explicit_model_settings() -> Resul
     Ok(())
 }
 
-/// S28: equal replay returns the recorded result without
+/// equal replay returns the recorded result without
 /// consuming any fresh semantic identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_equal_replay_requires_its_placement_effect_without_generation()
+async fn equal_replay_requires_its_placement_effect_without_generation()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
@@ -406,12 +405,11 @@ async fn s28_equal_replay_requires_its_placement_effect_without_generation()
     Ok(())
 }
 
-/// S28: imported creation replay rejects a placement head
+/// imported creation replay rejects a placement head
 /// behind its append-only event history before generating fresh identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_imported_creation_replay_rejects_a_lagging_placement_head()
--> Result<(), Box<dyn Error>> {
+async fn imported_creation_replay_rejects_a_lagging_placement_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
         ARBITRARY_LAGGING_HEAD_CONVERSATION_ID_SEED,
@@ -485,12 +483,12 @@ async fn s28_imported_creation_replay_rejects_a_lagging_placement_head()
     Ok(())
 }
 
-/// S28: the purpose-specific command
+/// the purpose-specific command
 /// load reconstitutes the complete stored command, defaults, result, semantic
 /// prefix, and seed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_command_load_reconstitutes_complete_checked_seed() -> Result<(), Box<dyn Error>> {
+async fn command_load_reconstitutes_complete_checked_seed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
         0x102,
@@ -558,11 +556,11 @@ async fn s28_command_load_reconstitutes_complete_checked_seed() -> Result<(), Bo
     Ok(())
 }
 
-/// S28: ordinary current-session loading returns the
+/// ordinary current-session loading returns the
 /// imported ancestry after validating the bounded one-to-one seed proof.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_current_session_load_reconstitutes_imported_ancestry() -> Result<(), Box<dyn Error>> {
+async fn current_session_load_reconstitutes_imported_ancestry() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
         0x103,
@@ -612,11 +610,11 @@ async fn s28_current_session_load_reconstitutes_imported_ancestry() -> Result<()
     Ok(())
 }
 
-/// S28: a changed canonical payload under a claimed
+/// a changed canonical payload under a claimed
 /// command identity returns typed conflicting reuse without generating entries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_conflicting_reuse_is_typed_and_generation_free() -> Result<(), Box<dyn Error>> {
+async fn conflicting_reuse_is_typed_and_generation_free() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
         0x104,
@@ -669,12 +667,12 @@ async fn s28_conflicting_reuse_is_typed_and_generation_free() -> Result<(), Box<
     Ok(())
 }
 
-/// S28: a missing imported conversation is a pre-claim
+/// a missing imported conversation is a pre-claim
 /// typed outcome and generates no semantic identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_missing_conversation_remains_unclaimed_and_generation_free()
--> Result<(), Box<dyn Error>> {
+async fn missing_conversation_remains_unclaimed_and_generation_free() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
 
@@ -701,12 +699,11 @@ async fn s28_missing_conversation_remains_unclaimed_and_generation_free()
     Ok(())
 }
 
-/// S28: a missing imported frontier is a pre-claim typed
+/// a missing imported frontier is a pre-claim typed
 /// outcome and generates no semantic identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_missing_frontier_remains_unclaimed_and_generation_free() -> Result<(), Box<dyn Error>>
-{
+async fn missing_frontier_remains_unclaimed_and_generation_free() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let stored = imported(0x110, 0x210, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -739,13 +736,13 @@ async fn s28_missing_frontier_remains_unclaimed_and_generation_free() -> Result<
     Ok(())
 }
 
-/// S28: concurrent equal first handling
+/// concurrent equal first handling
 /// converges on one committed seed, and only the command-claim winner consumes
 /// semantic identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_concurrent_equal_creation_has_one_identity_consuming_winner()
--> Result<(), Box<dyn Error>> {
+async fn concurrent_equal_creation_has_one_identity_consuming_winner() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
         0x115,
@@ -833,11 +830,11 @@ async fn s28_concurrent_equal_creation_has_one_identity_consuming_winner()
     Ok(())
 }
 
-/// S28: a generated session identity collision is typed
+/// a generated session identity collision is typed
 /// and rolls back the command claim.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_generated_session_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
+async fn generated_session_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x116, 0x216, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -882,11 +879,11 @@ async fn s28_generated_session_identity_collision_is_typed() -> Result<(), Box<d
     Ok(())
 }
 
-/// S28: a generated semantic-entry identity collision is
+/// a generated semantic-entry identity collision is
 /// typed and rolls back the command claim.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_generated_semantic_entry_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
+async fn generated_semantic_entry_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x118, 0x218, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -931,11 +928,11 @@ async fn s28_generated_semantic_entry_identity_collision_is_typed() -> Result<()
     Ok(())
 }
 
-/// S28: a generated seed-frontier identity collision is
+/// a generated seed-frontier identity collision is
 /// typed and rolls back the command claim.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_generated_seed_frontier_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
+async fn generated_seed_frontier_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x11a, 0x21a, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -980,11 +977,11 @@ async fn s28_generated_seed_frontier_identity_collision_is_typed() -> Result<(),
     Ok(())
 }
 
-/// S28: purpose loading rejects a stored sentinel command UUID
+/// purpose loading rejects a stored sentinel command UUID
 /// before reconstructing a domain command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_command_load_rejects_stored_sentinel_command_identity() -> Result<(), Box<dyn Error>> {
+async fn command_load_rejects_stored_sentinel_command_identity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x11c, 0x21c, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -1032,11 +1029,11 @@ async fn s28_command_load_rejects_stored_sentinel_command_identity() -> Result<(
     Ok(())
 }
 
-/// S28: imported ancestry carrying template provenance
+/// imported ancestry carrying template provenance
 /// fails closed at the ordinary current-session load boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_current_load_rejects_imported_template_provenance() -> Result<(), Box<dyn Error>> {
+async fn current_load_rejects_imported_template_provenance() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x11f, 0x21f, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -1082,11 +1079,11 @@ async fn s28_current_load_rejects_imported_template_provenance() -> Result<(), B
     Ok(())
 }
 
-/// S28: an imported session whose one-to-one seed is absent fails
+/// an imported session whose one-to-one seed is absent fails
 /// closed at the ordinary current-session load boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn Error>> {
+async fn current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x120, 0x220, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -1130,11 +1127,11 @@ async fn s28_current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// S28: the constant-size current-session proof rejects a
+/// the constant-size current-session proof rejects a
 /// seed header whose declared member count differs from the imported boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_current_load_rejects_cross_wired_seed_header_count() -> Result<(), Box<dyn Error>> {
+async fn current_load_rejects_cross_wired_seed_header_count() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x121, 0x221, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(

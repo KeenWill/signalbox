@@ -123,7 +123,7 @@ impl ApprovalJudgeCompletionIdentities {
 
 ```rust
 pub trait ApprovalJudgeAuthorization {
-    fn request(&self) -> &tool::ToolRequest;
+    fn request(&self) -> &request::ToolRequest;
     fn call(&self) -> signalbox_domain::ModelCallId;
     fn selection(&self) -> configuration::DirectModelSelection;
     fn target(&self) -> model_call::ResolvedProviderTarget;

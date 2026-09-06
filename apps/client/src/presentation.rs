@@ -4308,7 +4308,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_imported_snapshot_renders_attested_text() {
+    fn imported_snapshot_renders_attested_text() {
         let mut snapshot = TranscriptSnapshot::from_messages(
             9,
             [
@@ -4386,7 +4386,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_imported_snapshot_renders_conservative_nontext() {
+    fn imported_snapshot_renders_conservative_nontext() {
         let mut snapshot = TranscriptSnapshot::from_messages(
             9,
             [ServerMessage::TranscriptEntry {

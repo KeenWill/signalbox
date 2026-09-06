@@ -78,7 +78,7 @@ pub enum ModelConversationMessage {
         spawning_request: signalbox_domain::ToolRequestId,
         parent_session: signalbox_domain::SessionId,
         parent_turn: signalbox_domain::TurnId,
-        content: session_delegation::DelegationContent,
+        content: content::DelegationContent,
     },
     DelegationMessage {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -87,7 +87,7 @@ pub enum ModelConversationMessage {
         sender: signalbox_domain::SessionId,
         recipient: signalbox_domain::SessionId,
         delivery_sequence: nonzero::NonZeroU64,
-        content: session_delegation::DelegationContent,
+        content: content::DelegationContent,
     },
     BackgroundDelegationResult {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -95,7 +95,7 @@ pub enum ModelConversationMessage {
         spawning_request: signalbox_domain::ToolRequestId,
         child: signalbox_domain::SessionId,
         delivery_sequence: nonzero::NonZeroU64,
-        outcome: session_delegation::DelegationOutcome,
+        outcome: outcome::DelegationOutcome,
     },
     Assistant {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -110,7 +110,7 @@ pub enum ModelConversationMessage {
     AssistantToolUse {
         source: context_frontier::SemanticTranscriptEntryRef,
         producing_call: signalbox_domain::ModelCallId,
-        request: tool::ToolRequest,
+        request: request::ToolRequest,
     },
     ToolResult {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -135,13 +135,13 @@ pub enum ModelConversationMessage {
 
 ```rust
 pub enum ModelToolResultContent {
-    Success(tool::ToolResultContent),
+    Success(result::ToolResultContent),
     ExecutionError(tool_attempt::ToolExecutionError),
     Denied {
-        reason: option::Option<tool::ToolDenialReason>,
+        reason: option::Option<policy::ToolDenialReason>,
     },
     ClosedByTurnEnd,
-    Delegation(session_delegation::DelegationOutcome),
+    Delegation(outcome::DelegationOutcome),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -239,8 +239,8 @@ pub enum PrepareModelCallOutcome {
     Ready {
         request: boxed::Box<model_execution::PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,
-        dangerous_tool_auto_approval: tool::DangerousToolAutoApproval,
-        recorded_user_overrides: boxed::Box<[tool::RecordedUserOverride]>,
+        dangerous_tool_auto_approval: policy::DangerousToolAutoApproval,
+        recorded_user_overrides: boxed::Box<[override_denial::RecordedUserOverride]>,
         system_prompt: option::Option<configuration::SessionSystemPrompt>,
         tool_entries: boxed::Box<[ResolvedToolConversationEntry]>,
     },
