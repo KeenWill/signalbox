@@ -300,6 +300,16 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(matching_rules(std::slice::from_ref(&rule), &event), [&rule]);
     let identity = RepoWatchEventContentIdentityV1::from_bytes([15; 32]);
     let occurrence = RepoWatchEventOccurrenceV1::from_parts(event.clone(), identity);
+    let earlier_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(13)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("build"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let earlier_identity = RepoWatchEventContentIdentityV1::from_bytes([14; 32]);
+    let earlier_occurrence =
+        RepoWatchEventOccurrenceV1::from_parts(earlier_event.clone(), earlier_identity);
     let retain_until = observed_at + Duration::from_secs(120);
     assert_eq!(
         store
@@ -307,16 +317,24 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
                 &projection,
                 0,
                 &frontier,
-                std::slice::from_ref(&occurrence),
+                &[earlier_occurrence, occurrence],
                 observed_at,
                 retain_until,
             )
             .await?,
         FrontierEventAdmission::Committed {
             generation: 1,
-            events: Box::new([EventAdmission::Inserted]),
+            events: Box::new([EventAdmission::Inserted, EventAdmission::Inserted]),
         }
     );
+    let evaluation_order = store.event_evaluation_order(&repository).await?;
+    assert_eq!(evaluation_order.len(), 2);
+    assert_eq!(evaluation_order[0].event(), earlier_event.id());
+    assert_eq!(evaluation_order[0].frontier_generation(), 1);
+    assert_eq!(evaluation_order[0].event_ordinal(), 1);
+    assert_eq!(evaluation_order[1].event(), event.id());
+    assert_eq!(evaluation_order[1].frontier_generation(), 1);
+    assert_eq!(evaluation_order[1].event_ordinal(), 2);
     let complete_baseline_retained: bool = sqlx::query_scalar(
         "SELECT comparison_baseline @> $2::jsonb
            FROM repository_state WHERE repository = $1",
@@ -349,20 +367,29 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         signalbox_ownership_seam::CheckConclusion::Success,
     );
     let replayed_occurrence = RepoWatchEventOccurrenceV1::from_parts(replayed_event, identity);
+    let replayed_earlier_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(18)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("build"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let replayed_earlier_occurrence =
+        RepoWatchEventOccurrenceV1::from_parts(replayed_earlier_event, earlier_identity);
     assert_eq!(
         store
             .commit_frontier_candidate(
                 &projection,
                 0,
                 &frontier,
-                std::slice::from_ref(&replayed_occurrence),
+                &[replayed_earlier_occurrence, replayed_occurrence],
                 observed_at + Duration::from_secs(1),
                 retain_until + Duration::from_secs(1),
             )
             .await?,
         FrontierEventAdmission::Committed {
             generation: 1,
-            events: Box::new([EventAdmission::Replayed]),
+            events: Box::new([EventAdmission::Replayed, EventAdmission::Replayed]),
         }
     );
     let projection_row_versions_before: (String, String) = sqlx::query_as(
@@ -458,34 +485,37 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .fetch_one(&module_pool)
             .await?;
     assert_eq!(stored_default_head, updated_default_head.as_str());
-    let rejected_event = RepoWatchEvent::branch_workflow(
+    let eventful_projection_event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(17)),
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("lint"))?,
         signalbox_ownership_seam::CheckConclusion::Success,
     );
-    let rejected_occurrence = RepoWatchEventOccurrenceV1::from_parts(
-        rejected_event.clone(),
+    let eventful_projection_occurrence = RepoWatchEventOccurrenceV1::from_parts(
+        eventful_projection_event.clone(),
         RepoWatchEventContentIdentityV1::from_bytes([18; 32]),
     );
-    let rejected_title = PullRequestTitle::try_new(String::from("Must roll back"))?;
-    let rejected_default_head =
+    let eventful_projection_title = PullRequestTitle::try_new(String::from("Eventful projection"))?;
+    let eventful_projection_default_head =
         CommitSha::try_new(String::from("9999999999999999999999999999999999999999"))?;
-    projection.pull_requests[0].title = &rejected_title;
-    projection.repository.default_head = &rejected_default_head;
+    projection.pull_requests[0].title = &eventful_projection_title;
+    projection.repository.default_head = &eventful_projection_default_head;
     assert_eq!(
         store
             .commit_frontier_candidate(
                 &projection,
                 3,
                 &frontier,
-                std::slice::from_ref(&rejected_occurrence),
+                std::slice::from_ref(&eventful_projection_occurrence),
                 observed_at + Duration::from_secs(4),
                 retain_until + Duration::from_secs(4),
             )
             .await?,
-        FrontierEventAdmission::ConflictingReuse
+        FrontierEventAdmission::Committed {
+            generation: 4,
+            events: Box::new([EventAdmission::Inserted]),
+        }
     );
     let retained_projection: (String, String) = sqlx::query_as(
         "SELECT repository.default_head_sha, pull_request.title
@@ -500,8 +530,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(
         retained_projection,
         (
-            updated_default_head.as_str().into(),
-            updated_title.as_str().into()
+            eventful_projection_default_head.as_str().into(),
+            eventful_projection_title.as_str().into()
         )
     );
     projection.pull_requests[0].title = &updated_title;
@@ -512,13 +542,13 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .bind(repository.as_str())
     .fetch_one(&module_pool)
     .await?;
-    assert_eq!(unchanged_generation, Decimal::from(3_u64));
-    let rejected_count: i64 =
+    assert_eq!(unchanged_generation, Decimal::from(4_u64));
+    let eventful_projection_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE event_id = $1")
-            .bind(rejected_event.id().into_uuid())
+            .bind(eventful_projection_event.id().into_uuid())
             .fetch_one(&module_pool)
             .await?;
-    assert_eq!(rejected_count, 0);
+    assert_eq!(eventful_projection_count, 1);
     let complete_repository = RepositorySlug::try_new(String::from("complete/repository"))?;
     let complete_comparison_baseline = RepoWatchObservation::new(
         Vec::new(),
@@ -655,7 +685,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &projection,
-                3,
+                4,
                 &next_frontier,
                 &[preceding_occurrence, conflicting_occurrence],
                 observed_at,
@@ -690,7 +720,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store
             .commit_frontier_candidate(
                 &projection,
-                3,
+                4,
                 &stale_frontier,
                 &[],
                 observed_at,
@@ -707,10 +737,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     projection.comparison_baseline = &changed_comparison_baseline;
     assert_eq!(
         store
-            .commit_frontier_candidate(&projection, 3, &frontier, &[], observed_at, retain_until,)
+            .commit_frontier_candidate(&projection, 4, &frontier, &[], observed_at, retain_until,)
             .await?,
         FrontierEventAdmission::Committed {
-            generation: 4,
+            generation: 5,
             events: Box::new([]),
         }
     );
@@ -722,7 +752,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(
-        store.release_frontier(&repository, 3, &stream).await?,
+        store.release_frontier(&repository, 4, &stream).await?,
         FrontierReleaseAdmission::Stale
     );
     let sequence_after_stale_release: Decimal = sqlx::query_scalar(
@@ -735,8 +765,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .await?;
     assert_eq!(sequence_after_stale_release, Decimal::from(2_u64));
     assert_eq!(
-        store.release_frontier(&repository, 4, &stream).await?,
-        FrontierReleaseAdmission::Released { generation: 5 }
+        store.release_frontier(&repository, 5, &stream).await?,
+        FrontierReleaseAdmission::Released { generation: 6 }
     );
     let (released_generation, released_digest): (Decimal, Vec<u8>) = sqlx::query_as(
         "SELECT frontier_generation, last_frontier_commit_digest
@@ -745,7 +775,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .bind(repository.as_str())
     .fetch_one(&module_pool)
     .await?;
-    assert_eq!(released_generation, Decimal::from(5_u64));
+    assert_eq!(released_generation, Decimal::from(6_u64));
     assert_ne!(released_digest, committed_digest);
     assert_eq!(
         store
@@ -754,11 +784,11 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         FrontierEventAdmission::Stale
     );
     assert_eq!(
-        store.release_frontier(&repository, 4, &stream).await?,
-        FrontierReleaseAdmission::Replayed { generation: 5 }
+        store.release_frontier(&repository, 5, &stream).await?,
+        FrontierReleaseAdmission::Replayed { generation: 6 }
     );
     assert_eq!(
-        store.release_frontier(&repository, 5, &[99; 32]).await?,
+        store.release_frontier(&repository, 6, &[99; 32]).await?,
         FrontierReleaseAdmission::Absent
     );
 

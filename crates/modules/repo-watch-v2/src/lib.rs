@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use signalbox_ownership_seam::{
     BranchName, CheckConclusion, ChecksOutcome, CommitSha, MergeableState, OffsetDateTime,
     PullRequestBody, PullRequestNumber, PullRequestTitle, ReactionChange, ReactionSubject,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventIdentityFrontierV1,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventIdentityFrontierV1,
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventOccurrenceV1,
     RepoWatchEventTarget, RepoWatchRule, RepositorySlug, ReviewState,
 };
@@ -182,6 +182,31 @@ pub enum FrontierReleaseAdmission {
     Stale,
 }
 
+/// Durable coordinates used to evaluate retained facts in observation order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EventEvaluationPosition {
+    event: RepoWatchEventId,
+    frontier_generation: u64,
+    event_ordinal: u64,
+}
+
+impl EventEvaluationPosition {
+    /// Returns the retained event identity.
+    pub const fn event(&self) -> RepoWatchEventId {
+        self.event
+    }
+
+    /// Returns the cursor generation that committed the event.
+    pub const fn frontier_generation(&self) -> u64 {
+        self.frontier_generation
+    }
+
+    /// Returns the event's one-based position in its committed batch.
+    pub const fn event_ordinal(&self) -> u64 {
+        self.event_ordinal
+    }
+}
+
 /// Result of activating one configured rule revision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuleAdmission {
@@ -220,6 +245,8 @@ pub enum StoreError {
     InvalidEventRetention,
     /// The supplied frontier generation has no successor.
     InvalidFrontierGeneration,
+    /// A retained event has an invalid durable evaluation position.
+    InvalidEventEvaluationPosition,
     /// A fact in a frontier commit belongs to another repository.
     EventRepositoryMismatch,
     /// A pull-request projection belongs to another repository.
@@ -239,6 +266,9 @@ impl fmt::Display for StoreError {
             }
             Self::InvalidFrontierGeneration => {
                 "repository-watch frontier generation has no successor"
+            }
+            Self::InvalidEventEvaluationPosition => {
+                "repository-watch event has an invalid evaluation position"
             }
             Self::EventRepositoryMismatch => {
                 "repository-watch event does not belong to the frontier repository"
@@ -261,6 +291,7 @@ impl Error for StoreError {
             | Self::InvalidWebhookExpiry
             | Self::InvalidEventRetention
             | Self::InvalidFrontierGeneration
+            | Self::InvalidEventEvaluationPosition
             | Self::EventRepositoryMismatch
             | Self::ProjectionRepositoryMismatch
             | Self::InvalidRuleFieldInventory => None,
@@ -407,6 +438,40 @@ impl RepoWatchStore {
         .execute(&self.pool)
         .await?;
         Ok(updated.rows_affected() == 1)
+    }
+
+    /// Reads retained event identities in cursor-generation and batch order.
+    pub async fn event_evaluation_order(
+        &self,
+        repository: &RepositorySlug,
+    ) -> Result<Box<[EventEvaluationPosition]>, StoreError> {
+        let rows: Vec<(Uuid, Decimal, Decimal)> = sqlx::query_as(
+            "SELECT event_id, frontier_generation, event_ordinal
+               FROM gh_event
+              WHERE repository = $1
+              ORDER BY frontier_generation, event_ordinal",
+        )
+        .bind(repository.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(event, frontier_generation, event_ordinal)| {
+                let frontier_generation = frontier_generation
+                    .to_u64()
+                    .filter(|generation| *generation > 0)
+                    .ok_or(StoreError::InvalidEventEvaluationPosition)?;
+                let event_ordinal = event_ordinal
+                    .to_u64()
+                    .filter(|ordinal| *ordinal > 0)
+                    .ok_or(StoreError::InvalidEventEvaluationPosition)?;
+                Ok(EventEvaluationPosition {
+                    event: RepoWatchEventId::from_uuid(event),
+                    frontier_generation,
+                    event_ordinal,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Vec::into_boxed_slice)
     }
 
     /// Atomically commits a complete frontier candidate and its ordered facts.
@@ -557,11 +622,20 @@ impl RepoWatchStore {
             .checked_add(1)
             .ok_or(StoreError::InvalidFrontierGeneration)?;
         let mut admissions = Vec::with_capacity(events.len());
-        for occurrence in events {
+        for (event_ordinal, occurrence) in (1_u64..).zip(events) {
             if occurrence.event().repository() != repository {
                 return Err(StoreError::EventRepositoryMismatch);
             }
-            match append_event(&mut transaction, occurrence, recorded_at, retain_until).await? {
+            match append_event(
+                &mut transaction,
+                occurrence,
+                next_generation,
+                event_ordinal,
+                recorded_at,
+                retain_until,
+            )
+            .await?
+            {
                 Some(admission) => admissions.push(admission),
                 None => {
                     transaction.rollback().await?;
@@ -1096,6 +1170,8 @@ fn frontier_release_identity(stream_identity: &[u8; 32]) -> Vec<u8> {
 async fn append_event(
     transaction: &mut Transaction<'_, Postgres>,
     occurrence: &RepoWatchEventOccurrenceV1,
+    frontier_generation: u64,
+    event_ordinal: u64,
     recorded_at: OffsetDateTime,
     retain_until: OffsetDateTime,
 ) -> Result<Option<EventAdmission>, StoreError> {
@@ -1110,8 +1186,9 @@ async fn append_event(
     let inserted = sqlx::query(
         "INSERT INTO gh_event
             (event_id, content_identity, repository, event_kind, target_kind,
-             pull_request_number, normalized_payload, recorded_at, retain_until)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             pull_request_number, normalized_payload, frontier_generation,
+             event_ordinal, recorded_at, retain_until)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT DO NOTHING",
     )
     .bind(event.id().into_uuid())
@@ -1121,6 +1198,8 @@ async fn append_event(
     .bind(target_kind)
     .bind(pull_request_number)
     .bind(payload.as_slice())
+    .bind(Decimal::from(frontier_generation))
+    .bind(Decimal::from(event_ordinal))
     .bind(recorded_at)
     .bind(retain_until)
     .execute(&mut **transaction)
