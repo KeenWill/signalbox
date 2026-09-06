@@ -45,7 +45,7 @@ impl SubmitInputRequest {
         session: signalbox_domain::SessionId,
         content: user_content::UserContent,
         expected_active_turn: signalbox_domain::TurnId,
-        descendant_scope: session_delegation::DescendantTerminationScope,
+        descendant_scope: vocabulary::DescendantTerminationScope,
         configuration: delivery_request::PerInputConfigurationChoices,
     ) -> result::Result<Self, SubmitInputRequestError>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;

@@ -262,11 +262,11 @@ pub struct CorrelatedDurableChildWait {/* private */}
 impl CorrelatedDurableChildWait {
     pub fn try_new(
         correlation: tool_attempt::ToolAttemptDispatchCorrelation,
-        wait: session_delegation::DelegationWait,
+        wait: wait::DelegationWait,
     ) -> option::Option<Self>;
     pub const fn correlation(self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-    pub const fn wait(self) -> session_delegation::DelegationWait;
-    pub const fn child_wait(self) -> session_delegation::ChildWait;
+    pub const fn wait(self) -> wait::DelegationWait;
+    pub const fn child_wait(self) -> wait::ChildWait;
 }
 ```
 
@@ -407,7 +407,7 @@ pub enum ToolExecutionServiceOutcome {
     AwaitingApproval(signalbox_domain::ToolRequestId),
     AwaitingRecovery(signalbox_domain::ToolAttemptId),
     ChildWaitResumed(signalbox_domain::TurnAttemptId),
-    ChildWaitParked(session_delegation::ChildWait),
+    ChildWaitParked(wait::ChildWait),
     AttemptCheckpointed(signalbox_domain::ToolAttemptId),
     PreflightFailed(boxed::Box<tool_attempt::EndedToolAttempt>),
     ObservationCommitted(boxed::Box<tool_attempt::EndedToolAttempt>),

@@ -1849,7 +1849,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn s03_inv007_lost_nudge_is_recovered_by_periodic_sweep() {
+    async fn lost_nudge_is_recovered_by_periodic_sweep() {
         let recovered = session(3);
         let interval = ReconciliationSweepInterval::try_new(Duration::from_secs(5))
             .expect("test interval is nonzero");
@@ -2248,7 +2248,7 @@ mod tests {
         }
     }
 
-    /// S10 / INV-007: a provider future that never returns cannot retain a
+    /// a provider future that never returns cannot retain a
     /// scheduler admission slot past the compiled-or-lowered occupancy bound.
     #[tokio::test(start_paused = true)]
     async fn inv007_scheduler_expires_a_stalled_pass_and_calls_recovery() {

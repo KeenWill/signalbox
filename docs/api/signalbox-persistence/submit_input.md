@@ -357,7 +357,7 @@ impl submit_input::SubmitInputRepository {
         &self,
         command: command::SubmitInput,
         principal: session_lifecycle_command::CommandPrincipal,
-        cascade_root_kind: session_delegation::ParentTerminationKind,
+        cascade_root_kind: vocabulary::ParentTerminationKind,
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: option::Option<signalbox_domain::TurnId>,
         cancellation_identities: model_execution::CancelledModelCallTurnIdentities,
