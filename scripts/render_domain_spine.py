@@ -94,10 +94,13 @@ class Renderer:
             return body
         if kind == 'resolved_path':
             return self.path(body)
-        if kind == 'borrowed_ref':
-            return '&' + ((body['lifetime'] + ' ') if body['lifetime'] else '') + ('mut ' if body['is_mutable'] else '') + self.type(body['type'])
-        if kind == 'raw_pointer':
-            return ('*mut ' if body['is_mutable'] else '*const ') + self.type(body['type'])
+        if kind in {'borrowed_ref', 'raw_pointer'}:
+            pointee = self.type(body['type'])
+            if pointee.startswith(('dyn ', 'impl ')) and ' + ' in pointee:
+                pointee = '(' + pointee + ')'
+            if kind == 'raw_pointer':
+                return ('*mut ' if body['is_mutable'] else '*const ') + pointee
+            return '&' + ((body['lifetime'] + ' ') if body['lifetime'] else '') + ('mut ' if body['is_mutable'] else '') + pointee
         if kind == 'tuple':
             return '(' + ', '.join(map(self.type, body)) + (',' if len(body) == 1 else '') + ')'
         if kind == 'slice':

@@ -158,6 +158,28 @@ pub struct Token;
         self.assertEqual(renderer.declaration(value),
             "pub fn fetch<'a, T, const N: usize = 4>() -> example::Record where T: fmt::Debug;")
 
+    def test_borrowed_trait_object_groups_its_lifetime_bound(self):
+        renderer = Renderer(fixture())
+        reference = {'borrowed_ref': {
+            'lifetime': None, 'is_mutable': False,
+            'type': {'dyn_trait': {
+                'traits': [{'trait': path('Debug', 100), 'generic_params': []}],
+                'lifetime': "'static",
+            }},
+        }}
+        self.assertEqual(renderer.type(reference), "&(dyn fmt::Debug + 'static)")
+
+    def test_reference_to_impl_trait_groups_multiple_bounds(self):
+        renderer = Renderer(fixture())
+        reference = {'borrowed_ref': {
+            'lifetime': None, 'is_mutable': True,
+            'type': {'impl_trait': [
+                {'trait_bound': {'trait': path('Debug', 100), 'modifier': 'none', 'generic_params': []}},
+                {'trait_bound': {'trait': path('Send', 102), 'modifier': 'none', 'generic_params': []}},
+            ]},
+        }}
+        self.assertEqual(renderer.type(reference), '&mut (impl fmt::Debug + marker::Send)')
+
     def test_module_at_800_lines_splits_by_kind_and_links_every_part(self):
         document = fixture()
         renderer = Renderer(document)

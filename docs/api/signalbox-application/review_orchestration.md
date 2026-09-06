@@ -513,7 +513,7 @@ impl<StoreError, RunnerError> fmt::Display for review_orchestration::ReviewOrche
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<StoreError, RunnerError> error::Error for review_orchestration::ReviewOrchestrationServiceError<StoreError, RunnerError> where StoreError: error::Error + 'static, RunnerError: error::Error + 'static {
-    pub fn source(&self) -> option::Option<&dyn error::Error + 'static>;
+    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 

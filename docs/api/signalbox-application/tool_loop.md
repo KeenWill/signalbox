@@ -356,7 +356,7 @@ impl<TransactionError, ExecutorError> fmt::Display for tool_loop::ToolExecutionS
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<TransactionError, ExecutorError> error::Error for tool_loop::ToolExecutionServiceError<TransactionError, ExecutorError> where TransactionError: error::Error + 'static, ExecutorError: error::Error + 'static {
-    pub fn source(&self) -> option::Option<&dyn error::Error + 'static>;
+    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl<TransactionError, ExecutorError> operator_failure::ClassifyOperatorFailure for tool_loop::ToolExecutionServiceError<TransactionError, ExecutorError> where TransactionError: operator_failure::ClassifyOperatorFailure, ExecutorError: operator_failure::ClassifyOperatorFailure {
     pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;

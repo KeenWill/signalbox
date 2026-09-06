@@ -469,7 +469,7 @@ impl fmt::Display for repo_watch::RepoWatchDifferError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for repo_watch::RepoWatchDifferError {
-    pub fn source(&self) -> option::Option<&dyn error::Error + 'static>;
+    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl convert::From<repo_watch::RepoWatchEventConstructionError> for repo_watch::RepoWatchDifferError {
     pub fn from(value: repo_watch::RepoWatchEventConstructionError) -> Self;
@@ -573,7 +573,7 @@ pub enum RepoWatchRuleEvaluationOutcome {
 ```rust
 pub trait RepoWatchDispatchTransaction {
     type Error;
-    pub fn handle_repo_watch_evaluation(&mut self, evaluation: repo_watch::RepoWatchRuleEvaluation, ids: &mut impl submit_input::SubmitInputIdGenerator + marker::Send) -> impl future::Future<Output = result::Result<repo_watch::RepoWatchRuleEvaluationOutcome, <Self as repo_watch::RepoWatchDispatchTransaction>::Error>> + marker::Send;
+    pub fn handle_repo_watch_evaluation(&mut self, evaluation: repo_watch::RepoWatchRuleEvaluation, ids: &mut (impl submit_input::SubmitInputIdGenerator + marker::Send)) -> impl future::Future<Output = result::Result<repo_watch::RepoWatchRuleEvaluationOutcome, <Self as repo_watch::RepoWatchDispatchTransaction>::Error>> + marker::Send;
 }
 ```
 
@@ -622,7 +622,7 @@ impl fmt::Display for repo_watch::RepoWatchDispatchPreparationError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for repo_watch::RepoWatchDispatchPreparationError {
-    pub fn source(&self) -> option::Option<&dyn error::Error + 'static>;
+    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 

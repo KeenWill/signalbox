@@ -269,7 +269,7 @@ impl fmt::Display for configuration::OriginModelSettingsError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for configuration::OriginModelSettingsError {
-    pub fn source(&self) -> option::Option<&dyn error::Error + 'static>;
+    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 

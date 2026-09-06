@@ -173,7 +173,7 @@ impl<PassError, GoalError> fmt::Display for scheduler::GoalAwareEligibilityPassE
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<PassError, GoalError> error::Error for scheduler::GoalAwareEligibilityPassError<PassError, GoalError> where PassError: error::Error + 'static, GoalError: error::Error + 'static {
-    pub fn source(&self) -> option::Option<&dyn error::Error + 'static>;
+    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl<PassError, GoalError> operator_failure::ClassifyOperatorFailure for scheduler::GoalAwareEligibilityPassError<PassError, GoalError> where PassError: operator_failure::ClassifyOperatorFailure, GoalError: operator_failure::ClassifyOperatorFailure {
     pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;

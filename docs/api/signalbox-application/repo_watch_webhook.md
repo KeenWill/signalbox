@@ -166,7 +166,7 @@ impl fmt::Display for repo_watch_webhook::RepoWatchWebhookApplyError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for repo_watch_webhook::RepoWatchWebhookApplyError {
-    pub fn source(&self) -> option::Option<&dyn error::Error + 'static>;
+    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl convert::From<repo_watch::RepoWatchRepositoryStateError> for repo_watch_webhook::RepoWatchWebhookApplyError {
     pub fn from(value: repo_watch::RepoWatchRepositoryStateError) -> Self;

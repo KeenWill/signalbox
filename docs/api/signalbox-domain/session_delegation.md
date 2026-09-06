@@ -161,7 +161,7 @@ impl fmt::Display for session_delegation::DelegationRequestError {
     pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for session_delegation::DelegationRequestError {
-    pub fn source(&self) -> option::Option<&dyn error::Error + 'static>;
+    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 

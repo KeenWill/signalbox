@@ -77,7 +77,7 @@ impl<RepositoryError> fmt::Display for startup_scan::StartupScanError<Repository
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<RepositoryError> error::Error for startup_scan::StartupScanError<RepositoryError> where RepositoryError: error::Error + 'static {
-    pub fn source(&self) -> option::Option<&dyn error::Error + 'static>;
+    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl<RepositoryError> operator_failure::ClassifyOperatorFailure for startup_scan::StartupScanError<RepositoryError> where RepositoryError: operator_failure::ClassifyOperatorFailure {
     pub fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
