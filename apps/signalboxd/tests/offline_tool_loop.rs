@@ -2247,11 +2247,10 @@ async fn delegated_park_resumes_into_fresh_judge_composition() -> Result<(), Box
     first_execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
-    let (scheduled, _dispatch_starts, continuation) =
-        PostgresEligibilitySweep::new(fixture.pool.clone())
-            .find_sessions()
-            .await?
-            .into_parts();
+    let (scheduled, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
     let resumable = PostgresToolLoopRepository::new(fixture.pool.clone())
         .find_resumable_turn(fixture.session)
         .await?;
@@ -2711,14 +2710,13 @@ async fn configured_automatic_tool_round_limit_stops_before_the_next_provider_ca
     Ok(())
 }
 
-/// S10:
 /// one offline scripted turn parks for a user decision, executes exactly
 /// once after approval with normalized arguments, commits a reference-only
 /// result at the continuation boundary, and completes only after the second
 /// model round.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_tool_loop_completes() -> Result<(), Box<dyn Error>> {
+async fn tool_loop_completes() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -3090,11 +3088,11 @@ async fn tier_zero_session_status_updates_metadata_offline() -> Result<(), Box<d
     Ok(())
 }
 
-/// S10: the composed GitHub metadata read is catalog-visible and crosses only
+/// the composed GitHub metadata read is catalog-visible and crosses only
 /// the injected credential, egress policy, and hermetic transport.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error>> {
+async fn composed_github_read_executes_offline() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let expected = serde_json::json!({"number": 17, "title": "offline pull request"});
@@ -3136,11 +3134,11 @@ async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// S10: the composed workspace read is rooted in the injected temporary
+/// the composed workspace read is rooted in the injected temporary
 /// directory and returns its exact fixture content without network access.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Error>> {
+async fn composed_workspace_read_executes_offline() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let relative_path = "note.txt";
@@ -3184,11 +3182,11 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// S10: the composed local Git executor observes the injected repository
+/// the composed local Git executor observes the injected repository
 /// worktree and returns its fixture path through the daemon tool loop.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn Error>> {
+async fn composed_local_git_status_executes_offline() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let relative_path = "untracked.txt";
@@ -3222,14 +3220,14 @@ async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// S10: the composed sandboxed executor reaches the injected process boundary
+/// the composed sandboxed executor reaches the injected process boundary
 /// and returns its typed host-refusal evidence through the daemon tool loop.
 /// The session blanket is enabled because `sandboxed_exec` declares `Confirm`,
 /// so an unapproved proposal parks instead of dispatching and this test would
 /// observe the approval gate rather than the process boundary it is about.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Error>> {
+async fn composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::ApproveAll).await?;
     let workspace = tempdir()?;
     let (tool_catalog, tool_executor) = commissioned_daemon_tools(
@@ -3267,11 +3265,11 @@ async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// S10: the composed conversation port reads the invoking session's real
+/// the composed conversation port reads the invoking session's real
 /// persisted semantic transcript rather than a synthetic transcript value.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), Box<dyn Error>> {
+async fn composed_introspection_returns_real_own_transcript() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let (tool_catalog, tool_executor) = commissioned_daemon_tools(
@@ -3331,11 +3329,11 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
     Ok(())
 }
 
-/// S10: workspace mutation remains parked with no filesystem effect until a
+/// workspace mutation remains parked with no filesystem effect until a
 /// user approval is recorded through the process protocol.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s10_workspace_write_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
+async fn workspace_write_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let relative_path = "approved.txt";
@@ -3384,11 +3382,11 @@ async fn s10_workspace_write_gates_through_process_protocol() -> Result<(), Box<
     Ok(())
 }
 
-/// S10: review publication remains parked with no transport effect until a
+/// review publication remains parked with no transport effect until a
 /// user approval is recorded through the process protocol.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s10_github_publish_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
+async fn github_publish_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
     let expected = serde_json::json!({"review_id": 91, "state": "APPROVED"});
@@ -3846,12 +3844,12 @@ async fn tier_one_review_gate_check_completes_offline_tool_loop() -> Result<(), 
     .await
 }
 
-/// S10 / S11: user denial creates no physical
+/// user denial creates no physical
 /// attempt, projects one error result to the continuation call, and allows the
 /// same turn to complete from the model's response.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_s11_denial_continues_without_execution() -> Result<(), Box<dyn Error>> {
+async fn denial_continues_without_execution() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -3920,14 +3918,14 @@ async fn s10_s11_denial_continues_without_execution() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// S10 / S11: deny-and-end first
+/// deny-and-end first
 /// records the exact denial, then the ordinary proof-bearing interrupt closes
 /// the active turn; no tool attempt is created, the stop remains independently
 /// auditable, and a later submit survives reconstitution before its new turn
 /// activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_s11_cancelled_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
+async fn cancelled_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4033,14 +4031,13 @@ async fn s10_s11_cancelled_tool_round_admits_and_runs_later_turn() -> Result<(),
     Ok(())
 }
 
-/// S07 / S10: an interrupt alone against a parked approval
+/// an interrupt alone against a parked approval
 /// wait records the authoritative typed rejection — it is not a denial and
 /// does not bypass the decision command — and the wait remains parked with no
 /// tool attempt until its canonical decision command resolves the obligation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s07_s10_interrupt_against_parked_approval_wait_is_rejected() -> Result<(), Box<dyn Error>>
-{
+async fn interrupt_against_parked_approval_wait_is_rejected() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4115,12 +4112,12 @@ async fn s07_s10_interrupt_against_parked_approval_wait_is_rejected() -> Result<
     Ok(())
 }
 
-/// S02 / S10: a restart scan preserves an
+/// a restart scan preserves an
 /// approval wait exactly; after the user decision, the durable sweep and a
 /// fresh composition resume the same logical turn without replaying activation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s10_restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Error>> {
+async fn restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4170,11 +4167,10 @@ async fn s02_s10_restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Err
     fixture
         .decide(request, ToolApprovalDecision::Approve)
         .await?;
-    let (resumable, _dispatch_starts, continuation) =
-        PostgresEligibilitySweep::new(fixture.pool.clone())
-            .find_sessions()
-            .await?
-            .into_parts();
+    let (resumable, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
     assert!(!continuation);
     assert_eq!(resumable, vec![fixture.session]);
     let (restarted_execution, restarted_runtime) = fixture.execution(
@@ -4218,12 +4214,12 @@ async fn s02_s10_restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// S10: an auto/confirm batch parks on
+/// an auto/confirm batch parks on
 /// its earliest undecided request and, after approval, executes both requests
 /// serially in proposal order with their distinct provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_mixed_batch_executes_in_proposal_order() -> Result<(), Box<dyn Error>> {
+async fn mixed_batch_executes_in_proposal_order() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([
         tool(
@@ -4345,12 +4341,12 @@ async fn s10_mixed_batch_executes_in_proposal_order() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// S10: the explicitly dangerous frozen blanket posture
+/// the explicitly dangerous frozen blanket posture
 /// approves a confirm-default tool under `session_blanket` provenance and the
 /// turn runs unattended without fabricating user agency.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_blanket_posture_runs_confirm_tool_unattended() -> Result<(), Box<dyn Error>> {
+async fn blanket_posture_runs_confirm_tool_unattended() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::ApproveAll).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4398,14 +4394,14 @@ async fn s10_blanket_posture_runs_confirm_tool_unattended() -> Result<(), Box<dy
     Ok(())
 }
 
-/// S05: losing a dispatched effect-free attempt
+/// losing a dispatched effect-free attempt
 /// never retries it; the dispatch path contains the executor failure by
 /// classifying it `known_failed` with `crash_lost` evidence before releasing
 /// its gate, startup preserves that terminal state idempotently, and a later
 /// submit activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s05_failed_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
+async fn failed_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "effect_free",
@@ -4483,15 +4479,14 @@ async fn s05_failed_tool_round_admits_and_runs_later_turn() -> Result<(), Box<dy
     Ok(())
 }
 
-/// S02 / S10: an ordinary provider failure on the continuation model
+/// an ordinary provider failure on the continuation model
 /// call of a completed tool round terminalizes the turn naming that call, and
 /// the committed terminal shape reloads through the scheduling projection —
 /// the startup scan completes and the next submit activates and runs instead
 /// of the session becoming permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s10_failed_continuation_call_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>>
-{
+async fn failed_continuation_call_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "effect_free",
@@ -4650,15 +4645,14 @@ fn assert_approved_receipt(message: ServerMessage, request: ToolRequestId) {
     );
 }
 
-/// S02 / S10: a provider refusal on the continuation model call of
+/// a provider refusal on the continuation model call of
 /// a completed tool round terminalizes the turn as refused naming that call,
 /// and the committed refused shape reloads through the scheduling
 /// projection — the startup scan completes and the next submit activates and
 /// runs instead of the session becoming permanently unloadable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s10_refused_continuation_call_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>>
-{
+async fn refused_continuation_call_admits_and_runs_later_turn() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "effect_free",
@@ -4744,7 +4738,7 @@ async fn s02_s10_refused_continuation_call_admits_and_runs_later_turn() -> Resul
     Ok(())
 }
 
-/// S02 / S08 / S10: a NextSafePoint input accepted through
+/// a NextSafePoint input accepted through
 /// while a tool round is parked is consumed by the
 /// continuation call, the
 /// steering-bearing continuation completes the turn, and the committed shape
@@ -4752,7 +4746,7 @@ async fn s02_s10_refused_continuation_call_admits_and_runs_later_turn() -> Resul
 /// the next submit activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s08_s10_steering_consumed_at_continuation_completes() -> Result<(), Box<dyn Error>> {
+async fn steering_consumed_at_continuation_completes() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -4878,14 +4872,14 @@ async fn s02_s08_s10_steering_consumed_at_continuation_completes() -> Result<(),
     Ok(())
 }
 
-/// S02 / S08 / S10: steering consumed by the first model
+/// steering consumed by the first model
 /// call stays reconstitutable through the tool round it proposes — the parked
 /// approval wait still admits submits — and a second input steers the
 /// continuation, so one turn consumes steering at both safe points and the
 /// completed history reloads.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s08_s10_steering_consumed_at_both_safe_points_reloads() -> Result<(), Box<dyn Error>> {
+async fn steering_consumed_at_both_safe_points_reloads() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -5010,13 +5004,13 @@ async fn s02_s08_s10_steering_consumed_at_both_safe_points_reloads() -> Result<(
     Ok(())
 }
 
-/// S06: losing a dispatched
+/// losing a dispatched
 /// external-effect attempt never retries it; startup idempotently classifies
 /// exact ambiguity without projecting a result or close, and parks the turn for
 /// user recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s06_external_crash_parks_without_retry() -> Result<(), Box<dyn Error>> {
+async fn external_crash_parks_without_retry() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "external_effect",

@@ -11,12 +11,6 @@ pub struct StructuredOutputContract {
     pub schema: boxed::Box<raw::RawValue>,
 }
 // derives: fmt::Debug, clone::Clone
-impl<T> dyn_clone::DynClone for StructuredOutputContract
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl cmp::PartialEq for StructuredOutputContract {
     fn eq(&self, other: &Self) -> bool;
 }
@@ -43,12 +37,6 @@ pub trait DomainValidator<T> {
 ```rust
 pub struct NoDomainConstraints;
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq, default::Default
-impl<T> dyn_clone::DynClone for NoDomainConstraints
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<T> DomainValidator<T> for NoDomainConstraints {
     type Issue = never;
     fn validate(
@@ -70,12 +58,6 @@ pub enum StructuredDecodeFailure<I> {
     DomainInvalid { issues: vec::Vec<I> },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for StructuredDecodeFailure<I>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## decode_structured

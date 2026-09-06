@@ -10,36 +10,24 @@ pub enum GitObjectFormat {
     Sha256,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitObjectFormat
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PinnedRepositoryDirectories
 
 ```rust
 pub struct PinnedRepositoryDirectories {
-    pub root: path::WorkspaceRootIdentity,
-    pub administration: path::WorkspaceRootIdentity,
+    pub root: signalbox_tools_workspace::WorkspaceRootIdentity,
+    pub administration: signalbox_tools_workspace::WorkspaceRootIdentity,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PinnedRepositoryDirectories
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## LocalGitTools
 
 ```rust
-pub struct LocalGitTools<FileSystem = path::LocalWorkspaceFileSystem> {/* private */}
+pub struct LocalGitTools<FileSystem = signalbox_tools_workspace::LocalWorkspaceFileSystem> {/* private */}
 // derives: fmt::Debug
-impl<FileSystem: path::WorkspaceFileSystem> LocalGitTools<FileSystem> {
+impl<FileSystem: signalbox_tools_workspace::WorkspaceFileSystem> LocalGitTools<FileSystem> {
     pub fn try_new(
         filesystem: FileSystem,
         root_path: impl convert::AsRef<path::Path>,
@@ -47,6 +35,11 @@ impl<FileSystem: path::WorkspaceFileSystem> LocalGitTools<FileSystem> {
     ) -> result::Result<Self, LocalGitToolsConstructionError>;
     pub const fn object_format(&self) -> GitObjectFormat;
     pub const fn pinned_directories(&self) -> PinnedRepositoryDirectories;
-    pub fn into_parts(self) -> (tool_loop::CompiledToolCatalog, LocalGitExecutor<FileSystem>);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_application::CompiledToolCatalog,
+        LocalGitExecutor<FileSystem>,
+    );
 }
 ```

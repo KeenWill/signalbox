@@ -7,27 +7,27 @@
 ```rust
 pub enum ResolvedToolConversationEntry {
     AssistantToolUse {
-        source: context_frontier::SemanticTranscriptEntryRef,
-        request: tool::ToolRequest,
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        request: signalbox_domain::ToolRequest,
     },
     ExecutionResult {
-        source: context_frontier::SemanticTranscriptEntryRef,
-        request: tool::ToolRequest,
-        attempt: tool_attempt::EndedToolAttempt,
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        request: signalbox_domain::ToolRequest,
+        attempt: signalbox_domain::EndedToolAttempt,
     },
     Denied {
-        source: context_frontier::SemanticTranscriptEntryRef,
-        request: tool::ToolRequest,
-        approval: tool::ToolApprovalResolution,
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        request: signalbox_domain::ToolRequest,
+        approval: signalbox_domain::ToolApprovalResolution,
     },
     Closed {
-        source: context_frontier::SemanticTranscriptEntryRef,
-        request: tool::ToolRequest,
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        request: signalbox_domain::ToolRequest,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ResolvedToolConversationEntry {
-    pub const fn source(&self) -> context_frontier::SemanticTranscriptEntryRef;
+    pub const fn source(&self) -> signalbox_domain::SemanticTranscriptEntryRef;
 }
 ```
 
@@ -35,8 +35,8 @@ impl ResolvedToolConversationEntry {
 
 ```rust
 pub enum ToolAttemptAuthorizationStatus {
-    Prepared(tool_attempt::CurrentToolAttempt),
-    InFlight(tool_attempt::ToolDispatchAuthority),
+    Prepared(signalbox_domain::CurrentToolAttempt),
+    InFlight(signalbox_domain::ToolDispatchAuthority),
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -45,9 +45,9 @@ pub enum ToolAttemptAuthorizationStatus {
 
 ```rust
 pub enum ToolAttemptAuthorizationOutcome {
-    Authorized(boxed::Box<tool_attempt::ToolDispatchAuthority>),
+    Authorized(boxed::Box<signalbox_domain::ToolDispatchAuthority>),
     PreauthorizationRejected {
-        detail: tool_attempt::ToolExecutionErrorDetail,
+        detail: signalbox_domain::ToolExecutionErrorDetail,
     },
 }
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -60,11 +60,11 @@ pub trait DecideToolRequestTransaction {
     type Error: ClassifyOperatorFailure;
     fn decide<NextAttempt>(
         &mut self,
-        command: tool::DecideToolRequest,
+        command: signalbox_domain::DecideToolRequest,
         next_attempt: NextAttempt,
     ) -> impl future::Future<
         Output = result::Result<
-            tool::PreparedDecideToolRequest,
+            signalbox_domain::PreparedDecideToolRequest,
             <Self as DecideToolRequestTransaction>::Error,
         >,
     > + marker::Send
@@ -80,10 +80,10 @@ pub trait OverrideDeniedToolRequestTransaction {
     type Error: ClassifyOperatorFailure;
     fn override_denied(
         &mut self,
-        command: tool::OverrideDeniedToolRequest,
+        command: signalbox_domain::OverrideDeniedToolRequest,
     ) -> impl future::Future<
         Output = result::Result<
-            tool::PreparedOverrideDeniedToolRequest,
+            signalbox_domain::PreparedOverrideDeniedToolRequest,
             <Self as OverrideDeniedToolRequestTransaction>::Error,
         >,
     > + marker::Send;
@@ -97,17 +97,17 @@ pub struct ToolContinuationIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ToolContinuationIdentities {
     pub fn new(
-        result_entries: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
-        result_frontier: context_frontier::ContextFrontierId,
+        result_entries: vec::Vec<signalbox_domain::SemanticTranscriptEntryId>,
+        result_frontier: signalbox_domain::ContextFrontierId,
         call: signalbox_domain::ModelCallId,
-        target_failure: model_execution::FailedModelCallTurnIdentities,
-        steering_frontier: context_frontier::ContextFrontierId,
+        target_failure: signalbox_domain::FailedModelCallTurnIdentities,
+        steering_frontier: signalbox_domain::ContextFrontierId,
     ) -> Self;
-    pub fn result_entries(&self) -> &[context_frontier::SemanticTranscriptEntryId];
-    pub const fn result_frontier(&self) -> context_frontier::ContextFrontierId;
+    pub fn result_entries(&self) -> &[signalbox_domain::SemanticTranscriptEntryId];
+    pub const fn result_frontier(&self) -> signalbox_domain::ContextFrontierId;
     pub const fn call(&self) -> signalbox_domain::ModelCallId;
-    pub const fn target_failure(&self) -> &model_execution::FailedModelCallTurnIdentities;
-    pub const fn steering_frontier(&self) -> context_frontier::ContextFrontierId;
+    pub const fn target_failure(&self) -> &signalbox_domain::FailedModelCallTurnIdentities;
+    pub const fn steering_frontier(&self) -> signalbox_domain::ContextFrontierId;
 }
 ```
 
@@ -118,13 +118,13 @@ pub struct ToolCrashClosureIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ToolCrashClosureIdentities {
     pub fn new(
-        result_entries: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
-        result_frontier: context_frontier::ContextFrontierId,
-        failure: model_execution::FailedModelCallTurnIdentities,
+        result_entries: vec::Vec<signalbox_domain::SemanticTranscriptEntryId>,
+        result_frontier: signalbox_domain::ContextFrontierId,
+        failure: signalbox_domain::FailedModelCallTurnIdentities,
     ) -> Self;
-    pub fn result_entries(&self) -> &[context_frontier::SemanticTranscriptEntryId];
-    pub const fn result_frontier(&self) -> context_frontier::ContextFrontierId;
-    pub const fn failure(&self) -> &model_execution::FailedModelCallTurnIdentities;
+    pub fn result_entries(&self) -> &[signalbox_domain::SemanticTranscriptEntryId];
+    pub const fn result_frontier(&self) -> signalbox_domain::ContextFrontierId;
+    pub const fn failure(&self) -> &signalbox_domain::FailedModelCallTurnIdentities;
 }
 ```
 
@@ -134,9 +134,9 @@ impl ToolCrashClosureIdentities {
 pub enum PrepareToolContinuationOutcome {
     NoWork,
     Checkpointed(signalbox_domain::ModelCallId),
-    TargetUnavailable(boxed::Box<model_execution::FailedModelCallTurn>),
-    PoolExhausted(boxed::Box<model_execution::CredentialPoolExhaustedModelCallTurn>),
-    ContextCompactionRequired(boxed::Box<model_execution::ContextHeadroomExhaustedModelCallTurn>),
+    TargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),
+    PoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
+    ContextCompactionRequired(boxed::Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -162,7 +162,7 @@ pub trait ToolExecutionTransaction {
         turn: signalbox_domain::TurnId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<batch::ToolBatch>,
+            option::Option<signalbox_domain::ToolBatch>,
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
@@ -178,10 +178,10 @@ pub trait ToolExecutionTransaction {
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         attempt: signalbox_domain::ToolAttemptId,
-        effect_class: tool::ToolEffectClass,
+        effect_class: signalbox_domain::ToolEffectClass,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<tool_attempt::CurrentToolAttempt>,
+            option::Option<signalbox_domain::CurrentToolAttempt>,
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
@@ -213,25 +213,25 @@ pub trait ToolExecutionTransaction {
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         attempt: signalbox_domain::ToolAttemptId,
-        error: tool_attempt::ToolExecutionError,
+        error: signalbox_domain::ToolExecutionError,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_attempt::EndedToolAttempt,
+            signalbox_domain::EndedToolAttempt,
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
     fn commit_observation(
         &mut self,
-        observation: tool_attempt::CorrelatedToolAttemptObservation,
+        observation: signalbox_domain::CorrelatedToolAttemptObservation,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_attempt::EndedToolAttempt,
+            signalbox_domain::EndedToolAttempt,
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
     fn reread_observation(
         &mut self,
-        observation: &tool_attempt::CorrelatedToolAttemptObservation,
+        observation: &signalbox_domain::CorrelatedToolAttemptObservation,
     ) -> impl future::Future<
         Output = result::Result<
             RetainedToolAttemptObservationStatus,
@@ -240,7 +240,7 @@ pub trait ToolExecutionTransaction {
     > + marker::Send;
     fn reread_durable_completion(
         &mut self,
-        correlation: tool_attempt::ToolAttemptDispatchCorrelation,
+        correlation: signalbox_domain::ToolAttemptDispatchCorrelation,
     ) -> impl future::Future<Output = result::Result<bool, <Self as ToolExecutionTransaction>::Error>>
            + marker::Send;
     fn reread_durable_child_wait(
@@ -257,7 +257,7 @@ pub trait ToolExecutionTransaction {
         next_turn: NextTurn,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_attempt::ToolAttemptCrashOutcome,
+            signalbox_domain::ToolAttemptCrashOutcome,
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send
@@ -281,7 +281,7 @@ pub trait ToolExecutionTransaction {
         NextSteering: function::FnMut(
                 signalbox_domain::AcceptedInputId,
             ) -> (
-                context_frontier::SemanticTranscriptEntryId,
+                signalbox_domain::SemanticTranscriptEntryId,
                 signalbox_domain::TurnId,
             ) + marker::Send;
 }

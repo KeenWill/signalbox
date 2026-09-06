@@ -62,7 +62,7 @@ impl error::Error for BlobStoreNameError {}
 pub struct BlobObjectKey(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl BlobObjectKey {
-    pub fn for_digest(digest: blob::BlobDigest) -> Self;
+    pub fn for_digest(digest: signalbox_domain::BlobDigest) -> Self;
     pub fn try_from_recorded(
         value: impl convert::Into<sync::Arc<str>>,
     ) -> result::Result<Self, BlobObjectKeyError>;
@@ -93,12 +93,15 @@ impl error::Error for BlobObjectKeyError {}
 pub struct ExpectedBlob {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ExpectedBlob {
-    pub const fn new(digest: blob::BlobDigest, byte_length: nonzero::NonZeroU64) -> Self;
+    pub const fn new(
+        digest: signalbox_domain::BlobDigest,
+        byte_length: nonzero::NonZeroU64,
+    ) -> Self;
     pub const fn try_new(
-        digest: blob::BlobDigest,
+        digest: signalbox_domain::BlobDigest,
         byte_length: u64,
     ) -> result::Result<Self, EmptyBlobError>;
-    pub const fn digest(self) -> blob::BlobDigest;
+    pub const fn digest(self) -> signalbox_domain::BlobDigest;
     pub const fn byte_length(self) -> u64;
 }
 ```
@@ -201,11 +204,11 @@ pub struct BlobVerificationFailure {/* private */}
 impl BlobVerificationFailure {
     pub const fn new(
         expected: ExpectedBlob,
-        observed_digest: option::Option<blob::BlobDigest>,
+        observed_digest: option::Option<signalbox_domain::BlobDigest>,
         observed_length: u64,
     ) -> Self;
     pub const fn expected(self) -> ExpectedBlob;
-    pub const fn observed_digest(self) -> option::Option<blob::BlobDigest>;
+    pub const fn observed_digest(self) -> option::Option<signalbox_domain::BlobDigest>;
     pub const fn observed_length(self) -> u64;
 }
 ```

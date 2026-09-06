@@ -13,12 +13,6 @@ pub const PROVIDER_JSON_NESTING_LIMIT: usize;
 ```rust
 pub struct ProviderJsonNestingExceeded;
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ProviderJsonNestingExceeded
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for ProviderJsonNestingExceeded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

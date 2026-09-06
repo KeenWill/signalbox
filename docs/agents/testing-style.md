@@ -153,12 +153,11 @@ Snapshot assertions use
     only, rendered from the observed value under test. A snapshot of everything
     asserts nothing; it is a
     [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html).
-    Table-shaped output uses the workspace's `signalbox-expect-table`
-    dev-dependency (`crates/expect-table`), which renders any `Debug` rows as
-    one box-drawn table with deterministic, right-trimmed lines that stay
-    byte-stable under re-blessing; test crates import it rather than writing
-    their own. Prior art for tables in expect tests:
-    [expectable](https://github.com/janestreet/expectable).
+    Table-shaped output uses the
+    [expectable](https://github.com/KeenWill/expectable-rs) dev-dependency,
+    which renders `serde::Serialize` rows as box-drawn tables. Derive
+    `Serialize` on test-local row types and render them with
+    `expectable::print(&rows)`. Supply rows in deterministic order.
 
 Rules 2, 9, and 10 — a matrix whose expectation mirrors the code becomes
 per-edge targeted asserts in a row helper plus an expect table as their
@@ -176,7 +175,7 @@ for d in all_cancellation_dispositions() {
 // "rejected":
 //     Err(error) => { assert_eq!(error.current().id(), source_id); "rejected" }
 // so the table supplements the per-edge asserts (rule 10); it does not
-// replace them. The helper emits one `#[derive(Debug)]` row struct per
+// replace them. The helper emits one `#[derive(serde::Serialize)]` row struct per
 // edge; the struct's field names are the rendered column headers.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
 let rows = after_cancellation_rows(&prepared, proof(1));
@@ -192,7 +191,7 @@ expect![[r#"
     │ Ambiguous     │ rejected │
     └───────────────┴──────────┘
 "#]]
-.assert_eq(&table(rows));
+.assert_eq(&expectable::print(&rows));
 ```
 
 ## Laws versus values
@@ -306,7 +305,7 @@ assert!(matches!(end, AttemptEnd::WithoutStop { disposition: actual }
 
 // Good: the retained cause is read back from the observed value and
 // displayed where a reviewer can see it (rule 12). The helper emits one
-// #[derive(Debug)] row struct per end — field names are the column
+// #[derive(serde::Serialize)] row struct per end — field names are the column
 // headers — rendered through the shared crate (rule 12).
 expect![[r#"
     ┌────────────────────┬─────────────┬─────────────────────┐
@@ -316,7 +315,7 @@ expect![[r#"
     │ after cancellation │ Cancelled   │ interrupt command 1 │
     └────────────────────┴─────────────┴─────────────────────┘
 "#]]
-.assert_eq(&table(attempt_end_family_rows(&ends)));
+.assert_eq(&expectable::print(&attempt_end_family_rows(&ends)));
 ```
 
 ## Failure messages
@@ -407,5 +406,5 @@ expect![[r#"
 ```
 
 The rendering helper draws only the fields the derivation depends on, in derived
-order, through the shared `signalbox-expect-table` renderer; read the snapshot
-diff when it changes (rule 11).
+order, through the shared `expectable` renderer; read the snapshot diff when it
+changes (rule 11).

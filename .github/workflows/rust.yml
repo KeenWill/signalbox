@@ -190,25 +190,27 @@ jobs:
         run: /tmp/mdformat-venv/bin/mdformat --check *.md docs/
       # Conservative inventory for the recorded session-lock protocols. The
       # checksum makes changes to the small
-      # reviewed inventory explicit; the scan rejects strongest-mode row-lock
-      # clauses anywhere else in production Rust. This deliberately performs
+      # reviewed inventory explicit; the scan rejects row-lock clauses and
+      # advisory-lock calls elsewhere in production Rust. This deliberately performs
       # no Rust or SQL parsing.
       - name: Check explicit-lock inventory
         run: |
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            0bbd9ebe800a35967e0345df725e53f183a474c5f0dbf512d777886508db8425
+            4da7adc13c029c73b72fec67f87d264ffef2ea27ec04196e158870496d3910c4
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
               s{/[*].*?[*]/}{ }gs;
+              s{^\s*//[^\n]*}{ }gm;
               s{--[^\n]*}{ }g;
               s/\s+/ /g;
-              print "$ARGV\n" if /\bfor update\b/i;
+              print "$ARGV\n" if /\bfor (?:no key update|key share|share|update)\b/i
+                || /\bpg_(?:try_)?advisory_(?:xact_)?lock(?:_shared)?\s*\(/i;
             ')"
           test -z "$unexpected" || {
-            printf 'explicit row lock outside inventory:\n%s\n' "$unexpected"
+            printf 'explicit lock outside inventory:\n%s\n' "$unexpected"
             exit 1
           }
   rust-checks:
@@ -602,7 +604,7 @@ jobs:
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
+        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -731,7 +733,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
+        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive

@@ -11,8 +11,8 @@ impl UpdateSessionPlacementRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
-        expected_version: session_placement::SessionPlacementVersion,
-        replacement: session_placement::SessionPlacement,
+        expected_version: signalbox_domain::SessionPlacementVersion,
+        replacement: signalbox_domain::SessionPlacement,
     ) -> result::Result<Self, InvalidDurableCommandId>;
 }
 ```
@@ -24,7 +24,7 @@ pub trait UpdateSessionPlacementTransaction {
     type Error;
     fn handle(
         &mut self,
-        command: session_placement::UpdateSessionPlacement,
+        command: signalbox_domain::UpdateSessionPlacement,
     ) -> impl future::Future<
         Output = result::Result<
             UpdateSessionPlacementOutcome,
@@ -38,7 +38,7 @@ pub trait UpdateSessionPlacementTransaction {
 
 ```rust
 pub enum UpdateSessionPlacementOutcome {
-    Recorded(session_placement::UpdateSessionPlacementResult),
+    Recorded(signalbox_domain::UpdateSessionPlacementResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },

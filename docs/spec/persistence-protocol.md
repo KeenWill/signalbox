@@ -18,8 +18,8 @@ lifecycle by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and the command claim protocol by
 [identity-and-commands](identity-and-commands.md), runtime wiring by
 [runtime-substrate](runtime-substrate.md), the blob catalog by
-[blob-storage](blob-storage.md), repository-watch storage and the convergence
-sweep by [repo-watch](repo-watch.md), and the credential-availability machine by
+[blob-storage](blob-storage.md), repository-watch storage by
+[repo-watch](repo-watch.md), and the credential-availability machine by
 [credential-availability](credential-availability.md). This page states how
 those facts are stored, locked, published, and read back.
 

@@ -54,34 +54,34 @@ pub const MAX_LEAK_PAGE_FACTS: usize;
 
 ```rust
 pub struct RepositoryEntry {
-    pub key: value::RepositoryKey,
-    pub credential_profile: option::Option<value::ProfileName>,
+    pub key: RepositoryKey,
+    pub credential_profile: option::Option<ProfileName>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for digest::RepositoryEntry where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Advertisement
 
 ```rust
 pub struct Advertisement {
-    pub capability_classes: vec::Vec<value::CapabilityName>,
-    pub tools: vec::Vec<value::WireToolName>,
-    pub workspace_capabilities: vec::Vec<value::WorkspaceCapability>,
-    pub sandbox_profiles: vec::Vec<value::SandboxProfile>,
-    pub credential_profiles: vec::Vec<value::ProfileName>,
-    pub repositories: vec::Vec<digest::RepositoryEntry>,
+    pub capability_classes: vec::Vec<CapabilityName>,
+    pub tools: vec::Vec<WireToolName>,
+    pub workspace_capabilities: vec::Vec<WorkspaceCapability>,
+    pub sandbox_profiles: vec::Vec<SandboxProfile>,
+    pub credential_profiles: vec::Vec<ProfileName>,
+    pub repositories: vec::Vec<RepositoryEntry>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for digest::Advertisement where T: for<'de> de::Deserialize<'de> {}
-impl digest::Advertisement {
-    pub fn validate(&self) -> result::Result<(), value::ValueError>;
-    pub fn try_into_domain(self) -> result::Result<runner::RunnerAdvertisement, value::ValueError>;
+impl Advertisement {
+    pub fn validate(&self) -> result::Result<(), ValueError>;
+    pub fn try_into_domain(
+        self,
+    ) -> result::Result<signalbox_domain::RunnerAdvertisement, ValueError>;
 }
-impl convert::TryFrom<&runner::RunnerAdvertisement> for digest::Advertisement {
-    type Error = value::ValueError;
+impl convert::TryFrom<&signalbox_domain::RunnerAdvertisement> for Advertisement {
+    type Error = ValueError;
     fn try_from(
-        value: &runner::RunnerAdvertisement,
+        value: &signalbox_domain::RunnerAdvertisement,
     ) -> result::Result<Self, <Self as convert::TryFrom>::Error>;
 }
 ```
@@ -99,33 +99,31 @@ pub enum Recovery {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for digest::Recovery where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceManifest
 
 ```rust
 pub struct WorkspaceManifest {
-    pub lifecycle: value::ManifestLifecycle,
-    pub manifest_id: value::CanonicalUuid,
-    pub session: value::CanonicalUuid,
-    pub placement_revision: value::PositiveU64,
-    pub runner: value::CanonicalUuid,
-    pub repository: option::Option<value::RepositoryKey>,
-    pub canonical_clone_url_digest: option::Option<value::Digest>,
-    pub credential_profile: option::Option<value::ProfileName>,
-    pub sandbox_profile: value::SandboxProfile,
+    pub lifecycle: ManifestLifecycle,
+    pub manifest_id: CanonicalUuid,
+    pub session: CanonicalUuid,
+    pub placement_revision: PositiveU64,
+    pub runner: CanonicalUuid,
+    pub repository: option::Option<RepositoryKey>,
+    pub canonical_clone_url_digest: option::Option<Digest>,
+    pub credential_profile: option::Option<ProfileName>,
+    pub sandbox_profile: SandboxProfile,
     pub relative_path: string::String,
-    pub recovery: option::Option<digest::Recovery>,
+    pub recovery: option::Option<Recovery>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for digest::WorkspaceManifest where T: for<'de> de::Deserialize<'de> {}
-impl digest::WorkspaceManifest {
-    pub fn validate(&self) -> result::Result<(), value::ValueError>;
+impl WorkspaceManifest {
+    pub fn validate(&self) -> result::Result<(), ValueError>;
     pub fn from_domain(
-        lifecycle: value::ManifestLifecycle,
-        workspace: &runner::ProvisionedWorkspace,
-    ) -> result::Result<Self, value::ValueError>;
+        lifecycle: ManifestLifecycle,
+        workspace: &signalbox_domain::ProvisionedWorkspace,
+    ) -> result::Result<Self, ValueError>;
 }
 ```
 
@@ -140,72 +138,64 @@ pub enum LeakFactKind {
     Unreconciled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for digest::LeakFactKind where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## LeakFact
 
 ```rust
 pub struct LeakFact {
-    pub kind: digest::LeakFactKind,
+    pub kind: LeakFactKind,
     pub locator: string::String,
-    pub entry_digest: value::Digest,
-    pub session: option::Option<value::CanonicalUuid>,
-    pub placement_revision: option::Option<value::PositiveU64>,
+    pub entry_digest: Digest,
+    pub session: option::Option<CanonicalUuid>,
+    pub placement_revision: option::Option<PositiveU64>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for digest::LeakFact where T: for<'de> de::Deserialize<'de> {}
-impl cmp::Ord for digest::LeakFact {
+impl cmp::Ord for LeakFact {
     fn cmp(&self, other: &Self) -> cmp::Ordering;
 }
-impl cmp::PartialOrd for digest::LeakFact {
+impl cmp::PartialOrd for LeakFact {
     fn partial_cmp(&self, other: &Self) -> option::Option<cmp::Ordering>;
 }
-impl digest::LeakFact {
-    pub fn validate(&self) -> result::Result<(), value::ValueError>;
+impl LeakFact {
+    pub fn validate(&self) -> result::Result<(), ValueError>;
 }
 ```
 
 ## advertisement_digest
 
 ```rust
-pub fn advertisement_digest(
-    value: &digest::Advertisement,
-) -> result::Result<value::Digest, value::ValueError>;
+pub fn advertisement_digest(value: &Advertisement) -> result::Result<Digest, ValueError>;
 ```
 
 ## clone_url_digest
 
 ```rust
-pub fn clone_url_digest(canonical_url: &str) -> value::Digest;
+pub fn clone_url_digest(canonical_url: &str) -> Digest;
 ```
 
 ## workspace_manifest_digest
 
 ```rust
-pub fn workspace_manifest_digest(
-    value: &digest::WorkspaceManifest,
-) -> result::Result<value::Digest, value::ValueError>;
+pub fn workspace_manifest_digest(value: &WorkspaceManifest) -> result::Result<Digest, ValueError>;
 ```
 
 ## leak_report_digest
 
 ```rust
-pub fn leak_report_digest(
-    facts: &[digest::LeakFact],
-) -> result::Result<value::Digest, value::ValueError>;
+pub fn leak_report_digest(facts: &[LeakFact]) -> result::Result<Digest, ValueError>;
 ```
 
 ## LeakPageDigestInput
 
 ```rust
 pub struct LeakPageDigestInput<'a> {
-    pub registration_revision: value::PositiveU64,
-    pub report_digest: &'a value::Digest,
-    pub page: value::PositiveU64,
-    pub prior_page_digest: option::Option<&'a value::Digest>,
+    pub registration_revision: PositiveU64,
+    pub report_digest: &'a Digest,
+    pub page: PositiveU64,
+    pub prior_page_digest: option::Option<&'a Digest>,
     pub final_page: bool,
-    pub facts: &'a [digest::LeakFact],
+    pub facts: &'a [LeakFact],
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug
 ```
@@ -213,7 +203,5 @@ pub struct LeakPageDigestInput<'a> {
 ## leak_page_digest
 
 ```rust
-pub fn leak_page_digest(
-    input: digest::LeakPageDigestInput<'_>,
-) -> result::Result<value::Digest, value::ValueError>;
+pub fn leak_page_digest(input: LeakPageDigestInput<'_>) -> result::Result<Digest, ValueError>;
 ```

@@ -94,12 +94,6 @@ pub enum ToolContractCompileError {
     Schema,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ToolContractCompileError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## rendered_contract_schema
@@ -112,7 +106,7 @@ pub fn rendered_contract_schema<Contract: ToolContract + ?marker::Sized>() -> va
 
 ```rust
 pub fn compile_contract_definition<Contract: ToolContract + ?marker::Sized>(
-    permission_default: tool::ToolPermissionDefault,
-    effect_class: tool::ToolEffectClass,
-) -> result::Result<tool_loop::ToolDefinition, ToolContractCompileError>;
+    permission_default: signalbox_domain::ToolPermissionDefault,
+    effect_class: signalbox_domain::ToolEffectClass,
+) -> result::Result<signalbox_application::ToolDefinition, ToolContractCompileError>;
 ```

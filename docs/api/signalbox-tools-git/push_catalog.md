@@ -8,13 +8,18 @@
 pub struct GitPushTools<Transport> {/* private */}
 // derives: fmt::Debug
 impl<Transport> GitPushTools<Transport> {
-    pub fn try_new<FileSystem: path::WorkspaceFileSystem>(
+    pub fn try_new<FileSystem: signalbox_tools_workspace::WorkspaceFileSystem>(
         filesystem: &FileSystem,
         root_path: impl convert::AsRef<path::Path>,
         remote: ConfiguredGitRemote,
         transport: Transport,
     ) -> result::Result<Self, GitPushToolsConstructionError>;
-    pub fn into_parts(self) -> (tool_loop::CompiledToolCatalog, GitPushExecutor<Transport>);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_application::CompiledToolCatalog,
+        GitPushExecutor<Transport>,
+    );
 }
 ```
 
@@ -26,7 +31,7 @@ pub enum GitPushToolsConstructionError {
     Schema,
     ErrorDetail,
     Duplicate,
-    Root(path::WorkspaceRootError),
+    Root(signalbox_tools_workspace::WorkspaceRootError),
     Repository,
 }
 // derives: fmt::Debug

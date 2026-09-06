@@ -289,12 +289,12 @@ pub(crate) async fn insert_goal_turn(
 
 /// Records an existing queued turn as the goal turn of one generation.
 ///
-/// A repository-watch dispatch submits its tagged context through its own
-/// command before the goal it commissions exists, so the generation cannot mint
-/// the turn that carries it. Binding writes the `goal_turn` row alone: the
-/// accepted input, queued origin, lifecycle, and model-settings resolution the
-/// turn already owns are exactly the ones the generation adopts, and writing
-/// them again would fabricate a second history for a turn that has one.
+/// A commissioned dispatch submits its context through its input command before
+/// the commissioned goal exists, so the generation cannot mint the turn that
+/// carries it. Binding writes the `goal_turn` row alone: the accepted input,
+/// queued origin, lifecycle, and model-settings resolution the turn already owns
+/// are exactly the ones the generation adopts, and writing them again would
+/// fabricate a second history for a turn that has one.
 ///
 /// No `InputAccepted` outbox event is appended here. The command that accepted
 /// this turn already published one naming the same accepted input and turn, and

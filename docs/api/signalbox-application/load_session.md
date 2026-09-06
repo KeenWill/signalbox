@@ -11,7 +11,10 @@ pub trait SessionReader {
         &self,
         session_id: signalbox_domain::SessionId,
     ) -> impl future::Future<
-        Output = result::Result<option::Option<session::Session>, <Self as SessionReader>::Error>,
+        Output = result::Result<
+            option::Option<signalbox_domain::Session>,
+            <Self as SessionReader>::Error,
+        >,
     > + marker::Send;
 }
 ```
@@ -32,6 +35,6 @@ where
     pub async fn execute(
         &self,
         session_id: signalbox_domain::SessionId,
-    ) -> result::Result<option::Option<session::Session>, <Reader as SessionReader>::Error>;
+    ) -> result::Result<option::Option<signalbox_domain::Session>, <Reader as SessionReader>::Error>;
 }
 ```

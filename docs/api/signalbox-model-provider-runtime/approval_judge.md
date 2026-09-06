@@ -13,21 +13,15 @@ pub fn approval_judge_output_contract_text() -> string::String;
 
 ```rust
 pub struct ApprovalJudgeModelRequest {
-    pub request: tool::ToolRequest,
+    pub request: signalbox_domain::ToolRequest,
     pub call: signalbox_domain::ModelCallId,
-    pub selection: configuration::DirectModelSelection,
-    pub target: model_call::ResolvedProviderTarget,
+    pub selection: signalbox_domain::DirectModelSelection,
+    pub target: signalbox_domain::ResolvedProviderTarget,
     pub credential_reference: string::String,
     pub system_prompt: string::String,
     pub rendered_request: string::String,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ApprovalJudgeModelRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ApprovalJudgeModelResult
@@ -35,18 +29,12 @@ where
 ```rust
 pub struct ApprovalJudgeModelResult {
     pub call: signalbox_domain::ModelCallId,
-    pub recommendation: tool::DelegateApprovalRecommendation,
-    pub rationale: tool::ToolDecisionRationale,
-    pub reported_model: option::Option<target::ProviderReportedModel>,
-    pub usage: usage::TokenUsage,
+    pub recommendation: signalbox_domain::DelegateApprovalRecommendation,
+    pub rationale: signalbox_domain::ToolDecisionRationale,
+    pub reported_model: option::Option<signalbox_model_runtime::ProviderReportedModel>,
+    pub usage: signalbox_model_runtime::TokenUsage,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ApprovalJudgeModelResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ApprovalJudgeModel
@@ -106,7 +94,7 @@ impl PreparedApprovalJudgeModelCall {
         >,
     >
     where
-        Authorization: approval_judge::ApprovalJudgeAuthorization;
+        Authorization: signalbox_application::ApprovalJudgeAuthorization;
 }
 impl fmt::Debug for PreparedApprovalJudgeModelCall {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -118,23 +106,17 @@ impl fmt::Debug for PreparedApprovalJudgeModelCall {
 ```rust
 pub struct RuntimeApprovalJudgeModel<R> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for RuntimeApprovalJudgeModel<R>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<R> RuntimeApprovalJudgeModel<R> {
     pub fn new(runtime: R, models: RuntimeModelCatalog) -> Self;
 }
 impl<R> ApprovalJudgeModel for RuntimeApprovalJudgeModel<R>
 where
-    R: runtime::ModelRuntime<signalbox_domain::ModelCallId>
+    R: signalbox_model_runtime::ModelRuntime<signalbox_domain::ModelCallId>
         + fmt::Debug
         + marker::Send
         + marker::Sync
         + 'static,
-    <R as runtime::ModelRuntime>::Prepared: marker::Send + 'static,
+    <R as signalbox_model_runtime::ModelRuntime>::Prepared: marker::Send + 'static,
 {
     fn prepare<'a>(
         &'a self,
@@ -164,23 +146,17 @@ pub enum ApprovalJudgeModelError {
     PreparationDefect,
     AuthorizationMismatch,
     PreparationCorrelationMismatch,
-    CorrelationMismatch(usage::TokenUsage),
-    Refused(usage::TokenUsage),
-    ProviderError(usage::TokenUsage),
+    CorrelationMismatch(signalbox_model_runtime::TokenUsage),
+    Refused(signalbox_model_runtime::TokenUsage),
+    ProviderError(signalbox_model_runtime::TokenUsage),
     CancellationConfirmed,
     ProvenUnsent,
-    BoundaryLoss(usage::TokenUsage),
-    ProviderTargetSubstituted(usage::TokenUsage),
-    IncompleteDecision(usage::TokenUsage),
-    InvalidDecision(usage::TokenUsage),
+    BoundaryLoss(signalbox_model_runtime::TokenUsage),
+    ProviderTargetSubstituted(signalbox_model_runtime::TokenUsage),
+    IncompleteDecision(signalbox_model_runtime::TokenUsage),
+    InvalidDecision(signalbox_model_runtime::TokenUsage),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ApprovalJudgeModelError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for ApprovalJudgeModelError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -188,6 +164,6 @@ impl error::Error for ApprovalJudgeModelError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl ApprovalJudgeModelError {
-    pub const fn usage(self) -> usage::TokenUsage;
+    pub const fn usage(self) -> signalbox_model_runtime::TokenUsage;
 }
 ```

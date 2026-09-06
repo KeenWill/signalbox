@@ -5101,20 +5101,12 @@ fn write_assistant_texts(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 enum OperatorStatusPhase {
-    HeldSlots,
-    QueuedObligations,
-    PullRequestConvergences,
-    PendingStaleReviewClearances,
     LifecycleWeeks,
     LifecycleDeadlineViolations,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct OperatorStatusCounts {
-    held_slots: u64,
-    queued_obligations: u64,
-    pull_request_convergences: u64,
-    pending_stale_review_clearances: u64,
     lifecycle_weeks: u64,
     lifecycle_deadline_violations: u64,
 }
@@ -5136,30 +5128,12 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
         }
     }
     let mut spool = tempfile::tempfile()?;
-    let mut phase = OperatorStatusPhase::HeldSlots;
+    let mut phase = OperatorStatusPhase::LifecycleWeeks;
     let mut counts = OperatorStatusCounts::default();
     loop {
         let frame = connection.frame().await?;
         let item_phase = match frame.message() {
             ServerMessage::OperatorStatus(message) => match message.as_ref() {
-                OperatorStatusMessage::HeldSlot(_) => {
-                    counts.held_slots = status_increment(counts.held_slots)?;
-                    Some(OperatorStatusPhase::HeldSlots)
-                }
-                OperatorStatusMessage::QueuedObligation(_) => {
-                    counts.queued_obligations = status_increment(counts.queued_obligations)?;
-                    Some(OperatorStatusPhase::QueuedObligations)
-                }
-                OperatorStatusMessage::PullRequestConvergence(_) => {
-                    counts.pull_request_convergences =
-                        status_increment(counts.pull_request_convergences)?;
-                    Some(OperatorStatusPhase::PullRequestConvergences)
-                }
-                OperatorStatusMessage::PendingStaleReviewClearance(_) => {
-                    counts.pending_stale_review_clearances =
-                        status_increment(counts.pending_stale_review_clearances)?;
-                    Some(OperatorStatusPhase::PendingStaleReviewClearances)
-                }
                 OperatorStatusMessage::LifecycleWeek(_) => {
                     counts.lifecycle_weeks = status_increment(counts.lifecycle_weeks)?;
                     Some(OperatorStatusPhase::LifecycleWeeks)
@@ -5172,12 +5146,6 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
                 OperatorStatusMessage::End(item)
                     if counts
                         == (OperatorStatusCounts {
-                            held_slots: item.held_slot_count.value(),
-                            queued_obligations: item.queued_obligation_count.value(),
-                            pull_request_convergences: item.pull_request_convergence_count.value(),
-                            pending_stale_review_clearances: item
-                                .pending_stale_review_clearance_count
-                                .value(),
                             lifecycle_weeks: item.lifecycle_week_count.value(),
                             lifecycle_deadline_violations: item
                                 .lifecycle_deadline_violation_count
@@ -5217,10 +5185,6 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
         spool.write_all(&encode_server_line(&frame)?)?;
     }
     output.operator_status_counts(OperatorStatusPresentationCounts {
-        held_slots: counts.held_slots,
-        queued_obligations: counts.queued_obligations,
-        pull_request_convergences: counts.pull_request_convergences,
-        pending_stale_review_clearances: counts.pending_stale_review_clearances,
         lifecycle_weeks: counts.lifecycle_weeks,
         lifecycle_deadline_violations: counts.lifecycle_deadline_violations,
     })?;
@@ -6870,7 +6834,7 @@ mod tests {
     }
 
     #[test]
-    fn s19_descendant_scope_follows_the_explicit_cli_choice() {
+    fn descendant_scope_follows_the_explicit_cli_choice() {
         assert_eq!(
             descendant_scope(false),
             DescendantTerminationScope::ParentAlone
@@ -8834,10 +8798,10 @@ mod tests {
         Ok(())
     }
 
-    /// S28: a directory replaced after enumeration cannot redirect
+    /// a directory replaced after enumeration cannot redirect
     /// a queued candidate read through a symbolic link.
     #[tokio::test]
-    async fn s28_scan_refuses_directory_symlink_replacement() -> Result<(), Box<dyn Error>> {
+    async fn scan_refuses_directory_symlink_replacement() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let outside = tempfile::tempdir()?;
         let queued_directory = root.path().join("queued");
@@ -8860,12 +8824,12 @@ mod tests {
         Ok(())
     }
 
-    /// S34: an unreadable `--system-prompt-file` names the prompt file, not
+    /// an unreadable `--system-prompt-file` names the prompt file, not
     /// the unrelated conversation-import source, in both its typed variant and
     /// its rendered diagnostic.
     #[tokio::test]
-    async fn s34_missing_system_prompt_file_reports_a_prompt_file_failure()
-    -> Result<(), Box<dyn Error>> {
+    async fn missing_system_prompt_file_reports_a_prompt_file_failure() -> Result<(), Box<dyn Error>>
+    {
         let root = tempfile::tempdir()?;
         let absent = root.path().join("prompt.txt");
 
@@ -8881,11 +8845,11 @@ mod tests {
         Ok(())
     }
 
-    /// S28: a regular candidate replaced after enumeration by a
+    /// a regular candidate replaced after enumeration by a
     /// FIFO is rejected without waiting for a writer.
     #[cfg(not(target_vendor = "apple"))]
     #[tokio::test]
-    async fn s28_scan_refuses_fifo_replacement_without_blocking() -> Result<(), Box<dyn Error>> {
+    async fn scan_refuses_fifo_replacement_without_blocking() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let candidate_path = root.path().join("conversation.jsonl");
         fs::write(&candidate_path, b"inside")?;
@@ -9555,7 +9519,7 @@ mod tests {
         Ok(())
     }
 
-    /// S28: the inspection read is the client's source of selectable
+    /// the inspection read is the client's source of selectable
     /// positions, so a gap in the emitted sequence is rejected before any row
     /// can suggest a position the daemon did not emit.
     #[tokio::test]
@@ -9626,7 +9590,7 @@ mod tests {
         Ok(())
     }
 
-    /// S28: an imported conversation's normalized entry sequence is nonempty,
+    /// an imported conversation's normalized entry sequence is nonempty,
     /// so an empty inventory contradicts the record the daemon claims to be
     /// reading. The shared reader fails closed on it rather than printing a
     /// conversation with no selectable position.
@@ -9689,7 +9653,7 @@ mod tests {
         Ok(())
     }
 
-    /// S28: `latest` resolves against the imported conversation's own declared
+    /// `latest` resolves against the imported conversation's own declared
     /// entry count and reaches the wire as that concrete ordinal, so the
     /// durable command an exact replay reconstructs is unchanged.
     #[tokio::test]

@@ -5,6 +5,7 @@
 ## PreparedAttemptIdentities
 
 ```rust
+#[cfg(feature = "test-support")]
 pub struct PreparedAttemptIdentities {
     pub session: signalbox_domain::SessionId,
     pub turn: signalbox_domain::TurnId,
@@ -12,7 +13,7 @@ pub struct PreparedAttemptIdentities {
     pub request: signalbox_domain::ToolRequestId,
     pub attempt: signalbox_domain::ToolAttemptId,
     pub issuing_turn_attempt: signalbox_domain::TurnAttemptId,
-    pub frontier: context_frontier::ContextFrontierId,
+    pub frontier: signalbox_domain::ContextFrontierId,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -20,10 +21,11 @@ pub struct PreparedAttemptIdentities {
 ## PreparedAttemptProposal
 
 ```rust
+#[cfg(feature = "test-support")]
 pub struct PreparedAttemptProposal {
-    pub name: tool::ToolName,
-    pub arguments: tool::NormalizedToolArguments,
-    pub effect_class: tool::ToolEffectClass,
+    pub name: signalbox_domain::ToolName,
+    pub arguments: signalbox_domain::NormalizedToolArguments,
+    pub effect_class: signalbox_domain::ToolEffectClass,
     pub approval: PreparedAttemptApproval,
 }
 // derives: clone::Clone, fmt::Debug
@@ -32,6 +34,7 @@ pub struct PreparedAttemptProposal {
 ## PreparedAttemptApproval
 
 ```rust
+#[cfg(feature = "test-support")]
 pub enum PreparedAttemptApproval {
     PolicyAuto,
     UserConfirmation {
@@ -44,16 +47,18 @@ pub enum PreparedAttemptApproval {
 ## prepared_single_attempt_batch
 
 ```rust
+#[cfg(feature = "test-support")]
 #[must_use]
 pub fn prepared_single_attempt_batch(
     identities: PreparedAttemptIdentities,
     proposal: PreparedAttemptProposal,
-) -> batch::ToolBatch;
+) -> signalbox_domain::ToolBatch;
 ```
 
 ## FixtureTransactionFailures
 
 ```rust
+#[cfg(feature = "test-support")]
 pub struct FixtureTransactionFailures<Error> {
     pub domain_rejection: Error,
     pub declined_crash_classification: Error,
@@ -64,14 +69,20 @@ pub struct FixtureTransactionFailures<Error> {
 ## FixtureToolExecutionTransaction
 
 ```rust
+#[cfg(feature = "test-support")]
 pub struct FixtureToolExecutionTransaction<Error> {/* private */}
 // derives: clone::Clone, fmt::Debug
+#[cfg(feature = "test-support")]
 impl<Error> FixtureToolExecutionTransaction<Error> {
     #[must_use]
-    pub const fn new(batch: batch::ToolBatch, failures: FixtureTransactionFailures<Error>) -> Self;
+    pub const fn new(
+        batch: signalbox_domain::ToolBatch,
+        failures: FixtureTransactionFailures<Error>,
+    ) -> Self;
     #[must_use]
-    pub const fn batch(&self) -> &batch::ToolBatch;
+    pub const fn batch(&self) -> &signalbox_domain::ToolBatch;
 }
+#[cfg(feature = "test-support")]
 impl<Error> ToolExecutionTransaction for FixtureToolExecutionTransaction<Error>
 where
     Error: ClassifyOperatorFailure + clone::Clone + marker::Send,
@@ -89,21 +100,24 @@ where
     ) -> result::Result<bool, <Self as ToolExecutionTransaction>::Error>;
     async fn reread_durable_completion(
         &mut self,
-        _correlation: tool_attempt::ToolAttemptDispatchCorrelation,
+        _correlation: signalbox_domain::ToolAttemptDispatchCorrelation,
     ) -> result::Result<bool, <Self as ToolExecutionTransaction>::Error>;
     async fn load_active_batch(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
-    ) -> result::Result<option::Option<batch::ToolBatch>, <Self as ToolExecutionTransaction>::Error>;
+    ) -> result::Result<
+        option::Option<signalbox_domain::ToolBatch>,
+        <Self as ToolExecutionTransaction>::Error,
+    >;
     async fn prepare_next_attempt(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::ToolAttemptId,
-        _effect_class: tool::ToolEffectClass,
+        _effect_class: signalbox_domain::ToolEffectClass,
     ) -> result::Result<
-        option::Option<tool_attempt::CurrentToolAttempt>,
+        option::Option<signalbox_domain::CurrentToolAttempt>,
         <Self as ToolExecutionTransaction>::Error,
     >;
     async fn authorize_attempt(
@@ -124,15 +138,15 @@ where
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::ToolAttemptId,
-        _error: tool_attempt::ToolExecutionError,
-    ) -> result::Result<tool_attempt::EndedToolAttempt, <Self as ToolExecutionTransaction>::Error>;
+        _error: signalbox_domain::ToolExecutionError,
+    ) -> result::Result<signalbox_domain::EndedToolAttempt, <Self as ToolExecutionTransaction>::Error>;
     async fn commit_observation(
         &mut self,
-        observation: tool_attempt::CorrelatedToolAttemptObservation,
-    ) -> result::Result<tool_attempt::EndedToolAttempt, <Self as ToolExecutionTransaction>::Error>;
+        observation: signalbox_domain::CorrelatedToolAttemptObservation,
+    ) -> result::Result<signalbox_domain::EndedToolAttempt, <Self as ToolExecutionTransaction>::Error>;
     async fn reread_observation(
         &mut self,
-        _observation: &tool_attempt::CorrelatedToolAttemptObservation,
+        _observation: &signalbox_domain::CorrelatedToolAttemptObservation,
     ) -> result::Result<
         RetainedToolAttemptObservationStatus,
         <Self as ToolExecutionTransaction>::Error,
@@ -145,7 +159,7 @@ where
         _identities: ToolCrashClosureIdentities,
         _next_turn: NextTurn,
     ) -> result::Result<
-        tool_attempt::ToolAttemptCrashOutcome,
+        signalbox_domain::ToolAttemptCrashOutcome,
         <Self as ToolExecutionTransaction>::Error,
     >
     where
@@ -163,7 +177,7 @@ where
         NextSteering: function::FnMut(
                 signalbox_domain::AcceptedInputId,
             ) -> (
-                context_frontier::SemanticTranscriptEntryId,
+                signalbox_domain::SemanticTranscriptEntryId,
                 signalbox_domain::TurnId,
             ) + marker::Send;
 }
@@ -172,12 +186,15 @@ where
 ## RecordingToolExecutor
 
 ```rust
+#[cfg(feature = "test-support")]
 pub struct RecordingToolExecutor<Executor> {/* private */}
 // derives: fmt::Debug
+#[cfg(feature = "test-support")]
 impl<Executor> RecordingToolExecutor<Executor> {
     #[must_use]
     pub fn new(inner: Executor) -> (Self, RecordedEvidence);
 }
+#[cfg(feature = "test-support")]
 impl<Executor> ToolExecutor for RecordingToolExecutor<Executor>
 where
     Executor: ToolExecutor + marker::Send,
@@ -199,8 +216,10 @@ where
 ## RecordedEvidence
 
 ```rust
+#[cfg(feature = "test-support")]
 pub struct RecordedEvidence {/* private */}
 // derives: clone::Clone, fmt::Debug
+#[cfg(feature = "test-support")]
 impl RecordedEvidence {
     #[must_use]
     pub fn take(&self) -> option::Option<ToolExecutorEvidence>;

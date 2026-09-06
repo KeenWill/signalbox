@@ -28,7 +28,6 @@ axum = { version = "0.8.9", default-features = false, features = [
 ] }
 base64 = "0.23.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
-hmac = { version = "0.13.0", default-features = false }
 headers = "0.4.1"
 http = "1.3.1"
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
@@ -44,19 +43,6 @@ mime = "0.3.17"
 # `LengthLimitError` is an oversized body; anything else is transport failure.
 # Already present transitively under axum.
 http-body-util = { version = "0.1.4", default-features = false }
-# The webhook listener drives Hyper directly rather than through `axum::serve`,
-# because the raw-header ceilings below the router are only reachable on the
-# HTTP/1 builder. Both were already present transitively.
-hyper = { version = "1.10.1", default-features = false, features = [
-    "http1",
-    "server",
-] }
-hyper-util = { version = "0.1.20", default-features = false, features = [
-    "server",
-    "server-graceful",
-    "service",
-    "tokio",
-] }
 opentelemetry = { version = "0.32.0", default-features = false, features = [
     "trace",
 ] }

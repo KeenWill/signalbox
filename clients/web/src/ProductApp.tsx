@@ -22,7 +22,6 @@ import {
   useRef,
   useState,
 } from 'react'
-import { ActivitySurface } from './ActivitySurface'
 import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
@@ -75,11 +74,6 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
     title: 'Search',
     question: 'Where does this fact occur?',
   },
-  activity: {
-    eyebrow: 'Repository operations',
-    title: 'Activity',
-    question: 'What entered the system and how was it handled?',
-  },
   runners: {
     eyebrow: 'Execution fleet',
     title: 'Runners',
@@ -122,7 +116,6 @@ const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
   attention: 'navigate.attention',
   sessions: 'navigate.sessions',
   search: 'navigate.search',
-  activity: 'navigate.activity',
   runners: 'navigate.runners',
   reviews: 'navigate.reviews',
   imports: 'navigate.imports',
@@ -681,8 +674,10 @@ export function ProductApp({
         return surfaceEscapeRef.current?.() ?? false
       },
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
-      loadTimelineWindow: (anchor) =>
-        setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
+      loadTimelineWindow: sessionState.workspace
+        ? (anchor) =>
+            setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
+        : undefined,
       navigate: (path) => {
         // A retained exact continuation command owns the surface until it is retried or abandoned.
         if (navigationDisabled) return
@@ -875,35 +870,6 @@ export function ProductApp({
           </div>
         </section>
       </div>
-    ) : surface === 'activity' && bootstrap.isSuccess ? (
-      <ActivitySurface />
-    ) : surface === 'activity' ? (
-      <div className="surface-body">
-        <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
-          <div>
-            <h2>
-              {bootstrap.isError ? 'Activity contract unavailable' : 'Checking Activity contract'}
-            </h2>
-            <p>
-              {bootstrap.isError
-                ? 'Repository activity reads remain disabled until the generated bootstrap contract validates.'
-                : 'Repository activity reads will begin after the generated bootstrap contract validates.'}
-            </p>
-            {bootstrap.isError && (
-              <button
-                type="button"
-                className="bootstrap-retry"
-                onClick={() => {
-                  setFocusAfterBootstrapRecovery(true)
-                  void bootstrap.refetch()
-                }}
-              >
-                Retry contract check
-              </button>
-            )}
-          </div>
-        </section>
-      </div>
     ) : surface === 'sessions' && bootstrap.isSuccess && sessionState.workspace ? (
       <SessionWorkspaceSurface
         initialSessionId={sessionState.session}
@@ -916,7 +882,11 @@ export function ProductApp({
         windowRequest={windowRequest}
       />
     ) : surface === 'sessions' && bootstrap.isSuccess ? (
-      <SessionCatalogSurface state={sessionState} onStateChange={updateSessionSearch} />
+      <SessionCatalogSurface
+        state={sessionState}
+        onStateChange={updateSessionSearch}
+        onTimelineIds={setTimelineIds}
+      />
     ) : surface === 'sessions' ? (
       <div className="catalog-notice">
         <p>Sessions are unavailable until the browser contract handshake succeeds.</p>

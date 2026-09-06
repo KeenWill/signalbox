@@ -1040,10 +1040,10 @@ mod tests {
         );
     }
 
-    /// S09: long-frontier derivation shares the exact source prefix,
+    /// long-frontier derivation shares the exact source prefix,
     /// appends only the stated suffix, and leaves the source unchanged.
     #[test]
-    fn s09_long_frontier_derivation_preserves_source_prefix() {
+    fn long_frontier_derivation_preserves_source_prefix() {
         let source_entries = distinct_entries(512);
         let appended_entries = vec![entry(513), entry(514)];
         let source = snapshot(session_id(1), 1, source_entries.clone());
@@ -1061,10 +1061,10 @@ mod tests {
         assert_eq!(derived.entry_count(), 514);
     }
 
-    /// S09: hundreds of one-entry derivations retain one exact
+    /// hundreds of one-entry derivations retain one exact
     /// ordered frontier without rebuilding or mutating any semantic prefix.
     #[test]
-    fn s09_long_frontier_chain_preserves_every_append() {
+    fn long_frontier_chain_preserves_every_append() {
         let root = snapshot(session_id(1), 1, vec![entry(1)]);
         let terminal = (2..=512).fold(root, |source, index| {
             source
@@ -1126,10 +1126,10 @@ mod tests {
         );
     }
 
-    /// S09: later candidate derivation retains the complete earlier
+    /// later candidate derivation retains the complete earlier
     /// prefix in order and only appends exact new semantic entries.
     #[test]
-    fn s09_derivation_is_prefix_preserving_and_append_only() {
+    fn derivation_is_prefix_preserving_and_append_only() {
         let owner = session_id(1);
         let first = entry(1);
         let second = entry(2);
@@ -1215,11 +1215,11 @@ mod tests {
         );
     }
 
-    /// S17: a new consuming session owns its own frontier while
+    /// a new consuming session owns its own frontier while
     /// preserving inherited source-session and semantic-entry identities
     /// before appending its own origin entry.
     #[test]
-    fn s17_inherited_entry_references_are_preserved_without_reminting() {
+    fn inherited_entry_references_are_preserved_without_reminting() {
         let source_session = session_id(1);
         let consuming_session = session_id(2);
         let inherited = [entry_from(source_session, 1), entry_from(source_session, 2)];

@@ -370,13 +370,13 @@ mod tests {
         )
     }
 
-    /// S02: the dedicated compaction call configures no thinking
+    /// the dedicated compaction call configures no thinking
     /// display, so a Claude 5-family completion carries the omitted-display
     /// empty thinking block by default. Folding the summary drops it exactly as
     /// the ordinary bridge does, instead of failing the default path closed and
     /// stalling the very turn automatic compaction exists to rescue.
     #[tokio::test]
-    async fn s02_empty_thinking_part_is_dropped_from_a_compaction_summary() {
+    async fn empty_thinking_part_is_dropped_from_a_compaction_summary() {
         let model = compaction_model(vec![
             AssistantPart::Thinking {
                 text: String::new(),
@@ -393,11 +393,11 @@ mod tests {
         assert_eq!(result.summary, "compacted fixture summary");
     }
 
-    /// S02: thinking with actual text still fails the summary closed,
+    /// thinking with actual text still fails the summary closed,
     /// because accepting it would publish a summary that silently omits
     /// response material no durable representation can carry.
     #[tokio::test]
-    async fn s02_nonempty_thinking_part_still_fails_the_summary_closed() {
+    async fn nonempty_thinking_part_still_fails_the_summary_closed() {
         let model = compaction_model(vec![
             AssistantPart::Thinking {
                 text: String::from("visible reasoning"),
@@ -412,10 +412,10 @@ mod tests {
         );
     }
 
-    /// S02: redacted thinking carries withheld reasoning in opaque
+    /// redacted thinking carries withheld reasoning in opaque
     /// form and fails the summary closed for the same reason.
     #[tokio::test]
-    async fn s02_redacted_thinking_part_still_fails_the_summary_closed() {
+    async fn redacted_thinking_part_still_fails_the_summary_closed() {
         let model = compaction_model(vec![
             AssistantPart::RedactedThinking {
                 data: String::from("opaque-fixture-payload"),

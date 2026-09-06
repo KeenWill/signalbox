@@ -5,6 +5,6 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | root | 95 | 0 | 4 | [functions](root/functions.md), [types](root/types.md), [types-2](root/types-2.md) |
-| operator_status | 16 | 0 | 0 | [operator_status](operator_status.md) |
+| operator_status | 5 | 0 | 0 | [operator_status](operator_status.md) |
 | review | 32 | 0 | 0 | [review](review.md) |
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |

@@ -56,7 +56,7 @@ Configuration reload is one `reload_configuration` request with no members and
 no `command_id`, because the swap changes process memory alone and a repeat
 re-reads and re-validates. Success returns
 `configuration_reloaded { reloaded_sections }`, an array of the closed values
-`model_catalog`, `session_templates`, and `repository_watch`. Failure returns
+`model_catalog` and `session_templates`. Failure returns
 `configuration_reload_failed { phase, reason }`, sanitized as startup logs are,
 and leaves the running configuration unchanged. Which sections reload and the
 validate-then-swap rule belong to
@@ -95,9 +95,9 @@ traversal each one continues belongs to
 exactly the closed daemon-actionable set the runner wire carries, member for
 member, so every retained failure is serializable. The daemon bounds the detail
 and retains the runner's text unchanged, following the `operation_failed`
-contract in [runner-protocol.md](../spec/runner-protocol.md). The detail is
-untrusted runner-authored text, so the status projection is a transformed view
-of that retained record: it applies the diagnostic-evidence redaction in
+contract in [runner-protocol.md](runner-protocol.md). The detail is untrusted
+runner-authored text, so the status projection is a transformed view of that
+retained record: it applies the diagnostic-evidence redaction in
 [process-protocol.md](../spec/process-protocol.md), removing host and credential
 paths, before exposing it. The event notifies a follower of each live runner
 transition above its snapshot cursor; the snapshot's runner projection carries

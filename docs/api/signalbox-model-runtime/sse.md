@@ -10,12 +10,6 @@ pub struct SseRecord {
     pub data: string::String,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for SseRecord
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## SseFramingError
@@ -26,12 +20,6 @@ pub enum SseFramingError {
     InvalidUtf8 { detail: string::String },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for SseFramingError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for SseFramingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -46,12 +34,6 @@ pub struct SsePushOutcome {
     pub error: option::Option<SseFramingError>,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for SsePushOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## SseTermination
@@ -62,12 +44,6 @@ pub enum SseTermination {
     TruncatedRecord,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for SseTermination
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## SseFraming

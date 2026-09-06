@@ -1344,11 +1344,11 @@ mod tests {
         )
     }
 
-    /// S37: each knob resolves independently through per-call,
+    /// each knob resolves independently through per-call,
     /// session, profile, then global precedence, and an explicit provider
     /// default stops lower-layer inheritance.
     #[test]
-    fn s37_resolves_the_fixed_precedence_chain_with_explicit_clearing() {
+    fn resolves_the_fixed_precedence_chain_with_explicit_clearing() {
         let per_call = ModelSettingsOverlay::new(
             SettingOverlay::ProviderDefault,
             FastModeOverlay::Inherit,
@@ -1486,10 +1486,10 @@ mod tests {
         assert_eq!(settings.validated_for(), None);
     }
 
-    /// S37: an explicit unsupported level is a typed error rather
+    /// an explicit unsupported level is a typed error rather
     /// than delegated to an open provider enum or silent clamp.
     #[test]
-    fn s37_explicit_unsupported_reasoning_is_rejected() {
+    fn explicit_unsupported_reasoning_is_rejected() {
         let selected = direct(1);
         let supported = capabilities(
             [ReasoningLevel::Low, ReasoningLevel::Medium],
@@ -1515,10 +1515,10 @@ mod tests {
         );
     }
 
-    /// S37: model-change incompatibility clamps reasoning downward,
+    /// model-change incompatibility clamps reasoning downward,
     /// disables fast mode, clears an unordered tier, and records each change.
     #[test]
-    fn s37_model_change_adjusts_downward_off_and_default() {
+    fn model_change_adjusts_downward_off_and_default() {
         let supported = capabilities(
             [ReasoningLevel::Low, ReasoningLevel::High],
             FastModeSupport::Unsupported,
@@ -1551,10 +1551,10 @@ mod tests {
         );
     }
 
-    /// S37: when no supported level lies below the requested level,
+    /// when no supported level lies below the requested level,
     /// the model change chooses the lowest supported level.
     #[test]
-    fn s37_model_change_uses_lowest_only_when_nothing_is_below() {
+    fn model_change_uses_lowest_only_when_nothing_is_below() {
         let supported = capabilities(
             [ReasoningLevel::Medium, ReasoningLevel::High],
             FastModeSupport::Unsupported,
@@ -1578,10 +1578,10 @@ mod tests {
         );
     }
 
-    /// S37: inherited incompatibility rewrites the inherited source
+    /// inherited incompatibility rewrites the inherited source
     /// in the validated snapshot while preserving ordered adjustment evidence.
     #[test]
-    fn s37_model_change_installs_a_self_consistent_adjusted_snapshot() {
+    fn model_change_installs_a_self_consistent_adjusted_snapshot() {
         let selected = direct(1);
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
         let session = ModelSettingsOverlay::new(
@@ -1617,10 +1617,10 @@ mod tests {
         );
     }
 
-    /// S37: the same unsupported value remains an error when the
+    /// the same unsupported value remains an error when the
     /// model-change caller explicitly supplies it.
     #[test]
-    fn s37_model_change_does_not_adjust_an_explicit_unsupported_value() {
+    fn model_change_does_not_adjust_an_explicit_unsupported_value() {
         let selected = direct(1);
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
         let caller = ModelSettingsOverlay::new(
@@ -1648,10 +1648,10 @@ mod tests {
         );
     }
 
-    /// S37: an alternate fast target is selected only from the
+    /// an alternate fast target is selected only from the
     /// declared capability record.
     #[test]
-    fn s37_fast_mode_uses_only_the_declared_alternate_target() {
+    fn fast_mode_uses_only_the_declared_alternate_target() {
         let selected = ResolvedProviderTarget::naming(provider_model_identity(1));
         let fast = ResolvedProviderTarget::naming(provider_model_identity(2));
         let supported = capabilities([], FastModeSupport::AlternateTarget(fast), []);
@@ -1666,20 +1666,20 @@ mod tests {
         );
     }
 
-    /// S37: the alternate-target variant cannot silently authorize
+    /// the alternate-target variant cannot silently authorize
     /// ordinary serving through a self-map.
     #[test]
-    fn s37_fast_mode_rejects_a_self_mapped_alternate_target() {
+    fn fast_mode_rejects_a_self_mapped_alternate_target() {
         let selected = ResolvedProviderTarget::naming(provider_model_identity(1));
         let supported = capabilities([], FastModeSupport::AlternateTarget(selected), []);
 
         assert_eq!(supported.serving_target(selected, FastMode::Enabled), None);
     }
 
-    /// S37: an automatic adjustment is a durable event field and
+    /// an automatic adjustment is a durable event field and
     /// cannot disappear after settings preparation.
     #[test]
-    fn s37_defaults_event_retains_ordered_automatic_adjustments() {
+    fn defaults_event_retains_ordered_automatic_adjustments() {
         let selection = direct(1);
         let prior_selection = direct(2);
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
@@ -1740,10 +1740,10 @@ mod tests {
         assert_eq!(event.installed_settings(), installed);
     }
 
-    /// S37: an explicit caller value is rejected as unsupported and
+    /// an explicit caller value is rejected as unsupported and
     /// cannot be rewritten by automatic model-change adjustment evidence.
     #[test]
-    fn s37_defaults_event_rejects_adjustment_of_explicit_caller_value() {
+    fn defaults_event_rejects_adjustment_of_explicit_caller_value() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let prior = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, [])
@@ -1805,10 +1805,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// S37: retaining the same alias spelling can still record an
+    /// retaining the same alias spelling can still record an
     /// adjustment when its validated direct selection changed.
     #[test]
-    fn s37_defaults_event_detects_alias_retarget_from_validation_identity() {
+    fn defaults_event_detects_alias_retarget_from_validation_identity() {
         let alias = crate::ModelAlias::from_uuid(Uuid::from_u128(3));
         let prior_selection = direct(1);
         let installed_selection = direct(2);
@@ -1925,10 +1925,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// S37: a replacement model contributes its newly copied
+    /// a replacement model contributes its newly copied
     /// profile and global layers to settings-change provenance.
     #[test]
-    fn s37_defaults_event_uses_replacement_model_lower_layers() {
+    fn defaults_event_uses_replacement_model_lower_layers() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let prior = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, [])
@@ -1982,10 +1982,10 @@ mod tests {
         assert!(event.is_some());
     }
 
-    /// S37: every successor epoch records its newly copied profile
+    /// every successor epoch records its newly copied profile
     /// and global layers even when its direct model is unchanged.
     #[test]
-    fn s37_defaults_event_uses_same_model_successor_lower_layers() {
+    fn defaults_event_uses_same_model_successor_lower_layers() {
         let selection = direct(1);
         let supported = capabilities(
             [ReasoningLevel::Low, ReasoningLevel::High],

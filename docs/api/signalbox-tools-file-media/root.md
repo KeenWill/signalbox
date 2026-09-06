@@ -19,19 +19,15 @@ pub use signalbox_file_media_runtime::FILE_READ_NAME;
 ```rust
 pub struct FileInspectServiceRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for FileInspectServiceRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl FileInspectServiceRequest {
     pub const fn from_parts(
-        digest: value::FileDigest,
-        visible_part: option::Option<value::VisiblePartSelector>,
+        digest: signalbox_file_media_runtime::FileDigest,
+        visible_part: option::Option<signalbox_file_media_runtime::VisiblePartSelector>,
     ) -> Self;
-    pub const fn digest(&self) -> value::FileDigest;
-    pub const fn visible_part(&self) -> option::Option<&value::VisiblePartSelector>;
+    pub const fn digest(&self) -> signalbox_file_media_runtime::FileDigest;
+    pub const fn visible_part(
+        &self,
+    ) -> option::Option<&signalbox_file_media_runtime::VisiblePartSelector>;
 }
 ```
 
@@ -40,18 +36,14 @@ impl FileInspectServiceRequest {
 ```rust
 pub struct FileReadServiceRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for FileReadServiceRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl FileReadServiceRequest {
     pub const fn target(&self) -> &FileInspectServiceRequest;
-    pub const fn view(&self) -> &value::ReadViewName;
+    pub const fn view(&self) -> &signalbox_file_media_runtime::ReadViewName;
     pub const fn options(&self) -> option::Option<&map::BTreeMap<string::String, value::Value>>;
-    pub const fn continuation(&self) -> option::Option<&value::ReadContinuationCursor>;
-    pub fn into_runtime_input(self) -> detection::FileReadInput;
+    pub const fn continuation(
+        &self,
+    ) -> option::Option<&signalbox_file_media_runtime::ReadContinuationCursor>;
+    pub fn into_runtime_input(self) -> signalbox_file_media_runtime::FileReadInput;
 }
 ```
 
@@ -63,16 +55,10 @@ pub enum FileReadServiceInput {
         options: map::BTreeMap<string::String, value::Value>,
     },
     Continuation {
-        cursor: value::ReadContinuationCursor,
+        cursor: signalbox_file_media_runtime::ReadContinuationCursor,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for FileReadServiceInput
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## FileMediaAgentServiceFuture
@@ -80,8 +66,9 @@ where
 ```rust
 pub type FileMediaAgentServiceFuture<'a, Output> = pin::Pin<
     boxed::Box<
-        dyn future::Future<Output = result::Result<Output, detection::FileMediaFailure>>
-            + marker::Send
+        dyn future::Future<
+                Output = result::Result<Output, signalbox_file_media_runtime::FileMediaFailure>,
+            > + marker::Send
             + 'a,
     >,
 >;
@@ -94,11 +81,11 @@ pub trait FileMediaAgentService: marker::Send {
     fn inspect(
         &mut self,
         request: FileInspectServiceRequest,
-    ) -> FileMediaAgentServiceFuture<'_, detection::FileInspection>;
+    ) -> FileMediaAgentServiceFuture<'_, signalbox_file_media_runtime::FileInspection>;
     fn read(
         &mut self,
         request: FileReadServiceRequest,
-    ) -> FileMediaAgentServiceFuture<'_, detection::FileReadResult>;
+    ) -> FileMediaAgentServiceFuture<'_, signalbox_file_media_runtime::FileReadResult>;
 }
 ```
 
@@ -107,15 +94,14 @@ pub trait FileMediaAgentService: marker::Send {
 ```rust
 pub struct FileMediaTools<Service> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for FileMediaTools<Service>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Service> FileMediaTools<Service> {
     pub fn try_new(service: Service) -> result::Result<Self, FileMediaToolConstructionError>;
-    pub fn into_parts(self) -> (tool_loop::CompiledToolCatalog, FileMediaExecutor<Service>);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_application::CompiledToolCatalog,
+        FileMediaExecutor<Service>,
+    );
 }
 ```
 
@@ -129,12 +115,6 @@ pub enum FileMediaToolConstructionError {
     Duplicate,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for FileMediaToolConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for FileMediaToolConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -148,24 +128,18 @@ impl error::Error for FileMediaToolConstructionError {
 ```rust
 pub struct FileMediaExecutor<Service> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for FileMediaExecutor<Service>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<Service> tool_loop::ToolExecutor for FileMediaExecutor<Service>
+impl<Service> signalbox_application::ToolExecutor for FileMediaExecutor<Service>
 where
     Service: FileMediaAgentService,
 {
     type Error = FileMediaExecutorError;
     fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> impl future::Future<
         Output = result::Result<
-            tool_loop::CorrelatedToolExecutorEvidence,
-            <Self as tool_loop::ToolExecutor>::Error,
+            signalbox_application::CorrelatedToolExecutorEvidence,
+            <Self as signalbox_application::ToolExecutor>::Error,
         >,
     > + marker::Send;
 }
@@ -176,19 +150,13 @@ where
 ```rust
 pub struct FileMediaExecutorError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for FileMediaExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for FileMediaExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for FileMediaExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for FileMediaExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for FileMediaExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```

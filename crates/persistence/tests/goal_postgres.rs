@@ -12,7 +12,7 @@ use std::error::Error;
 use support::{blocked_backends_reached, record_empty_instruction_manifest};
 
 use expect_test::expect;
-use signalbox_expect_table::table;
+use expectable::print;
 
 use signalbox_application::{
     AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
@@ -521,7 +521,7 @@ async fn terminal_goal_disposition_survives_scheduler_restart() -> Result<(), Bo
     );
     terminalize_goal_turn_as_failed(&pool, 0xe61).await?;
 
-    let (sessions, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -1712,7 +1712,7 @@ async fn terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<(), Box
     );
     assert_eq!(activate_goal_turn(&pool, 0xd40).await?, attached.turn());
     mark_goal_turn_completed(&pool, attached.turn()).await?;
-    let (sessions, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -1767,11 +1767,10 @@ async fn stop_scope_replays_and_retires_queued_work() -> Result<(), Box<dyn Erro
             .await?,
         StartEligibleTurnOutcome::NoEligibleTurn
     );
-    let (stopped_sessions, _dispatch_starts, stopped_continuation) =
-        PostgresEligibilitySweep::new(pool.clone())
-            .find_sessions()
-            .await?
-            .into_parts();
+    let (stopped_sessions, stopped_continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
 
     assert!(stopped_sessions.is_empty());
     assert!(!stopped_continuation);
@@ -1833,7 +1832,7 @@ async fn stopped_queued_goal_is_absent_from_reconciliation_hints() -> Result<(),
             )
             .await?,
     );
-    let (sessions, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -3467,13 +3466,13 @@ async fn acquire_peer_message_suffix(
     Ok(())
 }
 
-/// S19: descendant-scoped goal stop takes its canonical
+/// descendant-scoped goal stop takes its canonical
 /// cascade prefix before the ordinary root lock, so an overlapping peer-message
 /// prefix cannot form the child/root inversion that PostgreSQL reports as
 /// `40P01`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
+async fn goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfb00;
     let fixture = descendant_lock_order_fixture(&pool, seed).await?;
@@ -3517,12 +3516,12 @@ async fn s19_goal_stop_orders_cascade_before_peer_message() -> Result<(), Box<dy
     Ok(())
 }
 
-/// S19: descendant-scoped input interrupt takes the same
+/// descendant-scoped input interrupt takes the same
 /// canonical cascade prefix before its root and scheduler locks, preventing the
 /// peer-message child/root inversion.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_input_interrupt_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
+async fn input_interrupt_orders_cascade_before_peer_message() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfc00;
     let fixture = descendant_lock_order_fixture(&pool, seed).await?;
@@ -3584,12 +3583,12 @@ async fn s19_input_interrupt_orders_cascade_before_peer_message() -> Result<(), 
     Ok(())
 }
 
-/// S19: when the descendant-scope root is itself a
+/// when the descendant-scope root is itself a
 /// delegated child, the canonical session frontier includes its parent
 /// endpoint in the same ascending lock set.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_descendant_frontier_includes_root_parent_endpoint() -> Result<(), Box<dyn Error>> {
+async fn descendant_frontier_includes_root_parent_endpoint() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let seed = 0xfca0;
     let grandparent = seed + 1;
@@ -3697,13 +3696,13 @@ async fn s19_descendant_frontier_includes_root_parent_endpoint() -> Result<(), B
     Ok(())
 }
 
-/// S18: an applied descendant-scoped goal stop
+/// an applied descendant-scoped goal stop
 /// atomically records every edge, logically terminalizes active and queued
 /// bound children with exact provenance, and leaves the background child
 /// runnable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_goal_stop_materializes_complete_delegation_cascade() -> Result<(), Box<dyn Error>> {
+async fn goal_stop_materializes_complete_delegation_cascade() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf100;
     let bound_child = 0xf101;
@@ -4141,12 +4140,12 @@ async fn s18_goal_stop_materializes_complete_delegation_cascade() -> Result<(), 
     Ok(())
 }
 
-/// S18: a descendant-scoped lifecycle stop whose live
+/// a descendant-scoped lifecycle stop whose live
 /// turn is closed by its core interrupt carries `stopped` into the cascade, so
 /// a bound child follows `on_parent_stopped` rather than `on_parent_cancelled`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), Box<dyn Error>> {
+async fn lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf500;
     let child = 0xf501;
@@ -4293,21 +4292,36 @@ async fn s18_lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), 
 /// One derived cascade edge: which relationship it dispositions, the immediate
 /// parent kind that selected its action, and the causal source that supplied
 /// that kind.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
 struct NestedCascadeEdgeFacts {
+    #[serde(serialize_with = "serialize_uuid")]
     spawning_tool_request_id: Uuid,
+    #[serde(serialize_with = "serialize_uuid")]
     parent_session_id: Uuid,
     termination_kind: String,
     source_kind: String,
+    #[serde(serialize_with = "serialize_optional_uuid")]
     source_spawning_tool_request_id: Option<Uuid>,
 }
 
 /// The recorded disposition one cascade edge published against its relationship.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
 struct NestedCascadeOutcomeFacts {
+    #[serde(serialize_with = "serialize_uuid")]
     spawning_tool_request_id: Uuid,
     outcome_kind: String,
     reason_kind: String,
+}
+
+fn serialize_uuid<S: serde::Serializer>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(id)
+}
+
+fn serialize_optional_uuid<S: serde::Serializer>(
+    id: &Option<Uuid>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&id.map(|id| id.to_string()), serializer)
 }
 
 /// Every durable record a pruned edge must not have acquired.
@@ -4318,7 +4332,7 @@ struct PrunedEdgeRecordCounts {
     logical_terminals: i64,
 }
 
-/// S19: a descendant-scoped stop descends into a nested
+/// a descendant-scoped stop descends into a nested
 /// relationship under its immediate parent's disposition, not under the root
 /// command's kind.
 ///
@@ -4331,8 +4345,8 @@ struct PrunedEdgeRecordCounts {
 /// `parent_stopped_parent_and_descendants`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
--> Result<(), Box<dyn Error>> {
+async fn nested_cascade_descends_under_immediate_parent_disposition() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf600;
     let bound_child = 0xf601;
@@ -4466,11 +4480,11 @@ async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
         ┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────────┬────────────────────┬──────────────────────────────────────┐
         │ spawning_tool_request_id             │ parent_session_id                    │ termination_kind │ source_kind        │ source_spawning_tool_request_id      │
         ├──────────────────────────────────────┼──────────────────────────────────────┼──────────────────┼────────────────────┼──────────────────────────────────────┤
-        │ 00000000-0000-0000-0000-00000000f610 │ 00000000-0000-0000-0000-00000000f600 │ stopped          │ root               │ None                                 │
+        │ 00000000-0000-0000-0000-00000000f610 │ 00000000-0000-0000-0000-00000000f600 │ stopped          │ root               │                                      │
         │ 00000000-0000-0000-0000-00000000f620 │ 00000000-0000-0000-0000-00000000f601 │ cancelled        │ parent_disposition │ 00000000-0000-0000-0000-00000000f610 │
         └──────────────────────────────────────┴──────────────────────────────────────┴──────────────────┴────────────────────┴──────────────────────────────────────┘
     "#]]
-    .assert_eq(&table(edges));
+    .assert_eq(&print(&edges));
     expect![[r#"
         ┌──────────────────────────────────────┬─────────────────┬─────────────────────────────────────────┐
         │ spawning_tool_request_id             │ outcome_kind    │ reason_kind                             │
@@ -4479,14 +4493,14 @@ async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
         │ 00000000-0000-0000-0000-00000000f620 │ child_stopped   │ parent_cancelled_parent_and_descendants │
         └──────────────────────────────────────┴─────────────────┴─────────────────────────────────────────┘
     "#]]
-    .assert_eq(&table(outcomes));
+    .assert_eq(&print(&outcomes));
 
     pool.close().await;
     drop(container);
     Ok(())
 }
 
-/// S19: a descendant-scoped stop stops descending below a
+/// a descendant-scoped stop stops descending below a
 /// relationship that survives it, leaving that whole subtree runnable.
 ///
 /// `background_child` keeps running under any parent termination, so the
@@ -4497,7 +4511,7 @@ async fn s19_nested_cascade_descends_under_immediate_parent_disposition()
 /// queued delegated turn stays eligible.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dyn Error>> {
+async fn nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf700;
     let background_child = 0xf701;
@@ -4642,17 +4656,17 @@ async fn s19_nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dy
         ┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────────┬─────────────┬─────────────────────────────────┐
         │ spawning_tool_request_id             │ parent_session_id                    │ termination_kind │ source_kind │ source_spawning_tool_request_id │
         ├──────────────────────────────────────┼──────────────────────────────────────┼──────────────────┼─────────────┼─────────────────────────────────┤
-        │ 00000000-0000-0000-0000-00000000f710 │ 00000000-0000-0000-0000-00000000f700 │ stopped          │ root        │ None                            │
+        │ 00000000-0000-0000-0000-00000000f710 │ 00000000-0000-0000-0000-00000000f700 │ stopped          │ root        │                                 │
         └──────────────────────────────────────┴──────────────────────────────────────┴──────────────────┴─────────────┴─────────────────────────────────┘
     "#]]
-    .assert_eq(&table(edges));
+    .assert_eq(&print(&edges));
 
     pool.close().await;
     drop(container);
     Ok(())
 }
 
-/// S18: a delegated turn that completes while holding
+/// a delegated turn that completes while holding
 /// next-safe-point steering reclassifies that steering into a successor turn.
 ///
 /// A delegated turn has no accepted-input queue origin, so reclassification
@@ -4660,7 +4674,7 @@ async fn s19_nested_cascade_prunes_below_a_surviving_edge() -> Result<(), Box<dy
 /// queue chain that an accepted-input turn walks.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_delegated_turn_reclassifies_its_pending_steering() -> Result<(), Box<dyn Error>> {
+async fn delegated_turn_reclassifies_its_pending_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xfb00;
     let child = 0xfb01;
@@ -4726,7 +4740,7 @@ async fn s18_delegated_turn_reclassifies_its_pending_steering() -> Result<(), Bo
     };
     assert_eq!(checkpointed, call);
 
-    let (eligible, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -4815,13 +4829,13 @@ async fn s18_delegated_turn_reclassifies_its_pending_steering() -> Result<(), Bo
     Ok(())
 }
 
-/// S18: a cascade-terminalized child releases its
+/// a cascade-terminalized child releases its
 /// compaction boundary. The retained delegated turn stays physically active, so
 /// preparation must read runtime relevance rather than the physical state and
 /// must source the logical terminal's frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_logically_terminal_child_admits_compaction() -> Result<(), Box<dyn Error>> {
+async fn logically_terminal_child_admits_compaction() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xfa00;
     let bound_child = 0xfa01;

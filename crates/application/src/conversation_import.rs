@@ -796,7 +796,7 @@ mod tests {
 
     /// first ingestion converts once and commits one complete candidate.
     #[tokio::test]
-    async fn s28_first_ingestion_returns_inserted_candidate() {
+    async fn first_ingestion_returns_inserted_candidate() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -828,10 +828,10 @@ mod tests {
         assert_eq!(store.observed[0].id(), candidate);
     }
 
-    /// S28: partial ingestion returns the checked accepted aggregate
+    /// partial ingestion returns the checked accepted aggregate
     /// and every loss without claiming the incomplete source is durable.
     #[tokio::test]
-    async fn s28_resilient_ingestion_reports_exact_skips_without_storage() {
+    async fn resilient_ingestion_reports_exact_skips_without_storage() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -869,10 +869,10 @@ mod tests {
         assert!(store.observed.is_empty());
     }
 
-    /// S28: a resilient conversion with no losses may use the same
+    /// a resilient conversion with no losses may use the same
     /// exact-source durable resolution as strict conversion.
     #[tokio::test]
-    async fn s28_resilient_complete_ingestion_stores_with_no_skips() {
+    async fn resilient_complete_ingestion_stores_with_no_skips() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -914,10 +914,10 @@ mod tests {
         assert_eq!(store.observed.len(), 1);
     }
 
-    /// S28: all-invalid nonempty input reports every loss without
+    /// all-invalid nonempty input reports every loss without
     /// minting entry identities or attempting a durable write.
     #[tokio::test]
-    async fn s28_resilient_ingestion_with_no_valid_records_never_stores() {
+    async fn resilient_ingestion_with_no_valid_records_never_stores() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -954,7 +954,7 @@ mod tests {
     /// exact reingestion discards candidates and returns the existing
     /// immutable imported-conversation identity.
     #[tokio::test]
-    async fn s28_exact_reingestion_returns_existing_identity() {
+    async fn exact_reingestion_returns_existing_identity() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let existing = conversation(99);
@@ -983,7 +983,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_conversion_failure_never_reaches_store() {
+    async fn conversion_failure_never_reaches_store() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -1010,7 +1010,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_converter_identity_mismatch_never_reaches_store() {
+    async fn converter_identity_mismatch_never_reaches_store() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let converted = conversation(9);
@@ -1036,7 +1036,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_converter_unissued_entry_identity_never_reaches_store() {
+    async fn converter_unissued_entry_identity_never_reaches_store() {
         let candidate = conversation(1);
         let issued_entries = [entry(2), entry(3)];
         let unissued_entry = entry(9);
@@ -1059,7 +1059,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_converter_reordered_entry_identities_never_reach_store() {
+    async fn converter_reordered_entry_identities_never_reach_store() {
         let candidate = conversation(1);
         let issued_entries = [entry(2), entry(3)];
         let mut service = service(
@@ -1081,7 +1081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_converter_extra_identity_request_never_reaches_store() {
+    async fn converter_extra_identity_request_never_reaches_store() {
         let candidate = conversation(1);
         let issued_entries = [entry(2), entry(3)];
         let mut service = service(
@@ -1105,7 +1105,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_store_source_digest_mismatch_fails_closed() {
+    async fn store_source_digest_mismatch_fails_closed() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let expected_digest = candidate_digest(candidate, entries);
@@ -1128,7 +1128,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_store_inserted_identity_mismatch_fails_closed() {
+    async fn store_inserted_identity_mismatch_fails_closed() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let wrong_identity = conversation(99);
@@ -1150,7 +1150,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s28_store_failure_is_not_retried() {
+    async fn store_failure_is_not_retried() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(candidate, entries, Err(FakeStoreError::Unavailable));

@@ -734,7 +734,7 @@ impl CurrentTurnAttemptTransitionError {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use super::*;
     use crate::applied_interrupt::test_applied_interrupt_proof;
@@ -743,11 +743,7 @@ mod tests {
         turn_attempt_id as attempt_id, turn_id,
     };
 
-    #[derive(Clone, Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Clone, Debug, serde::Serialize)]
     struct AttemptEndRow {
         attempted_end: String,
         outcome: String,
@@ -819,7 +815,7 @@ mod tests {
         );
     }
 
-    /// S07: Running accepts either singleton stop; stopped
+    /// Running accepts either singleton stop; stopped
     /// values replay/union compatible causes; Prepared accepts neither.
     #[test]
     fn stop_request_transition_matrix_preserves_complete_causes() {
@@ -896,7 +892,7 @@ mod tests {
         );
     }
 
-    /// S03 / S04 / S07: Prepared accepts exactly
+    /// Prepared accepts exactly
     /// the restricted unsent and startup terminal branches from
     /// docs/spec/turn-lifecycle-and-scheduling.md.
     #[test]
@@ -1012,10 +1008,10 @@ mod tests {
             │ after fatal mismatch (with interrupt): Ambiguous    │ rejected │
             └─────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
-    /// S02 / S04 / S06 / S07 / S10 / S23: Running may
+    /// Running may
     /// enter every type-valid terminal branch once slice 5 establishes guards.
     #[test]
     fn running_accepts_every_type_valid_terminal_value() {
@@ -1103,7 +1099,7 @@ mod tests {
             │ after fatal mismatch (with interrupt): Ambiguous    │ ends    │
             └─────────────────────────────────────────────────────┴─────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
     #[track_caller]
@@ -1211,7 +1207,7 @@ mod tests {
         );
     }
 
-    /// S04 / S07 / S23: CancellationOnly ends
+    /// CancellationOnly ends
     /// only as AfterCancellation with its exact proof and any honest result.
     #[test]
     fn cancellation_stopped_terminal_matrix_is_complete() {
@@ -1362,10 +1358,10 @@ mod tests {
             │ after fatal mismatch: Ambiguous                     │ rejected │
             └─────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
-    /// S04 / S06 / S21 / S23: FatalMismatch ends only as
+    /// FatalMismatch ends only as
     /// AfterFatalMismatch with the exact complete cause value.
     #[test]
     fn fatal_stopped_terminal_matrix_is_complete() {
@@ -1546,7 +1542,7 @@ mod tests {
             │ after cancellation (retained proof): Ambiguous     │ rejected │
             └────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&rows));
+        .assert_eq(&print(&rows));
     }
 
     /// Renders `without stop` rows for ending fresh copies of one source
@@ -1635,7 +1631,7 @@ mod tests {
         assert!(!causes.contains(failure(3)));
     }
 
-    /// S07: fatal failure and applied interrupt addition is
+    /// fatal failure and applied interrupt addition is
     /// idempotent and event-order independent without losing either fact.
     #[test]
     fn stop_union_is_idempotent_and_event_order_independent() {
@@ -1753,7 +1749,6 @@ mod tests {
         );
     }
 
-    /// S04 / S06 / S07 / S10 / S23:
     /// each terminal family retains its exact typed cause and disposition.
     #[test]
     fn every_allowed_terminal_disposition_stays_in_its_typed_family() {
@@ -1847,11 +1842,7 @@ mod tests {
     /// cause, read back from the observed values
     /// (`docs/agents/testing-style.md`, rule 12).
     fn attempt_end_family_table(ends: &[AttemptEnd]) -> String {
-        #[derive(Debug)]
-        #[allow(
-            dead_code,
-            reason = "the table renderer reads every field through the Debug derive"
-        )]
+        #[derive(Debug, serde::Serialize)]
         struct Row {
             family: &'static str,
             disposition: String,
@@ -1896,7 +1887,7 @@ mod tests {
             })
             .collect();
 
-        table(rows)
+        print(&rows)
     }
 
     /// refusal remains representable without fatal stop and after a
@@ -1923,7 +1914,7 @@ mod tests {
         ));
     }
 
-    /// S04: startup loss retains the terminal family matching the
+    /// startup loss retains the terminal family matching the
     /// complete recovered stop causes.
     #[test]
     fn lost_is_representable_in_all_three_matching_terminal_families() {

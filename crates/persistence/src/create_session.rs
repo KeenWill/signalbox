@@ -361,22 +361,6 @@ async fn commissioned_dispatch_claims(
     .await?)
 }
 
-pub(crate) async fn insert_fresh_prepared(
-    connection: &mut PgConnection,
-    prepared: PreparedCreateSession,
-    credential_pin: &crate::SessionCredentialPin,
-    principal: CommandPrincipal,
-) -> Result<(), CreateSessionRepositoryError> {
-    let command_id = prepared.command().command_id();
-    if !claim_create_session_command(connection, command_id, principal).await? {
-        return Err(CreateSessionCorruption::Inconsistent(
-            "fresh repository-watch command identity collided",
-        )
-        .into());
-    }
-    insert_prepared(connection, prepared, credential_pin).await
-}
-
 /// Claims one create-session command identity, reporting whether this
 /// transaction won it.
 ///
@@ -1302,10 +1286,10 @@ mod tests {
         corruption
     }
 
-    /// S01: the ordinary creation reader cannot silently discard a
+    /// the ordinary creation reader cannot silently discard a
     /// delegated spawning identity from an interactive session row.
     #[test]
-    fn s01_interactive_creation_rejects_spawning_request() {
+    fn interactive_creation_rejects_spawning_request() {
         let error = decode_provenance(
             String::from(session_creation_cause_to_str(
                 &SessionCreationCause::Interactive,

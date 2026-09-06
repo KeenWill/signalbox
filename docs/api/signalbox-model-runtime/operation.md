@@ -11,12 +11,6 @@ pub enum ModelOperationValidationError {
     UndeclaredToolChoice { name: ToolName },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ModelOperationValidationError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for ModelOperationValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -31,12 +25,6 @@ pub enum DeliveryMode {
     Streamed,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for DeliveryMode
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProviderCompactionMode
@@ -47,12 +35,6 @@ pub enum ProviderCompactionMode {
     Suppressed,
 }
 // derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ProviderCompactionMode
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ToolChoice
@@ -64,12 +46,6 @@ pub enum ToolChoice {
     Named(ToolName),
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ToolChoice
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ModelOperation
@@ -91,12 +67,6 @@ pub struct ModelOperation<C> {
     pub provider_compaction_supported: bool,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ModelOperation<C>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<C> ModelOperation<C> {
     pub fn new(
         correlation: C,

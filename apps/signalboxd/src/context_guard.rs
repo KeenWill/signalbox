@@ -563,7 +563,6 @@ pub struct ContextGuardedTurnPass<Counter, Catalog, Execution> {
     workspace_instructions: Option<WorkspaceInstructionRuntime>,
     execution: Execution,
     occupancy_recovery: Option<SchedulerPassOccupancyRecovery>,
-    dispatch_start: bool,
 }
 
 impl<Counter, Catalog, Execution> fmt::Debug for ContextGuardedTurnPass<Counter, Catalog, Execution>
@@ -586,7 +585,6 @@ where
             .field("workspace_instructions", &self.workspace_instructions)
             .field("execution", &self.execution)
             .field("occupancy_recovery", &self.occupancy_recovery)
-            .field("dispatch_start", &self.dispatch_start)
             .finish()
     }
 }
@@ -616,7 +614,6 @@ impl<Counter, Catalog, Execution> ContextGuardedTurnPass<Counter, Catalog, Execu
             workspace_instructions: None,
             execution,
             occupancy_recovery: None,
-            dispatch_start: false,
         }
     }
 
@@ -699,7 +696,6 @@ where
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        let dispatch_start = std::mem::take(&mut self.dispatch_start);
         let activation = self.activation.clone();
         let model_calls = self.model_calls.clone();
         let counter = self.counter.clone();
@@ -719,37 +715,15 @@ where
                 .as_ref()
                 .map(|(_, observer)| Arc::clone(observer))
                 .unwrap_or_else(|| Arc::new(|_| {}));
-            let resumed = if dispatch_start {
-                execution
-                    .resume_dispatch_start_with_observer(session, Arc::clone(&observe_turn))
-                    .await
-            } else {
-                execution
-                    .resume_active_with_observer(session, Arc::clone(&observe_turn))
-                    .await
-            };
+            let resumed = execution
+                .resume_active_with_observer(session, Arc::clone(&observe_turn))
+                .await;
             resumed.map_err(|source| ContextGuardedTurnPassError::Execution {
                 stage: TurnPassExecutionStage::ActiveTurnRecovery,
                 turn: Execution::active_resume_failure_turn(&source),
                 source,
             })?;
             if let Some(compaction) = &reported_usage_compaction {
-                if dispatch_start {
-                    match compaction.compaction_candidate(session, false).await {
-                        Ok(Some(_)) => {
-                            // A provider exchange cannot occupy the reserved
-                            // start lane. The unchanged queued turn remains
-                            // eligible for an ordinary pass to compact.
-                            return Ok(());
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            let error = ContextGuardedTurnPassError::ReportedUsageCompaction(error);
-                            report_guarded_ambiguity(&execution, &error);
-                            return Err(error);
-                        }
-                    }
-                }
                 let compaction_window = occupancy_recovery
                     .as_ref()
                     .map(|recovery| recovery.compaction_window(session));
@@ -811,13 +785,7 @@ where
                                 }
                                 observe_turn(activated.turn());
                                 report_guarded_turn_activation(activated.session(), activated.turn());
-                                let execution = async {
-                                    if dispatch_start {
-                                        execution.execute_dispatch_start(activated).await
-                                    } else {
-                                        execution.execute(activated).await
-                                    }
-                                };
+                                let execution = async { execution.execute(activated).await };
                                 return execution
                                     .instrument(guarded_turn_span(session, turn))
                                     .await
@@ -836,16 +804,6 @@ where
                     let selected_model = runtime_models
                         .resolve(target)
                         .ok_or(ContextGuardedTurnPassError::ContextWindowUnavailable(turn))?;
-                    if dispatch_start
-                        && model_configuration
-                            .adapter_for_provider_model(selected_model.provider_model())
-                            == Some(ModelAdapter::Anthropic)
-                    {
-                        // Counting and attachment reads are provider/storage
-                        // I/O. Preserve the queued preview so an ordinary pass
-                        // performs them outside the reserved start lane.
-                        return Ok(());
-                    }
                     let model = runtime_models
                         .effective_definition(
                             selected_model,
@@ -927,12 +885,6 @@ where
                                     .map_err(ContextGuardedTurnPassError::ReportedUsageCompaction)?
                                     .is_some()
                             {
-                                if dispatch_start {
-                                    // Preserve the queued preview and release
-                                    // the reserved lane. An ordinary pass will
-                                    // compact before falling through to send.
-                                    return Ok(());
-                                }
                                 let compaction_window = occupancy_recovery
                                     .as_ref()
                                     .map(|recovery| recovery.compaction_window(session));
@@ -971,13 +923,7 @@ where
                                         activated.session(),
                                         activated.turn(),
                                     );
-                                    let execution = async {
-                                        if dispatch_start {
-                                            execution.execute_dispatch_start(activated).await
-                                        } else {
-                                            execution.execute(activated).await
-                                        }
-                                    };
+                                    let execution = async { execution.execute(activated).await };
                                     return execution
                                         .instrument(guarded_turn_span(session, turn))
                                         .await
@@ -995,12 +941,6 @@ where
                         u64::from(model.max_output_tokens()),
                         u64::from(model.context_window_tokens()),
                     ) {
-                        if dispatch_start {
-                            // The estimate is advisory and creates no durable
-                            // state. Leave the turn queued so an ordinary pass
-                            // can recount and perform the provider compaction.
-                            return Ok(());
-                        }
                         if compacted_turn == Some(turn) {
                             match close_failed_compaction_turn(
                                 &activation,
@@ -1143,13 +1083,6 @@ where
                             }
                             observe_turn(activated.turn());
                             report_guarded_turn_activation(activated.session(), activated.turn());
-                            if dispatch_start {
-                                // The counted commit already created the first
-                                // durable call checkpoint. Returning releases
-                                // the reserved start lane; ordinary scheduling
-                                // resumes the prepared call.
-                                return Ok(());
-                            }
                             let execution = async {
                                 execution.execute(activated).await
                             };
@@ -1171,14 +1104,6 @@ where
             }
             outcome
         }
-    }
-
-    fn run_dispatch_start(
-        &mut self,
-        session: SessionId,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        self.dispatch_start = true;
-        self.run(session)
     }
 }
 
@@ -1548,11 +1473,11 @@ mod tests {
         }
     }
 
-    /// S03: the production guarded pass replaced the activated pass,
+    /// the production guarded pass replaced the activated pass,
     /// so an unprovable guarded activation commit must still raise the fatal
     /// recovery signal — every turn depends on it, not only compacted ones.
     #[test]
-    fn s03_ambiguous_guarded_activation_commit_reports_post_activation_failure() {
+    fn ambiguous_guarded_activation_commit_reports_post_activation_failure() {
         let (execution, signal) = supervised();
 
         report_guarded_ambiguity(&execution, &ambiguous_activation());
@@ -1560,11 +1485,11 @@ mod tests {
         assert!(signal.is_triggered());
     }
 
-    /// S03: an automatic compaction whose durable preparation cannot
+    /// an automatic compaction whose durable preparation cannot
     /// be proven committed reports the same outcome as an ambiguous activation
     /// commit, rather than failing silently on the compaction path.
     #[test]
-    fn s03_ambiguous_compaction_preparation_reports_post_activation_failure() {
+    fn ambiguous_compaction_preparation_reports_post_activation_failure() {
         let (execution, signal) = supervised();
 
         let error = ambiguous_compaction();
@@ -1577,10 +1502,10 @@ mod tests {
         assert!(signal.is_triggered());
     }
 
-    /// S03: a database failure before any commit boundary is ordinary
+    /// a database failure before any commit boundary is ordinary
     /// scheduler retry work and raises no recovery signal.
     #[test]
-    fn s03_activation_failure_before_the_commit_boundary_reports_nothing() {
+    fn activation_failure_before_the_commit_boundary_reports_nothing() {
         let (execution, signal) = supervised();
 
         let error: GuardedFailure = ContextGuardedTurnPassError::Activation {
@@ -1596,10 +1521,10 @@ mod tests {
         assert!(!signal.is_triggered());
     }
 
-    /// S03: execution failures keep their own supervision rule, so
+    /// execution failures keep their own supervision rule, so
     /// the guarded pass adds no second reaction to them.
     #[test]
-    fn s03_execution_failure_keeps_its_own_supervision_rule() {
+    fn execution_failure_keeps_its_own_supervision_rule() {
         let (execution, signal) = supervised();
 
         let error: GuardedFailure = ContextGuardedTurnPassError::Execution {

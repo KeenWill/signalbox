@@ -7,14 +7,16 @@
 ```rust
 pub struct GitPushExecutor<Transport> {/* private */}
 // derives: fmt::Debug
-impl<Transport: GitPushTransport> tool_loop::ToolExecutor for GitPushExecutor<Transport> {
+impl<Transport: GitPushTransport> signalbox_application::ToolExecutor
+    for GitPushExecutor<Transport>
+{
     type Error = GitPushExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -24,19 +26,13 @@ impl<Transport: GitPushTransport> tool_loop::ToolExecutor for GitPushExecutor<Tr
 ```rust
 pub struct GitPushExecutorError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitPushExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for GitPushExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for GitPushExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for GitPushExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for GitPushExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```

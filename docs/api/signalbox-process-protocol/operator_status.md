@@ -2,297 +2,6 @@
 
 # operator_status
 
-## MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES
-
-```rust
-pub const MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES: usize;
-```
-
-## MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES
-
-```rust
-pub const MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES: usize;
-```
-
-## MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES
-
-```rust
-pub const MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES: usize;
-```
-
-## MAX_OPERATOR_STATUS_DISPATCH_SESSIONS
-
-```rust
-pub const MAX_OPERATOR_STATUS_DISPATCH_SESSIONS: usize;
-```
-
-## MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS
-
-```rust
-pub const MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS: usize;
-```
-
-## MAX_OPERATOR_STATUS_UNRESOLVED_THREADS
-
-```rust
-pub const MAX_OPERATOR_STATUS_UNRESOLVED_THREADS: u64;
-```
-
-## MAX_OPERATOR_STATUS_GATING_CHECKS
-
-```rust
-pub const MAX_OPERATOR_STATUS_GATING_CHECKS: u64;
-```
-
-## MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES
-
-```rust
-pub const MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES: usize;
-```
-
-## MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES
-
-```rust
-pub const MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES: usize;
-```
-
-## MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES
-
-```rust
-pub const MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES: usize;
-```
-
-## MAX_OPERATOR_STATUS_REVIEWER_BASE_UTF8_BYTES
-
-```rust
-pub const MAX_OPERATOR_STATUS_REVIEWER_BASE_UTF8_BYTES: usize;
-```
-
-## OPERATOR_STATUS_BOT_LOGIN_SUFFIX
-
-```rust
-pub const OPERATOR_STATUS_BOT_LOGIN_SUFFIX: &str;
-```
-
-## OPERATOR_STATUS_TRUNK_BASE_BRANCH
-
-```rust
-pub const OPERATOR_STATUS_TRUNK_BASE_BRANCH: &str;
-```
-
-## OPERATOR_STATUS_COMMIT_SHA_LENGTH
-
-```rust
-pub const OPERATOR_STATUS_COMMIT_SHA_LENGTH: usize;
-```
-
-## OperatorStatusSingletonScope
-
-```rust
-pub enum OperatorStatusSingletonScope {
-    PullRequest,
-    Stack,
-    Rule,
-    Repo,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusSingletonScope where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusHeldSlotBlocker
-
-```rust
-pub enum OperatorStatusHeldSlotBlocker {
-    UndeliveredAction,
-    DeliveryTurnRuntimeRelevant,
-    LiveRuntimeTurn,
-    PursuingGoal,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusHeldSlotBlocker where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusMergeableState
-
-```rust
-pub enum OperatorStatusMergeableState {
-    Mergeable,
-    Conflicting,
-    Unknown,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusMergeableState where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusReviewDecision
-
-```rust
-pub enum OperatorStatusReviewDecision {
-    None,
-    Approved,
-    ReviewRequired,
-    ChangesRequested,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusReviewDecision where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusConvergenceVerdict
-
-```rust
-pub enum OperatorStatusConvergenceVerdict {
-    NotConverged,
-    InternallyConverged,
-    MergeReady,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusConvergenceVerdict where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusConvergenceSeal
-
-```rust
-pub enum OperatorStatusConvergenceSeal {
-    InternallyConverged,
-    MergeReady,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusConvergenceSeal where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusHeldSlotOrigin
-
-```rust
-pub enum OperatorStatusHeldSlotOrigin {
-    PullRequest {
-        pull_request_number: scalars::CanonicalU64,
-    },
-    Branch {
-        branch: string::String,
-    },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusHeldSlotOrigin where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusHeldSlotMessage
-
-```rust
-pub struct OperatorStatusHeldSlotMessage {
-    pub dispatch_id: scalars::CanonicalUuid,
-    pub repository: string::String,
-    pub origin: operator_status::OperatorStatusHeldSlotOrigin,
-    pub rule_id: string::String,
-    pub rule_version: scalars::CanonicalU64,
-    pub singleton_scope: operator_status::OperatorStatusSingletonScope,
-    pub singleton_repository: option::Option<string::String>,
-    pub singleton_pull_request_number: option::Option<scalars::CanonicalU64>,
-    pub singleton_stack_root_pull_request_number: option::Option<scalars::CanonicalU64>,
-    pub held_for_seconds: scalars::CanonicalU64,
-    pub session_ids: vec::Vec<scalars::CanonicalUuid>,
-    pub blockers: vec::Vec<operator_status::OperatorStatusHeldSlotBlocker>,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusHeldSlotMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusQueuedObligationMessage
-
-```rust
-pub struct OperatorStatusQueuedObligationMessage {
-    pub obligation_id: scalars::CanonicalUuid,
-    pub repository: string::String,
-    pub rule_id: string::String,
-    pub rule_version: scalars::CanonicalU64,
-    pub singleton_scope: operator_status::OperatorStatusSingletonScope,
-    pub singleton_repository: option::Option<string::String>,
-    pub singleton_pull_request_number: option::Option<scalars::CanonicalU64>,
-    pub singleton_stack_root_pull_request_number: option::Option<scalars::CanonicalU64>,
-    pub first_event_id: scalars::CanonicalUuid,
-    pub latest_event_id: scalars::CanonicalUuid,
-    pub matched_event_count: scalars::CanonicalU64,
-    pub waiting_for_seconds: scalars::CanonicalU64,
-    pub occupying_dispatch_id: option::Option<scalars::CanonicalUuid>,
-    pub occupying_session_ids: vec::Vec<scalars::CanonicalUuid>,
-    pub cooldown_remaining_seconds: option::Option<scalars::CanonicalU64>,
-    pub cooldown_never_eligible: bool,
-    pub ready: bool,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusQueuedObligationMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusPullRequestConvergenceMessage
-
-```rust
-pub struct OperatorStatusPullRequestConvergenceMessage {
-    pub repository: string::String,
-    pub pull_request_number: scalars::CanonicalU64,
-    pub head_sha: string::String,
-    pub base_branch: string::String,
-    pub base_revision: string::String,
-    pub mergeable_state: operator_status::OperatorStatusMergeableState,
-    pub review_decision: operator_status::OperatorStatusReviewDecision,
-    pub unresolved_thread_count: scalars::CanonicalU64,
-    pub gating_check_count: scalars::CanonicalU64,
-    pub non_green_gating_checks: vec::Vec<string::String>,
-    pub verdict: operator_status::OperatorStatusConvergenceVerdict,
-    pub seal: option::Option<operator_status::OperatorStatusConvergenceSeal>,
-    pub assessed_seconds_ago: scalars::CanonicalU64,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusPullRequestConvergenceMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
-## OperatorStatusPendingStaleReviewClearanceMessage
-
-```rust
-pub struct OperatorStatusPendingStaleReviewClearanceMessage {
-    pub repository: string::String,
-    pub pull_request_number: scalars::CanonicalU64,
-    pub current_head_sha: string::String,
-    pub review_node_id: string::String,
-    pub reviewer: string::String,
-    pub reviewed_head_sha: string::String,
-    pub pending_for_seconds: scalars::CanonicalU64,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusPendingStaleReviewClearanceMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-```
-
 ## OperatorStatusLifecycleState
 
 ```rust
@@ -306,10 +15,6 @@ pub enum OperatorStatusLifecycleState {
     Parked,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusLifecycleState where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## OperatorStatusLifecycleWeekMessage
@@ -317,59 +22,43 @@ impl<T> de::DeserializeOwned for operator_status::OperatorStatusLifecycleState w
 ```rust
 pub struct OperatorStatusLifecycleWeekMessage {
     pub week_start_date: string::String,
-    pub completion_failure_numerator: scalars::CanonicalU64,
-    pub completion_failure_denominator: scalars::CanonicalU64,
-    pub failed_unknown_count: scalars::CanonicalU64,
-    pub overflow_numerator: scalars::CanonicalU64,
-    pub overflow_denominator: scalars::CanonicalU64,
-    pub finish_given_overflow_numerator: scalars::CanonicalU64,
-    pub wall_numerator: scalars::CanonicalU64,
-    pub wall_denominator: scalars::CanonicalU64,
-    pub wall_occurrence_count: scalars::CanonicalU64,
-    pub classified_terminal_turn_count: scalars::CanonicalU64,
-    pub terminal_turn_count: scalars::CanonicalU64,
-    pub classified_known_failed_call_count: scalars::CanonicalU64,
-    pub known_failed_call_count: scalars::CanonicalU64,
+    pub completion_failure_numerator: CanonicalU64,
+    pub completion_failure_denominator: CanonicalU64,
+    pub failed_unknown_count: CanonicalU64,
+    pub overflow_numerator: CanonicalU64,
+    pub overflow_denominator: CanonicalU64,
+    pub finish_given_overflow_numerator: CanonicalU64,
+    pub wall_numerator: CanonicalU64,
+    pub wall_denominator: CanonicalU64,
+    pub wall_occurrence_count: CanonicalU64,
+    pub classified_terminal_turn_count: CanonicalU64,
+    pub terminal_turn_count: CanonicalU64,
+    pub classified_known_failed_call_count: CanonicalU64,
+    pub known_failed_call_count: CanonicalU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusLifecycleWeekMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## OperatorStatusLifecycleDeadlineViolationMessage
 
 ```rust
 pub struct OperatorStatusLifecycleDeadlineViolationMessage {
-    pub session_id: scalars::CanonicalUuid,
-    pub state: operator_status::OperatorStatusLifecycleState,
+    pub session_id: CanonicalUuid,
+    pub state: OperatorStatusLifecycleState,
     pub deadline_missing: bool,
-    pub expired_for_seconds: option::Option<scalars::CanonicalU64>,
+    pub expired_for_seconds: option::Option<CanonicalU64>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusLifecycleDeadlineViolationMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## OperatorStatusEndMessage
 
 ```rust
 pub struct OperatorStatusEndMessage {
-    pub held_slot_count: scalars::CanonicalU64,
-    pub queued_obligation_count: scalars::CanonicalU64,
-    pub pull_request_convergence_count: scalars::CanonicalU64,
-    pub pending_stale_review_clearance_count: scalars::CanonicalU64,
-    pub lifecycle_week_count: scalars::CanonicalU64,
-    pub lifecycle_deadline_violation_count: scalars::CanonicalU64,
+    pub lifecycle_week_count: CanonicalU64,
+    pub lifecycle_deadline_violation_count: CanonicalU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusEndMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## OperatorStatusMessage
@@ -377,23 +66,9 @@ impl<T> de::DeserializeOwned for operator_status::OperatorStatusEndMessage where
 ```rust
 pub enum OperatorStatusMessage {
     Start {},
-    HeldSlot(boxed::Box<operator_status::OperatorStatusHeldSlotMessage>),
-    QueuedObligation(boxed::Box<operator_status::OperatorStatusQueuedObligationMessage>),
-    PullRequestConvergence(
-        boxed::Box<operator_status::OperatorStatusPullRequestConvergenceMessage>,
-    ),
-    PendingStaleReviewClearance(
-        boxed::Box<operator_status::OperatorStatusPendingStaleReviewClearanceMessage>,
-    ),
-    LifecycleWeek(boxed::Box<operator_status::OperatorStatusLifecycleWeekMessage>),
-    LifecycleDeadlineViolation(
-        boxed::Box<operator_status::OperatorStatusLifecycleDeadlineViolationMessage>,
-    ),
-    End(boxed::Box<operator_status::OperatorStatusEndMessage>),
+    LifecycleWeek(boxed::Box<OperatorStatusLifecycleWeekMessage>),
+    LifecycleDeadlineViolation(boxed::Box<OperatorStatusLifecycleDeadlineViolationMessage>),
+    End(boxed::Box<OperatorStatusEndMessage>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for operator_status::OperatorStatusMessage where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
