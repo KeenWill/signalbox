@@ -201,7 +201,7 @@ jobs:
           python-version: '3.13'
       - name: Check Markdown formatting
         run: |
-          python3 -m venv /tmp/mdformat-venv
+          python3 -m venv --clear /tmp/mdformat-venv
           /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
           /tmp/mdformat-venv/bin/mdformat --check *.md docs/
       # Conservative inventory for the recorded session-lock protocols. The
