@@ -1,7 +1,5 @@
 //! Read-only repository-watch projections for the operator status command.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use signalbox_application::{RepoWatchConvergenceVerdict, RepoWatchReviewDecision};
 use signalbox_domain::MergeableState;
@@ -962,60 +960,28 @@ fn positive_i64(value: i64, field: &'static str) -> Result<u64, ProcessOperatorS
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Stored operator-status data contradicted its view contract.
 #[derive(Debug)]
 pub enum ProcessOperatorStatusCorruption {
+    #[error("operator status is missing {field_0}")]
     Missing(&'static str),
+    #[error("operator status has inconsistent {field_0}")]
     Inconsistent(&'static str),
+    #[error("operator status has invalid {field_0}")]
     InvalidNumber(&'static str),
+    #[error("operator status has unsupported {field} {value:?}")]
     Unsupported { field: &'static str, value: String },
 }
 
-impl fmt::Display for ProcessOperatorStatusCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "operator status is missing {field}"),
-            Self::Inconsistent(field) => {
-                write!(formatter, "operator status has inconsistent {field}")
-            }
-            Self::InvalidNumber(field) => write!(formatter, "operator status has invalid {field}"),
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "operator status has unsupported {field} {value:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ProcessOperatorStatusCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Failure to read or decode one operator-status snapshot.
 #[derive(Debug)]
 pub enum ProcessOperatorStatusError {
-    Database(sqlx::Error),
-    Corruption(ProcessOperatorStatusCorruption),
-}
-
-impl fmt::Display for ProcessOperatorStatusError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "operator-status database read failed: {error}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ProcessOperatorStatusError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    #[error("operator-status database read failed: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
+    Corruption(#[source] ProcessOperatorStatusCorruption),
 }
 
 impl From<sqlx::Error> for ProcessOperatorStatusError {

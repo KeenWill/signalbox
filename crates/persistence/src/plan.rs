@@ -1,10 +1,6 @@
 //! PostgreSQL storage for append-only session plan events.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    error::Error,
-    fmt,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -458,13 +454,17 @@ const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
  ORDER BY event.event_ordinal
  LIMIT $2";
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable plan row failed checked reconstruction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionPlanCorruption {
+    #[error("session plan is missing {field_0}")]
     /// A required durable field was absent.
     Missing(&'static str),
+    #[error("session plan has invalid positive {field_0}")]
     /// A numeric value was not a positive u64.
     InvalidPositiveInteger(&'static str),
+    #[error("session plan has unsupported {field}: {value}")]
     /// A closed discriminator was unsupported.
     Unsupported {
         /// Durable field being decoded.
@@ -472,115 +472,51 @@ pub enum SessionPlanCorruption {
         /// Unsupported spelling.
         value: String,
     },
+    #[error("session plan has mismatched {field_0}")]
     /// Two stored identity fields disagreed.
     MismatchedIdentity(&'static str),
+    #[error("session plan has invalid {field_0} payload")]
     /// Nullable event payload fields did not match their discriminator.
     InvalidEventPayload(&'static str),
+    #[error("session plan has invalid entry text")]
     /// Stored text violated the tool boundary.
     InvalidText,
+    #[error("session plan event sequence is invalid")]
     /// The durable event sequence has a gap or a mutation without a creation.
     InvalidEventSequence,
+    #[error("session plan history is invalid: {field_0}")]
     /// The chronological durable prefix cannot be folded.
-    InvalidHistory(PlanFoldError),
+    InvalidHistory(#[source] PlanFoldError),
+    #[error("session plan history repeats tool-attempt provenance")]
     /// Two durable events claim the same physical tool attempt.
     DuplicateProvenance,
+    #[error("session plan provenance lacks durable authority")]
     /// Durable provenance does not match tool-attempt authority.
     UntrustedProvenance,
 }
 
-impl fmt::Display for SessionPlanCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "session plan is missing {field}"),
-            Self::InvalidPositiveInteger(field) => {
-                write!(formatter, "session plan has invalid positive {field}")
-            }
-            Self::Unsupported { field, value } => {
-                write!(formatter, "session plan has unsupported {field}: {value}")
-            }
-            Self::MismatchedIdentity(field) => {
-                write!(formatter, "session plan has mismatched {field}")
-            }
-            Self::InvalidEventPayload(kind) => {
-                write!(formatter, "session plan has invalid {kind} payload")
-            }
-            Self::InvalidText => formatter.write_str("session plan has invalid entry text"),
-            Self::InvalidEventSequence => {
-                formatter.write_str("session plan event sequence is invalid")
-            }
-            Self::InvalidHistory(error) => {
-                write!(formatter, "session plan history is invalid: {error}")
-            }
-            Self::DuplicateProvenance => {
-                formatter.write_str("session plan history repeats tool-attempt provenance")
-            }
-            Self::UntrustedProvenance => {
-                formatter.write_str("session plan provenance lacks durable authority")
-            }
-        }
-    }
-}
-
-impl Error for SessionPlanCorruption {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidHistory(error) => Some(error),
-            Self::InvalidEventSequence
-            | Self::Missing(_)
-            | Self::InvalidPositiveInteger(_)
-            | Self::Unsupported { .. }
-            | Self::MismatchedIdentity(_)
-            | Self::InvalidEventPayload(_)
-            | Self::InvalidText
-            | Self::DuplicateProvenance
-            | Self::UntrustedProvenance => None,
-        }
-    }
-}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL plan storage failure.
 #[derive(Debug)]
 pub enum SessionPlanRepositoryError {
+    #[error("session plan database failure: {source}")]
     /// PostgreSQL failed before or during commit.
     Database {
+        #[source]
         /// Source database error.
         source: sqlx::Error,
         /// Whether the final commit outcome is unknown.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Durable rows cannot satisfy the port contract.
-    Corruption(SessionPlanCorruption),
+    Corruption(#[source] SessionPlanCorruption),
+    #[error("session plan append provenance is not active")]
     /// The caller supplied provenance that is not an active plan-write attempt.
     InvalidAppendProvenance,
+    #[error("session plan append attempt was already used")]
     /// One physical plan-write attempt was submitted more than once.
     DuplicateAppendAttempt,
-}
-
-impl fmt::Display for SessionPlanRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "session plan database failure: {source}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::InvalidAppendProvenance => {
-                formatter.write_str("session plan append provenance is not active")
-            }
-            Self::DuplicateAppendAttempt => {
-                formatter.write_str("session plan append attempt was already used")
-            }
-        }
-    }
-}
-
-impl Error for SessionPlanRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::InvalidAppendProvenance | Self::DuplicateAppendAttempt => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for SessionPlanRepositoryError {
@@ -744,7 +680,7 @@ impl SessionPlanRepository {
         }
 
         let prior = next
-            .as_u64()
+            .get()
             .checked_sub(1)
             .filter(|prior| *prior > 0)
             .map(Decimal::from);
@@ -758,7 +694,7 @@ impl SessionPlanRepository {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(request.session().into_uuid())
-        .bind(Decimal::from(next.as_u64()))
+        .bind(Decimal::from(next.get()))
         .bind(prior)
         .bind(mapping::plan_event_kind_to_str(encoded.kind))
         .bind(Decimal::from(encoded.entry.as_u64()))

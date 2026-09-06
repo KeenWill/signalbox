@@ -10,8 +10,6 @@
 //! session, submits its first input, and commissions its goal, so the judge
 //! consumes it identically and the unattended-escalation closeout covers it.
 
-use std::{error::Error, fmt};
-
 use signalbox_domain::{
     BranchName, CommissionedDispatchId, CommitSha, CreateSession, DeliveryRequest,
     DurableCommandId, GoalStatement, GoalUserAction, GoalUserCommand, ModelSelectionOverride,
@@ -337,27 +335,17 @@ impl PreparedCommissionedDispatch {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a commissioned dispatch could not be prepared for its atomic port.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommissionDispatchPreparationError {
+    #[error("commissioned dispatch resolved a template other than the requested one")]
     /// The resolved template's name is not the requested template.
     TemplateMismatch,
+    #[error("commissioned dispatch session preparation failed")]
     /// Session preparation refused the composed creation command.
     SessionPreparation,
 }
-
-impl fmt::Display for CommissionDispatchPreparationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::TemplateMismatch => {
-                "commissioned dispatch resolved a template other than the requested one"
-            }
-            Self::SessionPreparation => "commissioned dispatch session preparation failed",
-        })
-    }
-}
-
-impl Error for CommissionDispatchPreparationError {}
 
 #[cfg(test)]
 mod tests {

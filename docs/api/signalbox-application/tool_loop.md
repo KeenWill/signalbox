@@ -464,13 +464,13 @@ where
     TransactionError: fmt::Display,
     ExecutorError: fmt::Display,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<TransactionError, ExecutorError> error::Error
     for ToolExecutionServiceError<TransactionError, ExecutorError>
 where
-    TransactionError: error::Error + 'static,
-    ExecutorError: error::Error + 'static,
+    TransactionError: error::Error + 'static + fmt::Display,
+    ExecutorError: error::Error + 'static + fmt::Display,
 {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }

@@ -299,10 +299,15 @@ fn display(
         .next()
         .ok_or_else(|| syn::Error::new_spanned(attr, "expected error format"))?;
     if matches!(&first, Expr::Path(path) if path.path.is_ident("transparent")) {
-        let field = fields
-            .first()
-            .filter(|_| fields.len() == 1)
-            .ok_or_else(|| syn::Error::new_spanned(attr, "transparent requires one field"))?;
+        let field = if fields.len() == 1 {
+            fields.first()
+        } else {
+            let mut sources = fields.iter().filter(|field| field.source);
+            sources.next().filter(|_| sources.next().is_none())
+        }
+        .ok_or_else(|| {
+            syn::Error::new_spanned(attr, "transparent requires one field or one marked source")
+        })?;
         let binding = &field.binding;
         return Ok(quote!(::std::fmt::Display::fmt(#binding, #formatter)));
     }

@@ -4,7 +4,7 @@
 //! implement the lexical strategy with PostgreSQL, but callers never provide
 //! database query syntax or observe storage rows.
 
-use std::{fmt, future::Future, num::NonZeroU64};
+use std::{future::Future, num::NonZeroU64};
 
 use signalbox_domain::{
     AcceptedInputId, SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
@@ -58,28 +58,20 @@ pub const fn max_search_projection_text_bytes() -> usize {
     SEARCH_PROJECTION_TEXT_BYTE_CEILING
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Rejection of product search text before it reaches a strategy adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SearchTextError {
+    #[error("search text is empty")]
     /// The expression was empty or only whitespace.
     Empty,
+    #[error("search text exceeds its byte bound")]
     /// The expression crossed the hard UTF-8 byte ceiling.
     TooLong,
+    #[error("search text contains NUL")]
     /// The expression contained NUL.
     ContainsNul,
 }
-
-impl fmt::Display for SearchTextError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Empty => "search text is empty",
-            Self::TooLong => "search text exceeds its byte bound",
-            Self::ContainsNul => "search text contains NUL",
-        })
-    }
-}
-
-impl std::error::Error for SearchTextError {}
 
 /// One validated natural-language lexical expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,17 +115,11 @@ pub enum SearchScope {
     Session(SessionId),
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("search page size is outside its hard bounds")]
 /// Rejection of a requested search page size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SearchPageLimitError;
-
-impl fmt::Display for SearchPageLimitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("search page size is outside its hard bounds")
-    }
-}
-
-impl std::error::Error for SearchPageLimitError {}
 
 /// Validated item ceiling for one search page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -240,28 +226,20 @@ impl SearchArtifactId {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Rejection of text supplied by an explicit durable artifact publisher.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SearchProjectionTextError {
+    #[error("search projection text is empty")]
     /// The projection was empty.
     Empty,
+    #[error("search projection text exceeds its byte bound")]
     /// The projection crossed the hard UTF-8 byte ceiling.
     TooLong,
+    #[error("search projection text contains NUL")]
     /// The projection contained NUL.
     ContainsNul,
 }
-
-impl fmt::Display for SearchProjectionTextError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Empty => "search projection text is empty",
-            Self::TooLong => "search projection text exceeds its byte bound",
-            Self::ContainsNul => "search projection text contains NUL",
-        })
-    }
-}
-
-impl std::error::Error for SearchProjectionTextError {}
 
 /// Validated text owned by an explicit attachment or derivation producer.
 #[derive(Clone, Debug, Eq, PartialEq)]

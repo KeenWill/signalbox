@@ -218,9 +218,11 @@ pub enum ModelFrontierRenderingError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ModelFrontierRenderingError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ModelFrontierRenderingError {}
+impl error::Error for ModelFrontierRenderingError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl ClassifyOperatorFailure for ModelFrontierRenderingError {
     fn operator_failure_class(&self) -> OperatorFailureClass;
 }
@@ -667,12 +669,12 @@ impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationE
     >
 where
     PrepareError: fmt::Display,
+    ProviderError: fmt::Display,
     FailureError: fmt::Display,
     AuthorizationError: fmt::Display,
-    ProviderError: fmt::Display,
     ObservationError: fmt::Display,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> error::Error
     for ModelCallExecutionError<
@@ -683,12 +685,13 @@ impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationE
         ObservationError,
     >
 where
-    PrepareError: error::Error + 'static,
-    FailureError: error::Error + 'static,
-    AuthorizationError: error::Error + 'static,
-    ProviderError: error::Error + 'static,
-    ObservationError: error::Error + 'static,
+    PrepareError: error::Error + 'static + fmt::Display,
+    FailureError: error::Error + 'static + fmt::Display,
+    AuthorizationError: error::Error + 'static + fmt::Display,
+    ProviderError: error::Error + 'static + fmt::Display,
+    ObservationError: error::Error + 'static + fmt::Display,
 {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError>
     ClassifyOperatorFailure
@@ -858,9 +861,11 @@ pub enum ScriptedModelCallError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ScriptedModelCallError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ScriptedModelCallError {}
+impl error::Error for ScriptedModelCallError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 impl ClassifyOperatorFailure for ScriptedModelCallError {
     fn operator_failure_class(&self) -> OperatorFailureClass;
 }

@@ -4694,6 +4694,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-newtype"
+version = "0.0.0"
+
+[[package]]
 name = "signalbox-ownership-seam"
 version = "0.0.0"
 dependencies = [
@@ -4716,8 +4720,10 @@ dependencies = [
  "signalbox-blob-store",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-expect-table",
+ "signalbox-newtype",
  "signalbox-tools-plan",
  "sqlx",
  "tempfile",
@@ -4878,7 +4884,6 @@ dependencies = [
  "signalbox-test-bin",
  "signalbox-tool-contract",
  "tokio",
- "toml",
 ]
 
 [[package]]
@@ -4950,6 +4955,7 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-newtype",
  "signalbox-tool-contract",
  "uuid",
 ]
