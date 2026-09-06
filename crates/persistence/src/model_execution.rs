@@ -1938,6 +1938,9 @@ impl PostgresModelCallRepository {
                     && durable_exclusions.as_ref().is_some_and(|exclusions| {
                         !exclusions.excluded.contains(&current_reference)
                     });
+                // The failed credential itself must still be admitted for a
+                // retry. Otherwise only the pinned action may authorize a
+                // rotation; every other action follows the terminal path.
                 let rotating = !retrying_same_credential && rotation_candidate;
                 if retrying_same_credential || rotating {
                     let Some(DurablePoolExclusions { mut excluded, .. }) =

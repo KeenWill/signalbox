@@ -104,6 +104,11 @@ successor attempt. That commit appends no `TurnFailed`: one commit never both
 terminalizes the turn and authorizes a successor. The rotation and transient
 retry tests pin this ending.
 
+A same-credential retry additionally requires the failed member itself to remain
+admitted when the observation commits. If a durable action already excludes it,
+the pinned `switch_now` action may rotate to another admitted member; every
+other pinned action terminalizes the known failure.
+
 A transient exclusion is the successor's durable retry deadline; after its reset
 the failed member is admitted again. A chain exclusion is written when a failure
 rotates the pool and removes that member for the remainder of the turn. If
