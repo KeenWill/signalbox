@@ -4884,7 +4884,6 @@ dependencies = [
  "signalbox-test-bin",
  "signalbox-tool-contract",
  "tokio",
- "toml",
 ]
 
 [[package]]
