@@ -5645,8 +5645,8 @@ mod tests {
         TurnId::from_uuid(Uuid::from_u128(value))
     }
 
-    /// acceptance order A, B, C may execute as A, C, B; the
-    /// database lineage diagnostic selects B as the one complete-chain tip.
+    /// acceptance order A, B, C may execute as A, C, B; the database lineage diagnostic selects B
+    /// as the one complete-chain tip.
     #[test]
     fn latest_tip_follows_execution_lineage() {
         let second = turn(2);

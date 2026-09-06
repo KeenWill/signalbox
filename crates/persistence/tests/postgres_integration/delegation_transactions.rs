@@ -1,10 +1,10 @@
-//! Durable delegation transactions: wait, message, and relationship commits with their replay authentication.
+//! Durable delegation transactions: wait, message, and relationship commits with their replay
+//! authentication.
 
 use crate::*;
 
-/// a background wait, its completed receipt, and its update are
-/// one replay-idempotent commit.
-/// equal replay still requires its exact dispatch.
+/// a background wait, its completed receipt, and its update are one replay-idempotent commit. equal
+/// replay still requires its exact dispatch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegation_repository_commits_background_wait_atomically() -> Result<(), Box<dyn Error>> {
@@ -121,8 +121,8 @@ async fn delegation_repository_commits_background_wait_atomically() -> Result<()
     Ok(())
 }
 
-/// a reconstituted process request observes a prepared
-/// physical attempt as nonterminal rather than claiming terminal evidence.
+/// a reconstituted process request observes a prepared physical attempt as nonterminal rather than
+/// claiming terminal evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_wait_reports_prepared_attempt_without_ending_it() -> Result<(), Box<dyn Error>> {
@@ -171,8 +171,8 @@ async fn process_wait_reports_prepared_attempt_without_ending_it() -> Result<(),
     Ok(())
 }
 
-/// a background process wait reserves its future
-/// result delivery or terminalizes the executable attempt with typed evidence.
+/// a background process wait reserves its future result delivery or terminalizes the executable
+/// attempt with typed evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn background_wait_delivery_exhaustion_terminalizes_attempt() -> Result<(), Box<dyn Error>> {
@@ -256,8 +256,8 @@ async fn background_wait_delivery_exhaustion_terminalizes_attempt() -> Result<()
     Ok(())
 }
 
-/// an approved proposal-ordered request remains nonterminal
-/// before the tool loop prepares its physical attempt.
+/// an approved proposal-ordered request remains nonterminal before the tool loop prepares its
+/// physical attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_wait_reports_approved_request_before_attempt() -> Result<(), Box<dyn Error>> {
@@ -289,8 +289,8 @@ async fn process_wait_reports_approved_request_before_attempt() -> Result<(), Bo
     Ok(())
 }
 
-/// process delegation validates the named session before the
-/// request identity for both await and message operations.
+/// process delegation validates the named session before the request identity for both await and
+/// message operations.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_delegation_rejects_absent_session_first() -> Result<(), Box<dyn Error>> {
@@ -328,8 +328,8 @@ async fn process_delegation_rejects_absent_session_first() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// replay validates every immutable wait-row
-/// correlation instead of deriving over malformed stored endpoint facts.
+/// replay validates every immutable wait-row correlation instead of deriving over malformed stored
+/// endpoint facts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn wait_replay_rejects_cross_wired_stored_turn() -> Result<(), Box<dyn Error>> {
@@ -383,8 +383,8 @@ async fn wait_replay_rejects_cross_wired_stored_turn() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// relationship reconstitution rejects stored spawn
-/// provenance carrying a field outside the tool-request variant.
+/// relationship reconstitution rejects stored spawn provenance carrying a field outside the
+/// tool-request variant.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn spawn_reconstitution_rejects_contradictory_provenance() -> Result<(), Box<dyn Error>> {
@@ -434,8 +434,7 @@ async fn spawn_reconstitution_rejects_contradictory_provenance() -> Result<(), B
     Ok(())
 }
 
-/// a spawn event cannot carry a child-result
-/// satellite belonging only to a terminal outcome event.
+/// a spawn event cannot carry a child-result satellite belonging only to a terminal outcome event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn spawn_reconstitution_rejects_result_satellite() -> Result<(), Box<dyn Error>> {
@@ -478,8 +477,8 @@ async fn spawn_reconstitution_rejects_result_satellite() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// relationship reconstitution rejects stored outcome
-/// provenance carrying a field outside the selected provenance variant.
+/// relationship reconstitution rejects stored outcome provenance carrying a field outside the
+/// selected provenance variant.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn outcome_reconstitution_rejects_contradictory_provenance() -> Result<(), Box<dyn Error>> {
@@ -551,8 +550,8 @@ async fn outcome_reconstitution_rejects_contradictory_provenance() -> Result<(),
     Ok(())
 }
 
-/// background-wait replay authenticates the exact
-/// completed effect-free attempt and normalized registration receipt.
+/// background-wait replay authenticates the exact completed effect-free attempt and normalized
+/// registration receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn background_wait_replay_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
@@ -602,8 +601,7 @@ async fn background_wait_replay_requires_exact_terminal_attempt() -> Result<(), 
     Ok(())
 }
 
-/// equal wait replay requires the durable parent
-/// update emitted with the original registration.
+/// equal wait replay requires the durable parent update emitted with the original registration.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn wait_replay_requires_update_outbox_satellite() -> Result<(), Box<dyn Error>> {
@@ -644,8 +642,7 @@ async fn wait_replay_requires_update_outbox_satellite() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// equal wait replay authenticates the global outbox
-/// header paired with its durable parent update.
+/// equal wait replay authenticates the global outbox header paired with its durable parent update.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn wait_replay_requires_update_outbox_header() -> Result<(), Box<dyn Error>> {
@@ -690,8 +687,7 @@ async fn wait_replay_requires_update_outbox_header() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// equal wait replay rejects subject payloads that do
-/// not belong to a child-waiting update.
+/// equal wait replay rejects subject payloads that do not belong to a child-waiting update.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn wait_replay_rejects_unused_update_payload() -> Result<(), Box<dyn Error>> {
@@ -742,8 +738,8 @@ async fn wait_replay_rejects_unused_update_payload() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// foreground-wait replay authenticates the exact
-/// effect-free attempt's typed child-wait terminal evidence.
+/// foreground-wait replay authenticates the exact effect-free attempt's typed child-wait terminal
+/// evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn foreground_wait_replay_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
@@ -797,8 +793,8 @@ async fn foreground_wait_replay_requires_exact_terminal_attempt() -> Result<(), 
     Ok(())
 }
 
-/// foreground-wait replay authenticates the delivery
-/// satellite required by an already-recorded child result.
+/// foreground-wait replay authenticates the delivery satellite required by an already-recorded
+/// child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn foreground_wait_replay_requires_result_delivery() -> Result<(), Box<dyn Error>> {
@@ -862,8 +858,8 @@ async fn foreground_wait_replay_requires_result_delivery() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// background-wait replay rejects a delivery
-/// satellite cross-wired to a different recipient and missing its pending row.
+/// background-wait replay rejects a delivery satellite cross-wired to a different recipient and
+/// missing its pending row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn background_wait_replay_requires_exact_result_delivery() -> Result<(), Box<dyn Error>> {
@@ -935,8 +931,8 @@ async fn background_wait_replay_requires_exact_result_delivery() -> Result<(), B
     Ok(())
 }
 
-/// relationship reconstitution rejects action payloads that a
-/// stored background policy is not permitted to carry.
+/// relationship reconstitution rejects action payloads that a stored background policy is not
+/// permitted to carry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn background_policy_reconstitution_rejects_action_payloads() -> Result<(), Box<dyn Error>> {
@@ -978,8 +974,8 @@ async fn background_policy_reconstitution_rejects_action_payloads() -> Result<()
     Ok(())
 }
 
-/// foreground registration ends the physical await
-/// attempt and parks the same turn without retaining a live attempt.
+/// foreground registration ends the physical await attempt and parks the same turn without
+/// retaining a live attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegation_repository_parks_foreground_wait_atomically() -> Result<(), Box<dyn Error>> {
@@ -1037,9 +1033,8 @@ async fn delegation_repository_parks_foreground_wait_atomically() -> Result<(), 
     Ok(())
 }
 
-/// a message, recipient delivery, completed receipt, update,
-/// and wake are committed once, while physical replay returns the stored ID.
-/// equal replay still requires its exact dispatch.
+/// a message, recipient delivery, completed receipt, update, and wake are committed once, while
+/// physical replay returns the stored ID. equal replay still requires its exact dispatch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegation_repository_commits_message_and_wake_atomically() -> Result<(), Box<dyn Error>> {
@@ -1185,8 +1180,8 @@ async fn delegation_repository_commits_message_and_wake_atomically() -> Result<(
     Ok(())
 }
 
-/// message replay validates the direction-derived
-/// recipient and its pending-delivery correlation before returning a receipt.
+/// message replay validates the direction-derived recipient and its pending-delivery correlation
+/// before returning a receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn message_replay_rejects_cross_wired_recipient() -> Result<(), Box<dyn Error>> {
@@ -1242,8 +1237,8 @@ async fn message_replay_rejects_cross_wired_recipient() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// message replay authenticates the exact completed
-/// external-effect attempt and normalized durable receipt.
+/// message replay authenticates the exact completed external-effect attempt and normalized durable
+/// receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn message_replay_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
@@ -1300,8 +1295,8 @@ async fn message_replay_requires_exact_terminal_attempt() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// message replay authenticates the complete stored
-/// tool-request provenance instead of trusting the request identifier alone.
+/// message replay authenticates the complete stored tool-request provenance instead of trusting the
+/// request identifier alone.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn message_replay_requires_complete_tool_provenance() -> Result<(), Box<dyn Error>> {
@@ -1356,8 +1351,7 @@ async fn message_replay_requires_complete_tool_provenance() -> Result<(), Box<dy
     Ok(())
 }
 
-/// a message event cannot authenticate a cross-kind
-/// child-result satellite attached to its ordinal.
+/// a message event cannot authenticate a cross-kind child-result satellite attached to its ordinal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn message_event_rejects_child_result_satellite() -> Result<(), Box<dyn Error>> {
@@ -1411,8 +1405,7 @@ async fn message_event_rejects_child_result_satellite() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// reciprocal relationship rows cannot make peer lookup choose
-/// one direction nondeterministically.
+/// reciprocal relationship rows cannot make peer lookup choose one direction nondeterministically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn message_lookup_rejects_reciprocal_relationships() -> Result<(), Box<dyn Error>> {
@@ -1459,8 +1452,7 @@ async fn message_lookup_rejects_reciprocal_relationships() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// equal message replay requires the durable update
-/// satellite emitted by the original transaction.
+/// equal message replay requires the durable update satellite emitted by the original transaction.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn message_replay_requires_update_outbox_satellite() -> Result<(), Box<dyn Error>> {
@@ -1507,8 +1499,7 @@ async fn message_replay_requires_update_outbox_satellite() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// equal message replay authenticates the global
-/// outbox header paired with its recipient update.
+/// equal message replay authenticates the global outbox header paired with its recipient update.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn message_replay_requires_update_outbox_header() -> Result<(), Box<dyn Error>> {
@@ -1563,8 +1554,7 @@ async fn message_replay_requires_update_outbox_header() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// equal message replay requires the durable wake
-/// satellite emitted by the original transaction.
+/// equal message replay requires the durable wake satellite emitted by the original transaction.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn message_replay_requires_wake_outbox_satellite() -> Result<(), Box<dyn Error>> {
@@ -1611,8 +1601,7 @@ async fn message_replay_requires_wake_outbox_satellite() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// equal message replay authenticates the global
-/// outbox header paired with its recipient wake.
+/// equal message replay authenticates the global outbox header paired with its recipient wake.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn message_replay_requires_wake_outbox_header() -> Result<(), Box<dyn Error>> {
@@ -1667,8 +1656,8 @@ async fn message_replay_requires_wake_outbox_header() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// concurrent relationships cannot claim one global
-/// message identity; exactly one records and the loser is a typed rejection.
+/// concurrent relationships cannot claim one global message identity; exactly one records and the
+/// loser is a typed rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn concurrent_message_identity_collision_is_typed() -> Result<(), Box<dyn Error>> {
@@ -1737,9 +1726,8 @@ async fn concurrent_message_identity_collision_is_typed() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// a definitive process-message collision
-/// retains the exact minted identity, terminalizes its executable attempt as
-/// known failed, and replays the typed rejection from durable evidence.
+/// a definitive process-message collision retains the exact minted identity, terminalizes its
+/// executable attempt as known failed, and replays the typed rejection from durable evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_message_collision_replays_typed_rejection() -> Result<(), Box<dyn Error>> {
@@ -1812,8 +1800,8 @@ async fn process_message_collision_replays_typed_rejection() -> Result<(), Box<d
     Ok(())
 }
 
-/// an executable process message naming an absent
-/// peer terminalizes its attempt with the typed relationship rejection.
+/// an executable process message naming an absent peer terminalizes its attempt with the typed
+/// relationship rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn process_message_absent_peer_terminalizes_attempt() -> Result<(), Box<dyn Error>> {

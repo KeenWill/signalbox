@@ -5,13 +5,12 @@
 //! ownership bit, and the terminal outcome. Two of its three moving parts are
 //! not written here at all, on purpose:
 //!
-//! - The state mapping — the states the turn and goal machines derive — is
-//!   projected by the database from every `turn_lifecycle` and `goal_event`
-//!   write, so a path that moves a turn cannot leave the session state behind
-//!   it, including a path a later change adds.
-//! - The armed deadline is written by the satellite's own trigger from the
-//!   configured bound table, so the one-armed-deadline invariant holds by
-//!   construction rather than by every caller remembering to re-arm.
+//! - The state mapping — the states the turn and goal machines derive — is projected by the
+//!   database from every `turn_lifecycle` and `goal_event` write, so a path that moves a turn
+//!   cannot leave the session state behind it, including a path a later change adds.
+//! - The armed deadline is written by the satellite's own trigger from the configured bound table,
+//!   so the one-armed-deadline invariant holds by construction rather than by every caller
+//!   remembering to re-arm.
 //!
 //! What this module writes is the part no machine below the session can
 //! decide: creation, the park that overrides the mapping, the ownership flip,

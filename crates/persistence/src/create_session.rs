@@ -1286,8 +1286,8 @@ mod tests {
         corruption
     }
 
-    /// the ordinary creation reader cannot silently discard a
-    /// delegated spawning identity from an interactive session row.
+    /// the ordinary creation reader cannot silently discard a delegated spawning identity from an
+    /// interactive session row.
     #[test]
     fn interactive_creation_rejects_spawning_request() {
         let error = decode_provenance(
