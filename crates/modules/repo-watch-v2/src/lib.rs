@@ -22,8 +22,10 @@ use signalbox_ownership_seam::{
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+mod baseline;
 mod github;
 
+use baseline::observation_payload;
 pub use github::{GitHubClient, GitHubClientError};
 
 /// Current provider state for one watched repository.
@@ -96,6 +98,10 @@ pub struct RepositoryProjection<'a> {
     pub repository: RepositoryState<'a>,
     /// Complete current pull-request projection for the repository.
     pub pull_requests: Vec<PullRequestState<'a>>,
+    /// Complete normalized state used by the repository-event differ.
+    pub comparison_baseline: &'a signalbox_ownership_seam::RepoWatchObservation,
+    /// Compact baselines retained for merged pull requests.
+    pub merged_baselines: &'a [signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1],
 }
 
 /// Authenticated webhook intake retained until its caller-selected expiry.
@@ -676,6 +682,9 @@ impl RepoWatchStore {
         }
         let repository_state = &projection.repository;
         let pull_request_states = projection.pull_requests.as_slice();
+        let comparison_baseline =
+            observation_payload(projection.comparison_baseline, projection.merged_baselines)
+                .to_string();
         let repository = repository_state.repository;
         if pull_request_states
             .iter()
@@ -688,14 +697,23 @@ impl RepoWatchStore {
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
-        let projections_match =
-            stored_projections_match(&mut transaction, repository_state, pull_request_states)
-                .await?;
-        upsert_repository(&mut transaction, repository_state).await?;
+        let projections_match = stored_projections_match(
+            &mut transaction,
+            repository_state,
+            pull_request_states,
+            &comparison_baseline,
+        )
+        .await?;
+        upsert_repository(&mut transaction, repository_state, &comparison_baseline).await?;
         replace_pull_requests(&mut transaction, repository, pull_request_states).await?;
         let frontier = frontier.entries().collect::<Vec<_>>();
-        let candidate_identity =
-            frontier_candidate_identity(repository_state, pull_request_states, &frontier, events);
+        let candidate_identity = frontier_candidate_identity(
+            repository_state,
+            pull_request_states,
+            comparison_baseline.as_bytes(),
+            &frontier,
+            events,
+        );
         let current_generation: Decimal = sqlx::query_scalar(
             "SELECT frontier_generation FROM repository_state
               WHERE repository = $1 FOR UPDATE",
@@ -1117,24 +1135,27 @@ async fn stored_projections_match(
     transaction: &mut Transaction<'_, Postgres>,
     repository_state: &RepositoryState<'_>,
     pull_request_states: &[PullRequestState<'_>],
+    comparison_baseline: &str,
 ) -> Result<bool, StoreError> {
-    let repository: Option<(String, String, OffsetDateTime)> = sqlx::query_as(
-        "SELECT default_branch, default_head_sha, observed_at
+    let repository: Option<(String, String, OffsetDateTime, bool)> = sqlx::query_as(
+        "SELECT default_branch, default_head_sha, observed_at,
+                comparison_baseline = $2::jsonb
            FROM repository_state
           WHERE repository = $1",
     )
     .bind(repository_state.repository.as_str())
+    .bind(comparison_baseline)
     .fetch_optional(&mut **transaction)
     .await?;
-    if repository
-        .as_ref()
-        .is_none_or(|(default_branch, default_head, observed_at)| {
+    if repository.as_ref().is_none_or(
+        |(default_branch, default_head, observed_at, baseline_matches)| {
             default_branch != repository_state.default_branch.as_str()
                 || default_head != repository_state.default_head.as_str()
+                || !baseline_matches
                 || postgres_timestamp_micros(*observed_at)
                     != postgres_timestamp_micros(repository_state.observed_at)
-        })
-    {
+        },
+    ) {
         return Ok(false);
     }
     let stored: Vec<StoredPullRequestProjection> = sqlx::query_as(
@@ -1174,21 +1195,25 @@ fn postgres_timestamp_micros(timestamp: OffsetDateTime) -> i128 {
 async fn upsert_repository(
     transaction: &mut Transaction<'_, Postgres>,
     state: &RepositoryState<'_>,
+    comparison_baseline: &str,
 ) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT INTO repository_state
-            (repository, default_branch, default_head_sha, observed_at, updated_at)
-         VALUES ($1, $2, $3, $4, statement_timestamp())
+            (repository, default_branch, default_head_sha, observed_at,
+             comparison_baseline, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, statement_timestamp())
          ON CONFLICT (repository) DO UPDATE
          SET default_branch = EXCLUDED.default_branch,
              default_head_sha = EXCLUDED.default_head_sha,
              observed_at = EXCLUDED.observed_at,
+             comparison_baseline = EXCLUDED.comparison_baseline,
              updated_at = statement_timestamp()",
     )
     .bind(state.repository.as_str())
     .bind(state.default_branch.as_str())
     .bind(state.default_head.as_str())
     .bind(state.observed_at)
+    .bind(comparison_baseline)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -1254,6 +1279,7 @@ async fn replace_pull_requests(
 fn frontier_candidate_identity(
     repository_state: &RepositoryState<'_>,
     pull_request_states: &[PullRequestState<'_>],
+    comparison_baseline: &[u8],
     frontier: &[signalbox_ownership_seam::RepoWatchEventIdentityFrontierEntryV1],
     events: &[RepoWatchEventOccurrenceV1],
 ) -> Vec<u8> {
@@ -1272,6 +1298,7 @@ fn frontier_candidate_identity(
     );
     identity
         .extend_from_slice(&postgres_timestamp_micros(repository_state.observed_at).to_be_bytes());
+    push_identity_field(&mut identity, comparison_baseline);
     let mut pull_request_states = pull_request_states.iter().collect::<Vec<_>>();
     pull_request_states.sort_by_key(|state| state.number);
     for state in pull_request_states {

@@ -39,9 +39,11 @@ versioned semantics.
 
 Each repository frontier commit includes the complete current repository and
 pull-request projections, expected generation, complete identity candidate, and
-ordered event occurrences in one transaction. A generation mismatch is stale
-unless that complete input exactly replays the immediately succeeding commit. An
-empty event batch with an unchanged cursor is unchanged only when both stored
+ordered event occurrences in one transaction. The projection retains the
+complete normalized differ observation, including signal-reviewer provenance,
+pull requests, workflows, and branch heads. A generation mismatch is stale
+unless that complete input exactly replays the immediately succeeding commit.
+An empty event batch with an unchanged cursor is unchanged only when both stored
 projections also match; a projection-only change advances the generation and
 records the complete commit digest. Projection timestamps use PostgreSQL
 microsecond precision in both the stored comparison and commit identity.
@@ -122,9 +124,9 @@ next pending create action for its repository-watch dispatch and records the new
 session; replaying the event cannot settle another action. Identity reuse is
 idempotent only when all retained command metadata agrees. One dispatch
 reference names exactly one rule revision and event evaluation, including its
-complete ordered action batch. Recovery reads pending ledger rows without the
-removed or inactive rule, then core decodes and resubmits the exact retained
-payload rather than newly resolved template or configuration values.
+complete ordered action batch. Pending ledger rows remain recoverable without
+the removed or inactive rule, and newly resolved template or configuration
+values cannot replace the committed payload.
 
 ## Ingest
 
