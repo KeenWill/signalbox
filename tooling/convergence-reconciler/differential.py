@@ -76,6 +76,11 @@ class RecordedGitHub(reference.GitHubGraphQL):
         self.current = current
 
     def execute_rest(self, path):
+        if "/files?" in path:
+            key = f"{self.current['baseRefOid']}...{self.current['headRefOid']}"
+            files = self.recording["comparisons"][key]["files"]
+            page = int(path.rsplit("page=", 1)[1])
+            return copy.deepcopy(files[(page - 1) * 100:page * 100])
         key = path.split("/compare/", 1)[1]
         value = self.recording["comparisons"][key]
         if value is None:
