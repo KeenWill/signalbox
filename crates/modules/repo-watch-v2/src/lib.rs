@@ -19,12 +19,11 @@ use signalbox_ownership_seam::{
     CreateSession, CreateSessionOutcome, FinishCondition, LifecycleEvent, LifecycleEventKind,
     MergeableState, ModuleDispatch, OffsetDateTime, PullRequestBody, PullRequestNumber,
     PullRequestTitle, ReactionChange, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId,
-    RepoWatchEvent, RepoWatchEventContentIdentityV1,
-    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
-    RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
-    RepoWatchRuleVersion, RepositorySlug, ReviewState, SessionCommand, SessionCreationCause,
-    SessionId, SessionLifecycleCommand, SessionLifecycleOperation, SessionOwnership, StartGate,
-    StopStickiness,
+    RepoWatchEvent, RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState,
+    SessionCommand, SessionCommandKind, SessionCreationCause, SessionId, SessionLifecycleCommand,
+    SessionLifecycleOperation, SessionOwnership, StartGate, StopStickiness,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -1871,7 +1870,7 @@ impl RepoWatchStore {
                 planned.iter().cloned().zip(retained_actions)
             {
                 if ordinal != Decimal::from(planned.action_ordinal())
-                    || kind != planned.command().kind().durable_spelling()
+                    || kind != command_kind_storage(planned.command().kind())
                 {
                     transaction.rollback().await?;
                     return Ok(DispatchAdmission::ConflictingReuse);
@@ -1982,7 +1981,7 @@ impl RepoWatchStore {
                 .bind(Decimal::from(command.rule_revision().get()))
                 .bind(command.event_id().into_uuid())
                 .bind(command.trigger_sequence().map(Decimal::from))
-                .bind(command.command().kind().durable_spelling())
+                .bind(command_kind_storage(command.command().kind()))
                 .bind(payload)
                 .bind(issued_at)
                 .execute(&mut *transaction)
@@ -2047,7 +2046,7 @@ impl RepoWatchStore {
                         .decode(&payload)
                         .ok_or(StoreError::InvalidRetainedCommand)?;
                     if command.command_id().into_uuid() != command_id
-                        || command.kind().durable_spelling() != kind
+                        || command_kind_storage(command.kind()) != kind
                     {
                         return Err(StoreError::InvalidRetainedCommand);
                     }
@@ -2471,6 +2470,15 @@ const fn event_kind_storage(kind: RepoWatchEventKindNameV1) -> &'static str {
         RepoWatchEventKindNameV1::Unlabeled => "unlabeled",
         RepoWatchEventKindNameV1::BaseAdvanced => "base_advanced",
         RepoWatchEventKindNameV1::ReactionChanged => "reaction_changed",
+    }
+}
+
+const fn command_kind_storage(kind: SessionCommandKind) -> &'static str {
+    match kind {
+        SessionCommandKind::CreateSession => "create_session",
+        SessionCommandKind::SubmitInput => "submit_input",
+        SessionCommandKind::Goal => "goal",
+        SessionCommandKind::Lifecycle => "lifecycle",
     }
 }
 

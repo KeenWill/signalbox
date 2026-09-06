@@ -1410,7 +1410,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .bind(lifecycle_command_id)
     .fetch_one(&module_pool)
     .await?;
-    assert_eq!(retained_reaction_kind, "session_lifecycle");
+    assert_eq!(retained_reaction_kind, "lifecycle");
     let recovered_reaction = store
         .recover_pending_commands(&mut command_codec)
         .await?

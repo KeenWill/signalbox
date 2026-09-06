@@ -480,18 +480,6 @@ pub enum SessionCommandKind {
     Lifecycle,
 }
 
-impl SessionCommandKind {
-    /// Returns the canonical durable-command discriminator.
-    pub const fn durable_spelling(self) -> &'static str {
-        match self {
-            Self::CreateSession => "create_session",
-            Self::SubmitInput => "submit_input",
-            Self::Goal => "goal",
-            Self::Lifecycle => "session_lifecycle",
-        }
-    }
-}
-
 impl SessionCommand {
     /// Admits a repository-watch-dispatched create-session command.
     pub fn create_session(command: CreateSession) -> Result<Self, CommandOutsideSeam> {
@@ -598,7 +586,7 @@ impl std::error::Error for CommandOutsideSeam {}
 mod tests {
     use super::{
         CreateSession, FinishCondition, FinishConditionStatement, SessionCommand,
-        SessionCommandKind, SessionLifecycleCommand, SessionLifecycleOperation, SubmitInput,
+        SessionLifecycleCommand, SessionLifecycleOperation, SubmitInput,
     };
     use signalbox_domain::{
         DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
@@ -668,14 +656,6 @@ mod tests {
                 successor: SessionId::from_uuid(Uuid::from_u128(3)),
             }))
             .is_err()
-        );
-    }
-
-    #[test]
-    fn command_kinds_use_the_core_durable_spellings() {
-        assert_eq!(
-            SessionCommandKind::Lifecycle.durable_spelling(),
-            "session_lifecycle"
         );
     }
 

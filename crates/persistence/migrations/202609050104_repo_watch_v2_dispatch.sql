@@ -28,7 +28,7 @@ CREATE TABLE dispatch_ledger (
     FOREIGN KEY (repository, rule_id, rule_revision)
         REFERENCES rule_revision(repository, rule_id, revision),
     FOREIGN KEY (event_id) REFERENCES gh_event(event_id),
-    CHECK (command_kind = ANY (ARRAY['create_session', 'submit_input', 'goal', 'session_lifecycle'])),
+    CHECK (command_kind = ANY (ARRAY['create_session', 'submit_input', 'goal', 'lifecycle'])),
     CHECK ((created_session_id IS NOT NULL) =
         (command_kind = 'create_session' AND status = 'applied')),
     CHECK (action_ordinal BETWEEN 1 AND 18446744073709551615),
