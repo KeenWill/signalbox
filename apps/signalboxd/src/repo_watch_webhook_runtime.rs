@@ -59,7 +59,6 @@ const HEADER_SIGNATURE: &str = "x-hub-signature-256";
 const HEADER_TRANSFER_ENCODING: &str = "transfer-encoding";
 const JSON_CONTENT_TYPE: &str = "application/json";
 const SHA256_SIGNATURE_PREFIX: &str = "sha256=";
-const SHA256_HEX_BYTES: usize = 64;
 const SHA256_BYTES: usize = 32;
 const MAX_EVENT_NAME_BYTES: usize = 64;
 const MAX_ACTION_NAME_BYTES: usize = 64;
@@ -792,10 +791,9 @@ fn header_text(value: &HeaderValue) -> Result<&str, WebhookHttpRejection> {
 fn require_content_type(headers: &HeaderMap) -> Result<(), WebhookHttpRejection> {
     let content_type = header_text(required_header(headers, HEADER_CONTENT_TYPE)?)?;
     let media_type = content_type
-        .split_once(';')
-        .map_or(content_type, |(media_type, _)| media_type)
-        .trim();
-    if !media_type.eq_ignore_ascii_case(JSON_CONTENT_TYPE) {
+        .parse::<mime::Mime>()
+        .map_err(|_| WebhookHttpRejection::InvalidContentType)?;
+    if media_type.essence_str() != JSON_CONTENT_TYPE {
         return Err(WebhookHttpRejection::InvalidContentType);
     }
     Ok(())
@@ -859,27 +857,11 @@ fn parse_signature(value: &HeaderValue) -> Result<[u8; SHA256_BYTES], WebhookHtt
     let hex = signature
         .strip_prefix(SHA256_SIGNATURE_PREFIX)
         .ok_or(WebhookHttpRejection::InvalidSignature)?;
-    if hex.len() != SHA256_HEX_BYTES {
-        return Err(WebhookHttpRejection::InvalidSignature);
-    }
     let mut decoded = [0_u8; SHA256_BYTES];
-    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
-        decoded[index] = decode_hex_pair(pair)?;
-    }
-    Ok(decoded)
-}
-
-fn decode_hex_pair(pair: &[u8]) -> Result<u8, WebhookHttpRejection> {
-    let high = decode_lower_hex(pair[0])?;
-    let low = decode_lower_hex(pair[1])?;
-    Ok((high << 4) | low)
-}
-
-const fn decode_lower_hex(byte: u8) -> Result<u8, WebhookHttpRejection> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(WebhookHttpRejection::InvalidSignature),
+    if hex::decode_to_slice(hex, &mut decoded).is_ok() && hex::encode(decoded) == hex {
+        Ok(decoded)
+    } else {
+        Err(WebhookHttpRejection::InvalidSignature)
     }
 }
 
