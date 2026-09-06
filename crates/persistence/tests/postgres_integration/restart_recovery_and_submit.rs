@@ -355,11 +355,10 @@ async fn s03_s04_restart_scan_recovers_lost_attempt_once_and_unblocks_successor(
         committed_counts_before_replay
     );
 
-    let (eligible_sessions, _dispatch_starts, continuation) =
-        PostgresEligibilitySweep::new(restarted_pool.clone())
-            .find_sessions()
-            .await?
-            .into_parts();
+    let (eligible_sessions, continuation) = PostgresEligibilitySweep::new(restarted_pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
     assert!(!continuation);
     assert_eq!(eligible_sessions, vec![SessionId::from_uuid(session_uuid)]);
     let activated = activate_earliest_queued_turn(

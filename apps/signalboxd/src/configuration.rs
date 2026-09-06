@@ -23,9 +23,8 @@ use signalbox_domain::{
     RepoWatchEventKindNameV1, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput,
     RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
     RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
-    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
-    ValidatedModelSettings,
+    RepositorySlug, ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay,
+    ToolApprovalPosture, ToolName, UnsupportedModelSetting, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -60,7 +59,6 @@ use signalbox_process_protocol::{
 use signalbox_tools_git::GitIdentity;
 use signalbox_tools_github::{GITHUB_CREDENTIAL_REFERENCE, GitHubEgressPolicy};
 use signalbox_tools_web::WebFetchEgressPolicy;
-use tokio::io::AsyncReadExt;
 use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
@@ -106,7 +104,9 @@ pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
+// numeric-bound: guard - bounds structured repository-watch rules retained by the shared convergence configuration parser
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
+// numeric-bound: guard - bounds actions decoded for one retained repository-watch rule
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
 /// One provider-availability cause a pool trigger can react to.
 ///
@@ -486,7 +486,9 @@ pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// Default maximum assembled source bytes for one conversation import.
 pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
+// numeric-bound: guard - bounds independently credentialed repositories available to the shared convergence sweep
 const MAX_WATCHED_REPOSITORIES: usize = 128;
+// numeric-bound: guard - bounds reviewer identities decoded by the retained configuration grammar
 const MAX_SIGNAL_REVIEWERS: usize = 128;
 
 /// Loopback-only reference address selected when the webhook listener table
@@ -704,23 +706,6 @@ impl RepositoryWatchConfiguration {
             )
         }
     }
-
-    /// Validates every rule against the immutable session-template catalog.
-    pub fn validate_template_contexts(
-        &self,
-        declarations: &[RepoWatchTemplateContextDeclaration],
-    ) -> Result<(), HubModelConfigurationError> {
-        for rule in &self.rules {
-            rule.validate_template_contexts(declarations)
-                .map_err(
-                    |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
-                        rule: rule.id().as_str().to_owned(),
-                        reason: error.to_string(),
-                    },
-                )?;
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -743,11 +728,6 @@ pub struct NumericBoundsConfiguration {
 }
 
 const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
-    (
-        "repository_reconciliation_quantum",
-        NumericBoundKind::Integer,
-    ),
-    ("webhook_drain_work_budget", NumericBoundKind::Duration),
     ("fenced_pool_min_connections", NumericBoundKind::Integer),
     (
         "fenced_pool_floor_reconciliation_interval",
@@ -4520,7 +4500,6 @@ fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
 #[derive(Clone)]
 pub struct FileCredentialAccess {
     paths: Arc<HashMap<CredentialReference, PathBuf>>,
-    maximum_bytes: Option<usize>,
 }
 
 impl FileCredentialAccess {
@@ -4534,18 +4513,6 @@ impl FileCredentialAccess {
     pub fn from_files(files: impl IntoIterator<Item = (CredentialReference, PathBuf)>) -> Self {
         Self {
             paths: Arc::new(files.into_iter().collect()),
-            maximum_bytes: None,
-        }
-    }
-
-    pub(crate) fn new_bounded(
-        path: PathBuf,
-        reference: CredentialReference,
-        maximum_bytes: usize,
-    ) -> Self {
-        Self {
-            paths: Arc::new(HashMap::from([(reference, path)])),
-            maximum_bytes: Some(maximum_bytes),
         }
     }
 
@@ -4575,10 +4542,7 @@ impl CredentialAccess for FileCredentialAccess {
         let path = self.paths.get(reference).ok_or_else(|| {
             CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unmapped)
         })?;
-        let file_bytes = match self.maximum_bytes {
-            Some(maximum_bytes) => read_bounded_credential_file(path, maximum_bytes).await,
-            None => tokio::fs::read(path).await,
-        };
+        let file_bytes = tokio::fs::read(path).await;
         match file_bytes {
             Ok(file_bytes) => Ok(CredentialValue::new(credential_bytes(&file_bytes))),
             Err(error) => Err(CredentialAccessError::new(
@@ -4590,23 +4554,6 @@ impl CredentialAccess for FileCredentialAccess {
                 },
             )),
         }
-    }
-}
-
-async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
-    let file = tokio::fs::File::open(path).await?;
-    let read_limit = u64::try_from(maximum_bytes)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let mut bytes = Vec::with_capacity(maximum_bytes.min(8 * 1_024));
-    file.take(read_limit).read_to_end(&mut bytes).await?;
-    if bytes.len() > maximum_bytes {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "credential file exceeds its accepted byte bound",
-        ))
-    } else {
-        Ok(bytes)
     }
 }
 
@@ -4625,9 +4572,8 @@ pub(crate) mod tests {
     use signalbox_domain::{
         AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
         ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
-        ProviderModelIdentity, PullRequestNumber, ReasoningLevel, RepoWatchDispatchContextShape,
-        RepoWatchEventKindNameV1, RepoWatchRuleVersion, RepoWatchSingletonScope,
-        RepoWatchTemplateContextDeclaration, ResolvedProviderTarget, ServiceTier,
+        ProviderModelIdentity, PullRequestNumber, ReasoningLevel, RepoWatchEventKindNameV1,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, ResolvedProviderTarget, ServiceTier,
         SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
@@ -4737,8 +4683,6 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
 version = 1
 
 [numeric_bounds]
-repository_reconciliation_quantum = 16
-webhook_drain_work_budget = "45s"
 fenced_pool_min_connections = 48
 fenced_pool_floor_reconciliation_interval = "5s"
 fenced_pool_floor_reconciliation_attempt_bound = "30s"
@@ -6156,48 +6100,6 @@ cool_off_seconds = {}
         assert!(rule.matcher().mergeable_state().is_empty());
         assert!(rule.matcher().conclusion().is_empty());
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
-    }
-
-    #[test]
-    fn repository_watch_rule_accepts_its_declared_template_context() {
-        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
-            .expect("repository-watch rule fixture is valid");
-        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
-            .expect("template fixture name is valid");
-        let declaration = RepoWatchTemplateContextDeclaration::try_new(
-            template,
-            vec![RepoWatchDispatchContextShape::PullRequest],
-        )
-        .expect("template declaration is nonempty");
-
-        assert_eq!(
-            configured
-                .repository_watch()
-                .expect("fixture configures repository watch")
-                .validate_template_contexts(&[declaration]),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn repository_watch_rule_rejects_a_template_context_mismatch() {
-        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
-            .expect("repository-watch rule fixture is valid");
-        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
-            .expect("template fixture name is valid");
-        let declaration = RepoWatchTemplateContextDeclaration::try_new(
-            template,
-            vec![RepoWatchDispatchContextShape::Branch],
-        )
-        .expect("template declaration is nonempty");
-        let error = configured
-            .repository_watch()
-            .expect("fixture configures repository watch")
-            .validate_template_contexts(&[declaration])
-            .expect_err("pull-request rule cannot target branch-only template");
-
-        assert!(error.to_string().contains(WATCH_RULE_ID));
-        assert!(error.to_string().contains(WATCH_TEMPLATE));
     }
 
     #[test]
@@ -9923,33 +9825,6 @@ context_window_tokens = 200000
                 .expect("historical profile resolves")
                 .expose_bytes(),
             historical_value
-        );
-    }
-
-    #[tokio::test]
-    async fn bounded_file_credentials_reject_before_accumulating_past_the_limit() {
-        const ACCEPTED_BYTES: usize = 8;
-        let temporary = tempfile::tempdir().expect("fixture directory is available");
-        let path = temporary.path().join("bounded-credential");
-        std::fs::write(&path, vec![b'x'; ACCEPTED_BYTES + 1])
-            .expect("oversized credential fixture is writable");
-        let source = FileCredentialAccess::new_bounded(
-            path,
-            CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
-            ACCEPTED_BYTES,
-        );
-
-        assert_eq!(
-            source
-                .resolve(
-                    &source
-                        .credential_reference()
-                        .expect("the fixture source has one reference"),
-                )
-                .await
-                .expect_err("oversized credential is rejected")
-                .failure,
-            CredentialAccessFailure::Unreadable
         );
     }
 

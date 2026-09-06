@@ -70,13 +70,13 @@ named in a template. The only admission route is a model request through
 with an explicit Delegated approval posture, so the approval judge decides each
 admission against the session's brief. A person decides when the judge escalates
 and when the judge call itself ends in a terminal failure
-([tool-loop.md](../spec/tool-loop.md)). In a repository-watch session that no
-accepted steering or operator resumption attends, an escalation instead closes
-the batch, fails the turn, and blocks the goal. A request naming an ineligible
-bundle or carrying arguments that do not decode resolves before approval and
-creates no attempt. The execution-stage failures are exactly four closed reason
-tokens: `stale_source`, `aggregate_exhaustion`, `target_capability`, and
-`stale_cursor`.
+([tool-loop.md](../spec/tool-loop.md)). A commissioned dispatch keeps an
+escalation parked while its authority stands or the turn has pending steering;
+withdrawn authority without pending steering terminalizes the unattended turn. A
+request naming an ineligible bundle or carrying arguments that do not decode
+resolves before approval and creates no attempt. The execution-stage failures
+are exactly four closed reason tokens: `stale_source`, `aggregate_exhaustion`,
+`target_capability`, and `stale_cursor`.
 
 Every repository-controlled string a list or preview result carries, such as a
 display name, a source or scope path, a description, heading text, or skill

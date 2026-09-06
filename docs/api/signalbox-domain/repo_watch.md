@@ -574,95 +574,6 @@ impl fmt::Display for RepoWatchDispatchContextShape {
 }
 ```
 
-## RepoWatchTemplateContextDeclaration
-
-```rust
-pub struct RepoWatchTemplateContextDeclaration {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl RepoWatchTemplateContextDeclaration {
-    pub fn try_new(
-        template: SessionTemplateName,
-        accepted: vec::Vec<RepoWatchDispatchContextShape>,
-    ) -> result::Result<Self, RepoWatchTemplateContextDeclarationError>;
-    pub const fn template(&self) -> &SessionTemplateName;
-    pub fn accepted(&self) -> &[RepoWatchDispatchContextShape];
-    pub fn accepts(&self, shape: RepoWatchDispatchContextShape) -> bool;
-}
-```
-
-## RepoWatchTemplateContextDeclarationError
-
-```rust
-pub enum RepoWatchTemplateContextDeclarationError {
-    NoAcceptedContextShape { template: SessionTemplateName },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for RepoWatchTemplateContextDeclarationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for RepoWatchTemplateContextDeclarationError {}
-```
-
-## PullRequestContext
-
-```rust
-pub struct PullRequestContext {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl PullRequestContext {
-    pub const fn repository(&self) -> &RepositorySlug;
-    pub const fn number(&self) -> PullRequestNumber;
-    pub const fn head_sha(&self) -> &CommitSha;
-    pub const fn head_repository(&self) -> &RepositorySlug;
-    pub const fn head_branch(&self) -> &BranchName;
-    pub const fn base_branch(&self) -> &BranchName;
-    pub const fn event(&self) -> &RepoWatchEvent;
-}
-```
-
-## BranchContext
-
-```rust
-pub struct BranchContext {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl BranchContext {
-    pub const fn repository(&self) -> &RepositorySlug;
-    pub const fn branch(&self) -> &BranchName;
-    pub const fn workflow(&self) -> &WorkflowName;
-    pub const fn conclusion(&self) -> CheckConclusion;
-    pub const fn event(&self) -> &RepoWatchEvent;
-}
-```
-
-## DispatchSessionParameters
-
-```rust
-pub enum DispatchSessionParameters {
-    PullRequest(PullRequestContext),
-    Branch(BranchContext),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl DispatchSessionParameters {
-    pub fn try_from_event(
-        event: RepoWatchEvent,
-    ) -> result::Result<Self, RepoWatchDispatchContextError>;
-    pub const fn shape(&self) -> RepoWatchDispatchContextShape;
-    pub const fn event(&self) -> &RepoWatchEvent;
-}
-```
-
-## RepoWatchDispatchContextError
-
-```rust
-pub enum RepoWatchDispatchContextError {
-    InvalidBranchEvent,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for RepoWatchDispatchContextError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for RepoWatchDispatchContextError {}
-```
-
 ## RepoWatchRuleActionV1
 
 ```rust
@@ -673,31 +584,6 @@ pub enum RepoWatchRuleActionV1 {
 impl RepoWatchRuleActionV1 {
     pub const fn template(&self) -> &SessionTemplateName;
 }
-```
-
-## DispatchSessionAction
-
-```rust
-pub struct DispatchSessionAction {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl DispatchSessionAction {
-    pub const fn new(template: SessionTemplateName, params: DispatchSessionParameters) -> Self;
-    pub const fn template(&self) -> &SessionTemplateName;
-    pub const fn params(&self) -> &DispatchSessionParameters;
-    pub fn synthesized_goal_statement(
-        &self,
-        rule: &RepoWatchRuleId,
-    ) -> result::Result<GoalStatement, GoalTextError>;
-}
-```
-
-## RepoWatchActionV1
-
-```rust
-pub enum RepoWatchActionV1 {
-    DispatchSession(DispatchSessionAction),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## RepoWatchRuleContentDigest
@@ -777,15 +663,6 @@ impl RepoWatchRule {
     pub fn identity_field_digests(
         &self,
     ) -> vec::Vec<(RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest)>;
-    pub fn required_context_shapes(&self) -> vec::Vec<RepoWatchDispatchContextShape>;
-    pub fn validate_template_contexts(
-        &self,
-        declarations: &[RepoWatchTemplateContextDeclaration],
-    ) -> result::Result<(), RepoWatchRuleValidationError>;
-    pub fn actions_for_event(
-        &self,
-        event: &RepoWatchEvent,
-    ) -> result::Result<vec::Vec<RepoWatchActionV1>, RepoWatchDispatchContextError>;
 }
 ```
 
@@ -795,16 +672,7 @@ impl RepoWatchRule {
 pub enum RepoWatchRuleValidationError {
     NoActions,
     SubsecondCooldown,
-    BranchEventWithPullRequestSingleton {
-        scope: RepoWatchSingletonScope,
-    },
-    TemplateNotDeclared {
-        template: SessionTemplateName,
-    },
-    TemplateRejectsContext {
-        template: SessionTemplateName,
-        shape: RepoWatchDispatchContextShape,
-    },
+    BranchEventWithPullRequestSingleton { scope: RepoWatchSingletonScope },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchRuleValidationError {

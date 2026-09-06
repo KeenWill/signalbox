@@ -73,8 +73,7 @@ activates and closes the exact prospective Prepared call with that evidence.
 Only a successful estimate whose input plus full output reservation is at most
 95 percent of the configured context ceiling enters the counted activation
 transaction; otherwise the turn compacts. An estimate that returns no validated
-count falls through to ordinary uncounted activation. A reserved dispatch-start
-leaves an Anthropic turn queued before count or attachment I/O.
+count falls through to ordinary uncounted activation.
 
 Anthropic ordinary calls enable provider-default server-side compaction only
 when the exact effective provider target's configured capabilities explicitly

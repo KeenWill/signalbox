@@ -5,9 +5,7 @@
 //! Terminalization then re-runs that same query for the one session under the
 //! scheduler lock and commits the shared failed-turn transition
 //! ([`crate::startup`]) rather than editing lifecycle rows here, so a stale
-//! turn ends exactly as a recovered one does and every trigger that watches
-//! for a terminal turn — repository-watch dispatch release included — fires
-//! without this module naming any of them.
+//! turn ends exactly as a recovered one does.
 
 use std::{future::Future, num::NonZeroU64, time::Duration};
 

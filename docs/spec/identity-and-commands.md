@@ -47,11 +47,13 @@ and returned as a replay outcome, not as a registry error.
 the user, daemon core, the model output of one turn, the startup recovery scan,
 or the execution of one tool request. Only submit-input and metadata-replacement
 commands carry an actor in their durable payload. Repository watch and
-commissioned dispatch stamp a module issuer principal on the registry row and
-compose their initial input, the one automated action attributed to the user,
-under the user actor. Actor answers who issued one command; a session's creation
-cause, owned by [sessions-and-transcript](sessions-and-transcript.md), answers
-why the session exists, and neither fact substitutes for the other.
+commissioned dispatch stamp a module issuer principal on the registry row.
+Commissioned dispatch composes its initial input, the one automated action
+attributed to the user, under the user actor. Repository watch emits a held
+create-session command and does not submit an initial input. Actor answers who
+issued one command; a session's creation cause, owned by
+[sessions-and-transcript](sessions-and-transcript.md), answers why the session
+exists, and neither fact substitutes for the other.
 
 ## Design decisions
 
@@ -65,10 +67,8 @@ nothing measures the effect.
 
 When the number of identities a transition needs is known only under the
 repository lock, orchestration passes a generator closure into the transaction
-port, except the repository-watch dispatch obligation, whose identity the
-recording statement mints. Why: the domain transition receives a typed identity,
-the domain stays generation-free and deterministic, and no inventory read
-precedes the lock.
+port. Why: the domain transition receives a typed identity, the domain stays
+generation-free and deterministic, and no inventory read precedes the lock.
 
 Each command's comparison payload and result live in typed relational records,
 so they stay reviewable and constraint-checked; there is no universal JSONB or
@@ -115,9 +115,8 @@ request construction and again at persistence decoding. Why: they are common
 accidental defaults and would otherwise become permanent user-global claims.
 
 Orchestration generates each fresh identity candidate immediately before the
-domain transition that creates the fact, except the repository-watch dispatch
-obligation, whose identifier Postgres generates in the statement that records
-it. No Postgres column has an identity-generating default.
+domain transition that creates the fact. No Postgres column has an
+identity-generating default.
 
 Recovery reconstitutes committed facts under their stored identities; the
 startup scan mints identities only for the new facts it records.

@@ -25,13 +25,7 @@
 //! Paths that acquire the satellite outside a scheduler statement hold no
 //! scheduler row in the same transaction. Session creation inserts it. The
 //! lifecycle store's own park, closure, and ownership writes take the `session`
-//! row first. Repository-watch terminal goal commands lock the complete
-//! unreleased dispatch cohort in session-identity order before taking their
-//! triggering session's scheduler/lifecycle lock; other terminal goal
-//! projections take the same ordered cohort in the projection trigger.
-//! Blocker replacement and park release serialize on the stable obligation
-//! identity, then take the projected subjects in session-identity order before
-//! changing the obligation row.
+//! row first.
 //!
 //! Inline row locks (the SQL remains at its call site):
 //! - `review_workflow::append_finding_event`: ordinary events lock every
@@ -58,24 +52,13 @@
 //!     `MODEL_CALL_OUTBOX_ORDER_GUARD` key before credential or outbox locks;
 //!     `lock_credential_pool_action_head`: `credential_pool_action_head:`
 //!     plus profile reference, in sorted profile order for several profiles.
-//!   - `convergence_sweep::lock_model_activity_fence`:
-//!     `convergence_model_activity:` plus session identity, before first-call
-//!     creation or inactivity parking; parking locks its cohort in session order.
 //!   - `commissioned_dispatch::lock_pull_request_target`:
 //!     `commissioned-dispatch:` plus repository and pull-request number,
 //!     before target admission or release.
-//!   - `repo_watch::{commit_inner, record_convergence_assessments,
-//!     plan_stale_review_clearances, claim_pending_stale_review_clearances}`:
-//!     repository slug before cursor or recovery-page reads.
-//!   - `repo_watch_dispatch::lock_text`: repository slug, configuration key,
-//!     or dispatch singleton key; evaluation takes repository before singleton.
 //!   - `search::SearchRepository::publish`: source kind
 //!     and artifact identity joined with `chr(31)`, before identity checks/write.
-//! - `repo_watch_webhook::inject_projection_wedge` (`test-support`) installs
-//!   `wedge_repo_watch_webhook_projection`, which takes an exclusive
-//!   `pg_advisory_xact_lock` on the supplied integer during projection insertion.
 //!
-//! Schema lock sites below name SQL functions, grouped by migration family.
+//! SQL lock sites below name functions in migration files, grouped by family.
 //! Arrows describe acquisition within a function; row sets name their SQL sort
 //! order. Advisory locks are exclusive transaction locks with
 //! `hashtextextended(key, 0)`. Repeated definitions share an entry where their
@@ -149,7 +132,9 @@
 //!   `runner_enrollment FOR SHARE` -> `runner_connection_authority_head FOR SHARE`
 //!   -> `runner_current_connection_loss FOR SHARE`.
 //!
-//! `repo_watch`, `session_lifecycle_satellite`, and `session_deadline_runtime`:
+//! Migration-only sites in `repo_watch`, `session_lifecycle_satellite`, and
+//! `session_deadline_runtime`: `202609050105_drop_repo_watch_v1.sql` removes
+//! these locks from the installed schema.
 //! - `adjust_repo_watch_pull_request_work_count`:
 //!   `repo_watch_current_pull_request_work_count FOR UPDATE`.
 //! - `repo_watch_owe_dispatch_requeue`: singleton-key advisory lock ->
@@ -166,7 +151,9 @@
 //!   `session_lifecycle FOR UPDATE` in session order.
 //! - `lock_repo_watch_deactivation_session_lifecycles`: subject
 //!   `session_lifecycle FOR UPDATE` in session order.
-//! - `repo_watch_v2_dispatch::enforce_dispatch_reference_origin`:
+//!
+//! `repo_watch_v2_dispatch`:
+//! - `enforce_dispatch_reference_origin`:
 //!   advisory key `dispatch:` plus dispatch reference before origin checking.
 //!
 //! `review`:
@@ -209,86 +196,6 @@ pub(crate) const PROGRAM_JOURNAL_SEQUENCE: &str = "SELECT
   WHERE run_id = $1
   FOR UPDATE";
 
-pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
-    "SELECT latest_event_id, settled_kind, settled_dispatch_id,
-            parked_at IS NOT NULL AS parked
-       FROM repo_watch_dispatch_obligation
-      WHERE obligation_id = $1
-      FOR UPDATE";
-
-pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
-                hashtextextended(repo_watch_dispatch_obligation_lock_key($1), 0)
-            )";
-
-pub(crate) const REPO_WATCH_TERMINAL_GOAL_COHORT: &str = "SELECT lifecycle.session_id
-       FROM session_lifecycle AS lifecycle
-       JOIN (
-            SELECT cohort.session_id
-              FROM repo_watch_dispatch_action AS subject
-              JOIN repo_watch_dispatch_action AS cohort
-                ON cohort.dispatch_id = subject.dispatch_id
-             WHERE subject.session_id = $1
-               AND NOT EXISTS (
-                    SELECT 1
-                      FROM repo_watch_dispatch_release AS released
-                     WHERE released.dispatch_id = subject.dispatch_id
-               )
-       ) AS dispatch_subject USING (session_id)
-      ORDER BY lifecycle.session_id
-        FOR UPDATE OF lifecycle";
-
-pub(crate) const REPO_WATCH_OBLIGATION_BLOCKER_SUBJECTS: &str = "SELECT lifecycle.session_id
-       FROM session_lifecycle AS lifecycle
-       JOIN (
-            SELECT current.external_blocking_session_id AS session_id
-              FROM repo_watch_dispatch_obligation AS current
-             WHERE current.obligation_id = $1
-               AND current.external_blocking_session_id IS NOT NULL
-            UNION
-            SELECT action.session_id
-              FROM repo_watch_dispatch_obligation AS current
-              JOIN repo_watch_dispatch_action AS action
-                ON action.dispatch_id = current.blocking_dispatch_id
-             WHERE current.obligation_id = $1
-            UNION
-            SELECT $2::uuid WHERE $2::uuid IS NOT NULL
-            UNION
-            SELECT action.session_id
-              FROM repo_watch_dispatch_action AS action
-             WHERE action.dispatch_id = $3
-       ) AS subject USING (session_id)
-      ORDER BY lifecycle.session_id
-        FOR UPDATE OF lifecycle";
-
-pub(crate) const REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS: &str = "SELECT obligation.obligation_id
-           FROM repo_watch_dispatch_obligation AS obligation
-          WHERE obligation.settled_kind IS NULL
-            AND obligation.parked_state_event_id IS DISTINCT FROM $3
-            AND (
-                EXISTS (
-                    SELECT 1
-                      FROM repo_watch_event AS event
-                     WHERE event.event_id = obligation.latest_event_id
-                       AND event.repository = $1
-                       AND event.pull_request_number = $2
-                       AND event.event_id <> $3
-                )
-                OR EXISTS (
-                    SELECT 1
-                      FROM repo_watch_event AS parked_state
-                     WHERE parked_state.event_id = obligation.parked_state_event_id
-                       AND parked_state.repository = $1
-                       AND parked_state.pull_request_number = $2
-                )
-            )
-          ORDER BY obligation.obligation_id
-            FOR UPDATE";
-
-pub(crate) const REPO_WATCH_WEBHOOK_DELIVERY: &str = "SELECT receipt_sequence
-       FROM repo_watch_webhook_delivery
-      WHERE hook_id = $1 AND delivery_id = $2
-      FOR UPDATE";
-
 pub(crate) const START_ELIGIBLE_TURN: &str = "WITH satellite AS (
                 SELECT session_id
                   FROM session_lifecycle
@@ -307,54 +214,6 @@ pub(crate) const START_ELIGIBLE_TURN: &str = "WITH satellite AS (
                  WHERE session_id = (SELECT session_id FROM satellite)
                  FOR UPDATE
             )";
-
-pub(crate) const EXPIRED_DISPATCH_START_LEASE: &str = "SELECT EXISTS (
-        SELECT 1
-          FROM repo_watch_dispatch_start_lease AS lease
-         WHERE lease.session_id = $1
-           AND lease.expires_at <= clock_timestamp()
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM model_call AS call
-                 WHERE call.session_id = lease.session_id
-           )
-           AND (
-                (
-                    NOT EXISTS (
-                        SELECT 1
-                          FROM repo_watch_dispatch_start_lease_expiration AS expired
-                         WHERE expired.dispatch_id = lease.dispatch_id
-                           AND expired.action_ordinal = lease.action_ordinal
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1
-                          FROM repo_watch_dispatch_release AS released
-                         WHERE released.dispatch_id = lease.dispatch_id
-                    )
-                )
-                OR EXISTS (
-                    SELECT 1
-                      FROM turn_lifecycle AS lifecycle
-                      JOIN goal_turn AS goal
-                        ON goal.session_id = lifecycle.session_id
-                       AND goal.turn_id = lifecycle.turn_id
-                      JOIN repo_watch_dispatch_start_lease_expiration AS expired
-                        ON expired.dispatch_id = lease.dispatch_id
-                       AND expired.action_ordinal = lease.action_ordinal
-                       AND expired.goal_command_id IS NOT NULL
-                     WHERE lifecycle.session_id = lease.session_id
-                       AND lifecycle.state_kind = 'active'
-                       AND goal.goal_generation = 1
-                       AND NOT EXISTS (
-                            SELECT 1
-                              FROM goal_turn AS successor_goal
-                             WHERE successor_goal.session_id = lease.session_id
-                               AND successor_goal.goal_generation >
-                                   goal.goal_generation
-                       )
-                )
-           )
-    )";
 
 pub(crate) const STARTUP_RECOVERY: &str = "WITH satellite AS (
                 SELECT session_id

@@ -240,10 +240,6 @@ impl tool_loop::PostgresToolLoopRepository {
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<option::Option<signalbox_domain::TurnId>, tool_loop::ToolLoopRepositoryError>;
-    pub async fn find_dispatch_start_turn(
-        &self,
-        session: signalbox_domain::SessionId,
-    ) -> result::Result<option::Option<signalbox_domain::TurnId>, tool_loop::ToolLoopRepositoryError>;
     pub async fn resume_child_wait(
         &self,
         session: signalbox_domain::SessionId,
