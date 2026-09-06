@@ -195,14 +195,15 @@ where
     ConverterError: fmt::Display,
     StoreError: fmt::Display,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<ConverterError, StoreError> error::Error
     for ImportConversationError<ConverterError, StoreError>
 where
-    ConverterError: error::Error + 'static,
-    StoreError: error::Error + 'static,
+    ConverterError: error::Error + 'static + fmt::Display,
+    StoreError: error::Error + 'static + fmt::Display,
 {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 
