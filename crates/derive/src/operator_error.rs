@@ -341,27 +341,19 @@ fn display(
 }
 
 fn source_coercion() -> TokenStream {
-    let auto_traits = [
-        quote!(),
-        quote!(+ ::std::marker::Send),
-        quote!(+ ::std::marker::Sync),
-        quote!(+ ::std::marker::Send + ::std::marker::Sync),
-    ];
-    let erased = auto_traits.iter().map(|traits| {
-        quote! {
-            impl __SignalboxAsDynError for (dyn ::std::error::Error #traits + 'static) {
-                fn __signalbox_as_dyn_error(&self) -> &(dyn ::std::error::Error + 'static) { self }
-            }
-        }
-    });
     quote! {
-        trait __SignalboxAsDynError {
-            fn __signalbox_as_dyn_error(&self) -> &(dyn ::std::error::Error + 'static);
+        trait __SignalboxSourceRef<'__source> {
+            type Target: ::std::error::Error + ?Sized + 'static;
+            fn __signalbox_source_ref(self) -> &'__source Self::Target;
         }
-        impl<__Error: ::std::error::Error + 'static> __SignalboxAsDynError for __Error {
-            fn __signalbox_as_dyn_error(&self) -> &(dyn ::std::error::Error + 'static) { self }
+        impl<'__source, __Error: ::std::error::Error + 'static> __SignalboxSourceRef<'__source> for &&'__source __Error {
+            type Target = __Error;
+            fn __signalbox_source_ref(self) -> &'__source Self::Target { *self }
         }
-        #(#erased)*
+        impl<'__source, __Error: ::std::error::Error + ?Sized + 'static> __SignalboxSourceRef<'__source> for &'__source ::std::boxed::Box<__Error> {
+            type Target = __Error;
+            fn __signalbox_source_ref(self) -> &'__source Self::Target { self.as_ref() }
+        }
     }
 }
 
@@ -479,7 +471,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             [field] => {
                 has_sources = true;
                 let binding = &field.binding;
-                quote!(Some(#binding.__signalbox_as_dyn_error()))
+                quote!(Some((&#binding).__signalbox_source_ref()))
             }
             _ => {
                 return Err(syn::Error::new_spanned(
@@ -548,13 +540,12 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             parse_quote!(::std::error::Error + 'static),
         )?;
         if options.error_bound.is_none()
-            && options.display_bound.is_none()
-            && !format_bounds.is_empty()
+            && let Some(clause) = &display_generics.where_clause
         {
             generics
                 .make_where_clause()
                 .predicates
-                .extend(format_bounds);
+                .extend(clause.predicates.clone());
         }
         let (implementation, _, clause) = generics.split_for_impl();
         let coercion = has_sources.then(source_coercion);
