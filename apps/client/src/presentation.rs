@@ -480,6 +480,7 @@ pub(crate) enum SnapshotSelection {
 #[derive(Default)]
 struct SnapshotSelectionContext {
     requests: HashSet<CanonicalUuid>,
+    cancelled_model_call: Option<CanonicalUuid>,
 }
 
 /// One imported entry as the imported verb presents it.
@@ -3110,6 +3111,7 @@ impl SnapshotSelection {
         let mut terminal_results = HashSet::new();
         let mut reconciliation_call = None;
         let mut reconciliation_proposals = HashSet::new();
+        let mut cancelled_model_call = None;
         let mut anchor_found = false;
         for record in snapshot.replay()? {
             let record = record?;
@@ -3132,6 +3134,20 @@ impl SnapshotSelection {
                         && terminal_frontier_id == *stored_frontier
                 ) {
                     anchor_found = true;
+                }
+                if let (
+                    Self::Cancelled {
+                        turn_id: selected_turn,
+                        ..
+                    },
+                    TurnState::Cancelled {
+                        terminal_model_call_id,
+                        ..
+                    },
+                ) = (self, &turn.state)
+                    && selected_turn == turn.turn_id
+                {
+                    cancelled_model_call = *terminal_model_call_id;
                 }
                 continue;
             }
@@ -3207,6 +3223,7 @@ impl SnapshotSelection {
                 }
                 Ok(SnapshotSelectionContext {
                     requests: proposals,
+                    cancelled_model_call: None,
                 })
             }
             Self::ToolBatchProposed { .. } if anchor_found => {
@@ -3217,6 +3234,7 @@ impl SnapshotSelection {
             {
                 Ok(SnapshotSelectionContext {
                     requests: terminal_results,
+                    cancelled_model_call,
                 })
             }
             Self::Refused { .. } => Ok(SnapshotSelectionContext::default()),
@@ -3229,6 +3247,7 @@ impl SnapshotSelection {
             {
                 Ok(SnapshotSelectionContext {
                     requests: reconciliation_proposals,
+                    cancelled_model_call: None,
                 })
             }
             Self::ToolBatchProposed { .. } => Err(ClientError::Protocol(
@@ -3262,6 +3281,13 @@ impl SnapshotSelection {
                     model_call_id: entry_call,
                 }),
             ) => turn_id == *entry_turn && model_call_id == *entry_call,
+            (
+                Self::Cancelled { turn_id, .. },
+                SnapshotEntryKind::Marker(TranscriptEntry::ProviderCompaction {
+                    turn_id: entry_turn,
+                    model_call_id: entry_call,
+                }),
+            ) => turn_id == *entry_turn && context.cancelled_model_call == Some(*entry_call),
             (
                 Self::ToolBatchProposed {
                     turn_id,
@@ -5930,24 +5956,54 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_terminal_reread_selects_only_its_exact_marker() {
+    fn cancelled_terminal_reread_includes_the_producing_calls_compaction_marker() {
         let selected_turn = wire_uuid(1);
-        let later_turn = wire_uuid(2);
+        let selected_call = wire_uuid(2);
+        let other_call = wire_uuid(3);
+        let later_turn = wire_uuid(4);
         let mut snapshot = TranscriptSnapshot::from_messages(
             12,
             [
+                ServerMessage::TranscriptTurn {
+                    turn_id: selected_turn,
+                    acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
+                    state: TurnState::Cancelled {
+                        terminal_frontier_id: wire_uuid(5),
+                        terminal_attempt_id: wire_uuid(6),
+                        terminal_model_call_id: Some(selected_call),
+                    },
+                },
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(0),
                     source_session_id: wire_uuid(10),
                     entry_id: wire_uuid(11),
-                    entry: TranscriptEntry::TurnCancelled {
+                    entry: TranscriptEntry::ProviderCompaction {
                         turn_id: selected_turn,
+                        model_call_id: selected_call,
                     },
                 },
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(1),
                     source_session_id: wire_uuid(10),
                     entry_id: wire_uuid(12),
+                    entry: TranscriptEntry::ProviderCompaction {
+                        turn_id: selected_turn,
+                        model_call_id: other_call,
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(2),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(13),
+                    entry: TranscriptEntry::TurnCancelled {
+                        turn_id: selected_turn,
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(3),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(14),
                     entry: TranscriptEntry::TurnCancelled {
                         turn_id: later_turn,
                     },
@@ -5964,13 +6020,17 @@ mod tests {
                 &mut displayed,
                 SnapshotSelection::Cancelled {
                     turn_id: selected_turn,
-                    terminal_entry_id: wire_uuid(11),
+                    terminal_entry_id: wire_uuid(13),
                 },
             )
             .expect("selected cancellation marker must render");
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
-        assert!(rendered.contains(&selected_turn.to_string()));
+        assert!(rendered.contains(&format!(
+            "provider_compaction turn={selected_turn} call={selected_call}"
+        )));
+        assert!(!rendered.contains(&format!("call={other_call}")));
+        assert!(rendered.contains("turn_cancelled"));
         assert!(!rendered.contains(&later_turn.to_string()));
         assert!(stderr.is_empty());
     }

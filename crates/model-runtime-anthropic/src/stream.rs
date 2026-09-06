@@ -1309,7 +1309,7 @@ mod tests {
               \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
             b"event: content_block_delta\n\
               data: {\"type\":\"content_block_delta\",\"index\":0,\
-              \"delta\":{\"type\":\"compaction_delta\",\"content\":\"summary\",\"encrypted_content\":\"opaque==\"}}\n\n",
+              \"delta\":{\"type\":\"compaction_delta\",\"content\":\"\\u0073ummary\",\"encrypted_content\":\"opaque==\"}}\n\n",
             b"event: content_block_stop\n\
               data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             b"event: message_delta\n\
@@ -1339,6 +1339,10 @@ mod tests {
                 "content": "summary",
                 "encrypted_content": "opaque==",
             })
+        );
+        assert!(
+            !block_json.contains(r"\u0073"),
+            "the streamed fields are structurally reconstructed before durable replay"
         );
     }
 

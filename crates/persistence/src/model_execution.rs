@@ -702,7 +702,8 @@ impl PostgresModelCallRepository {
     /// frontier, so the allowance covers exactly the content appended after the
     /// provider counted its input. `replays_provider_compaction` states whether
     /// the effective target includes opaque provider-compaction members in that
-    /// request projection.
+    /// request projection and therefore whether final-iteration retained counts
+    /// describe the next request.
     pub async fn latest_reported_usage<'a>(
         &self,
         session: SessionId,
@@ -1061,15 +1062,24 @@ impl PostgresModelCallRepository {
                 })
                 .transpose()
         };
-        let retained_input_tokens = decode("retained_input_tokens")?;
-        let retained_output_tokens = decode("retained_output_tokens")?;
-        if row.try_get::<bool, _>("has_provider_compaction")?
+        let mut retained_input_tokens = decode("retained_input_tokens")?;
+        let mut retained_output_tokens = decode("retained_output_tokens")?;
+        let has_provider_compaction = row.try_get::<bool, _>("has_provider_compaction")?;
+        if has_provider_compaction
             && (retained_input_tokens.is_none() || retained_output_tokens.is_none())
         {
             return Err(ModelCallCorruption::Missing(
                 "provider-compaction retained iteration token counts",
             )
             .into());
+        }
+        if has_provider_compaction && !replays_provider_compaction {
+            // Without the durable block, the next request replays the preserved
+            // pre-compaction history. Final-iteration retained counts describe
+            // a projection that request will not carry; fall back to the
+            // conservative aggregate usage evidence instead.
+            retained_input_tokens = None;
+            retained_output_tokens = None;
         }
         Ok(Some(ReportedModelCallUsage {
             usage: ProviderReportedTokenUsage::unreported()

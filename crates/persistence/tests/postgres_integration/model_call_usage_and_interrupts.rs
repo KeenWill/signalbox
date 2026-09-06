@@ -320,6 +320,19 @@ async fn refused_response_commits_prior_provider_compaction() -> Result<(), Box<
         !retained.output_is_retained(),
         "refusal output never enters the next request"
     );
+    let disabled = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            false,
+            terminal_frontier,
+        )
+        .await?
+        .expect("aggregate usage remains a conservative fallback");
+    assert_eq!(disabled.usage(), reported_usage);
+    assert_eq!(disabled.retained_input_tokens(), None);
+    assert_eq!(disabled.retained_output_tokens(), None);
     let (eligible, dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
