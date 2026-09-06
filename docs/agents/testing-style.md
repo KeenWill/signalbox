@@ -52,10 +52,9 @@ shortened.
    Fixture-based assertions follow the setup when it changes; re-encoded
    constants silently diverge from it.
 
-7. **One behavior per test, named for the behavior.** The repository's
-   `sNN_invNNN_...` naming convention already does this; keep it. A test that
-   needs "and" in its description is two tests — unless the requirement itself
-   is atomic (rule 17's exception).
+7. **One behavior per test, named for the behavior.** A test that needs "and" in
+   its description is two tests — unless the requirement itself is atomic (rule
+   17's exception).
 
 8. **Judge every test as a classifier.** For each test, name the real bug it
    would catch and the false alarm it could raise. The ideal test fails only
