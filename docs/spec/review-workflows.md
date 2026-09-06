@@ -250,9 +250,11 @@ settled check inventories, current-head checks, mergeability, base ancestry,
 draft status, and description length according to explicit policy. Disposition
 grammars, informational classes and acknowledgements, the planning marker, and
 draft handling are policy fields; the description word limit is optional and
-absent by default. Repository values live in the crate policy example. Every
-recorded observation ends with a complete identity query. A later authenticated
-body finding invalidates an earlier quiet review on the same head. An escalation
+absent by default. Repository values live in the crate policy example, whose
+fixing-revision grammar is
+`` (?i)^fixed in (?:commits?\s+)?`?([0-9a-f]{7,40})`? ``. Every recorded
+observation ends with a complete identity query. A later authenticated body
+finding invalidates an earlier quiet review on the same head. An escalation
 reply must follow the reviewer's latest edit. Incomplete pagination or a changed
 pull-request identity during decision revalidation is an error; the predicate
 performs no I/O. Persisted authentication and review waves are bound to the
