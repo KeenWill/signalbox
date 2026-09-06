@@ -10,13 +10,13 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::{Value, json};
 use signalbox_ownership_seam::{
     BranchName, CheckConclusion, ChecksOutcome, CommandOutsideSeam, CommandSettlement, CommitSha,
-    CreateSession, FinishCondition, LifecycleEvent, LifecycleEventKind, MergeableState,
-    ModuleDispatch, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    ReactionChange, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
-    RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
-    RepoWatchEventOccurrenceV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleActionV1,
-    RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState, SessionCommand,
-    SessionCommandKind, SessionCreationCause, SessionId, SessionLifecycleCommand,
+    CreateSession, CreateSessionOutcome, FinishCondition, LifecycleEvent, LifecycleEventKind,
+    MergeableState, ModuleDispatch, OffsetDateTime, PullRequestBody, PullRequestNumber,
+    PullRequestTitle, ReactionChange, ReactionSubject, RepoWatchAuthorLogin, RepoWatchDispatchId,
+    RepoWatchEvent, RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1,
+    RepoWatchEventKindV1, RepoWatchEventOccurrenceV1, RepoWatchEventTarget, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, ReviewState,
+    SessionCommand, SessionCommandKind, SessionCreationCause, SessionId, SessionLifecycleCommand,
     SessionLifecycleOperation, SessionOwnership, StartGate, StopStickiness,
 };
 use sqlx::{PgPool, Postgres, Transaction};
@@ -378,6 +378,8 @@ pub trait DispatchReferenceGenerator {
 pub enum LifecycleReactionError {
     /// Only session terminal and goal change events drive these reactions.
     UnsupportedTrigger,
+    /// The reaction command must target the session named by its trigger.
+    MismatchedSession,
     /// Only start release and sticky stop are repo-watch lifecycle reactions.
     UnsupportedCommand,
 }
@@ -387,6 +389,9 @@ impl fmt::Display for LifecycleReactionError {
         formatter.write_str(match self {
             Self::UnsupportedTrigger => {
                 "repository-watch lifecycle reaction has no admitted trigger"
+            }
+            Self::MismatchedSession => {
+                "repository-watch lifecycle reaction targets another session"
             }
             Self::UnsupportedCommand => {
                 "repository-watch lifecycle reaction has no admitted command"
@@ -1855,6 +1860,32 @@ impl RepoWatchStore {
         Ok(updated.rows_affected() == 1)
     }
 
+    /// Records a synchronous terminal result from create-session submission.
+    ///
+    /// Applied creation remains pending until its `SessionCreated` event links
+    /// the created session. A conflicting command identity produces no core
+    /// event, so the submitter must await this update before advancing to the
+    /// next ordered action.
+    pub async fn apply_create_session_outcome(
+        &self,
+        outcome: &CreateSessionOutcome,
+        settled_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let CreateSessionOutcome::ConflictingReuse { command_id } = outcome else {
+            return Ok(false);
+        };
+        let updated = sqlx::query(
+            "UPDATE dispatch_ledger
+                SET status = 'rejected', rejection_kind = 'conflicting_reuse', settled_at = $2
+              WHERE command_id = $1 AND command_kind = 'create_session' AND status = 'pending'",
+        )
+        .bind(command_id.into_uuid())
+        .bind(settled_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     async fn settle_created_session(
         &self,
         dispatch: RepoWatchDispatchId,
@@ -1942,6 +1973,7 @@ pub fn plan_lifecycle_reaction(
     }
     plan_lifecycle_reaction_at_sequence(
         trigger.sequence(),
+        trigger.session(),
         dispatch,
         rule,
         event,
@@ -1952,12 +1984,16 @@ pub fn plan_lifecycle_reaction(
 
 fn plan_lifecycle_reaction_at_sequence(
     trigger_sequence: u64,
+    trigger_session: Option<SessionId>,
     dispatch: RepoWatchDispatchId,
     rule: &RepoWatchRule,
     event: &RepoWatchEvent,
     action_ordinal: NonZeroU64,
     command: SessionLifecycleCommand,
 ) -> Result<PlannedCommand, LifecycleReactionError> {
+    if trigger_session != Some(command.session()) {
+        return Err(LifecycleReactionError::MismatchedSession);
+    }
     let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
         || matches!(
             command.operation(),
@@ -1993,14 +2029,23 @@ pub fn plan_retained_lifecycle_reaction(
     ) {
         return Err(LifecycleReactionError::UnsupportedTrigger);
     }
-    plan_retained_lifecycle_reaction_at_sequence(trigger.sequence(), origin, command)
+    plan_retained_lifecycle_reaction_at_sequence(
+        trigger.sequence(),
+        trigger.session(),
+        origin,
+        command,
+    )
 }
 
 fn plan_retained_lifecycle_reaction_at_sequence(
     trigger_sequence: u64,
+    trigger_session: Option<SessionId>,
     origin: &RetainedDispatchAction,
     command: SessionLifecycleCommand,
 ) -> Result<PlannedCommand, LifecycleReactionError> {
+    if trigger_session != Some(command.session()) {
+        return Err(LifecycleReactionError::MismatchedSession);
+    }
     let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
         || matches!(
             command.operation(),
@@ -2033,6 +2078,7 @@ fn plan_retained_lifecycle_reaction_at_sequence(
 #[cfg(feature = "test-support")]
 pub fn plan_lifecycle_reaction_for_test(
     trigger_sequence: NonZeroU64,
+    trigger_session: SessionId,
     dispatch: RepoWatchDispatchId,
     rule: &RepoWatchRule,
     event: &RepoWatchEvent,
@@ -2041,6 +2087,7 @@ pub fn plan_lifecycle_reaction_for_test(
 ) -> Result<PlannedCommand, LifecycleReactionError> {
     plan_lifecycle_reaction_at_sequence(
         trigger_sequence.get(),
+        Some(trigger_session),
         dispatch,
         rule,
         event,
@@ -2053,10 +2100,16 @@ pub fn plan_lifecycle_reaction_for_test(
 #[cfg(feature = "test-support")]
 pub fn plan_retained_lifecycle_reaction_for_test(
     trigger_sequence: NonZeroU64,
+    trigger_session: SessionId,
     origin: &RetainedDispatchAction,
     command: SessionLifecycleCommand,
 ) -> Result<PlannedCommand, LifecycleReactionError> {
-    plan_retained_lifecycle_reaction_at_sequence(trigger_sequence.get(), origin, command)
+    plan_retained_lifecycle_reaction_at_sequence(
+        trigger_sequence.get(),
+        Some(trigger_session),
+        origin,
+        command,
+    )
 }
 
 /// Returns configured rules whose checked matcher accepts one normalized fact.

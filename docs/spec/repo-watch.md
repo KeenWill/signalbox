@@ -79,14 +79,17 @@ new session. Initial actions and lifecycle reactions are retained and submitted
 in strictly increasing, unique action-ordinal order. A created session indexes
 its retained rule revision, event, dispatch, and action ordinal, so lifecycle
 reaction planning survives rule removal and process restart. Equal evaluation
-recovery finds that retained batch before considering newly reserved dispatch
-or command identities. A durable delivery intent records the reserved submit-command,
-accepted-input, turn, and cancellation candidates beside the applied link, so
-equal recovery reuses the committed batch. An obligation records exactly one
-blocker: the occupying repository-watch dispatch or an external commissioned
-session. Every park and release of an obligation appends a journal row naming
-the count at the transition and, for a release, its operator or the causing
-event, under a schema-owned vocabulary. Readiness in
+recovery finds that retained batch before considering newly reserved dispatch or
+command identities. A lifecycle reaction targets the session named by its
+trigger. Before submitting a later action, the dispatcher records a synchronous
+create-session command-identity conflict as rejected; an applied creation
+settles from its `SessionCreated` event. A durable delivery intent records the
+reserved submit-command, accepted-input, turn, and cancellation candidates
+beside the applied link, so equal recovery reuses the committed batch. An
+obligation records exactly one blocker: the occupying repository-watch dispatch
+or an external commissioned session. Every park and release of an obligation
+appends a journal row naming the count at the transition and, for a release, its
+operator or the causing event, under a schema-owned vocabulary. Readiness in
 `repo_watch_outstanding_dispatch_obligation` excludes a parked obligation and,
 independently, one whose count has reached the budget.
 

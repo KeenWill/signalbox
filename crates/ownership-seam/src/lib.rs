@@ -5,7 +5,7 @@
 //! handles and the wider core outbox vocabulary do not cross this boundary.
 
 pub use signalbox_application::{
-    RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
+    CreateSessionOutcome, RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
     RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
     RepoWatchEventOccurrenceV1, derive_repo_watch_events,
 };
