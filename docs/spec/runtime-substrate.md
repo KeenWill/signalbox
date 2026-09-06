@@ -311,10 +311,11 @@ no error envelope, admits the proof only when its event stream closes with a
 `turn.failed` event; a stream-level error that no matching `turn.failed` event
 closes carries none.
 
-The Anthropic proof set is `rate_limit_error`, `overloaded_error`, and
-`api_error` at HTTP 500. The OpenAI proof set is `rate_limit_exceeded`,
-`rate_limit_error`, `insufficient_quota`, and
-`server_error`/`internal_server_error` at HTTP 500.
+Provider-internal non-acceptance proof is admitted only for Anthropic
+`api_error` at HTTP 500 and OpenAI `server_error`/`internal_server_error` at
+HTTP 500. Anthropic also admits `rate_limit_error` and `overloaded_error`;
+OpenAI also admits `rate_limit_exceeded`, `rate_limit_error`, and
+`insufficient_quota`.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion, and an unrecognized finish token is boundary
