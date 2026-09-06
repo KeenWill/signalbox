@@ -183,6 +183,26 @@ jobs:
             | tail -n1)
           test -n "${executable}" || { echo "::error::no test executable produced"; exit 1; }
           echo "executable=${executable}" >> "${GITHUB_OUTPUT}"
+      - name: Build the temporary Responses probe
+        if: ${{ github.head_ref == 'agent/openai-responses-probe' }}
+        id: probe-build
+        run: |
+          set -euo pipefail
+          cargo test --no-fail-fast -p signalbox-model-runtime-openai \
+            --test live_responses_probe --no-run --message-format=json > "${RUNNER_TEMP}/responses-probe-build.json"
+          executable=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' "${RUNNER_TEMP}/responses-probe-build.json")
+          test -n "${executable}"
+          echo "executable=${executable}" >> "${GITHUB_OUTPUT}"
+      - name: Run the temporary Responses probe
+        if: ${{ github.head_ref == 'agent/openai-responses-probe' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_PROBE_SAME_ORG_API_KEY: ${{ secrets.OPENAI_PROBE_SAME_ORG_API_KEY }}
+          OPENAI_PROBE_OTHER_ORG_API_KEY: ${{ secrets.OPENAI_PROBE_OTHER_ORG_API_KEY }}
+        run: |
+          set -euo pipefail
+          "${{ steps.probe-build.outputs.executable }}" --ignored --exact \
+            the_responses_api_answers_replay_and_compaction_probes --nocapture
       # The key reaches only this step's environment — never argv, never
       # echoed, never exported to an earlier or later step.
       - name: Run one live exchange through the adapter
