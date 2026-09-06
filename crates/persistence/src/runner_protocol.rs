@@ -3842,16 +3842,10 @@ async fn load_enrollment_request_facts(
     connection: &mut PgConnection,
     request: RunnerEnrollmentRequestId,
 ) -> Result<Option<StoredEnrollmentRequestFacts>, RunnerProtocolStoreError> {
-    let row = sqlx::query(
-        "SELECT enrollment_id, runner_id, authentication_reference_id,
-                registration_revision
-           FROM runner_enrollment_request_receipt
-          WHERE request_id = $1
-          FOR SHARE",
-    )
-    .bind(request.into_uuid())
-    .fetch_optional(&mut *connection)
-    .await?;
+    let row = sqlx::query(crate::lock_inventory::RUNNER_ENROLLMENT_REQUEST_FACTS)
+        .bind(request.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
     row.map(|row| {
         Ok(StoredEnrollmentRequestFacts {
             identities: IssuedRunnerEnrollmentIdentities::new(
@@ -6444,24 +6438,14 @@ async fn lock_runner_lease_claim_connection_authority(
     .ok_or(RunnerProtocolStoreError::Domain(
         RunnerDomainError::InvalidState,
     ))?;
-    sqlx::query(
-        "SELECT enrollment_id
-           FROM runner_enrollment
-          WHERE enrollment_id = $1
-          FOR SHARE",
-    )
-    .bind(enrollment)
-    .fetch_one(&mut **transaction)
-    .await?;
-    sqlx::query(
-        "SELECT enrollment_id
-           FROM runner_connection_authority_head
-          WHERE enrollment_id = $1
-          FOR SHARE",
-    )
-    .bind(enrollment)
-    .fetch_optional(&mut **transaction)
-    .await?;
+    sqlx::query(crate::lock_inventory::RUNNER_LEASE_CLAIM_ENROLLMENT)
+        .bind(enrollment)
+        .fetch_one(&mut **transaction)
+        .await?;
+    sqlx::query(crate::lock_inventory::RUNNER_LEASE_CLAIM_CONNECTION_AUTHORITY)
+        .bind(enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?;
     Ok(())
 }
 

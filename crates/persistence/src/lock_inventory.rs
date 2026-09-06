@@ -27,7 +27,7 @@
 //! lifecycle store's own park, closure, and ownership writes take the `session`
 //! row first.
 //!
-//! Inline row locks (the SQL remains at its call site):
+//! Additional row-lock protocols:
 //! - `review_workflow::append_finding_event`: ordinary events lock every
 //!   `review_finding` for the target `FOR NO KEY UPDATE`, by `finding_id`;
 //!   publication reconciliation takes the external link before its finding.
@@ -39,7 +39,7 @@
 //! - `context_compaction::complete`: source `context_frontier` `FOR SHARE`
 //!   after the lifecycle session lock.
 //!
-//! Inline advisory locks:
+//! Advisory-lock protocols:
 //! - `hub_fence::advance_hub_fence`: after `HUB_FENCE_GENERATION`, exclusive
 //!   `pg_advisory_xact_lock` on the prior generation's `advisory_key`, then
 //!   `pg_try_advisory_lock` on that same key to retain it across commit.
@@ -994,3 +994,54 @@ pub(crate) const REVIEW_EXTERNAL_LINK_TRANSITION: &str = "SELECT external_link_i
        FROM review_external_link
       WHERE external_link_id = $1
       FOR NO KEY UPDATE";
+
+pub(crate) const REVIEW_TARGET_FINDINGS_TRANSITION: &str = "SELECT finding_id
+                   FROM review_finding
+                  WHERE target_id = (
+                            SELECT target_id
+                              FROM review_finding
+                             WHERE finding_id = $1
+                        )
+                  ORDER BY finding_id
+                  FOR NO KEY UPDATE";
+
+pub(crate) const RUNNER_ENROLLMENT_REQUEST_FACTS: &str =
+    "SELECT enrollment_id, runner_id, authentication_reference_id,
+                registration_revision
+           FROM runner_enrollment_request_receipt
+          WHERE request_id = $1
+          FOR SHARE";
+
+pub(crate) const RUNNER_LEASE_CLAIM_ENROLLMENT: &str = "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR SHARE";
+
+pub(crate) const RUNNER_LEASE_CLAIM_CONNECTION_AUTHORITY: &str = "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR SHARE";
+
+pub(crate) const CONTEXT_COMPACTION_SOURCE_FRONTIER: &str = "SELECT member_count
+               FROM context_frontier
+              WHERE owning_session_id = $1
+                AND context_frontier_id = $2
+              FOR SHARE";
+
+pub(crate) const HUB_FENCE_POOL_GENERATION: &str = "SELECT pg_advisory_lock_shared($1)";
+
+pub(crate) const HUB_FENCE_PRIOR_GENERATION: &str = "SELECT pg_advisory_xact_lock($1)";
+
+pub(crate) const HUB_FENCE_RETAIN_PRIOR_GENERATION: &str = "SELECT pg_try_advisory_lock($1)";
+
+pub(crate) const HUB_FENCE_RETIRE_GENERATION: &str = "SELECT pg_advisory_lock($1)";
+
+pub(crate) const HASHED_TRANSACTION_ADVISORY_LOCK: &str =
+    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))";
+
+pub(crate) const SEARCH_ARTIFACT_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
+                 hashtextextended(
+                     concat_ws(chr(31), $1::text, $2::text),
+                     0
+                 )
+             )";

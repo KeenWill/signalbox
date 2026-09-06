@@ -6837,7 +6837,7 @@ async fn lock_credential_pool_action_head(
     connection: &mut PgConnection,
     credential_reference: &str,
 ) -> Result<(), ModelCallRepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+    sqlx::query(crate::lock_inventory::HASHED_TRANSACTION_ADVISORY_LOCK)
         .bind(format!(
             "credential_pool_action_head:{credential_reference}"
         ))
@@ -6850,7 +6850,7 @@ async fn lock_credential_pool_action_head(
 pub(crate) async fn acquire_model_call_outbox_order_guard(
     connection: &mut PgConnection,
 ) -> Result<ModelCallOutboxOrderGuard, ModelCallRepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+    sqlx::query(crate::lock_inventory::HASHED_TRANSACTION_ADVISORY_LOCK)
         .bind(MODEL_CALL_OUTBOX_ORDER_GUARD)
         .execute(&mut *connection)
         .await?;
