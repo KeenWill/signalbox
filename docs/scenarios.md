@@ -744,9 +744,9 @@ INV-tagged test names and attached doc comments.
   provider-internal failure with distinct non-acceptance evidence may authorize
   the successor. Rate limiting, overload, and provider-internal failure retry
   the same profile below its bound before the pinned pool action applies.
-  `switch_now` rotates a rate-limit, overload, or quota failure when its pinned
-  trigger selects that action; a provider-internal failure terminalizes at the
-  bound. Classification alone is insufficient. Ambiguity, refusal, credential
+  `switch_now` rotates a rate-limit or overload failure when its pinned trigger
+  selects that action; a provider-internal failure terminalizes at the bound.
+  Classification alone is insufficient. Ambiguity, refusal, credential
   resolution failure, and credential rejection never authorize a successor. The
   successor cannot cross adapters or change the exact target. Exhausting the
   pool follows its configured durable park or known-failure outcome
