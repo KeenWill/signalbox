@@ -27,7 +27,7 @@
 | repo_watch | 51 | 0 | 0 | [types](repo_watch/types.md), [types-2](repo_watch/types-2.md) |
 | review_workflow | 83 | 0 | 1 | [types](review_workflow/types.md), [types-2](review_workflow/types-2.md), [functions](review_workflow/functions.md) |
 | runner | 70 | 0 | 0 | [types](runner/types.md), [types-2](runner/types-2.md) |
-| semantic_entry | 4 | 0 | 0 | [semantic_entry](semantic_entry.md) |
+| semantic_entry | 6 | 0 | 0 | [semantic_entry](semantic_entry.md) |
 | session | 22 | 0 | 0 | [session](session.md) |
 | session_delegation | 37 | 0 | 3 | [session_delegation](session_delegation.md) |
 | session_lifecycle | 23 | 0 | 0 | [session_lifecycle](session_lifecycle.md) |

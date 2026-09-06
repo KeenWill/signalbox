@@ -123,6 +123,7 @@ impl ToolCallProposal {
 ```rust
 pub enum AssistantResponsePart {
     Text(AssistantText),
+    ProviderCompaction(ProviderCompactionBlock),
     ToolCall(ToolCallProposal),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq

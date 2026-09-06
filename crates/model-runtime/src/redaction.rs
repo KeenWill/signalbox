@@ -647,25 +647,35 @@ fn provider_compaction_prefix_completed_by_durable_parts(
 }
 
 fn following_durable_parts_contain(parts: &[AssistantPart], expected: &str) -> bool {
-    parts.iter().any(|part| match part {
-        AssistantPart::Text(text) => text.contains(expected),
-        AssistantPart::Thinking { text, signature } => {
-            text.contains(expected)
-                || signature
-                    .as_deref()
-                    .is_some_and(|signature| signature.contains(expected))
+    let mut pending = String::new();
+    parts.iter().any(|part| {
+        let mut inspect = |fragment: &str| {
+            pending.push_str(fragment);
+            if pending.contains(expected) {
+                return true;
+            }
+            (_, pending) =
+                redact_complete_credentials_and_hold_prefix(std::mem::take(&mut pending), expected);
+            false
+        };
+
+        match part {
+            AssistantPart::Text(text) => inspect(text),
+            AssistantPart::Thinking { text, signature } => {
+                inspect(text) || signature.as_deref().is_some_and(&mut inspect)
+            }
+            AssistantPart::RedactedThinking { data } => inspect(data),
+            AssistantPart::ProviderCompaction { block_json } => {
+                inspect(block_json) || json_escapes_decode_to_credential(block_json, expected)
+            }
+            AssistantPart::ToolCall(proposal) => {
+                inspect(proposal.id.as_str())
+                    || inspect(proposal.name.as_str())
+                    || inspect(&proposal.arguments_json)
+                    || json_escapes_decode_to_credential(&proposal.arguments_json, expected)
+            }
+            AssistantPart::SuppressedToolCall(name) => inspect(name.as_str()),
         }
-        AssistantPart::RedactedThinking { data } => data.contains(expected),
-        AssistantPart::ProviderCompaction { block_json } => {
-            block_json.contains(expected) || json_escapes_decode_to_credential(block_json, expected)
-        }
-        AssistantPart::ToolCall(proposal) => {
-            proposal.id.as_str().contains(expected)
-                || proposal.name.as_str().contains(expected)
-                || proposal.arguments_json.contains(expected)
-                || json_escapes_decode_to_credential(&proposal.arguments_json, expected)
-        }
-        AssistantPart::SuppressedToolCall(name) => name.as_str().contains(expected),
     })
 }
 
@@ -1700,6 +1710,40 @@ mod tests {
 
         let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
             panic!("cross-part credential evidence is rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_provider_compaction_and_multiple_text_parts_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"key_","encrypted_content":"opaque"}"#
+                                .to_string(),
+                    },
+                    AssistantPart::Text("lo".to_string()),
+                    AssistantPart::Text("op tail".to_string()),
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("multi-part credential evidence is rejected");
         };
         assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
         assert_eq!(

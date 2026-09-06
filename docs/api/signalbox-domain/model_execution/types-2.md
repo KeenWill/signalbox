@@ -2,6 +2,22 @@
 
 # model_execution: types-2
 
+## ReclassifiedPendingSteeringTurn
+
+```rust
+pub struct ReclassifiedPendingSteeringTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReclassifiedPendingSteeringTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn source_turn(&self) -> TurnId;
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn order(&self) -> AcceptedInputQueueOrder;
+    pub const fn binding(&self) -> SteeringBinding;
+    pub const fn effective_configuration(&self) -> &EffectiveConfiguration;
+}
+```
+
 ## CompletedModelCallTurn
 
 ```rust
@@ -157,6 +173,7 @@ impl RefusedModelCallTurn {
     pub const fn call(&self) -> &EndedModelCall;
     pub const fn attempt(&self) -> &EndedTurnAttempt;
     pub const fn disposition(&self) -> &TurnDisposition;
+    pub fn provider_compaction_entries(&self) -> &[SemanticTranscriptEntry];
     pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot;
     pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn];
 }

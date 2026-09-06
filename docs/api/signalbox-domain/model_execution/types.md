@@ -512,16 +512,30 @@ pub enum ModelCallTerminalObservation {
     Completed {
         assistant_text: vec::Vec<AssistantText>,
     },
+    CompletedWithProviderCompaction {
+        response: vec::Vec<AssistantResponsePart>,
+        retained_input_tokens: u64,
+        retained_output_tokens: u64,
+    },
     CompletedWithTools {
         response: ToolUsingAssistantResponse,
+        retained_input_tokens: option::Option<u64>,
+        retained_output_tokens: option::Option<u64>,
     },
     KnownFailed,
     Refused,
+    RefusedWithProviderCompaction {
+        provider_compaction: vec::Vec<ProviderCompactionBlock>,
+        retained_input_tokens: u64,
+        retained_output_tokens: u64,
+    },
     Cancelled,
     Ambiguous,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ModelCallTerminalObservation {
+    pub const fn retained_input_tokens(&self) -> option::Option<u64>;
+    pub const fn retained_output_tokens(&self) -> option::Option<u64>;
     pub const fn disposition(&self) -> ModelCallDisposition;
 }
 ```
@@ -563,6 +577,9 @@ pub enum ToolResponsePartIdentity {
     Text {
         entry: SemanticTranscriptEntryId,
     },
+    ProviderCompaction {
+        entry: SemanticTranscriptEntryId,
+    },
     ToolCall {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -572,6 +589,7 @@ pub enum ToolResponsePartIdentity {
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ToolResponsePartIdentity {
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -604,6 +622,9 @@ pub enum StoppedToolResponsePartIdentity {
     Text {
         entry: SemanticTranscriptEntryId,
     },
+    ProviderCompaction {
+        entry: SemanticTranscriptEntryId,
+    },
     ToolCall {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -614,6 +635,7 @@ pub enum StoppedToolResponsePartIdentity {
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl StoppedToolResponsePartIdentity {
     pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn provider_compaction(entry: SemanticTranscriptEntryId) -> Self;
     pub const fn tool_call(
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
@@ -702,6 +724,10 @@ pub struct RefusedModelCallTurnIdentities {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl RefusedModelCallTurnIdentities {
     pub fn new(terminal_frontier: ContextFrontierId) -> Self;
+    pub fn with_provider_compaction_entries(
+        self,
+        identities: vec::Vec<SemanticTranscriptEntryId>,
+    ) -> Self;
     pub fn with_pending_steering_reclassifications(
         self,
         identities: vec::Vec<PendingSteeringReclassificationIdentity>,
@@ -763,21 +789,5 @@ impl AmbiguousModelCallTurnIdentities {
         self,
         identities: vec::Vec<PendingSteeringReclassificationIdentity>,
     ) -> Self;
-}
-```
-
-## ReclassifiedPendingSteeringTurn
-
-```rust
-pub struct ReclassifiedPendingSteeringTurn {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReclassifiedPendingSteeringTurn {
-    pub const fn session(&self) -> SessionId;
-    pub const fn source_turn(&self) -> TurnId;
-    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle;
-    pub const fn turn(&self) -> TurnId;
-    pub const fn order(&self) -> AcceptedInputQueueOrder;
-    pub const fn binding(&self) -> SteeringBinding;
-    pub const fn effective_configuration(&self) -> &EffectiveConfiguration;
 }
 ```
