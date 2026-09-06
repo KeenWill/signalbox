@@ -191,19 +191,19 @@ pub const OPERATOR_STATUS_TRUNK_BASE_BRANCH: &str = "main";
 // numeric-bound: not-a-bound - the fixed width of a git SHA-1 object name
 pub const OPERATOR_STATUS_COMMIT_SHA_LENGTH: usize = 40;
 
+#[derive(signalbox_derive::Accessors)]
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CanonicalUuid(Uuid);
+pub struct CanonicalUuid(
+    /// Returns the underlying UUID for an explicit adapter mapping.
+    #[get(copy, as = "into_uuid")]
+    Uuid,
+);
 
 impl CanonicalUuid {
     /// Constructs the canonical wire value from a UUID.
     pub const fn from_uuid(value: Uuid) -> Self {
         Self(value)
-    }
-
-    /// Returns the underlying UUID for an explicit adapter mapping.
-    pub const fn into_uuid(self) -> Uuid {
-        self.0
     }
 
     fn parse(value: &str) -> Result<Self, CanonicalValueError> {
@@ -290,20 +290,20 @@ impl<'de> Deserialize<'de> for CommandId {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A full-range unsigned 64-bit value encoded as its shortest decimal string.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CanonicalU64(u64);
+pub struct CanonicalU64(
+    /// Returns the numeric value after canonical decoding.
+    #[get(copy, as = "value")]
+    u64,
+);
 
 impl CanonicalU64 {
     /// Wraps an unsigned value for precision-safe wire encoding.
     pub const fn new(value: u64) -> Self {
         Self(value)
-    }
-
-    /// Returns the numeric value after canonical decoding.
-    pub const fn value(self) -> u64 {
-        self.0
     }
 }
 
@@ -321,10 +321,15 @@ impl From<CanonicalU64> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A positive unsigned 64-bit value encoded as its shortest decimal string.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct PositiveCanonicalU64(u64);
+pub struct PositiveCanonicalU64(
+    /// Returns the positive numeric value.
+    #[get(copy, as = "value")]
+    u64,
+);
 
 impl PositiveCanonicalU64 {
     /// Checks that the represented wire integer is positive.
@@ -333,11 +338,6 @@ impl PositiveCanonicalU64 {
             return Err(CanonicalValueError::Decimal);
         }
         Ok(Self(value))
-    }
-
-    /// Returns the positive numeric value.
-    pub const fn value(self) -> u64 {
-        self.0
     }
 }
 
@@ -361,10 +361,15 @@ impl From<signalbox_domain::RunnerGeneration> for PositiveCanonicalU64 {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A lowercase 32-byte digest encoded as exactly 64 hexadecimal characters.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CanonicalDigest(String);
+pub struct CanonicalDigest(
+    /// Borrows the exact canonical hexadecimal spelling.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CanonicalDigest {
     /// Checks the exact lowercase hexadecimal digest spelling.
@@ -374,11 +379,6 @@ impl CanonicalDigest {
             return Err(CanonicalValueError::Digest);
         }
         Ok(Self(value))
-    }
-
-    /// Borrows the exact canonical hexadecimal spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Transfers the exact canonical hexadecimal spelling.
@@ -401,9 +401,14 @@ impl From<CanonicalDigest> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact external blob identity including its fixed SHA-256 algorithm tag.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CanonicalBlobDigest(BlobDigest);
+pub struct CanonicalBlobDigest(
+    /// Returns the validated digest for an explicit adapter mapping.
+    #[get(copy, as = "into_digest")]
+    BlobDigest,
+);
 
 impl CanonicalBlobDigest {
     /// Constructs the exact SHA-256 identity from an already-computed digest.
@@ -414,11 +419,6 @@ impl CanonicalBlobDigest {
     /// Wraps one validated domain digest for the process boundary.
     pub const fn from_digest(value: BlobDigest) -> Self {
         Self(value)
-    }
-
-    /// Returns the validated digest for an explicit adapter mapping.
-    pub const fn into_digest(self) -> BlobDigest {
-        self.0
     }
 }
 
@@ -461,10 +461,15 @@ impl<'de> Deserialize<'de> for CanonicalBlobDigest {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Request correlation identity. Zero is reserved for uncorrelated errors.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RequestId(u64);
+pub struct RequestId(
+    /// Returns the numeric identity after canonical decoding.
+    #[get(copy, as = "value")]
+    u64,
+);
 
 impl RequestId {
     /// Constructs a client-usable nonzero request identity.
@@ -479,11 +484,6 @@ impl RequestId {
     /// Returns the reserved identity for a frame that cannot be correlated.
     pub const fn uncorrelated() -> Self {
         Self(0)
-    }
-
-    /// Returns the numeric identity after canonical decoding.
-    pub const fn value(self) -> u64 {
-        self.0
     }
 
     const fn is_correlated(self) -> bool {
@@ -505,20 +505,20 @@ impl From<RequestId> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact user input content carried to the application admission boundary.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct InputContent(String);
+pub struct InputContent(
+    /// Borrows exact decoded text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl InputContent {
     /// Wraps decoded content without applying application admission policy.
     pub fn new(value: String) -> Self {
         Self(value)
-    }
-
-    /// Borrows exact decoded text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Transfers ownership of the exact decoded text.
@@ -602,10 +602,15 @@ impl fmt::Debug for UserInputPart {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical nonempty ordered user-input parts array.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct UserInputContent(Vec<UserInputPart>);
+pub struct UserInputContent(
+    /// Borrows the exact ordered parts.
+    #[get(slice, as = "parts")]
+    Vec<UserInputPart>,
+);
 
 struct UserInputContentVisitor;
 
@@ -660,11 +665,6 @@ impl UserInputContent {
     /// Wraps a complete parts array for structural validation at frame encode.
     pub fn from_parts(parts: Vec<UserInputPart>) -> Self {
         Self(parts)
-    }
-
-    /// Borrows the exact ordered parts.
-    pub fn parts(&self) -> &[UserInputPart] {
-        &self.0
     }
 
     /// Borrows text when this is exactly one text part.
@@ -1214,10 +1214,15 @@ pub enum ReviewExternalObjectKind {
     ChangeRequestComment,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded transcript-content fragment.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct ContentFragment(String);
+pub struct ContentFragment(
+    /// Borrows exact fragment text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl ContentFragment {
     /// Applies the per-fragment UTF-8 byte bound.
@@ -1227,11 +1232,6 @@ impl ContentFragment {
         } else {
             Ok(Self(value))
         }
-    }
-
-    /// Borrows exact fragment text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -1277,10 +1277,15 @@ pub enum ModelCallCostLabel {
     MeteredEquivalent,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical nonnegative decimal USD text with no exponent or redundant zeroes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CanonicalDollarAmount(String);
+pub struct CanonicalDollarAmount(
+    /// Borrows the canonical decimal spelling.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CanonicalDollarAmount {
     /// Validates one shortest nonnegative base-ten decimal spelling.
@@ -1321,11 +1326,6 @@ impl CanonicalDollarAmount {
             Ok(Self(value))
         }
     }
-
-    /// Borrows the canonical decimal spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl TryFrom<String> for CanonicalDollarAmount {
@@ -1342,10 +1342,15 @@ impl From<CanonicalDollarAmount> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded deployment-owned rate version carried as cost provenance.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct BillingRateVersion(String);
+pub struct BillingRateVersion(
+    /// Borrows the exact rate version.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl BillingRateVersion {
     /// Validates a nonempty, unpadded, NUL-free version spelling.
@@ -1359,11 +1364,6 @@ impl BillingRateVersion {
         } else {
             Ok(Self(value))
         }
-    }
-
-    /// Borrows the exact rate version.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -1407,13 +1407,18 @@ impl From<ContentFragment> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One exact session system prompt on the wire.
 ///
 /// A present prompt is nonempty and rejects U+0000; absence is JSON null on
 /// the owning member, never empty text. The daemon applies deployment policy.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct SystemPromptText(String);
+pub struct SystemPromptText(
+    /// Borrows the exact admitted prompt text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl SystemPromptText {
     /// Applies the structural nonempty and U+0000-free admission rules.
@@ -1423,11 +1428,6 @@ impl SystemPromptText {
         } else {
             Ok(Self(value))
         }
-    }
-
-    /// Borrows the exact admitted prompt text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Transfers ownership of the exact admitted prompt text.
@@ -1638,19 +1638,19 @@ pub enum ConversationImportRejectionClass {
     InvalidToolResult,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact caller-supplied source bytes carried as canonical padded base64.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConversationImportSource(Vec<u8>);
+pub struct ConversationImportSource(
+    /// Borrows the exact decoded source snapshot.
+    #[get(slice, as = "as_bytes")]
+    Vec<u8>,
+);
 
 impl ConversationImportSource {
     /// Wraps one complete source snapshot without interpreting it.
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
-    }
-
-    /// Borrows the exact decoded source snapshot.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
     }
 
     /// Transfers ownership of the exact decoded source snapshot.
@@ -2649,11 +2649,16 @@ pub enum MetadataActor {
     },
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// The post-lock database statement time and actor of the latest replacement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataLastWriter {
+    /// Returns the nonnegative Unix-microsecond transaction timestamp.
+    #[get(copy)]
     updated_at_unix_micros: CanonicalU64,
+    /// Returns the closed actor provenance.
+    #[get(copy)]
     actor: MetadataActor,
 }
 
@@ -2706,16 +2711,6 @@ impl MetadataLastWriter {
             actor,
         }
     }
-
-    /// Returns the nonnegative Unix-microsecond transaction timestamp.
-    pub const fn updated_at_unix_micros(self) -> CanonicalU64 {
-        self.updated_at_unix_micros
-    }
-
-    /// Returns the closed actor provenance.
-    pub const fn actor(self) -> MetadataActor {
-        self.actor
-    }
 }
 
 /// One closed conversation origin class.
@@ -2740,6 +2735,7 @@ pub enum ConversationOriginFilter {
     All,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One exclusive unified keyset cursor naming the last listed conversation.
 ///
 /// The unified page order is by conversation identity UUID value, native
@@ -2748,8 +2744,12 @@ pub enum ConversationOriginFilter {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationCursor {
+    /// Returns the origin class of the cursor position.
+    #[get(copy)]
     /// Origin class of the cursor position.
     origin: ConversationOrigin,
+    /// Returns the conversation identity at the cursor position.
+    #[get(copy)]
     /// Conversation identity at the cursor position.
     conversation_id: CanonicalUuid,
 }
@@ -2761,16 +2761,6 @@ impl ConversationCursor {
             origin,
             conversation_id,
         }
-    }
-
-    /// Returns the origin class of the cursor position.
-    pub const fn origin(self) -> ConversationOrigin {
-        self.origin
-    }
-
-    /// Returns the conversation identity at the cursor position.
-    pub const fn conversation_id(self) -> CanonicalUuid {
-        self.conversation_id
     }
 }
 
@@ -4559,6 +4549,7 @@ impl ClientRequest {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One validated client frame.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -4566,6 +4557,8 @@ impl ClientRequest {
 pub struct ClientFrame {
     version: ProtocolVersion,
     request_id: RequestId,
+    /// Borrows the closed request.
+    #[get]
     request: ClientRequest,
 }
 
@@ -4601,11 +4594,6 @@ impl ClientFrame {
     /// Returns the correlation identity.
     pub const fn request_id(&self) -> RequestId {
         self.request_id
-    }
-
-    /// Borrows the closed request.
-    pub const fn request(&self) -> &ClientRequest {
-        &self.request
     }
 
     /// Transfers the admitted version, correlation identity, and closed
@@ -5144,12 +5132,17 @@ impl RejectionDetail {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Presence-checked rejection detail on an error message.
 ///
 /// An absent value omits the JSON member. A present JSON `null` is rejected
 /// rather than being treated as absence.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ErrorDetail(Option<RejectionDetail>);
+pub struct ErrorDetail(
+    /// Returns the typed rejection detail when present.
+    #[get(copy, as = "value")]
+    Option<RejectionDetail>,
+);
 
 impl ErrorDetail {
     /// Omits rejection detail from a non-rejection error.
@@ -5165,11 +5158,6 @@ impl ErrorDetail {
     /// Includes typed import evidence on an invalid request.
     pub const fn invalid_request(detail: RejectionDetail) -> Self {
         Self(Some(detail))
-    }
-
-    /// Returns the typed rejection detail when present.
-    pub const fn value(self) -> Option<RejectionDetail> {
-        self.0
     }
 
     const fn is_absent(&self) -> bool {
@@ -5892,6 +5880,7 @@ pub enum ImportedContentKind {
     MessageContentAbsent,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A leading excerpt of one imported entry's exact attested text.
 ///
 /// The preview is the entry's exact leading Unicode scalar sequence cut at a
@@ -5901,6 +5890,8 @@ pub enum ImportedContentKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawImportedTextPreview")]
 pub struct ImportedTextPreview {
+    /// Returns the exact emitted leading scalars.
+    #[get(str)]
     /// Exact leading scalars within structural wire-text memory.
     preview: String,
     /// Whether exact text remains beyond the emitted scalars.
@@ -5955,11 +5946,6 @@ impl ImportedTextPreview {
             preview: text[..end].to_owned(),
             truncated: end < text.len(),
         }
-    }
-
-    /// Returns the exact emitted leading scalars.
-    pub fn preview(&self) -> &str {
-        &self.preview
     }
 
     /// Returns whether exact text remains beyond the emitted scalars.
@@ -6213,10 +6199,15 @@ pub enum RunnerSandboxProfile {
     WorkspaceRestricted,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Checked runner capability-class name carried by a session projection.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RunnerCapabilityClass(String);
+pub struct RunnerCapabilityClass(
+    /// Borrows the validated capability-class name.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl RunnerCapabilityClass {
     /// Applies the runner domain's portable catalog-name validation.
@@ -6224,11 +6215,6 @@ impl RunnerCapabilityClass {
         DomainRunnerCapabilityClass::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| CanonicalValueError::RunnerCatalogName)
-    }
-
-    /// Borrows the validated capability-class name.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -6246,10 +6232,15 @@ impl From<RunnerCapabilityClass> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Checked runner credential-profile name carried by a session projection.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RunnerCredentialProfileName(String);
+pub struct RunnerCredentialProfileName(
+    /// Borrows the validated credential-profile name.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl RunnerCredentialProfileName {
     /// Applies the runner domain's portable catalog-name validation.
@@ -6257,11 +6248,6 @@ impl RunnerCredentialProfileName {
         DomainCredentialProfileName::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| CanonicalValueError::RunnerCatalogName)
-    }
-
-    /// Borrows the validated credential-profile name.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -6279,10 +6265,15 @@ impl From<RunnerCredentialProfileName> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Checked runner repository key carried by a session projection.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RunnerRepositoryKey(String);
+pub struct RunnerRepositoryKey(
+    /// Borrows the validated repository key.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl RunnerRepositoryKey {
     /// Applies the runner domain's portable repository-key validation.
@@ -6290,11 +6281,6 @@ impl RunnerRepositoryKey {
         DomainWorkspaceRepositoryKey::try_new(value.clone())
             .map(|_| Self(value))
             .map_err(|_| CanonicalValueError::RunnerCatalogName)
-    }
-
-    /// Borrows the validated repository key.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -6352,10 +6338,13 @@ pub enum RunnerProjectionState {
     RunnerAbandoned,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Authoritative current runner placement projected in a transcript snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawRunnerProjection")]
 pub struct RunnerProjection {
+    /// Borrows the immutable requested selector.
+    #[get]
     /// Immutable selector requested by this placement revision.
     selector: RunnerProjectionSelector,
     /// Current or lost exact runner when the state names one.
@@ -6456,11 +6445,6 @@ impl RunnerProjection {
         })
     }
 
-    /// Borrows the immutable requested selector.
-    pub const fn selector(&self) -> &RunnerProjectionSelector {
-        &self.selector
-    }
-
     /// Returns the current or lost exact runner when the state names one.
     pub const fn runner_id(&self) -> Option<CanonicalUuid> {
         self.runner_id
@@ -6520,10 +6504,15 @@ impl TryFrom<RawRunnerProjection> for RunnerProjection {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact bounded runner working-directory text carried on the process wire.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RunnerWorkingDirectory(String);
+pub struct RunnerWorkingDirectory(
+    /// Borrows the exact validated directory text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl RunnerWorkingDirectory {
     /// Maximum UTF-8 bytes admitted by the runner domain and process wire.
@@ -6535,11 +6524,6 @@ impl RunnerWorkingDirectory {
         DomainRunnerWorkingDirectory::try_new(value.clone())
             .map_err(|_| CanonicalValueError::RunnerWorkingDirectory)?;
         Ok(Self(value))
-    }
-
-    /// Borrows the exact validated directory text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -9266,12 +9250,15 @@ where
     ValueT::deserialize(deserializer).map(Some)
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One validated server frame.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerFrame {
     version: ProtocolVersion,
     request_id: RequestId,
+    /// Borrows the closed server message.
+    #[get]
     message: ServerMessage,
 }
 
@@ -9307,11 +9294,6 @@ impl ServerFrame {
     /// Returns the request correlation identity.
     pub const fn request_id(&self) -> RequestId {
         self.request_id
-    }
-
-    /// Borrows the closed server message.
-    pub const fn message(&self) -> &ServerMessage {
-        &self.message
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {

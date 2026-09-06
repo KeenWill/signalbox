@@ -62,9 +62,12 @@ impl ReviewerVerdictStatus {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One exact review-thread identity used by convergence blockers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewThreadIdentity {
+    /// Borrows the opaque thread identity.
+    #[get(str)]
     id: String,
     path: String,
     finding_title: String,
@@ -85,11 +88,6 @@ impl ReviewThreadIdentity {
                 finding_title,
             },
         )
-    }
-
-    /// Borrows the opaque thread identity.
-    pub fn id(&self) -> &str {
-        &self.id
     }
 
     fn into_value(self) -> Value {
@@ -267,9 +265,12 @@ impl ReviewerVerdictEvidence {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Typed result of `change_request_convergence_state`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConvergenceStateResult {
+    /// Borrows the exact current head revision.
+    #[get(str)]
     head_revision: String,
     mergeable_state: String,
     ci_rollup_state: Option<String>,
@@ -402,11 +403,6 @@ impl ConvergenceStateResult {
     /// Returns the deterministic verdict.
     pub const fn verdict(&self) -> ConvergenceVerdict {
         self.verdict
-    }
-
-    /// Borrows the exact current head revision.
-    pub fn head_revision(&self) -> &str {
-        &self.head_revision
     }
 
     pub(super) fn evidence_truncated(&self) -> bool {

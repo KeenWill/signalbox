@@ -43,9 +43,14 @@ const ENTRY_NOT_FOUND_DETAIL: &str = "plan entry not found";
 const DEPENDENCY_CYCLE_DETAIL: &str = "plan dependency would create a cycle";
 const DEPENDENCY_LIMIT_DETAIL: &str = "plan entry dependency limit reached";
 
+#[derive(signalbox_derive::Accessors)]
 /// One positive ordinal in a session's append-only plan history.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PlanEventOrdinal(NonZeroU64);
+pub struct PlanEventOrdinal(
+    /// Returns the durable integer.
+    #[get(inner, as = "as_u64")]
+    NonZeroU64,
+);
 
 impl PlanEventOrdinal {
     /// Reconstitutes a positive durable ordinal.
@@ -68,16 +73,16 @@ impl PlanEventOrdinal {
             None => None,
         }
     }
-
-    /// Returns the durable integer.
-    pub const fn as_u64(self) -> u64 {
-        self.0.get()
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Stable entry identity: the ordinal of its creation event.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PlanEntryId(PlanEventOrdinal);
+pub struct PlanEntryId(
+    /// Returns the creation-event ordinal.
+    #[get(copy, as = "creation_ordinal")]
+    PlanEventOrdinal,
+);
 
 impl PlanEntryId {
     /// Names the entry created by one event.
@@ -91,11 +96,6 @@ impl PlanEntryId {
             Some(ordinal) => Some(Self(ordinal)),
             None => None,
         }
-    }
-
-    /// Returns the creation-event ordinal.
-    pub const fn creation_ordinal(self) -> PlanEventOrdinal {
-        self.0
     }
 
     /// Returns the model-facing integer.
@@ -128,9 +128,14 @@ pub enum PlanStatus {
     Abandoned,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Checked plan-entry text.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct PlanText(String);
+pub struct PlanText(
+    /// Borrows the exact text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl PlanText {
     /// Admits nonempty text within the declared scalar bound.
@@ -146,11 +151,6 @@ impl PlanText {
             return Err(PlanTextError::TooLong { characters });
         }
         Ok(Self(value))
-    }
-
-    /// Borrows the exact text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Returns the exact text.
@@ -208,9 +208,14 @@ pub enum PlanEventDraft {
     },
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact trusted invocation provenance retained on every event.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct PlanEventProvenance(ToolAttemptDispatchCorrelation);
+pub struct PlanEventProvenance(
+    /// Returns the complete dispatch correlation.
+    #[get(copy, as = "correlation")]
+    ToolAttemptDispatchCorrelation,
+);
 
 impl PlanEventProvenance {
     /// Retains the trusted physical-dispatch correlation.
@@ -221,11 +226,6 @@ impl PlanEventProvenance {
     /// Returns the owning session.
     pub const fn session(self) -> SessionId {
         self.0.session()
-    }
-
-    /// Returns the complete dispatch correlation.
-    pub const fn correlation(self) -> ToolAttemptDispatchCorrelation {
-        self.0
     }
 }
 
@@ -260,11 +260,14 @@ pub enum PlanEventKind {
     },
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Typed evidence for a dependency edge that would close a directed cycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanDependencyCycle {
     entry: PlanEntryId,
     dependency: PlanEntryId,
+    /// Borrows the closed cycle, beginning and ending at the dependent entry.
+    #[get(slice)]
     path: Vec<PlanEntryId>,
 }
 
@@ -305,18 +308,16 @@ impl PlanDependencyCycle {
     pub const fn dependency(&self) -> PlanEntryId {
         self.dependency
     }
-
-    /// Borrows the closed cycle, beginning and ending at the dependent entry.
-    pub fn path(&self) -> &[PlanEntryId] {
-        &self.path
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One durable plan event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanEvent {
     ordinal: PlanEventOrdinal,
     provenance: PlanEventProvenance,
+    /// Borrows event content.
+    #[get]
     kind: PlanEventKind,
 }
 
@@ -343,19 +344,19 @@ impl PlanEvent {
     pub const fn provenance(&self) -> PlanEventProvenance {
         self.provenance
     }
-
-    /// Borrows event content.
-    pub const fn kind(&self) -> &PlanEventKind {
-        &self.kind
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One folded current entry, retained even when abandoned.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanEntry {
     id: PlanEntryId,
+    /// Borrows the latest text.
+    #[get]
     text: PlanText,
     status: PlanStatus,
+    /// Borrows dependencies in first-append order.
+    #[get(slice)]
     dependencies: Vec<PlanEntryId>,
     readiness: PlanReadiness,
 }
@@ -404,19 +405,9 @@ impl PlanEntry {
         self.id
     }
 
-    /// Borrows the latest text.
-    pub const fn text(&self) -> &PlanText {
-        &self.text
-    }
-
     /// Returns the latest status.
     pub const fn status(&self) -> PlanStatus {
         self.status
-    }
-
-    /// Borrows dependencies in first-append order.
-    pub fn dependencies(&self) -> &[PlanEntryId] {
-        &self.dependencies
     }
 
     /// Returns current dependency readiness.
@@ -425,18 +416,16 @@ impl PlanEntry {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Folded current plan in creation order.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FoldedPlan {
+    /// Borrows current entries in creation order.
+    #[get(slice)]
     entries: Vec<PlanEntry>,
 }
 
 impl FoldedPlan {
-    /// Borrows current entries in creation order.
-    pub fn entries(&self) -> &[PlanEntry] {
-        &self.entries
-    }
-
     /// Returns current entries in creation order.
     pub fn into_entries(self) -> Vec<PlanEntry> {
         self.entries
@@ -587,10 +576,13 @@ fn recompute_readiness(entries: &mut [PlanEntry]) {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Port request for one atomic session-local append.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanAppendRequest {
     provenance: PlanEventProvenance,
+    /// Borrows requested event content.
+    #[get]
     draft: PlanEventDraft,
 }
 
@@ -608,11 +600,6 @@ impl PlanAppendRequest {
     /// Returns trusted provenance.
     pub const fn provenance(&self) -> PlanEventProvenance {
         self.provenance
-    }
-
-    /// Borrows requested event content.
-    pub const fn draft(&self) -> &PlanEventDraft {
-        &self.draft
     }
 }
 
@@ -709,9 +696,12 @@ impl PlanPageCompleteness {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Optional bounded chronological history prefix.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanHistoryPage {
+    /// Borrows chronological events.
+    #[get(slice)]
     events: Vec<PlanEvent>,
     completeness: PlanPageCompleteness,
 }
@@ -725,21 +715,19 @@ impl PlanHistoryPage {
         }
     }
 
-    /// Borrows chronological events.
-    pub fn events(&self) -> &[PlanEvent] {
-        &self.events
-    }
-
     /// Returns whether the history prefix is complete.
     pub const fn completeness(&self) -> PlanPageCompleteness {
         self.completeness
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded folded-plan page returned by the port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanReadPage {
     session: SessionId,
+    /// Borrows current entries.
+    #[get(slice)]
     entries: Vec<PlanEntry>,
     completeness: PlanPageCompleteness,
     history: Option<PlanHistoryPage>,
@@ -764,11 +752,6 @@ impl PlanReadPage {
     /// Returns the owning session carried by the port response.
     pub const fn session(&self) -> SessionId {
         self.session
-    }
-
-    /// Borrows current entries.
-    pub fn entries(&self) -> &[PlanEntry] {
-        &self.entries
     }
 
     /// Returns whether the current-entry page is complete.
