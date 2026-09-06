@@ -99,7 +99,9 @@ The module schema contains twelve tables:
   reconciliation validates a repository's complete configured set and commits
   every activation and deactivation atomically. An activation records the
   repository event tail after which that revision may evaluate facts, and
-  deactivation retains its lineage.
+  deactivation retains its lineage. The highest recorded revision of each
+  retired identity is permanent; only lower inactive revisions not named by a
+  retained dispatch are releasable.
 - `dispatch_ledger` records command identity, dispatch reference, rule revision,
   source event, command family, an opaque core encoding of the exact checked
   payload, and settlement.
