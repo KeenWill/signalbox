@@ -386,7 +386,7 @@ fn unpinned_names(covered: &[(String, bool)]) -> Vec<&str> {
         .collect()
 }
 
-/// INV-070: every function reachable from a check constraint or index during
+/// every function reachable from a check constraint or index during
 /// `pg_restore` carries the canonical pinned search path — the
 /// migration-selected schema, then `pg_catalog`, then `pg_temp`.
 #[tokio::test(flavor = "multi_thread")]
@@ -426,7 +426,7 @@ async fn every_restore_reachable_function_pins_its_search_path() -> Result<(), B
     Ok(())
 }
 
-/// INV-070: body-reference discovery closes transitively — a check constraint
+/// body-reference discovery closes transitively — a check constraint
 /// whose function calls through an intermediate body still surfaces the
 /// unpinned function at the end of the chain.
 #[tokio::test(flavor = "multi_thread")]

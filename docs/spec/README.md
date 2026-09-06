@@ -16,10 +16,10 @@ only, except for the lines under Planned. `docs/design/` holds one document per
 subsystem with committed but unbuilt design, written for the agent that will
 build it; landed material is removed as it lands, and the document is deleted
 when no planned capability remains. [open-questions.md](../open-questions.md)
-holds undecided items. Two normative surfaces sit outside those homes:
-[domain-spine.md](../domain-spine.md) mirrors the public API shapes of the
-domain and application crates, and [invariants.md](../invariants.md) indexes the
-INV-tagged tests.
+holds undecided items. Two normative surfaces sit outside those homes: the
+generated [domain API](../api/signalbox-domain/README.md) and
+[application API](../api/signalbox-application/README.md) declare public API
+shapes.
 
 A design document is titled `<Subsystem> design`, opens with a preamble saying
 it is not built and naming the spec page it extends, and has the sections Goal,
@@ -69,11 +69,10 @@ records when behavior changed. A page says what the system does, not what a
 reader should do. Code identifiers appear only where the map names a core
 mechanism, a decision names the thing it decides, or a contract names its
 enforcer or an identifier that is itself contract data, such as a field name, a
-discriminator, or a preimage. Prose carries no INV tags; invariants are tests,
-and a contract names its enforcer by source path, crate, type, or function.
-Pages have no Open edges section and no paragraph labelled as committed but
-unimplemented. Every link targets a page, never an anchor, unless the anchor is
-a heading on the linking page.
+discriminator, or a preimage. A contract names its enforcer by source path,
+crate, type, or function. Pages have no Open edges section and no paragraph
+labelled as committed but unimplemented. Every link targets a page, never an
+anchor, unless the anchor is a heading on the linking page.
 
 ## Pages
 
@@ -89,6 +88,7 @@ a heading on the linking page.
 - [Credential availability](credential-availability.md)
 - [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Process protocol](process-protocol.md)
+- [Ownership seam](ownership-seam.md)
 - [Persistence protocol](persistence-protocol.md)
 - [Blob storage](blob-storage.md)
 - [File and media interpretation](file-and-media.md)

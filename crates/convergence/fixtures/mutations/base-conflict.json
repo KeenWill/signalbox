@@ -1,0 +1,22 @@
+{
+  "source": "settled.json",
+  "edge": "conflicting mergeability",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/mergeable",
+      "value": "CONFLICTING"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/mergeable",
+      "value": "CONFLICTING"
+    },
+    {
+      "path": "/observations/0/2/response/data/node/mergeable",
+      "value": "CONFLICTING"
+    },
+    {
+      "path": "/observations/1/2/response/data/node/mergeable",
+      "value": "CONFLICTING"
+    }
+  ]
+}
