@@ -1030,6 +1030,7 @@ export async function* followSession(
   sessionId: string,
   signal: AbortSignal,
 ): AsyncGenerator<WebSessionLiveStreamEvent> {
+  let resynchronized = false
   while (!signal.aborted) {
     const initial = await readSessionLive(sessionId, signal)
     let cursor = BigInt(initial.observed_through)
@@ -1098,6 +1099,21 @@ export async function* followSession(
     }
     if (!resync && !signal.aborted)
       throw new ProductTransportError('Live connection ended; reconnect to continue following.')
+    if (resync && !signal.aborted) {
+      if (resynchronized) {
+        // One immediate resync; persistent lag waits a second between reconnects.
+        await new Promise<void>((resolve) => {
+          const finish = () => {
+            clearTimeout(timer)
+            signal.removeEventListener('abort', finish)
+            resolve()
+          }
+          const timer = setTimeout(finish, 1000)
+          signal.addEventListener('abort', finish, { once: true })
+        })
+      }
+      resynchronized = true
+    }
   }
 }
 

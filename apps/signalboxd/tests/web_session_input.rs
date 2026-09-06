@@ -8,9 +8,11 @@ use axum::{
     http::{Request, StatusCode},
 };
 use signalbox_domain::{
-    CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
-    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    TranscriptAncestry,
+    CreateSession, DeliveryRequest, DirectModelSelection, DurableCommandId, FastModeOverlay,
+    ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay,
+    PerInputConfigurationChoices, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SettingOverlay, TranscriptAncestry, UserContent,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository, disposable_postgres_server_args,
@@ -60,6 +62,14 @@ context_window_tokens = 200000
 reasoning_levels = ["low"]
 
 "#;
+
+struct FixtureNudge;
+
+impl signalbox_application::EligibilityNudge for FixtureNudge {
+    fn nudge(&self, _: SessionId) -> signalbox_application::EligibilityNudgeOutcome {
+        signalbox_application::EligibilityNudgeOutcome::WorkSourceClosed
+    }
+}
 
 fn submission(session: SessionId, command: Uuid, message: &str) -> Request<Body> {
     Request::post(format!("/api/sessions/{}/input", session.into_uuid()))
@@ -114,7 +124,7 @@ async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
         None,
         Some(pool.clone()),
         None,
-        Some(configuration),
+        Some(configuration.clone()),
         None,
         None,
     );
@@ -148,6 +158,57 @@ async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
     let body: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 65536).await?)?;
     assert_eq!(body["error"]["code"], "conflicting_command_reuse");
+    let mut service = signalbox_application::SubmitInputService::new(
+        signalbox_application::UuidV7SubmitInputIdGenerator,
+        signalbox_persistence::submit_input::SubmitInputRepository::with_model_capabilities(
+            pool.clone(),
+            configuration.model_capability_catalog(),
+        ),
+        FixtureNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    for choices in [
+        PerInputConfigurationChoices::new(
+            SessionConfigurationDefaultsVersion::first(),
+            ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(Uuid::from_u128(1)),
+            )),
+        ),
+        PerInputConfigurationChoices::with_model_settings(
+            SessionConfigurationDefaultsVersion::first(),
+            ModelSelectionOverride::UseSessionDefault,
+            ModelSettingsOverlay::new(
+                SettingOverlay::ProviderDefault,
+                FastModeOverlay::Inherit,
+                SettingOverlay::Inherit,
+            ),
+        ),
+    ] {
+        let command = Uuid::now_v7();
+        let message = "Recorded explicit configuration";
+        let recorded = service
+            .execute(signalbox_application::SubmitInputRequest::try_new(
+                DurableCommandId::from_uuid(command),
+                session,
+                UserContent::try_text(message.to_owned()).expect("fixture message is valid"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: choices,
+                },
+            )?)
+            .await?;
+        assert!(matches!(
+            recorded,
+            signalbox_application::SubmitInputOutcome::Recorded(_)
+        ));
+        let response = router
+            .clone()
+            .oneshot(submission(session, command, message))
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await?)?;
+        assert_eq!(body["error"]["code"], "conflicting_command_reuse");
+    }
     let missing = router
         .oneshot(submission(
             SessionId::from_uuid(Uuid::from_u128(99)),
@@ -181,18 +242,20 @@ async fn web_input_requires_same_origin_json_and_valid_text() -> Result<(), Box<
         router.clone().oneshot(non_json).await?.status(),
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
-    let mut noncanonical = submission(session, command, "Message");
-    *noncanonical.body_mut() = Body::from(
-        serde_json::json!({
-            "command_id": "00000000-0000-0000-0000-0000000000AF",
-            "message": "Message"
-        })
-        .to_string(),
-    );
-    assert_eq!(
-        router.clone().oneshot(noncanonical).await?.status(),
-        StatusCode::BAD_REQUEST
-    );
+    for spelling in [
+        "00000000-0000-0000-0000-0000000000AF",
+        "000000000000000000000000000000af",
+    ] {
+        let mut noncanonical = submission(session, command, "Message");
+        *noncanonical.body_mut() = Body::from(
+            serde_json::json!({ "command_id": spelling, "message": "Message" }).to_string(),
+        );
+        let response = router.clone().oneshot(noncanonical).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await?)?;
+        assert_eq!(body["error"]["code"], "invalid_command_id");
+    }
     assert_eq!(
         router
             .clone()

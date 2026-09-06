@@ -15,7 +15,41 @@ const stream = (...events: unknown[]) =>
   new Response(events.map((event) => JSON.stringify(event)).join('\n') + '\n', {
     headers: { 'content-type': 'application/x-ndjson' },
   })
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.useRealTimers()
+})
+
+it('backs off repeated resyncs and cancels the wait without opening another request', async () => {
+  vi.useFakeTimers()
+  const fetch = vi.fn(async (url: string) =>
+    url.endsWith('/live')
+      ? Response.json(snapshot('41'))
+      : stream(
+          { kind: 'snapshot', snapshot: snapshot('41') },
+          { kind: 'resync_required', cursor: '42' },
+        ),
+  )
+  vi.stubGlobal('fetch', fetch)
+  const controller = new AbortController()
+  const follow = followSession(sessionId, controller.signal)
+  for (let count = 0; count < 4; count++) await follow.next()
+  expect(fetch).toHaveBeenCalledTimes(4)
+  const delayed = follow.next()
+  await vi.advanceTimersByTimeAsync(999)
+  expect(fetch).toHaveBeenCalledTimes(4)
+  await vi.advanceTimersByTimeAsync(1)
+  expect((await delayed).value).toEqual({ kind: 'snapshot', snapshot: snapshot('41') })
+  await follow.next()
+  expect(fetch).toHaveBeenCalledTimes(6)
+  const cancelled = follow.next()
+  await vi.advanceTimersByTimeAsync(999)
+  expect(fetch).toHaveBeenCalledTimes(6)
+  controller.abort()
+  expect((await cancelled).done).toBe(true)
+  expect(vi.getTimerCount()).toBe(0)
+  expect(fetch).toHaveBeenCalledTimes(6)
+})
 
 it('resynchronizes a live gap from a fresh snapshot and skips duplicate durable events', async () => {
   const fetch = vi

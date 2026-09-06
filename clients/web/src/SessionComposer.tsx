@@ -134,17 +134,6 @@ export function SessionComposer({
         <button type="submit" disabled={!canSend}>
           {retained === null ? 'Send message' : mutation.isPending ? 'Sending…' : 'Retry message'}
         </button>
-        {retained !== null && !mutation.isPending && (
-          <button
-            type="button"
-            onClick={() => {
-              setRetained(null)
-              setNotice('Retained command discarded. Its prior outcome is still unconfirmed.')
-            }}
-          >
-            Discard retained command
-          </button>
-        )}
         <span role="status">{notice}</span>
       </div>
     </form>

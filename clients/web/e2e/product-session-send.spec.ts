@@ -191,6 +191,8 @@ test('retries an unconfirmed acceptance with the same command and text', async (
     'readonly',
     '',
   )
+  await expect(page.getByRole('button', { name: 'Discard retained command' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toHaveCount(0)
   await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) =>
     route.fulfill({ status: 503, body: 'Timeline temporarily unavailable' }),
   )

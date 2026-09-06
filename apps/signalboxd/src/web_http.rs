@@ -1142,7 +1142,11 @@ async fn session_submit_input(
                 || recorded.command().content() != &content
                 || !matches!(
                     recorded.command().delivery(),
-                    DeliveryRequest::StartWhenNoActiveTurn { .. }
+                    DeliveryRequest::StartWhenNoActiveTurn { configuration }
+                        if configuration == PerInputConfigurationChoices::new(
+                            configuration.expected_session_defaults_version(),
+                            ModelSelectionOverride::UseSessionDefault,
+                        )
                 )
             {
                 return web_input_conflict();
