@@ -29,7 +29,10 @@ that calls the verb; webhook listener reload belongs to
 [repository watch](repo-watch.md). A reload that adds, edits, or removes
 `repository_watch.rules` commits activations and deactivations in the
 [reconciliation transaction](../spec/repo-watch.md) that records each
-activation's repository event tail, inside the reload boundary.
+activation's repository event tail, inside the reload boundary. A reload re-runs
+convergence configured-target reconciliation inside the reload boundary, and the
+sweep reads the new targets, template, interval, and credential path at its next
+attempt.
 
 A model entry carries zero or more `[[models.rate_windows]]` entries, each one
 dated price window over that entry's own `provider_model`. A window names the

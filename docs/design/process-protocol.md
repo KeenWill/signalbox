@@ -29,7 +29,7 @@ is 1 through 256 printable ASCII bytes; `verification_uri` is an absolute
 Invalid fields fail as `device_endpoint_rejected` before progress is emitted.
 Each request ends with
 `oauth_credential_receipt { command_id, profile, outcome }`, whose outcome is
-`provisioned`, `reprovisioned`, `deleted`, `already_deleted`, or
+`provisioned`, `reprovisioned`, `deleted`, `already_deleted`, `abandoned`, or
 `failed { reason }`, where `reason` is one of the fieldless values
 `device_endpoint_rejected`, `polling_expired`,
 `token_response_without_identity`, or `account_independence_failed`.
@@ -40,7 +40,9 @@ future dispatches while retaining the configured registration and referenced
 history; a child already holding a copied token finishes its invocation. An
 equal request with the same `command_id` reports busy while pending or returns
 its stored receipt without repeating the exchange or deletion; conflicting reuse
-is rejected. The credential mutation and terminal receipt commit atomically
+is rejected. Startup terminalizes each pending provisioning or re-provisioning
+claim with an `abandoned` receipt; another provisioning attempt requires a new
+`command_id`. The credential mutation and terminal receipt commit atomically
 under the command claim protocol in
 [identity and commands](../spec/identity-and-commands.md).
 
