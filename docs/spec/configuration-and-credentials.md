@@ -21,8 +21,8 @@ files, the optional browser bind address and static-asset root, the log filter,
 and the telemetry settings. An absent `SIGNALBOX_RUNNER_SOCKET_PATH` derives the
 runner socket by replacing the process socket path's final extension with
 `.runner.sock`, and the runner's `daemon_socket_path` dials that path.
-`DATABASE_URL` is the whole database channel, and a deployment carries every
-connection parameter in the URL. Whatever TLS mode the URL states, the
+`DATABASE_URL` is the whole database channel: a deployment carries every
+connection parameter in the URL, and whatever TLS mode the URL states, the
 production connection verifies the server certificate and hostname in full.
 Model-provider credential paths come from `file` profiles in the catalog;
 `ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An absent
@@ -37,15 +37,15 @@ them. `RUST_LOG` admits one log level and nothing else; an empty or whitespace
 value selects the INFO default silently, as absence does, and any other value
 warns and falls back to it.
 
-`SIGNALBOX_OTLP_ENDPOINT` enables span export; its absence disables OTLP and
-makes every other OTLP setting inert. With the endpoint set, a general or
+`SIGNALBOX_OTLP_ENDPOINT`, a base URL to whose path `http/protobuf` export
+appends `/v1/traces`, enables span export; its absence disables OTLP and makes
+every other OTLP setting inert. With the endpoint set, a general or
 trace-specific `OTEL_EXPORTER_OTLP_*` endpoint, headers, timeout, protocol, or
 compression variable in the environment fails startup. `SIGNALBOX_OTLP_PROTOCOL`
 selects `grpc` or `http/protobuf`, `SIGNALBOX_OTLP_HEADERS_FILE` names a
 collector-header file read once at startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets
 the parent-based trace-id sampling ratio from 0 through 1, and
-`SIGNALBOX_OTLP_SERVICE_NAME` sets the service name. The endpoint is a base URL,
-and `http/protobuf` export appends `/v1/traces` to its path.
+`SIGNALBOX_OTLP_SERVICE_NAME` sets the service name.
 `SIGNALBOX_PROMETHEUS_BIND`, an exact IP socket address, enables a separate
 Prometheus listener.
 
@@ -60,29 +60,34 @@ and its `bubblewrap_path` must resolve to an executable regular file. Its
 Runner credential profiles are non-secret checked names the daemon grants and
 only the runner resolves.
 
-The model catalog declares what the four adapters can serve. Each `[[models]]`
-entry binds an immutable direct-selection key to one exact provider target, a
-model family, a provider-native spelling, token ceilings, and flat USD rates
-that are either wholly absent or a complete bundle carrying its own stable rate
-version; aliases name a selection. A model whose `fast_mode` is
+The model catalog declares what the four adapters can serve; the daemon provides
+exactly `anthropic`, `openai`, `claude_cli`, and `codex_cli`, no adapter pins a
+profile name, and a pool may hold several profiles for one adapter. Each
+`[[models]]` entry binds an immutable direct-selection key to one exact provider
+target, a model family, a provider-native spelling, token ceilings, and flat USD
+rates that are either wholly absent or a complete bundle carrying its own stable
+rate version; aliases name a selection. A model whose `fast_mode` is
 `alternate_target` names a `fast_target_id` that resolves to a
 non-client-selectable `[[serving_targets]]` entry carrying its own target, model
 family, provider spelling, and token ceilings. `provider_model` is nonempty and
 unpadded, and one spelling routes to exactly one adapter across the document.
 `context_window_tokens` is the usable ceiling after any provider or adapter
 reservation, not the raw advertised window, and is not smaller than
-`max_output_tokens`. `[model_settings]` is the deployment global default and
+`max_output_tokens`. The optional `provider_compaction` boolean is an exact
+per-target Anthropic capability on `[[models]]` and `[[serving_targets]]`;
+omission is false, another adapter cannot declare it true, and the effective
+target after fast-target resolution controls both compaction enablement and
+opaque-block replay. `[model_settings]` is the deployment global default and
 each `[[model_settings_profiles]]` entry is a named profile a model's optional
 `settings_profile` selects; a selected profile outranks the global default, and
 both sit below the session and per-call layers of
-[model session settings](model-session-settings.md). The daemon provides exactly
-the `anthropic`, `openai`, `claude_cli`, and `codex_cli` adapters; no adapter
-pins a profile name, and a pool may hold several profiles for one adapter. An
-adapter mapping that names `claude_cli` requires a `[claude_cli]` table carrying
-that adapter's `executable`, `mcp_bridge_executable`, and `working_directory`.
-The required `[numeric_bounds]` table holds the central numeric-bound inventory
-and the loader supplies no default for any member, while other tables carry
-their own configured limits. `codex_cli_version_probe_bound` bounds a
+[model session settings](model-session-settings.md). An adapter mapping that
+names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
+`executable`, `mcp_bridge_executable`, and `working_directory`. The required
+`[numeric_bounds]` table holds the central numeric-bound inventory and the
+loader supplies no default for any member, while other tables carry their own
+configured limits. Numeric-bound duration policies use Jiff's friendly
+unsigned-duration syntax. `codex_cli_version_probe_bound` bounds a
 credential-free startup probe of the configured Codex executable, and a missing,
 malformed, zero, unsuccessful, or mismatched probe fails configuration before
 the socket opens. One valid document yields correlated immutable in-memory
@@ -117,22 +122,22 @@ A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable
 records; its `CredentialValue` carries the secret bytes and exists only at the
 adapter boundary. Every model-provider reference is an operator-chosen profile
-name. The two integration constants are `brave-search-primary` and
+name; the two integration constants are `brave-search-primary` and
 `github-primary`, and `codex-subscription-primary` and
 `claude-subscription-primary` are the defaults a CLI runtime uses when its
 mapping names nothing else. A profile's delivery states how its secret reaches
 the provider. `file` is the delivery for every credential with an external
 source of truth, such as a provider API key or a long-lived token a provider's
 tooling mints; a direct-HTTP adapter forms its header from the file value and
-rejects `env_key` because it uses no child environment. `ambient` leaves login
-resolution to a CLI. `codex_home` names the login directory a Codex child
-receives as `CODEX_HOME`: delivery replaces the child's inherited `CODEX_HOME`
-with the admitted path of the profile the operation's reference names and leaves
-every other profile's path absent. A configured home is admitted only as an
-existing, readable, nonempty directory, and startup fails otherwise. Each
+rejects `env_key` because it uses no child environment. Each
 `FileCredentialAccess` instance binds one consumer-scoped map of references to
 deployment paths, and a model adapter receives the complete file-profile catalog
-declared for it.
+declared for it. `ambient` leaves login resolution to a CLI. `codex_home` names
+the login directory a Codex child receives as `CODEX_HOME`; a configured home is
+admitted only as an existing, readable, nonempty directory, and startup fails
+otherwise. Delivery replaces the child's inherited `CODEX_HOME` with the
+admitted path of the profile the operation's reference names and leaves every
+other profile's path absent.
 
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly
@@ -141,18 +146,17 @@ name is 1 through 256 unpadded NUL-free bytes and it holds 1 through 1,024
 members, each with a priority within the pool. Priorities need not be unique or
 contiguous: `tie_break` resolves equal values, and gaps let a later profile take
 an intermediate rank. Both `tie_break`, which admits `first_listed`, and
-`on_pool_exhausted`, which is `park` or `fail`, are required, and the five
-trigger keys `on_quota_exhausted`, `on_rate_limited`, `on_overloaded`,
-`on_credential_rejected`, and `on_headroom_low` each carry one closed action,
-where an omitted key selects `stay`. The actions are `stay`, `switch_next_turn`,
-`switch_now`, `avoid_new_sessions`, and `quarantine`. A one-member pool is the
+`on_pool_exhausted`, which is `park` or `fail`, are required. The five trigger
+keys `on_quota_exhausted`, `on_rate_limited`, `on_overloaded`,
+`on_credential_rejected`, and `on_headroom_low` each carry one action from the
+closed set `stay`, `switch_next_turn`, `switch_now`, `avoid_new_sessions`, and
+`quarantine`; an omitted key selects `stay`, and a one-member pool is the
 ordinary single-account deployment and needs no trigger keys. Selection happens
 at model-call preparation, never at session creation: it prefers the sticky
 member while that member remains admissible and otherwise walks members in
 priority order, skipping excluded ones and breaking ties by the snapshot's rule.
-Trigger actions and the exclusions they create are durable. How an attempt ends
-when a pool admits no member is owned by
-[credential availability](credential-availability.md).
+Trigger actions and the exclusions they create are durable. Every availability
+ending is owned by [credential availability](credential-availability.md).
 
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
@@ -312,8 +316,9 @@ successor attempt that fails as its predecessor did.
 Settings whose effect the daemon cannot supply are typed startup failures rather
 than retained and inert: `round_robin`, `least_used`, any headroom reserve, a
 non-`stay` `on_headroom_low`, and a `switch_now` whose adapter cannot prove
-non-acceptance for that trigger's cause. Why: a configured protection that
-silently never fires reads as one the deployment has.
+non-acceptance for that trigger's cause unless it is `on_credential_rejected`.
+Why: a configured protection that silently never fires reads as one the
+deployment has.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
@@ -326,9 +331,11 @@ account holds different ranks in different pools.
 commits alone, so the default configuration can still commit a terminal
 observation.
 
-`switch_now` is refused on `on_credential_rejected` and `on_headroom_low`,
-because a rejected credential is deployment misconfiguration that substitution
-would hide and low headroom is not a failure.
+`switch_now` on `on_credential_rejected` rotates to the next admitted member
+when no stop was requested; `CredentialRejected` admits that successor without
+non-acceptance proof. The rejected profile and `CredentialRejected` cause remain
+recorded durably on the failed attempt. `switch_now` remains refused on
+`on_headroom_low`, because low headroom is not a failure.
 
 A `codex_home` refresh race gets no delivery-layer bypass, because the Codex CLI
 reports one undifferentiated authentication failure the adapter cannot split;
@@ -381,6 +388,16 @@ a runner. An explicit `ambient` login nevertheless retains same-user filesystem
 powers outside the grant channel.
 
 ## Boundary contracts
+
+The optional `[codex_cli].model_context_window_overrides` map is an inline TOML
+table; a nested `[codex_cli.model_context_window_overrides]` table is invalid.
+Every key exactly matches the `provider_model` of a configured model routed
+through the `codex_cli` adapter, every value is a positive raw Codex
+`model_context_window` token count, and any unmatched or differently routed key
+fails startup. Codex applies its own reservation to that raw count;
+`context_window_tokens` remains the independently configured usable
+post-reservation ceiling enforced by the daemon, and the loader does not derive
+either value from the other.
 
 The daemon refers to a credential by its non-secret name everywhere except at
 the point of use. No credential value, credential file path, or database URL
@@ -639,6 +656,12 @@ successful code-host result, is scrubbed of that value and its JSON-escaped form
 before it crosses into evidence. An `ambient` or `codex_home` profile gives the
 daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
+
+The optional `[convergence]` table deserializes the
+[shared convergence policy](../../crates/convergence/README.md), including its
+validation of nonempty reviewer identities after bot-suffix normalization.
+Convergence reads and the sweep require this policy; other code-host operations
+do not use it.
 
 ## Planned
 

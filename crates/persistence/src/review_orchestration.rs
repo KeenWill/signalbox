@@ -4,8 +4,6 @@
 //! run, pass, finding, event, and external-link values are always reconstructed
 //! through [`ReviewWorkflowStore`].
 
-use std::{error::Error, fmt};
-
 use signalbox_application::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
     ReviewDurableSealOutcome, ReviewImportOutcome, ReviewImportedContextEvidence,
@@ -2751,45 +2749,18 @@ fn ordinal_i32(value: usize) -> Result<i32, ReviewOrchestrationStoreError> {
     i32::try_from(value).map_err(|_| corruption("orchestration inventory is too large"))
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL or fail-closed reconstruction failure.
 #[derive(Debug)]
 pub enum ReviewOrchestrationStoreError {
-    Database(sqlx::Error),
-    CommitAmbiguous(sqlx::Error),
-    Workflow(ReviewWorkflowStoreError),
+    #[error("review orchestration database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("review orchestration commit is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("review orchestration canonical evidence failed: {field_0}")]
+    Workflow(#[source] ReviewWorkflowStoreError),
+    #[error("review orchestration durable facts are corrupt: {field_0}")]
     Corruption(&'static str),
-}
-
-impl fmt::Display for ReviewOrchestrationStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "review orchestration database failure: {error}")
-            }
-            Self::CommitAmbiguous(error) => write!(
-                formatter,
-                "review orchestration commit is ambiguous: {error}"
-            ),
-            Self::Workflow(error) => write!(
-                formatter,
-                "review orchestration canonical evidence failed: {error}"
-            ),
-            Self::Corruption(detail) => write!(
-                formatter,
-                "review orchestration durable facts are corrupt: {detail}"
-            ),
-        }
-    }
-}
-
-impl Error for ReviewOrchestrationStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Workflow(error) => Some(error),
-            Self::Corruption(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for ReviewOrchestrationStoreError {

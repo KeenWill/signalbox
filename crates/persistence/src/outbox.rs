@@ -5,8 +5,6 @@
 //! connection and never own its transaction. [`OutboxDispatcher`] separately
 //! owns the delivery-prefix transaction around one synchronous consumer offer.
 
-use std::{error::Error, fmt};
-
 #[cfg(feature = "postgres-integration")]
 use std::num::NonZeroU64;
 
@@ -24,7 +22,10 @@ use signalbox_domain::{
     SessionOwnershipTransition, SessionTerminalOutcome, ToolApprovalResolution, ToolAttemptId,
     ToolRequestId, TurnAttemptId, TurnId, TurnModelSettingsResolved, UserContent,
 };
-use sqlx::{PgConnection, PgPool, Row, types::Uuid};
+use sqlx::{
+    PgConnection, PgPool, Row,
+    types::{Uuid, time::OffsetDateTime},
+};
 
 use crate::{
     lock_inventory,
@@ -44,11 +45,11 @@ use crate::{
         dispatching_module_from_str, dispatching_module_to_str, durable_command_id_from_uuid,
         goal_event_kind_from_str, input_position_from_numeric, input_position_to_numeric,
         model_change_adjustments_from_json, model_settings_from_json,
-        model_settings_overlay_from_json, outbox_event_discriminator_from_str,
-        runner_sandbox_from_str, runner_sandbox_to_str, session_creation_cause_from_str,
-        session_creation_cause_to_str, session_id_from_uuid, session_id_to_uuid,
-        tool_request_id_from_uuid, turn_disposition_kind_from_str, turn_disposition_kind_to_str,
-        turn_id_to_uuid,
+        model_settings_overlay_from_json, outbox_consumer_to_str,
+        outbox_event_discriminator_from_str, runner_sandbox_from_str, runner_sandbox_to_str,
+        session_creation_cause_from_str, session_creation_cause_to_str, session_id_from_uuid,
+        session_id_to_uuid, tool_request_id_from_uuid, turn_disposition_kind_from_str,
+        turn_disposition_kind_to_str, turn_id_to_uuid,
     },
     session_lifecycle::{
         decode_lifecycle_actor, decode_lifecycle_state, decode_standing_failure_cause,
@@ -96,6 +97,7 @@ struct OutboxSlotRow {
     storage_version: Option<i16>,
     stored_session: Option<Uuid>,
     turn_disposition: Option<String>,
+    recorded_at: Option<OffsetDateTime>,
 }
 
 pub(crate) struct ValidatedOutboxHeader {
@@ -104,6 +106,7 @@ pub(crate) struct ValidatedOutboxHeader {
     stored_session: Option<Uuid>,
     pub(crate) discriminator: OutboxEventDiscriminator,
     pub(crate) turn_disposition: Option<TurnDispositionStorageKind>,
+    pub(crate) recorded_at: OffsetDateTime,
 }
 
 type ToolBatchTransitionRow = (Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, bool);
@@ -121,14 +124,18 @@ struct TurnCancelledOutboxRow {
     terminal_frontier_id: Uuid,
 }
 
-/// One committed outbox event offered to the hub's single dispatcher consumer.
+#[derive(signalbox_derive::Accessors)]
+/// One committed outbox event offered to a typed outbox consumer.
 ///
 /// This is a persistence projection, not a domain event or process-protocol
 /// frame. Its sequence is the durable global outbox cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchedOutboxEvent {
     sequence: u64,
+    recorded_at: OffsetDateTime,
     session: Option<SessionId>,
+    /// Borrows the decoded typed event record.
+    #[get]
     kind: DispatchedOutboxEventKind,
 }
 
@@ -138,15 +145,15 @@ impl DispatchedOutboxEvent {
         self.sequence
     }
 
+    /// Returns the database write time of the committed outbox header.
+    pub const fn recorded_at(&self) -> OffsetDateTime {
+        self.recorded_at
+    }
+
     /// Returns the session named by the outbox header; a `command_settled`
     /// receipt for a rejected creation or an unknown session names none.
     pub const fn session(&self) -> Option<SessionId> {
         self.session
-    }
-
-    /// Borrows the decoded typed event record.
-    pub const fn kind(&self) -> &DispatchedOutboxEventKind {
-        &self.kind
     }
 }
 
@@ -712,114 +719,92 @@ pub enum OutboxDispatchOutcome {
     },
 }
 
+/// A compiled-in consumer with its own durable delivery prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboxConsumer {
+    /// The process-protocol client event stream.
+    ProcessProtocol,
+    /// The repository-watch ownership module.
+    RepoWatch,
+}
+
+#[derive(signalbox_derive::OperatorError)]
 /// Fail-closed reason a committed outbox projection could not be decoded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutboxCorruption {
-    /// The singleton delivery row was absent.
+    #[error("outbox delivery state is missing")]
+    /// The selected consumer cursor was absent.
     MissingDeliveryState,
-    /// The locked singleton could not be advanced from the observed cursor.
+    #[error("outbox delivery state changed unexpectedly")]
+    /// The locked consumer cursor could not advance from the observed value.
     DeliveryStateChanged,
+    #[error("outbox sequence state is missing")]
     /// The singleton allocation row was absent.
     MissingSequenceState,
+    #[error("outbox delivery state exceeds the allocated sequence")]
     /// The delivered cursor exceeded the allocator cursor.
     DeliveryBeyondAllocatedSequence,
+    #[error("outbox event header exceeds the allocated sequence")]
     /// A committed header existed beyond the allocator cursor.
     EventBeyondAllocatedSequence,
+    #[error("outbox committed event header is missing")]
     /// The allocator named a committed sequence whose header was absent.
     MissingCommittedEventHeader,
+    #[error("outbox sequence is invalid")]
     /// A stored cursor or sequence was not an unsigned 64-bit integer.
     InvalidSequence,
+    #[error("outbox input acceptance position is invalid")]
     /// An input-accepted record carried an invalid positive position.
     InvalidAcceptancePosition,
+    #[error("outbox accepted input content is invalid")]
     /// An input-accepted record carried invalid ordered content satellites.
     InvalidAcceptedInputContent,
+    #[error("outbox storage version is unsupported")]
     /// An event header used an unsupported storage version.
     UnsupportedStorageVersion,
+    #[error("outbox event kind is unsupported")]
     /// An event header named no admitted typed record family.
     UnsupportedEventKind,
+    #[error("outbox typed event record is missing")]
     /// The header's required typed record was absent.
     MissingTypedRecord,
+    #[error("outbox lifecycle event correlations are invalid")]
     /// A lifecycle transition disagreed with authoritative durable state.
     InvalidLifecycleEventCorrelation,
+    #[error("outbox terminal event correlations are invalid")]
     /// A terminal typed record disagreed with authoritative durable state.
     InvalidTerminalEventCorrelation,
+    #[error("outbox model-call state is invalid")]
     /// A model-call transition had an inconsistent or unknown state shape.
     InvalidModelCallState,
+    #[error("outbox delegation event is invalid")]
     /// A delegation update or wake had an inconsistent or unknown typed shape.
     InvalidDelegationEvent,
+    #[error("outbox model-settings event is invalid")]
     /// A settings event disagreed with its immutable referenced records.
     InvalidModelSettingsEvent,
+    #[error("outbox runner event is invalid")]
     /// A runner event had an inconsistent or unknown typed shape.
     InvalidRunnerEvent,
+    #[error("outbox lifecycle event is invalid")]
     /// A session lifecycle, goal, or ownership record had an inconsistent or
     /// unknown typed shape.
     InvalidLifecycleEvent,
+    #[error("outbox settlement event is invalid")]
     /// A settlement receipt had an inconsistent or unknown typed shape.
     InvalidSettlementEvent,
 }
 
-impl fmt::Display for OutboxCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::MissingDeliveryState => "outbox delivery state is missing",
-            Self::DeliveryStateChanged => "outbox delivery state changed unexpectedly",
-            Self::MissingSequenceState => "outbox sequence state is missing",
-            Self::DeliveryBeyondAllocatedSequence => {
-                "outbox delivery state exceeds the allocated sequence"
-            }
-            Self::EventBeyondAllocatedSequence => {
-                "outbox event header exceeds the allocated sequence"
-            }
-            Self::MissingCommittedEventHeader => "outbox committed event header is missing",
-            Self::InvalidSequence => "outbox sequence is invalid",
-            Self::InvalidAcceptancePosition => "outbox input acceptance position is invalid",
-            Self::InvalidAcceptedInputContent => "outbox accepted input content is invalid",
-            Self::UnsupportedStorageVersion => "outbox storage version is unsupported",
-            Self::UnsupportedEventKind => "outbox event kind is unsupported",
-            Self::MissingTypedRecord => "outbox typed event record is missing",
-            Self::InvalidLifecycleEventCorrelation => {
-                "outbox lifecycle event correlations are invalid"
-            }
-            Self::InvalidTerminalEventCorrelation => {
-                "outbox terminal event correlations are invalid"
-            }
-            Self::InvalidModelCallState => "outbox model-call state is invalid",
-            Self::InvalidDelegationEvent => "outbox delegation event is invalid",
-            Self::InvalidModelSettingsEvent => "outbox model-settings event is invalid",
-            Self::InvalidRunnerEvent => "outbox runner event is invalid",
-            Self::InvalidLifecycleEvent => "outbox lifecycle event is invalid",
-            Self::InvalidSettlementEvent => "outbox settlement event is invalid",
-        })
-    }
-}
-
-impl Error for OutboxCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Infrastructure or integrity failure from one dispatcher attempt.
 #[derive(Debug)]
 pub enum OutboxDispatchError {
+    #[error("outbox dispatch database operation failed")]
     /// PostgreSQL acquisition, query, rollback, or commit failed.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("outbox dispatch corruption: {field_0}")]
     /// Committed storage could not be decoded into the closed projection.
-    Corruption(OutboxCorruption),
-}
-
-impl fmt::Display for OutboxDispatchError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(_) => formatter.write_str("outbox dispatch database operation failed"),
-            Self::Corruption(error) => write!(formatter, "outbox dispatch corruption: {error}"),
-        }
-    }
-}
-
-impl Error for OutboxDispatchError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] OutboxCorruption),
 }
 
 impl From<sqlx::Error> for OutboxDispatchError {
@@ -843,8 +828,47 @@ pub struct OutboxDispatcher {
     pool: PgPool,
 }
 
+/// A typed, replayable read over one compiled-in consumer's durable prefix.
+#[derive(Clone, Debug)]
+pub struct OutboxConsumerReader {
+    pool: PgPool,
+    consumer: OutboxConsumer,
+}
+
+impl OutboxConsumerReader {
+    /// Binds the reader to one compiled-in consumer's durable prefix.
+    pub const fn new(pool: PgPool, consumer: OutboxConsumer) -> Self {
+        Self { pool, consumer }
+    }
+
+    /// Reads the next typed event without advancing the durable prefix.
+    pub async fn read_next(&self) -> Result<Option<DispatchedOutboxEvent>, OutboxDispatchError> {
+        let mut transaction = self.pool.begin().await?;
+        let delivered = lock_consumer_cursor(&mut transaction, self.consumer).await?;
+        let event = load_next_event(&mut transaction, delivered).await?;
+        transaction.rollback().await?;
+        Ok(event)
+    }
+
+    /// Advances the durable prefix through the exact event just processed.
+    pub async fn acknowledge(&self, sequence: u64) -> Result<(), OutboxDispatchError> {
+        let mut transaction = self.pool.begin().await?;
+        let delivered = lock_consumer_cursor(&mut transaction, self.consumer).await?;
+        if delivered >= sequence {
+            transaction.rollback().await?;
+            return Ok(());
+        }
+        if delivered.checked_add(1) != Some(sequence) {
+            return Err(OutboxCorruption::DeliveryStateChanged.into());
+        }
+        advance_consumer_cursor(&mut transaction, self.consumer, delivered, sequence).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+}
+
 impl OutboxDispatcher {
-    /// Binds the dispatcher to the shared hub pool.
+    /// Binds the dispatcher to the process-protocol delivery prefix.
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -865,55 +889,83 @@ impl OutboxDispatcher {
         Consumer: FnOnce(&DispatchedOutboxEvent) -> OutboxDeliveryDecision,
     {
         let mut transaction = self.pool.begin().await?;
-        let delivered: Option<Decimal> = sqlx::query_scalar(lock_inventory::OUTBOX_DELIVERY)
-            .fetch_optional(&mut *transaction)
-            .await?;
-        let delivered = delivered.ok_or(OutboxCorruption::MissingDeliveryState)?;
-        let delivered = decode_nonnegative_sequence(delivered)?;
-        let Some(next) = delivered.checked_add(1) else {
-            let allocated = load_allocated_sequence(&mut transaction).await?;
-            if allocated < delivered {
-                return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
-            }
-            transaction.rollback().await?;
-            return Ok(OutboxDispatchOutcome::Idle);
-        };
-        let (allocated, event_beyond_allocated, event) = load_event(&mut transaction, next).await?;
-        if allocated < delivered {
-            return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
-        }
-        if event_beyond_allocated {
-            return Err(OutboxCorruption::EventBeyondAllocatedSequence.into());
-        }
+        let consumer = OutboxConsumer::ProcessProtocol;
+        let delivered = lock_consumer_cursor(&mut transaction, consumer).await?;
+        let event = load_next_event(&mut transaction, delivered).await?;
         let Some(event) = event else {
-            if allocated >= next {
-                return Err(OutboxCorruption::MissingCommittedEventHeader.into());
-            }
             transaction.rollback().await?;
             return Ok(OutboxDispatchOutcome::Idle);
         };
+        let next = event.sequence();
 
         if consume(&event) == OutboxDeliveryDecision::Retry {
             transaction.rollback().await?;
             return Ok(OutboxDispatchOutcome::Retry { sequence: next });
         }
 
-        let updated = sqlx::query(
-            "UPDATE outbox_delivery_state
-                SET delivered_through = $1
-              WHERE singleton
-                AND delivered_through = $2",
-        )
-        .bind(Decimal::from(next))
-        .bind(Decimal::from(delivered))
-        .execute(&mut *transaction)
-        .await?;
-        if updated.rows_affected() != 1 {
-            return Err(OutboxCorruption::DeliveryStateChanged.into());
-        }
+        advance_consumer_cursor(&mut transaction, consumer, delivered, next).await?;
         transaction.commit().await?;
         Ok(OutboxDispatchOutcome::Delivered { sequence: next })
     }
+}
+
+async fn lock_consumer_cursor(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    consumer: OutboxConsumer,
+) -> Result<u64, OutboxDispatchError> {
+    let delivered: Option<Decimal> = sqlx::query_scalar(lock_inventory::OUTBOX_DELIVERY)
+        .bind(outbox_consumer_to_str(consumer))
+        .fetch_optional(&mut **transaction)
+        .await?;
+    decode_nonnegative_sequence(delivered.ok_or(OutboxCorruption::MissingDeliveryState)?)
+        .map_err(Into::into)
+}
+
+async fn load_next_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    delivered: u64,
+) -> Result<Option<DispatchedOutboxEvent>, OutboxDispatchError> {
+    let Some(next) = delivered.checked_add(1) else {
+        let allocated = load_allocated_sequence(transaction).await?;
+        if allocated < delivered {
+            return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
+        }
+        return Ok(None);
+    };
+    let (allocated, event_beyond_allocated, event) = load_event(transaction, next).await?;
+    if allocated < delivered {
+        return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
+    }
+    if event_beyond_allocated {
+        return Err(OutboxCorruption::EventBeyondAllocatedSequence.into());
+    }
+    if event.is_none() && allocated >= next {
+        return Err(OutboxCorruption::MissingCommittedEventHeader.into());
+    }
+    Ok(event)
+}
+
+async fn advance_consumer_cursor(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    consumer: OutboxConsumer,
+    delivered: u64,
+    sequence: u64,
+) -> Result<(), OutboxDispatchError> {
+    let updated = sqlx::query(
+        "UPDATE outbox_consumer_cursor
+            SET delivered_through = $1
+          WHERE consumer_name = $2
+            AND delivered_through = $3",
+    )
+    .bind(Decimal::from(sequence))
+    .bind(outbox_consumer_to_str(consumer))
+    .bind(Decimal::from(delivered))
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(OutboxCorruption::DeliveryStateChanged.into());
+    }
+    Ok(())
 }
 
 async fn load_allocated_sequence(
@@ -947,15 +999,16 @@ pub(crate) async fn load_event_header(
             event.event_kind,
             event.storage_version,
             event.session_id AS stored_session,
-            event.turn_disposition
+            event.turn_disposition,
+            event.recorded_at
            FROM outbox_sequence_state AS allocator
            LEFT JOIN (
                 SELECT event_sequence, event_kind, storage_version, session_id,
-                       turn_disposition
+                       turn_disposition, recorded_at
                   FROM outbox_event
                 UNION ALL
                 SELECT event_sequence, event_kind, storage_version, session_id,
-                       NULL::text AS turn_disposition
+                       NULL::text AS turn_disposition, recorded_at
                   FROM delegation_outbox_event
            ) AS event
              ON event.event_sequence = $1
@@ -972,15 +1025,18 @@ pub(crate) async fn load_event_header(
         storage_version,
         stored_session,
         turn_disposition,
+        recorded_at,
     }) = row
     else {
         return Err(OutboxCorruption::MissingSequenceState.into());
     };
     let allocated = decode_nonnegative_sequence(allocated)?;
-    let (stored_sequence, event_kind, storage_version) =
-        match (stored_sequence, event_kind, storage_version) {
-            (None, None, None) => return Ok((allocated, event_beyond_allocated, None)),
-            (Some(sequence), Some(kind), Some(version)) => (sequence, kind, version),
+    let (stored_sequence, event_kind, storage_version, recorded_at) =
+        match (stored_sequence, event_kind, storage_version, recorded_at) {
+            (None, None, None, None) => return Ok((allocated, event_beyond_allocated, None)),
+            (Some(sequence), Some(kind), Some(version), Some(recorded_at)) => {
+                (sequence, kind, version, recorded_at)
+            }
             _ => return Err(OutboxCorruption::MissingCommittedEventHeader.into()),
         };
     if decode_positive_sequence(stored_sequence)? != expected_sequence {
@@ -1012,6 +1068,7 @@ pub(crate) async fn load_event_header(
             stored_session,
             discriminator,
             turn_disposition,
+            recorded_at,
         }),
     ))
 }
@@ -1032,6 +1089,7 @@ pub(crate) async fn load_event(
             event_beyond_allocated,
             Some(DispatchedOutboxEvent {
                 sequence: expected_sequence,
+                recorded_at: header.recorded_at,
                 session: None,
                 kind,
             }),
@@ -1274,9 +1332,9 @@ pub(crate) async fn load_event(
             // by an applied submit command, or by the goal machinery, which
             // mints a commandless input and proves it with a `goal_turn` row.
             // A generation owning the turn does not disqualify the first shape:
-            // a goal turn bound to a turn a command already accepted — what
-            // repository-watch dispatch commits — is exactly a commanded input
-            // that also carries a `goal_turn` row.
+            // a commissioned dispatch binds its goal to the turn accepted by
+            // its input command, producing a commanded input that also carries
+            // a `goal_turn` row.
             let row = sqlx::query(
                 "SELECT event.accepted_input_id, event.turn_id,
                         event.acceptance_position,
@@ -1721,6 +1779,7 @@ pub(crate) async fn load_event(
         event_beyond_allocated,
         Some(DispatchedOutboxEvent {
             sequence: expected_sequence,
+            recorded_at: header.recorded_at,
             session: Some(session),
             kind,
         }),

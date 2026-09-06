@@ -9,11 +9,10 @@ Four capabilities extend the runtime boundary. The operation gains a typed
 workspace-instruction region so daemon-authored instructions reach a provider's
 instruction transport without being mixed into ordinary system text. The Codex
 CLI adapter gains file credential delivery, so a deployment can run it with a
-daemon-held API key instead of the CLI's ambient login. The Codex CLI adapter
-also gains OAuth delivery, with exact-value redaction of every delivered token
-installed before the child starts. The direct HTTP adapters gain a way to
-surface refusal evidence once a transport can prove the response followed the
-complete request upload.
+daemon-held API key instead of the CLI's ambient login, and OAuth delivery, with
+exact-value redaction of every delivered token installed before the child
+starts. The direct HTTP adapters gain a way to surface refusal evidence once a
+transport can prove the response followed the complete request upload.
 
 ## Design
 

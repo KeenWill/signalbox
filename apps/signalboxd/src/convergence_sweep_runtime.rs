@@ -12,14 +12,15 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, EligibilityNudge,
-    InProcessEligibilityNudge, PullRequestCheck, PullRequestCheckState, PullRequestConvergence,
-    PullRequestConvergenceBlocker, PullRequestConvergenceFacts,
-    UuidV7CommissionedDispatchIdGenerator, UuidV7SubmitInputIdGenerator,
-    evaluate_pull_request_convergence,
+    InProcessEligibilityNudge, UuidV7CommissionedDispatchIdGenerator, UuidV7SubmitInputIdGenerator,
+};
+use signalbox_convergence::{
+    ConvergencePolicy, Evaluation, Verdict,
+    fetch::{GitHubRequest, RequestFuture},
 };
 use signalbox_domain::{
-    BranchName, CommitSha, DurableCommandId, GoalStatement, MergeableState, PullRequestNumber,
-    RepositorySlug, UserContent,
+    BranchName, CommitSha, DurableCommandId, GoalStatement, PullRequestNumber, RepositorySlug,
+    UserContent,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::{
@@ -45,7 +46,7 @@ const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const USER_AGENT_VALUE: &str = "signalbox-convergence-sweep";
 // numeric-bound: guard - prevents a provider response from exhausting process memory
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-// numeric-bound: guard - prevents credential material from exhausting process memory
+// numeric-bound: guard - prevents credential material from reaching the provider
 const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 
 /// Deployment policy for convergence census work and retry scheduling.
@@ -83,71 +84,6 @@ impl ConvergenceSweepNumericBounds {
     }
 }
 
-const DETAILS_QUERY: &str = r#"
-query PullRequestConvergence($namespace: String!, $name: String!, $number: Int!) {
-  repository(owner: $namespace, name: $name) {
-    pullRequest(number: $number) {
-      state isDraft baseRefName baseRefOid headRefName headRefOid mergeable
-      headRepository { name_with_owner: nameWithOwner }
-      reviewThreads(first: 100) {
-        nodes { isResolved }
-        pageInfo { hasNextPage endCursor }
-      }
-      commits(last: 1) { nodes { commit {
-        oid
-        statusCheckRollup { contexts(first: 100) {
-          nodes {
-            __typename
-            ... on CheckRun { name status conclusion }
-            ... on StatusContext { context state }
-          }
-          pageInfo { hasNextPage endCursor }
-        } }
-      } } }
-    }
-  }
-}
-"#;
-
-const THREADS_QUERY: &str = r#"
-query PullRequestConvergenceThreads(
-  $namespace: String!, $name: String!, $number: Int!, $after: String
-) {
-  repository(owner: $namespace, name: $name) {
-    pullRequest(number: $number) {
-      state baseRefName baseRefOid headRefName headRefOid
-      reviewThreads(first: 100, after: $after) {
-        nodes { isResolved }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-"#;
-
-const CHECKS_QUERY: &str = r#"
-query PullRequestConvergenceChecks(
-  $namespace: String!, $name: String!, $number: Int!, $after: String
-) {
-  repository(owner: $namespace, name: $name) {
-    pullRequest(number: $number) {
-      state baseRefName baseRefOid headRefName headRefOid
-      commits(last: 1) { nodes { commit {
-        oid
-        statusCheckRollup { contexts(first: 100, after: $after) {
-          nodes {
-            __typename
-            ... on CheckRun { name status conclusion }
-            ... on StatusContext { context state }
-          }
-          pageInfo { hasNextPage endCursor }
-        } }
-      } } }
-    }
-  }
-}
-"#;
-
 /// Construction failure for the fixed HTTPS transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConvergenceSweepRuntimeConstructionError;
@@ -167,7 +103,6 @@ enum CensusError {
     Response,
     Decode,
     Shape,
-    Pagination,
     State,
 }
 
@@ -192,6 +127,8 @@ pub struct ConvergenceSweepRuntime {
     state: PostgresConvergenceSweepStore,
     eligibility_nudge: InProcessEligibilityNudge,
     numeric_bounds: ConvergenceSweepNumericBounds,
+    convergence_policy: Option<ConvergencePolicy>,
+    convergence_history: tokio::sync::Mutex<std::collections::BTreeMap<String, Value>>,
 }
 
 impl ConvergenceSweepRuntime {
@@ -231,10 +168,9 @@ impl ConvergenceSweepRuntime {
                     .map(|pull_request| SweepTarget {
                         repository: repository.repository().clone(),
                         pull_request: *pull_request,
-                        credentials: FileCredentialAccess::new_bounded(
+                        credentials: FileCredentialAccess::new(
                             repository.credential_file().to_path_buf(),
                             repository.credential_reference(),
-                            MAX_CREDENTIAL_BYTES,
                         ),
                         credential_reference: repository.credential_reference(),
                     })
@@ -256,6 +192,8 @@ impl ConvergenceSweepRuntime {
             state: PostgresConvergenceSweepStore::new(pool),
             eligibility_nudge,
             numeric_bounds,
+            convergence_policy: models.convergence().cloned(),
+            convergence_history: Default::default(),
         }))
     }
 
@@ -426,10 +364,10 @@ impl ConvergenceSweepRuntime {
             }
         };
         let observation = ConvergenceSweepObservation::new(
-            fetched.facts.head_sha().clone(),
-            fetched.facts.unresolved_review_threads(),
+            fetched.head_sha.clone(),
+            fetched.evaluation.unresolved_review_threads as u64,
         );
-        let convergence = evaluate_pull_request_convergence(&fetched.facts);
+        let convergence = &fetched.evaluation.verdict;
         if convergence.is_converged() {
             self.record_decision(target, &observation, ConvergenceSweepDecision::Converged)
                 .await;
@@ -530,7 +468,7 @@ impl ConvergenceSweepRuntime {
             .await;
             return;
         };
-        let context = match commission_content(target, &fetched, &convergence) {
+        let context = match commission_content(target, &fetched, convergence) {
             Ok(context) => context,
             Err(()) => {
                 self.record_failure(
@@ -792,208 +730,100 @@ impl ConvergenceSweepRuntime {
         let mut authorization =
             HeaderValue::from_bytes(&authorization).map_err(|_| CensusError::Credential)?;
         authorization.set_sensitive(true);
-        let (namespace, name) = target
-            .repository
-            .as_str()
-            .split_once('/')
-            .ok_or(CensusError::Shape)?;
-        let variables = json!({"namespace": namespace, "name": name,
-            "number": target.pull_request.get()});
-        let root = self
-            .graphql(DETAILS_QUERY, variables.clone(), &authorization)
-            .await?;
-        let pull = root
-            .pointer("/data/repository/pullRequest")
-            .ok_or(CensusError::Shape)?;
-        if pull.get("state").and_then(Value::as_str) != Some("OPEN") {
-            return Err(CensusError::Shape);
+        let mut policy = self.convergence_policy.clone().ok_or(CensusError::Shape)?;
+        if let Some(ceiling) = self.numeric_bounds.connection_pages {
+            policy.page_limit = policy.page_limit.min(ceiling);
         }
-        let head_sha = commit_at(pull, "headRefOid")?;
-        let head_branch = branch_at(pull, "headRefName")?;
-        let base_branch = branch_at(pull, "baseRefName")?;
-        let base_sha = commit_at(pull, "baseRefOid")?;
-        let head_repository = head_repository_at(pull)?;
-        let checked_head_sha = checked_head_at(pull)?;
-        let mergeable_state = mergeable_state_at(pull)?;
-        let draft_state = draft_state_at(pull)?;
-        let initial_thread_states = review_thread_states(
-            pull.pointer("/reviewThreads/nodes")
-                .and_then(Value::as_array)
-                .ok_or(CensusError::Shape)?,
-        )?;
-        let mut thread_states = initial_thread_states.clone();
-        let (initial_checks, initial_check_page) = initial_checks(pull)?;
-        let mut checks = initial_checks.clone();
-        let mut check_page = initial_check_page.clone();
-        let initial_thread_page = page_info(pull.pointer("/reviewThreads/pageInfo"))?;
-        let mut thread_page = initial_thread_page.clone();
-        let mut thread_pages = 1usize;
-        while thread_page.has_next {
-            thread_pages += 1;
-            if self
-                .numeric_bounds
-                .connection_pages
-                .is_some_and(|limit| thread_pages > limit)
-            {
-                return Err(CensusError::Pagination);
-            }
-            let mut next = variables.clone();
-            next["after"] = Value::String(thread_page.cursor.ok_or(CensusError::Shape)?);
-            let page = self.graphql(THREADS_QUERY, next, &authorization).await?;
-            let connection = threads_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
-            thread_states.extend(review_thread_states(
-                connection
-                    .get("nodes")
-                    .and_then(Value::as_array)
-                    .ok_or(CensusError::Shape)?,
-            )?);
-            thread_page = page_info(connection.get("pageInfo"))?;
+        let key = format!(
+            "{}#{}",
+            target.repository.as_str(),
+            target.pull_request.get()
+        );
+        let previous = self
+            .convergence_history
+            .lock()
+            .await
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let mut send = |request| -> RequestFuture<'_> {
+            let authorization = &authorization;
+            Box::pin(async move {
+                let result = match request {
+                    GitHubRequest::GraphQl { query, variables } => {
+                        self.graphql(&query, variables, authorization).await
+                    }
+                    GitHubRequest::Rest { path } => self.rest(&path, authorization).await,
+                };
+                result.map_err(|_| {
+                    signalbox_convergence::Error::Evidence(
+                        "convergence provider request failed".into(),
+                    )
+                })
+            })
+        };
+        let recording = signalbox_convergence::fetch::record_with(
+            &mut send,
+            previous,
+            target.repository.as_str(),
+            target.pull_request.get(),
+            &policy,
+        )
+        .await
+        .map_err(|_| CensusError::Response)?;
+        let snapshot = recording
+            .snapshot(&policy)
+            .map_err(|_| CensusError::Shape)?;
+        if snapshot.initial["headRepository"] != snapshot.current["headRepository"] {
+            return Err(CensusError::State);
         }
-        let mut check_pages = 1usize;
-        while check_page.has_next {
-            check_pages += 1;
-            if self
-                .numeric_bounds
-                .connection_pages
-                .is_some_and(|limit| check_pages > limit)
-            {
-                return Err(CensusError::Pagination);
-            }
-            let mut next = variables.clone();
-            next["after"] = Value::String(check_page.cursor.ok_or(CensusError::Shape)?);
-            let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
-            let connection = checks_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
-            checks.extend(decode_checks(
-                connection
-                    .get("nodes")
-                    .and_then(Value::as_array)
-                    .ok_or(CensusError::Shape)?,
-            )?);
-            check_page = page_info(connection.get("pageInfo"))?;
-        }
-        // A paginated census assembles its snapshot from a traversal that spans
-        // many responses, so the fence below and the revalidation traversals
-        // after it bound the whole window in one direction: the details reread
-        // proves the refs, mergeable state, draft state, and head repository
-        // still hold, and the re-traversals that follow it prove every page of
-        // both connections still holds. Revalidating a connection before the
-        // fence instead would leave a gap — a thread or check on the second or
-        // later page could change after its own reread but before the fence,
-        // and because the fence compares only the initial pages, refs, and page
-        // information, all of which can be identical across that change, the
-        // stale buffers would be accepted.
-        if thread_pages > 1 || check_pages > 1 {
-            let revalidated = self
-                .graphql(DETAILS_QUERY, variables.clone(), &authorization)
-                .await?;
-            let revalidated_pull = revalidated
-                .pointer("/data/repository/pullRequest")
-                .ok_or(CensusError::Shape)?;
-            validate_paginated_pull(
-                revalidated_pull,
-                &head_sha,
-                &head_branch,
-                &base_branch,
-                &base_sha,
-            )?;
-            if mergeable_state_at(revalidated_pull)? != mergeable_state {
-                return Err(CensusError::State);
-            }
-            ensure_draft_state_stable(draft_state, draft_state_at(revalidated_pull)?)?;
-            ensure_head_repository_stable(
-                &head_repository,
-                &head_repository_at(revalidated_pull)?,
-            )?;
-            ensure_final_connections_stable(
-                revalidated_pull,
-                &initial_thread_states,
-                &initial_thread_page,
-                &initial_checks,
-                &initial_check_page,
-            )?;
-        }
-        if thread_pages > 1 {
-            let mut next = variables.clone();
-            next["after"] = Value::Null;
-            let page = self.graphql(THREADS_QUERY, next, &authorization).await?;
-            let connection = threads_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
-            let mut revalidated = review_thread_states(
-                connection
-                    .get("nodes")
-                    .and_then(Value::as_array)
-                    .ok_or(CensusError::Shape)?,
-            )?;
-            let mut revalidation_page = page_info(connection.get("pageInfo"))?;
-            let mut revalidation_pages = 1usize;
-            while revalidation_page.has_next {
-                revalidation_pages += 1;
-                if self
-                    .numeric_bounds
-                    .connection_pages
-                    .is_some_and(|limit| revalidation_pages > limit)
-                {
-                    return Err(CensusError::Pagination);
-                }
-                let mut next = variables.clone();
-                next["after"] = Value::String(revalidation_page.cursor.ok_or(CensusError::Shape)?);
-                let page = self.graphql(THREADS_QUERY, next, &authorization).await?;
-                let connection =
-                    threads_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
-                revalidated.extend(review_thread_states(
-                    connection
-                        .get("nodes")
-                        .and_then(Value::as_array)
-                        .ok_or(CensusError::Shape)?,
-                )?);
-                revalidation_page = page_info(connection.get("pageInfo"))?;
-            }
-            ensure_threads_stable(&thread_states, &revalidated)?;
-        }
-        if checks_require_revalidation(thread_pages, check_pages) {
-            let mut next = variables.clone();
-            next["after"] = Value::Null;
-            let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
-            let (mut revalidated, mut revalidation_page) =
-                initial_checks_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
-            let mut revalidation_pages = 1usize;
-            while revalidation_page.has_next {
-                revalidation_pages += 1;
-                if self
-                    .numeric_bounds
-                    .connection_pages
-                    .is_some_and(|limit| revalidation_pages > limit)
-                {
-                    return Err(CensusError::Pagination);
-                }
-                let mut next = variables.clone();
-                next["after"] = Value::String(revalidation_page.cursor.ok_or(CensusError::Shape)?);
-                let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
-                let connection =
-                    checks_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
-                revalidated.extend(decode_checks(
-                    connection
-                        .get("nodes")
-                        .and_then(Value::as_array)
-                        .ok_or(CensusError::Shape)?,
-                )?);
-                revalidation_page = page_info(connection.get("pageInfo"))?;
-            }
-            ensure_checks_stable(&checks, &revalidated)?;
-        }
-        let unresolved = unresolved_threads(&thread_states);
+        let evaluation =
+            signalbox_convergence::evaluate(&snapshot, &policy).map_err(|_| CensusError::State)?;
+        let node = &snapshot.current;
+        let head_repository = RepositorySlug::try_new(
+            node["headRepository"]["nameWithOwner"]
+                .as_str()
+                .ok_or(CensusError::Shape)?
+                .to_lowercase(),
+        )
+        .map_err(|_| CensusError::Shape)?;
+        self.convergence_history
+            .lock()
+            .await
+            .insert(key, evaluation.state.clone());
         Ok(FetchedPullRequest {
-            base_branch,
-            head_branch,
+            head_sha: commit_at(node, "headRefOid")?,
+            base_branch: branch_at(node, "baseRefName")?,
+            head_branch: branch_at(node, "headRefName")?,
             head_repository,
-            facts: PullRequestConvergenceFacts::new(
-                head_sha,
-                checked_head_sha,
-                draft_state,
-                unresolved,
-                mergeable_state,
-                checks,
-            ),
+            evaluation,
         })
+    }
+
+    async fn rest(&self, path: &str, authorization: &HeaderValue) -> Result<Value, CensusError> {
+        let mut response = self
+            .client
+            .get(format!("https://api.github.com/{path}"))
+            .header(AUTHORIZATION, authorization.clone())
+            .header(ACCEPT, "application/vnd.github+json")
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .send()
+            .await
+            .map_err(|_| CensusError::Request)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(Value::Null);
+        }
+        if response.status() != StatusCode::OK {
+            return Err(CensusError::Response);
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| CensusError::Response)? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(CensusError::Response);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| CensusError::Decode)
     }
 
     async fn graphql(
@@ -1085,298 +915,8 @@ struct FetchedPullRequest {
     base_branch: BranchName,
     head_branch: BranchName,
     head_repository: RepositorySlug,
-    facts: PullRequestConvergenceFacts,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct PageInfo {
-    has_next: bool,
-    cursor: Option<String>,
-}
-impl PageInfo {
-    const fn done() -> Self {
-        Self {
-            has_next: false,
-            cursor: None,
-        }
-    }
-}
-
-fn page_info(value: Option<&Value>) -> Result<PageInfo, CensusError> {
-    let value = value.ok_or(CensusError::Shape)?;
-    Ok(PageInfo {
-        has_next: value
-            .get("hasNextPage")
-            .and_then(Value::as_bool)
-            .ok_or(CensusError::Shape)?,
-        cursor: value
-            .get("endCursor")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-    })
-}
-
-fn review_thread_states(values: &[Value]) -> Result<Vec<bool>, CensusError> {
-    values
-        .iter()
-        .map(|value| {
-            value
-                .get("isResolved")
-                .and_then(Value::as_bool)
-                .ok_or(CensusError::Shape)
-        })
-        .collect()
-}
-
-fn unresolved_threads(states: &[bool]) -> u64 {
-    states.iter().filter(|resolved| !**resolved).count() as u64
-}
-
-fn ensure_threads_stable(observed: &[bool], revalidated: &[bool]) -> Result<(), CensusError> {
-    if observed == revalidated {
-        Ok(())
-    } else {
-        Err(CensusError::State)
-    }
-}
-
-fn ensure_final_connections_stable(
-    pull: &Value,
-    observed_threads: &[bool],
-    observed_thread_page: &PageInfo,
-    observed_checks: &[PullRequestCheck],
-    observed_check_page: &PageInfo,
-) -> Result<(), CensusError> {
-    let revalidated_threads = review_thread_states(
-        pull.pointer("/reviewThreads/nodes")
-            .and_then(Value::as_array)
-            .ok_or(CensusError::Shape)?,
-    )?;
-    let revalidated_thread_page = page_info(pull.pointer("/reviewThreads/pageInfo"))?;
-    let (revalidated_checks, revalidated_check_page) = initial_checks(pull)?;
-    ensure_threads_stable(observed_threads, &revalidated_threads)?;
-    ensure_checks_stable(observed_checks, &revalidated_checks)?;
-    if observed_thread_page != &revalidated_thread_page
-        || observed_check_page != &revalidated_check_page
-    {
-        return Err(CensusError::State);
-    }
-    Ok(())
-}
-
-const fn checks_require_revalidation(thread_pages: usize, check_pages: usize) -> bool {
-    thread_pages > 1 || check_pages > 1
-}
-
-fn checks_page<'a>(
-    page: &'a Value,
-    expected_head: &CommitSha,
-    expected_head_branch: &BranchName,
-    expected_base: &BranchName,
-    expected_base_sha: &CommitSha,
-) -> Result<&'a Value, CensusError> {
-    let pull = page
-        .pointer("/data/repository/pullRequest")
-        .ok_or(CensusError::Shape)?;
-    validate_paginated_pull(
-        pull,
-        expected_head,
-        expected_head_branch,
-        expected_base,
-        expected_base_sha,
-    )?;
-    let commit = pull
-        .pointer("/commits/nodes/0/commit")
-        .ok_or(CensusError::Shape)?;
-    if commit_at(commit, "oid")? != *expected_head {
-        return Err(CensusError::Shape);
-    }
-    commit
-        .pointer("/statusCheckRollup/contexts")
-        .ok_or(CensusError::Shape)
-}
-
-fn initial_checks_page(
-    page: &Value,
-    expected_head: &CommitSha,
-    expected_head_branch: &BranchName,
-    expected_base: &BranchName,
-    expected_base_sha: &CommitSha,
-) -> Result<(Vec<PullRequestCheck>, PageInfo), CensusError> {
-    let pull = page
-        .pointer("/data/repository/pullRequest")
-        .ok_or(CensusError::Shape)?;
-    validate_paginated_pull(
-        pull,
-        expected_head,
-        expected_head_branch,
-        expected_base,
-        expected_base_sha,
-    )?;
-    let commit = pull
-        .pointer("/commits/nodes/0/commit")
-        .ok_or(CensusError::Shape)?;
-    if commit_at(commit, "oid")? != *expected_head {
-        return Err(CensusError::Shape);
-    }
-    initial_checks(pull)
-}
-
-fn threads_page<'a>(
-    page: &'a Value,
-    expected_head: &CommitSha,
-    expected_head_branch: &BranchName,
-    expected_base: &BranchName,
-    expected_base_sha: &CommitSha,
-) -> Result<&'a Value, CensusError> {
-    let pull = page
-        .pointer("/data/repository/pullRequest")
-        .ok_or(CensusError::Shape)?;
-    validate_paginated_pull(
-        pull,
-        expected_head,
-        expected_head_branch,
-        expected_base,
-        expected_base_sha,
-    )?;
-    pull.get("reviewThreads").ok_or(CensusError::Shape)
-}
-
-fn validate_paginated_pull(
-    pull: &Value,
-    expected_head: &CommitSha,
-    expected_head_branch: &BranchName,
-    expected_base: &BranchName,
-    expected_base_sha: &CommitSha,
-) -> Result<(), CensusError> {
-    if pull.get("state").and_then(Value::as_str) != Some("OPEN")
-        || commit_at(pull, "headRefOid")? != *expected_head
-        || branch_at(pull, "headRefName")? != *expected_head_branch
-        || branch_at(pull, "baseRefName")? != *expected_base
-        || commit_at(pull, "baseRefOid")? != *expected_base_sha
-    {
-        return Err(CensusError::Shape);
-    }
-    Ok(())
-}
-
-fn mergeable_state_at(pull: &Value) -> Result<MergeableState, CensusError> {
-    match pull.get("mergeable").and_then(Value::as_str) {
-        Some("MERGEABLE") => Ok(MergeableState::Mergeable),
-        Some("CONFLICTING") => Ok(MergeableState::Conflicting),
-        Some("UNKNOWN") => Ok(MergeableState::Unknown),
-        _ => Err(CensusError::Shape),
-    }
-}
-
-fn draft_state_at(
-    pull: &Value,
-) -> Result<signalbox_application::PullRequestDraftState, CensusError> {
-    match pull.get("isDraft").and_then(Value::as_bool) {
-        Some(true) => Ok(signalbox_application::PullRequestDraftState::Draft),
-        Some(false) => Ok(signalbox_application::PullRequestDraftState::ReadyForReview),
-        None => Err(CensusError::Shape),
-    }
-}
-
-fn ensure_draft_state_stable(
-    observed: signalbox_application::PullRequestDraftState,
-    revalidated: signalbox_application::PullRequestDraftState,
-) -> Result<(), CensusError> {
-    if observed == revalidated {
-        Ok(())
-    } else {
-        Err(CensusError::State)
-    }
-}
-
-fn decode_checks(values: &[Value]) -> Result<Vec<PullRequestCheck>, CensusError> {
-    values
-        .iter()
-        .map(
-            |value| match value.get("__typename").and_then(Value::as_str) {
-                Some("CheckRun") => {
-                    let status = value
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .ok_or(CensusError::Shape)?;
-                    Ok(PullRequestCheck::new(
-                        value
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .ok_or(CensusError::Shape)?
-                            .to_owned(),
-                        if status == "COMPLETED" {
-                            PullRequestCheckState::CheckRunCompleted {
-                                conclusion: value
-                                    .get("conclusion")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_owned),
-                            }
-                        } else {
-                            PullRequestCheckState::CheckRunInProgress
-                        },
-                    ))
-                }
-                Some("StatusContext") => Ok(PullRequestCheck::new(
-                    value
-                        .get("context")
-                        .and_then(Value::as_str)
-                        .ok_or(CensusError::Shape)?
-                        .to_owned(),
-                    PullRequestCheckState::StatusContext {
-                        state: value
-                            .get("state")
-                            .and_then(Value::as_str)
-                            .ok_or(CensusError::Shape)?
-                            .to_owned(),
-                    },
-                )),
-                _ => Err(CensusError::Shape),
-            },
-        )
-        .collect()
-}
-
-fn ensure_checks_stable(
-    observed: &[PullRequestCheck],
-    revalidated: &[PullRequestCheck],
-) -> Result<(), CensusError> {
-    if observed == revalidated {
-        Ok(())
-    } else {
-        Err(CensusError::State)
-    }
-}
-
-fn checked_head_at(pull: &Value) -> Result<Option<CommitSha>, CensusError> {
-    let rollup = pull
-        .pointer("/commits/nodes/0/commit/statusCheckRollup")
-        .ok_or(CensusError::Shape)?;
-    if rollup.is_null() {
-        return Ok(None);
-    }
-    commit_at(
-        pull.pointer("/commits/nodes/0/commit")
-            .ok_or(CensusError::Shape)?,
-        "oid",
-    )
-    .map(Some)
-}
-
-fn initial_checks(pull: &Value) -> Result<(Vec<PullRequestCheck>, PageInfo), CensusError> {
-    let rollup = pull
-        .pointer("/commits/nodes/0/commit/statusCheckRollup")
-        .ok_or(CensusError::Shape)?;
-    if rollup.is_null() {
-        return Ok((Vec::new(), PageInfo::done()));
-    }
-    let contexts = rollup.get("contexts").ok_or(CensusError::Shape)?;
-    let nodes = contexts
-        .get("nodes")
-        .and_then(Value::as_array)
-        .ok_or(CensusError::Shape)?;
-    Ok((decode_checks(nodes)?, page_info(contexts.get("pageInfo"))?))
+    head_sha: CommitSha,
+    evaluation: Evaluation,
 }
 
 fn commit_at(value: &Value, key: &str) -> Result<CommitSha, CensusError> {
@@ -1414,7 +954,7 @@ fn commission_request(
         CommissionedDispatchFence::PullRequest {
             repository: target.repository.clone(),
             pull_request: target.pull_request,
-            head_sha: fetched.facts.head_sha().clone(),
+            head_sha: fetched.head_sha.clone(),
             head_repository: fetched.head_repository.clone(),
             head_branch: fetched.head_branch.clone(),
             base_branch: fetched.base_branch.clone(),
@@ -1433,81 +973,24 @@ fn commission_request(
 fn commission_content(
     target: &SweepTarget,
     fetched: &FetchedPullRequest,
-    convergence: &PullRequestConvergence,
+    convergence: &Verdict,
 ) -> Result<String, ()> {
-    let blockers = convergence
-        .blockers()
-        .iter()
-        .map(blocker_text)
-        .collect::<Vec<_>>();
-    let gating_checks = fetched
-        .facts
-        .checks()
-        .iter()
-        .filter(|check| !check.is_non_gating())
-        .map(|check| json!({"name": check.name(), "state": check.observed_state()}))
-        .collect::<Vec<_>>();
-    let non_gating_checks = fetched
-        .facts
-        .checks()
-        .iter()
-        .filter(|check| check.is_non_gating())
-        .map(|check| json!({"name": check.name(), "state": check.observed_state()}))
-        .collect::<Vec<_>>();
     serde_json::to_string(&json!({
-        "kind": "pull_request_convergence_reconciliation",
-        "repository": target.repository.as_str(),
-        "pull_request": target.pull_request.get(),
-        "head_sha": fetched.facts.head_sha().as_str(),
-        "checked_head_sha": fetched.facts.checked_head_sha().map(CommitSha::as_str),
-        "head_repository": fetched.head_repository.as_str(),
-        "base_branch": fetched.base_branch.as_str(),
-        "head_branch": fetched.head_branch.as_str(),
-        "draft": fetched.facts.draft().is_draft(),
-        "unresolved_review_threads": fetched.facts.unresolved_review_threads(),
-        "mergeable_state": format!("{:?}", fetched.facts.mergeable_state()).to_lowercase(),
-        "gating_checks": gating_checks,
-        "non_gating_checks": non_gating_checks,
-        "blockers": blockers,
-    }))
-    .map_err(|_| ())
-}
-
-fn head_repository_at(pull: &Value) -> Result<RepositorySlug, CensusError> {
-    RepositorySlug::try_new(
-        pull.pointer("/headRepository/name_with_owner")
-            .and_then(Value::as_str)
-            .ok_or(CensusError::Shape)?
-            .to_lowercase(),
-    )
-    .map_err(|_| CensusError::Shape)
-}
-
-fn ensure_head_repository_stable(
-    observed: &RepositorySlug,
-    revalidated: &RepositorySlug,
-) -> Result<(), CensusError> {
-    if observed == revalidated {
-        Ok(())
-    } else {
-        Err(CensusError::State)
-    }
-}
-
-fn blocker_text(blocker: &PullRequestConvergenceBlocker) -> String {
-    match blocker {
-        PullRequestConvergenceBlocker::UnresolvedReviewThreads(count) => {
-            format!("unresolved-review-threads:{count}")
-        }
-        PullRequestConvergenceBlocker::ChecksNotForCurrentHead => {
-            String::from("checks-not-for-current-head")
-        }
-        PullRequestConvergenceBlocker::CheckNotGreen { name, state } => {
-            format!("check-not-green:{name}:{state}")
-        }
-        PullRequestConvergenceBlocker::BaseConflict => String::from("base-conflict"),
-        PullRequestConvergenceBlocker::MergeabilityUnknown => String::from("mergeability-unknown"),
-    }
+        "kind":"pull_request_convergence_reconciliation",
+        "repository":target.repository.as_str(),
+        "pull_request":target.pull_request.get(),
+        "head_sha":fetched.head_sha.as_str(),
+        "checked_head_sha":fetched.evaluation.facts.checked_head_oid,
+        "head_repository":fetched.head_repository.as_str(),
+        "base_branch":fetched.base_branch.as_str(),
+        "head_branch":fetched.head_branch.as_str(),
+        "draft":fetched.evaluation.facts.is_draft,
+        "unresolved_review_threads":fetched.evaluation.unresolved_review_threads,
+        "mergeable_state":fetched.evaluation.facts.mergeable.to_lowercase(),
+        "gating_checks":fetched.evaluation.gating_checks,
+        "non_gating_checks":fetched.evaluation.non_gating_checks,
+        "blockers":convergence.reasons().iter().map(|reason|reason.reference_reason()).collect::<Vec<_>>(),
+    })).map_err(|_|())
 }
 
 async fn sleep_for_policy(delay: Option<Duration>) {
@@ -1565,10 +1048,6 @@ mod tests {
         )
     }
 
-    fn sha(value: char) -> CommitSha {
-        CommitSha::try_new(value.to_string().repeat(40)).expect("fixture SHA is valid")
-    }
-
     // The lineage arithmetic itself now lives in the convergence-sweep store, which
     // grows and caps each retry from this policy. What stays provable here is that
     // the configured, optional bounds reach that store intact and describe a usable
@@ -1589,520 +1068,6 @@ mod tests {
                 .zip(policy.backoff_cap)
                 .is_some_and(|(base, cap)| base <= cap),
             "the checked-in example schedules a first retry no later than its own cap"
-        );
-    }
-
-    #[test]
-    fn status_and_check_run_non_gating_rules_remain_distinct() {
-        let status = PullRequestCheck::new(
-            String::from("coderabbit"),
-            PullRequestCheckState::StatusContext {
-                state: String::from("FAILURE"),
-            },
-        );
-        let run = PullRequestCheck::new(
-            String::from("CodeRabbit"),
-            PullRequestCheckState::CheckRunCompleted {
-                conclusion: Some(String::from("FAILURE")),
-            },
-        );
-        assert!(status.is_non_gating());
-        assert!(!run.is_non_gating());
-    }
-
-    #[test]
-    fn checks_query_is_scoped_to_the_requested_pull_request() {
-        assert!(CHECKS_QUERY.contains("pullRequest(number: $number)"));
-        assert!(CHECKS_QUERY.contains("commits(last: 1)"));
-    }
-
-    #[test]
-    fn a_check_run_without_status_is_rejected() {
-        let checks = [json!({
-            "__typename": "CheckRun",
-            "name": "test",
-            "conclusion": "SUCCESS"
-        })];
-
-        assert!(matches!(decode_checks(&checks), Err(CensusError::Shape)));
-    }
-
-    #[test]
-    fn absent_status_rollup_does_not_mark_checks_current() {
-        let pull = json!({
-            "commits": {
-                "nodes": [{"commit": {"oid": sha('a').as_str(), "statusCheckRollup": null}}]
-            }
-        });
-
-        assert_eq!(checked_head_at(&pull), Ok(None));
-        let (checks, page) = initial_checks(&pull).expect("a null rollup is a complete absence");
-        assert!(checks.is_empty());
-        assert!(!page.has_next);
-    }
-
-    #[test]
-    fn absent_status_rollup_remains_absent_during_revalidation() {
-        let expected_head = sha('a');
-        let expected_base_sha = sha('c');
-        let expected_head_branch = BranchName::try_new(String::from("agent/convergence"))
-            .expect("fixture head branch is valid");
-        let expected_base =
-            BranchName::try_new(String::from("main")).expect("fixture base branch is valid");
-        let page = json!({
-            "data": {"repository": {"pullRequest": {
-                "state": "OPEN",
-                "baseRefName": expected_base.as_str(),
-                "baseRefOid": expected_base_sha.as_str(),
-                "headRefName": expected_head_branch.as_str(),
-                "headRefOid": expected_head.as_str(),
-                "commits": {"nodes": [{"commit": {
-                    "oid": expected_head.as_str(),
-                    "statusCheckRollup": null
-                }}]}
-            }}}
-        });
-
-        let (checks, page_info) = initial_checks_page(
-            &page,
-            &expected_head,
-            &expected_head_branch,
-            &expected_base,
-            &expected_base_sha,
-        )
-        .expect("stable rollup absence revalidates");
-
-        assert!(checks.is_empty());
-        assert!(!page_info.has_next);
-    }
-
-    #[test]
-    fn mergeability_decoder_preserves_the_closed_provider_states() {
-        assert_eq!(
-            mergeable_state_at(&json!({"mergeable": "MERGEABLE"})),
-            Ok(MergeableState::Mergeable)
-        );
-        assert_eq!(
-            mergeable_state_at(&json!({"mergeable": "CONFLICTING"})),
-            Ok(MergeableState::Conflicting)
-        );
-        assert_eq!(
-            mergeable_state_at(&json!({"mergeable": "UNKNOWN"})),
-            Ok(MergeableState::Unknown)
-        );
-    }
-
-    #[test]
-    fn paginated_census_rejects_draft_state_drift() {
-        assert_eq!(
-            ensure_draft_state_stable(
-                signalbox_application::PullRequestDraftState::ReadyForReview,
-                signalbox_application::PullRequestDraftState::Draft,
-            ),
-            Err(CensusError::State)
-        );
-        assert_eq!(
-            ensure_draft_state_stable(
-                signalbox_application::PullRequestDraftState::Draft,
-                signalbox_application::PullRequestDraftState::Draft,
-            ),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn a_partial_initial_status_rollup_is_rejected() {
-        let missing_nodes = json!({
-            "commits": {
-                "nodes": [{"commit": {
-                    "oid": sha('a').as_str(),
-                    "statusCheckRollup": {
-                        "contexts": {
-                            "pageInfo": {"hasNextPage": false, "endCursor": null}
-                        }
-                    }
-                }}]
-            }
-        });
-        let missing_page_info = json!({
-            "commits": {
-                "nodes": [{"commit": {
-                    "oid": sha('a').as_str(),
-                    "statusCheckRollup": {"contexts": {"nodes": []}}
-                }}]
-            }
-        });
-
-        assert!(matches!(
-            initial_checks(&missing_nodes),
-            Err(CensusError::Shape)
-        ));
-        assert!(matches!(
-            initial_checks(&missing_page_info),
-            Err(CensusError::Shape)
-        ));
-    }
-
-    #[test]
-    fn a_second_checks_page_decodes_only_for_the_observed_snapshot() {
-        let expected_head = sha('a');
-        let expected_base_sha = sha('c');
-        let expected_head_branch = BranchName::try_new(String::from("agent/convergence"))
-            .expect("fixture head branch is valid");
-        let expected_base =
-            BranchName::try_new(String::from("main")).expect("fixture base branch is valid");
-        let page = json!({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "state": "OPEN",
-                        "baseRefName": expected_base.as_str(),
-                        "baseRefOid": expected_base_sha.as_str(),
-                        "headRefName": expected_head_branch.as_str(),
-                        "headRefOid": expected_head.as_str(),
-                        "commits": {
-                            "nodes": [{
-                                "commit": {
-                                    "oid": expected_head.as_str(),
-                                    "statusCheckRollup": {
-                                        "contexts": {
-                                            "nodes": [{
-                                                "__typename": "StatusContext",
-                                                "context": "test",
-                                                "state": "SUCCESS"
-                                            }],
-                                            "pageInfo": {
-                                                "hasNextPage": false,
-                                                "endCursor": null
-                                            }
-                                        }
-                                    }
-                                }
-                            }]
-                        }
-                    }
-                }
-            }
-        });
-
-        let connection = checks_page(
-            &page,
-            &expected_head,
-            &expected_head_branch,
-            &expected_base,
-            &expected_base_sha,
-        )
-        .expect("snapshot-matched page decodes");
-        let checks = decode_checks(
-            connection
-                .get("nodes")
-                .and_then(Value::as_array)
-                .expect("fixture carries check nodes"),
-        )
-        .expect("second-page check shape is valid");
-
-        assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].name(), "test");
-    }
-
-    #[test]
-    fn a_checks_page_for_another_head_is_rejected() {
-        let expected_base_sha = sha('c');
-        let expected_head_branch = BranchName::try_new(String::from("agent/convergence"))
-            .expect("fixture head branch is valid");
-        let expected_base =
-            BranchName::try_new(String::from("main")).expect("fixture base branch is valid");
-        let page = json!({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "state": "OPEN",
-                        "baseRefName": expected_base.as_str(),
-                        "baseRefOid": expected_base_sha.as_str(),
-                        "headRefName": expected_head_branch.as_str(),
-                        "headRefOid": sha('b').as_str(),
-                        "commits": {
-                            "nodes": [{
-                                "commit": {
-                                    "oid": sha('b').as_str(),
-                                    "statusCheckRollup": {"contexts": {}}
-                                }
-                            }]
-                        }
-                    }
-                }
-            }
-        });
-
-        assert_eq!(
-            checks_page(
-                &page,
-                &sha('a'),
-                &expected_head_branch,
-                &expected_base,
-                &expected_base_sha,
-            ),
-            Err(CensusError::Shape)
-        );
-    }
-
-    #[test]
-    fn mutable_paginated_check_states_are_rejected() {
-        let successful = PullRequestCheck::new(
-            String::from("test"),
-            PullRequestCheckState::CheckRunCompleted {
-                conclusion: Some(String::from("SUCCESS")),
-            },
-        );
-        let failed = PullRequestCheck::new(
-            String::from("test"),
-            PullRequestCheckState::CheckRunCompleted {
-                conclusion: Some(String::from("FAILURE")),
-            },
-        );
-
-        assert_eq!(
-            ensure_checks_stable(std::slice::from_ref(&successful), &[failed]),
-            Err(CensusError::State)
-        );
-        assert_eq!(
-            ensure_checks_stable(
-                std::slice::from_ref(&successful),
-                std::slice::from_ref(&successful),
-            ),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn a_thread_page_for_the_observed_snapshot_decodes() {
-        let expected_head = sha('a');
-        let expected_base_sha = sha('c');
-        let expected_head_branch = BranchName::try_new(String::from("agent/convergence"))
-            .expect("fixture head branch is valid");
-        let expected_base =
-            BranchName::try_new(String::from("main")).expect("fixture base branch is valid");
-        let page = json!({
-            "data": {"repository": {"pullRequest": {
-                "state": "OPEN",
-                "baseRefName": expected_base.as_str(),
-                "baseRefOid": expected_base_sha.as_str(),
-                "headRefName": expected_head_branch.as_str(),
-                "headRefOid": expected_head.as_str(),
-                "reviewThreads": {"nodes": [{"isResolved": false}]}
-            }}}
-        });
-        let connection = threads_page(
-            &page,
-            &expected_head,
-            &expected_head_branch,
-            &expected_base,
-            &expected_base_sha,
-        )
-        .expect("snapshot-matched page decodes");
-        let nodes = connection
-            .get("nodes")
-            .and_then(Value::as_array)
-            .expect("fixture carries thread nodes");
-
-        assert_eq!(
-            unresolved_threads(&review_thread_states(nodes).expect("thread states decode")),
-            1
-        );
-    }
-
-    #[test]
-    fn mutable_paginated_review_thread_states_are_rejected() {
-        assert_eq!(
-            ensure_threads_stable(&[true, false], &[false, true]),
-            Err(CensusError::State)
-        );
-        assert_eq!(
-            ensure_threads_stable(&[true, false], &[true, false]),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn final_details_reject_changed_initial_connection_contents() {
-        let observed_check = PullRequestCheck::new(
-            String::from("test"),
-            PullRequestCheckState::CheckRunCompleted {
-                conclusion: Some(String::from("SUCCESS")),
-            },
-        );
-        let pull = json!({
-            "reviewThreads": {
-                "nodes": [{"isResolved": false}],
-                "pageInfo": {"hasNextPage": true, "endCursor": "threads-1"}
-            },
-            "commits": {"nodes": [{"commit": {
-                "oid": sha('a').as_str(),
-                "statusCheckRollup": {"contexts": {
-                    "nodes": [{
-                        "__typename": "CheckRun",
-                        "name": "test",
-                        "status": "COMPLETED",
-                        "conclusion": "FAILURE"
-                    }],
-                    "pageInfo": {"hasNextPage": false, "endCursor": null}
-                }}
-            }}]}
-        });
-
-        let result = ensure_final_connections_stable(
-            &pull,
-            &[true],
-            &PageInfo {
-                has_next: true,
-                cursor: Some(String::from("threads-1")),
-            },
-            &[observed_check],
-            &PageInfo::done(),
-        );
-
-        assert_eq!(result, Err(CensusError::State));
-    }
-
-    #[test]
-    fn paginated_census_rejects_a_head_repository_transfer() {
-        let observed = RepositorySlug::try_new(String::from("contributor/repository"))
-            .expect("fixture repository is valid");
-        let transferred = RepositorySlug::try_new(String::from("successor/repository"))
-            .expect("fixture repository is valid");
-
-        assert_eq!(
-            ensure_head_repository_stable(&observed, &transferred),
-            Err(CensusError::State)
-        );
-        assert_eq!(ensure_head_repository_stable(&observed, &observed), Ok(()));
-    }
-
-    #[test]
-    fn thread_pagination_revalidates_the_initial_checks() {
-        assert!(checks_require_revalidation(2, 1));
-        assert!(checks_require_revalidation(1, 2));
-        assert!(!checks_require_revalidation(1, 1));
-    }
-
-    #[test]
-    fn a_thread_page_for_another_head_is_rejected() {
-        let expected_base_sha = sha('c');
-        let expected_head_branch = BranchName::try_new(String::from("agent/convergence"))
-            .expect("fixture head branch is valid");
-        let expected_base =
-            BranchName::try_new(String::from("main")).expect("fixture base branch is valid");
-        let page = json!({
-            "data": {"repository": {"pullRequest": {
-                "state": "OPEN",
-                "baseRefName": expected_base.as_str(),
-                "baseRefOid": expected_base_sha.as_str(),
-                "headRefName": expected_head_branch.as_str(),
-                "headRefOid": sha('b').as_str(),
-                "reviewThreads": {}
-            }}}
-        });
-
-        assert_eq!(
-            threads_page(
-                &page,
-                &sha('a'),
-                &expected_head_branch,
-                &expected_base,
-                &expected_base_sha,
-            ),
-            Err(CensusError::Shape)
-        );
-    }
-
-    #[test]
-    fn paginated_pages_reject_closed_retargeted_base_advanced_or_renamed_pull_requests() {
-        let expected_head = sha('a');
-        let expected_base_sha = sha('c');
-        let expected_head_branch = BranchName::try_new(String::from("agent/convergence"))
-            .expect("fixture head branch is valid");
-        let expected_base =
-            BranchName::try_new(String::from("main")).expect("fixture base branch is valid");
-        let closed = json!({
-            "data": {"repository": {"pullRequest": {
-                "state": "CLOSED",
-                "baseRefName": expected_base.as_str(),
-                "baseRefOid": expected_base_sha.as_str(),
-                "headRefName": expected_head_branch.as_str(),
-                "headRefOid": expected_head.as_str(),
-                "reviewThreads": {}
-            }}}
-        });
-        let retargeted = json!({
-            "data": {"repository": {"pullRequest": {
-                "state": "OPEN",
-                "baseRefName": "release",
-                "baseRefOid": expected_base_sha.as_str(),
-                "headRefName": expected_head_branch.as_str(),
-                "headRefOid": expected_head.as_str(),
-                "commits": {"nodes": []}
-            }}}
-        });
-        let base_advanced = json!({
-            "data": {"repository": {"pullRequest": {
-                "state": "OPEN",
-                "baseRefName": expected_base.as_str(),
-                "baseRefOid": sha('d').as_str(),
-                "headRefName": expected_head_branch.as_str(),
-                "headRefOid": expected_head.as_str(),
-                "reviewThreads": {}
-            }}}
-        });
-        let head_renamed = json!({
-            "data": {"repository": {"pullRequest": {
-                "state": "OPEN",
-                "baseRefName": expected_base.as_str(),
-                "baseRefOid": expected_base_sha.as_str(),
-                "headRefName": "agent/renamed",
-                "headRefOid": expected_head.as_str(),
-                "reviewThreads": {}
-            }}}
-        });
-
-        assert_eq!(
-            threads_page(
-                &closed,
-                &expected_head,
-                &expected_head_branch,
-                &expected_base,
-                &expected_base_sha,
-            ),
-            Err(CensusError::Shape)
-        );
-        assert_eq!(
-            checks_page(
-                &retargeted,
-                &expected_head,
-                &expected_head_branch,
-                &expected_base,
-                &expected_base_sha,
-            ),
-            Err(CensusError::Shape)
-        );
-        assert_eq!(
-            threads_page(
-                &base_advanced,
-                &expected_head,
-                &expected_head_branch,
-                &expected_base,
-                &expected_base_sha,
-            ),
-            Err(CensusError::Shape)
-        );
-        assert_eq!(
-            threads_page(
-                &head_renamed,
-                &expected_head,
-                &expected_head_branch,
-                &expected_base,
-                &expected_base_sha,
-            ),
-            Err(CensusError::Shape)
         );
     }
 
@@ -2176,10 +1141,9 @@ mod tests {
         SweepTarget {
             repository: fixture_repository(),
             pull_request: fixture_pull_request(),
-            credentials: FileCredentialAccess::new_bounded(
+            credentials: FileCredentialAccess::new(
                 std::path::PathBuf::from("/nonexistent/convergence-sweep-fixture-credential"),
                 reference.clone(),
-                MAX_CREDENTIAL_BYTES,
             ),
             credential_reference: reference,
         }
@@ -2209,6 +1173,8 @@ mod tests {
             cool_off,
             template: signalbox_domain::SessionTemplateName::try_new(FIXTURE_TEMPLATE.to_owned())?,
             templates: SessionTemplateConfiguration::default(),
+            convergence_policy: models.convergence().cloned(),
+            convergence_history: Default::default(),
             models,
             commissioned: PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin),
             state: PostgresConvergenceSweepStore::new(pool.clone()),

@@ -1,11 +1,7 @@
 //! Atomic PostgreSQL persistence and replay for durable input acceptance.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::{
-    error::Error,
-    fmt,
-    num::{NonZeroU32, NonZeroU64},
-};
+use std::num::{NonZeroU32, NonZeroU64};
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -36,9 +32,9 @@ use signalbox_domain::{
     NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
     OriginConfigurationReconstitutionInput, OriginModelSettingsError, ParentTerminationKind,
     PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
-    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, RunnerGeneration, RunnerId,
-    SemanticTranscriptEntryId,
+    ProviderCompactionBlock, ProviderModelIdentity, ReconstitutedSubmitInput,
+    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    ResolvedProviderTarget, RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -399,11 +395,14 @@ pub enum SubmitInputHandlingOutcome {
     },
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct one complete input handling.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SubmitInputCorruption {
+    #[error("missing durable SubmitInput {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported SubmitInput {field}: {value}")]
     /// A closed discriminator or representation version is unsupported.
     Unsupported {
         /// The record field that could not be decoded.
@@ -411,8 +410,10 @@ pub enum SubmitInputCorruption {
         /// The durable spelling that was observed.
         value: String,
     },
+    #[error("inconsistent SubmitInput {field_0}")]
     /// Typed records or variant-specific fields disagree.
     Inconsistent(&'static str),
+    #[error("invalid SubmitInput {field}: {reason}")]
     /// A stored positive ordinal cannot construct the domain value.
     InvalidOrdinal {
         /// The ordinal-bearing field.
@@ -420,6 +421,7 @@ pub enum SubmitInputCorruption {
         /// Why its numeric representation is invalid.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("invalid SubmitInput {field}: {failure:?}")]
     /// Exact stored text cannot construct baseline user content.
     InvalidContent {
         /// The content-bearing field.
@@ -427,63 +429,36 @@ pub enum SubmitInputCorruption {
         /// Why the exact stored text is outside the baseline.
         failure: NonEmptyUnicodeTextFailure,
     },
+    #[error("SubmitInput current Session is invalid: {field_0}")]
     /// The current session projection required for first handling is invalid.
     CurrentSession(SessionCorruption),
+    #[error("SubmitInput domain reconstitution failed: {field_0:?}")]
     /// Checked stored values fail domain-owned receipt correlation.
     Domain(SubmitInputReconstitutionFailure),
+    #[error("SubmitInput scheduling reconstitution failed: {field_0:?}")]
     /// Complete scheduling facts fail domain-owned aggregate reconstruction.
     Scheduling(AcceptedInputSchedulingReconstitutionFailure),
 }
 
-impl fmt::Display for SubmitInputCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing durable SubmitInput {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported SubmitInput {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent SubmitInput {relationship}")
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(formatter, "invalid SubmitInput {field}: {reason}")
-            }
-            Self::InvalidContent { field, failure } => {
-                write!(formatter, "invalid SubmitInput {field}: {failure:?}")
-            }
-            Self::CurrentSession(error) => {
-                write!(formatter, "SubmitInput current Session is invalid: {error}")
-            }
-            Self::Domain(failure) => {
-                write!(
-                    formatter,
-                    "SubmitInput domain reconstitution failed: {failure:?}"
-                )
-            }
-            Self::Scheduling(failure) => {
-                write!(
-                    formatter,
-                    "SubmitInput scheduling reconstitution failed: {failure:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for SubmitInputCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure, wrong purpose-specific load, or integrity failure.
 #[derive(Debug)]
 pub enum SubmitInputRepositoryError {
+    #[error("SubmitInput database failure: {field_0}")]
     /// PostgreSQL failed before any commit could have succeeded.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("SubmitInput commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL obscured whether the requested commit succeeded.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("durable command {command_id:?} does not name SubmitInput")]
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The user-global identifier that names another kind.
         command_id: DurableCommandId,
     },
+    #[error(
+        "SubmitInput command {command_id:?} proposed accepted input {accepted_input:?}, which is already the origin of active turn {active_turn:?}"
+    )]
     /// A generated accepted-input candidate reused the active turn's origin.
     AcceptedInputIdentityCollision {
         /// The unclaimed durable command.
@@ -493,58 +468,16 @@ pub enum SubmitInputRepositoryError {
         /// The colliding accepted-input candidate and active origin.
         accepted_input: AcceptedInputId,
     },
+    #[error(transparent)]
     /// A caller-owned explicit setting is unsupported by the selected model.
-    UnsupportedModelSetting(UnsupportedModelSetting),
+    UnsupportedModelSetting(#[source] UnsupportedModelSetting),
+    #[error(transparent)]
     /// Durable records cannot reconstruct the requested domain value.
-    Corruption(SubmitInputCorruption),
+    Corruption(#[source] SubmitInputCorruption),
+    #[error("SubmitInput model execution failed: {field_0}")]
     /// The active turn's model-execution aggregate could not apply or persist
     /// the correlated stop transition.
-    ModelExecution(Box<ModelCallRepositoryError>),
-}
-
-impl fmt::Display for SubmitInputRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "SubmitInput database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "SubmitInput commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::DifferentCommandKind { command_id } => {
-                write!(
-                    formatter,
-                    "durable command {command_id:?} does not name SubmitInput"
-                )
-            }
-            Self::AcceptedInputIdentityCollision {
-                command_id,
-                active_turn,
-                accepted_input,
-            } => write!(
-                formatter,
-                "SubmitInput command {command_id:?} proposed accepted input {accepted_input:?}, which is already the origin of active turn {active_turn:?}"
-            ),
-            Self::UnsupportedModelSetting(error) => error.fmt(formatter),
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::ModelExecution(error) => {
-                write!(formatter, "SubmitInput model execution failed: {error}")
-            }
-        }
-    }
-}
-
-impl Error for SubmitInputRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::DifferentCommandKind { .. } | Self::AcceptedInputIdentityCollision { .. } => None,
-            Self::UnsupportedModelSetting(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::ModelExecution(error) => Some(error),
-        }
-    }
+    ModelExecution(#[source] Box<ModelCallRepositoryError>),
 }
 
 impl From<sqlx::Error> for SubmitInputRepositoryError {
@@ -2039,6 +1972,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
                                 | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
                                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                                | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
                                 | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -2430,6 +2364,7 @@ async fn delegated_parked_attachment_frontier_origins(
                 | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -4905,7 +4840,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
         "SELECT DISTINCT producing_model_call_id
            FROM semantic_transcript_entry
           WHERE source_session_id = $1
-            AND payload_kind IN ('assistant_text', 'assistant_tool_use')
+            AND payload_kind IN ('assistant_text', 'provider_compaction', 'assistant_tool_use')
           ORDER BY producing_model_call_id",
     )
     .bind(session_id_to_uuid(session_id))
@@ -6098,6 +6033,24 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 })?,
             },
             (
+                "provider_compaction",
+                None,
+                None,
+                None,
+                None,
+                Some(block),
+                Some(call),
+                None,
+                None,
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call: ModelCallId::from_uuid(call),
+                block: ProviderCompactionBlock::try_new(block).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("provider compaction block")
+                })?,
+            },
+            (
                 "assistant_tool_use",
                 None,
                 None,
@@ -6179,6 +6132,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 | "turn_failed"
                 | "turn_cancelled"
                 | "assistant_text"
+                | "provider_compaction"
                 | "assistant_tool_use"
                 | "tool_execution_result"
                 | "tool_denied"

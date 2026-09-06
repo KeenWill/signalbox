@@ -3,8 +3,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use signalbox_model_runtime::{
-    CancellationSignal, ModelOperation, ModelRuntime, ObservationSink, PreparationDefect,
-    PreparationOutcome, TerminalReport,
+    CancellationSignal, InputTokenCountOutcome, MessagePart, ModelInputTokenCounter,
+    ModelOperation, ModelRuntime, ObservationSink, PreparationDefect, PreparationOutcome,
+    TerminalReport,
 };
 use signalbox_model_runtime_claude_cli::{
     ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
@@ -35,6 +36,33 @@ pub enum ConfiguredPreparedRequest<C, A, P, O, Q> {
         runtime: Arc<CodexCliRuntime>,
         prepared: Box<CodexCliPreparedRequest<C>>,
     },
+}
+
+impl<C, A, O> ModelInputTokenCounter<C> for ConfiguredModelRuntime<A, O>
+where
+    C: Clone + Send + Sync,
+    A: ModelInputTokenCounter<C> + Send + Sync,
+    O: Send + Sync,
+{
+    async fn count_input_tokens(
+        &self,
+        mut operation: ModelOperation<C>,
+        cancellation: CancellationSignal,
+    ) -> InputTokenCountOutcome<C> {
+        let provider_model = operation.resolved_target.as_str();
+        if self.routes.get(provider_model) != Some(&ModelAdapter::Anthropic) {
+            return InputTokenCountOutcome::Unavailable {
+                correlation: operation.correlation,
+            };
+        }
+        omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::Anthropic);
+        let Some(runtime) = self.anthropic.as_ref() else {
+            return InputTokenCountOutcome::Failed {
+                correlation: operation.correlation,
+            };
+        };
+        runtime.count_input_tokens(operation, cancellation).await
+    }
 }
 
 /// Why one configured CLI adapter could not be constructed at startup.
@@ -170,6 +198,30 @@ fn map_preparation<C, P, R>(
     }
 }
 
+fn omit_unreplayable_provider_compaction<C>(
+    operation: &mut ModelOperation<C>,
+    adapter: ModelAdapter,
+) {
+    // Anthropic decides after applying its capability mapping because fast mode
+    // may replace the selected target. Every other adapter omits the
+    // Anthropic-qualified opaque part here.
+    if adapter == ModelAdapter::Anthropic {
+        return;
+    }
+    operation.messages.retain_mut(|message| {
+        let carried_compaction = message
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::ProviderCompaction { .. }));
+        if carried_compaction {
+            message
+                .parts
+                .retain(|part| !matches!(part, MessagePart::ProviderCompaction { .. }));
+        }
+        !carried_compaction || !message.parts.is_empty()
+    });
+}
+
 impl<C, A, O> ModelRuntime<C> for ConfiguredModelRuntime<A, O>
 where
     C: Clone + Send + Sync,
@@ -182,10 +234,14 @@ where
 
     async fn prepare(
         &self,
-        operation: ModelOperation<C>,
+        mut operation: ModelOperation<C>,
         cancellation: CancellationSignal,
     ) -> PreparationOutcome<C, Self::Prepared> {
-        match self.routes.get(operation.resolved_target.as_str()) {
+        let adapter = self.routes.get(operation.resolved_target.as_str()).copied();
+        if let Some(adapter) = adapter {
+            omit_unreplayable_provider_compaction(&mut operation, adapter);
+        }
+        match adapter {
             Some(ModelAdapter::Anthropic) => {
                 let runtime = match self.anthropic.as_ref() {
                     Some(runtime) => Arc::clone(runtime),
@@ -288,21 +344,29 @@ where
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::{
+        collections::HashMap,
+        os::unix::fs::PermissionsExt,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use signalbox_model_runtime::{
         AnthropicServiceTier, AssistantPart, CancellationSignal, CodexCliServiceTier,
         CompletionEvidence, CompletionFinish, ConversationMessage, CredentialReference,
-        ExchangeFacts, FastMode, ModelOperation, ModelRuntime, ModelSettings, Observation,
-        ObservationSink, OpenAiServiceTier, PreparationDefect, PreparationOutcome,
-        ProviderReportedModel, ReasoningLevel, RequestedTarget, ResolvedTarget, Script,
-        ScriptedModel, ServiceTier, TerminalEvidence, TokenUsage,
+        ExchangeFacts, FastMode, InputTokenCountOutcome, MessagePart, ModelInputTokenCounter,
+        ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationSink,
+        OpenAiServiceTier, PreparationDefect, PreparationOutcome, ProviderReportedModel,
+        ReasoningLevel, RequestedTarget, ResolvedTarget, Script, ScriptedModel, ServiceTier,
+        TerminalEvidence, TokenUsage,
     };
     use signalbox_model_runtime_claude_cli::SUPPORTED_CLAUDE_CLI_VERSION;
 
-    use crate::configuration::HubModelConfiguration;
+    use crate::configuration::{HubModelConfiguration, ModelAdapter};
 
-    use super::ConfiguredModelRuntime;
+    use super::{ConfiguredModelRuntime, omit_unreplayable_provider_compaction};
 
     #[derive(Default)]
     struct Observations(Vec<Observation<String>>);
@@ -328,11 +392,13 @@ mod tests {
                 Some(signalbox_model_runtime::AssistantPart::Text(text)) => Some(text.as_str()),
                 Some(signalbox_model_runtime::AssistantPart::Thinking { .. })
                 | Some(signalbox_model_runtime::AssistantPart::RedactedThinking { .. })
+                | Some(signalbox_model_runtime::AssistantPart::ProviderCompaction { .. })
                 | Some(signalbox_model_runtime::AssistantPart::ToolCall(_))
                 | Some(signalbox_model_runtime::AssistantPart::SuppressedToolCall(_))
                 | None => None,
             },
-            TerminalEvidence::Refused(_)
+            TerminalEvidence::CompletedWithProviderCompaction { .. }
+            | TerminalEvidence::Refused(_)
             | TerminalEvidence::ProviderError(_)
             | TerminalEvidence::CancellationConfirmed(_)
             | TerminalEvidence::ProvenUnsent(_)
@@ -349,6 +415,48 @@ mod tests {
             content: vec![AssistantPart::Text(text.to_owned())],
             usage: TokenUsage::unreported(),
         })
+    }
+
+    fn operation_with_provider_compaction(provider_model: &str) -> ModelOperation<String> {
+        ModelOperation::new(
+            String::from("cross-provider"),
+            CredentialReference::new("credential"),
+            RequestedTarget::new("selection"),
+            ResolvedTarget::new(provider_model),
+            vec![
+                ConversationMessage {
+                    role: signalbox_model_runtime::ConversationRole::Assistant,
+                    parts: vec![
+                        MessagePart::Text(String::from("preserved output")),
+                        MessagePart::ProviderCompaction {
+                            block_json: String::from(
+                                r#"{"type":"compaction","content":"summary"}"#,
+                            ),
+                        },
+                    ],
+                },
+                ConversationMessage {
+                    role: signalbox_model_runtime::ConversationRole::Assistant,
+                    parts: vec![MessagePart::ProviderCompaction {
+                        block_json: String::from(r#"{"type":"compaction","content":"summary"}"#),
+                    }],
+                },
+            ],
+            ModelSettings::new(256),
+        )
+    }
+
+    #[test]
+    fn cross_provider_projection_omits_only_opaque_compaction_parts() {
+        let mut operation = operation_with_provider_compaction("gpt-exact");
+
+        omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::OpenAi);
+
+        assert_eq!(operation.messages.len(), 1);
+        assert_eq!(
+            operation.messages[0].parts,
+            vec![MessagePart::Text(String::from("preserved output"))]
+        );
     }
 
     #[test]
@@ -571,6 +679,66 @@ service_tiers = ["priority"]
             vec![ConversationMessage::user_text("respond")],
             settings,
         )
+    }
+
+    #[derive(Clone)]
+    struct RecordingInputCounter {
+        invocations: Arc<AtomicUsize>,
+    }
+
+    impl ModelInputTokenCounter<String> for RecordingInputCounter {
+        async fn count_input_tokens(
+            &self,
+            operation: ModelOperation<String>,
+            _cancellation: CancellationSignal,
+        ) -> InputTokenCountOutcome<String> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            InputTokenCountOutcome::Counted {
+                correlation: operation.correlation,
+                input_tokens: 17,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_input_estimate_routes_only_anthropic_targets() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let runtime = ConfiguredModelRuntime {
+            anthropic: Some(Arc::new(RecordingInputCounter {
+                invocations: Arc::clone(&invocations),
+            })),
+            openai: None::<Arc<()>>,
+            claude_cli: None,
+            codex_cli: None,
+            routes: HashMap::from([
+                (String::from("claude-example"), ModelAdapter::Anthropic),
+                (String::from("gpt-example"), ModelAdapter::OpenAi),
+            ]),
+        };
+        let mut anthropic = openai_operation();
+        anthropic.correlation = String::from("anthropic-count");
+        anthropic.resolved_target = ResolvedTarget::new("claude-example");
+        let anthropic_outcome = runtime
+            .count_input_tokens(anthropic, CancellationSignal::never())
+            .await;
+        let openai_outcome = runtime
+            .count_input_tokens(openai_operation(), CancellationSignal::never())
+            .await;
+
+        assert_eq!(
+            anthropic_outcome,
+            InputTokenCountOutcome::Counted {
+                correlation: String::from("anthropic-count"),
+                input_tokens: 17,
+            }
+        );
+        assert_eq!(
+            openai_outcome,
+            InputTokenCountOutcome::Unavailable {
+                correlation: String::from("openai-route"),
+            }
+        );
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
     }
 
     /// The OpenAI slot mirrors the Anthropic one: a configured route reaches

@@ -187,19 +187,17 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
 };
 pub use repo_watch::{
-    BranchContext, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
-    DispatchSessionAction, DispatchSessionParameters, GitHubObjectId, LabelName, MergeableState,
-    PullRequestBody, PullRequestContext, PullRequestEventContext, PullRequestEventContextInput,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
+    MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
-    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError,
-    RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
-    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
-    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
-    RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest, RepoWatchRuleValidationError,
-    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
-    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepoWatchWorkflowRunAttempt,
-    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchAuthorLogin, RepoWatchDispatchContextShape, RepoWatchEvent,
+    RepoWatchEventConstructionError, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
+    RepoWatchEventTarget, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
+    RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleContentDigest, RepoWatchRuleId, RepoWatchRuleIdentityField,
+    RepoWatchRuleIdentityFieldDigest, RepoWatchRuleValidationError, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepoWatchTextError, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    ReviewState, ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
@@ -255,8 +253,8 @@ pub use runner::{
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
-    AssistantText, SemanticTranscriptEntry, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryReconstitutionInput,
+    AssistantText, ProviderCompactionBlock, ProviderCompactionBlockError, SemanticTranscriptEntry,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
 };
 pub use session::{
     CreateSession, CreateSessionAppliedResult, CreateSessionFromImportedFrontier,

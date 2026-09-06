@@ -579,18 +579,14 @@ pub struct WebImportContinuationResponse {
 pub struct WebTimelineEventSequence(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
 
 fn canonical_u64(value: &str) -> Option<u64> {
-    let canonical = !value.is_empty()
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-        && (value == "0" || !value.starts_with('0'));
-    canonical.then(|| value.parse::<u64>().ok()).flatten()
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|parsed| parsed.to_string() == value)
 }
 
 fn canonical_session_id(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| match index {
-            8 | 13 | 18 | 23 => byte == b'-',
-            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
-        })
+    uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
 
 /// Checked canonical UUID used for browser-visible session identities.
@@ -614,25 +610,7 @@ impl WebSessionId {
     /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
     #[must_use]
     pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
-        Self(format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            bytes[0],
-            bytes[1],
-            bytes[2],
-            bytes[3],
-            bytes[4],
-            bytes[5],
-            bytes[6],
-            bytes[7],
-            bytes[8],
-            bytes[9],
-            bytes[10],
-            bytes[11],
-            bytes[12],
-            bytes[13],
-            bytes[14],
-            bytes[15],
-        ))
+        Self(uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
     }
 
     /// Constructs a session identity from its canonical lowercase UUID spelling.
@@ -1020,11 +998,9 @@ impl WebBlobId {
     #[must_use]
     pub fn from_canonical(value: String) -> Option<Self> {
         let digest = value.strip_prefix("sha256:")?;
-        (digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-        .then_some(Self(value))
+        let mut bytes = [0_u8; 32];
+        hex::decode_to_slice(digest, &mut bytes).ok()?;
+        (hex::encode(bytes) == digest).then_some(Self(value))
     }
 }
 
@@ -1561,26 +1537,12 @@ impl<'de> Deserialize<'de> for WebDollarAmount {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let (whole, fractional) = value
-            .split_once('.')
-            .map_or((value.as_str(), None), |(whole, fractional)| {
-                (whole, Some(fractional))
-            });
-        let whole_is_canonical = !whole.is_empty()
-            && whole.bytes().all(|byte| byte.is_ascii_digit())
-            && (whole == "0" || !whole.starts_with('0'));
-        let fractional_is_canonical = fractional.is_none_or(|fractional| {
-            !fractional.is_empty()
-                && fractional.len() <= 28
-                && fractional.bytes().all(|byte| byte.is_ascii_digit())
-                && !fractional.ends_with('0')
-        });
-        let coefficient = format!("{whole}{}", fractional.unwrap_or_default());
-        let significant_coefficient = coefficient.trim_start_matches('0');
-        let coefficient_fits = significant_coefficient.len() < 29
-            || (significant_coefficient.len() == 29
-                && significant_coefficient <= "79228162514264337593543950335");
-        if !whole_is_canonical || !fractional_is_canonical || !coefficient_fits {
+        let parsed = value.parse::<rust_decimal::Decimal>();
+        if parsed.is_err()
+            || parsed.is_ok_and(|parsed| {
+                parsed.is_sign_negative() || parsed.normalize().to_string() != value
+            })
+        {
             return Err(de::Error::custom(
                 "dollar amount must be a canonical nonnegative decimal",
             ));
@@ -2044,386 +2006,6 @@ pub struct WebSessionCatalogSnapshot {
     pub continuation: Option<WebSessionCatalogContinuation>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchEventKind {
-    PullRequestOpened,
-    PullRequestClosed,
-    PullRequestMerged,
-    HeadChanged,
-    MergeableStateChanged,
-    ChecksCompleted,
-    CheckRunCompleted,
-    BranchWorkflowRunCompleted,
-    ReviewSubmitted,
-    ThreadOpened,
-    ThreadResolved,
-    Labeled,
-    Unlabeled,
-    BaseAdvanced,
-    ReactionChanged,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchEvent {
-    pub id: String,
-    pub cursor_generation: String,
-    pub event_ordinal: u32,
-    pub kind: WebRepoWatchEventKind,
-    pub pull_request: Option<String>,
-    pub observed_at_unix_milliseconds: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchDispatch {
-    pub id: String,
-    pub event_id: String,
-    pub rule: String,
-    pub attempted_at_unix_milliseconds: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchSettlement {
-    pub dispatch_id: String,
-    pub event_id: String,
-    pub settled_at_unix_milliseconds: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchLatestWebhook {
-    pub receipt_sequence: String,
-    pub event_name: String,
-    pub action_name: Option<String>,
-    pub received_at_unix_milliseconds: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchWebhookWindow {
-    pub seconds: u32,
-    pub received: String,
-    pub projected: String,
-    pub terminal: String,
-    pub quarantined: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchEventKindCount {
-    pub kind: WebRepoWatchEventKind,
-    pub count: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchRepositoryStatus {
-    pub repository: String,
-    pub cursor_generation: Option<String>,
-    pub observed_at_unix_milliseconds: Option<String>,
-    pub latest_webhook: Option<WebRepoWatchLatestWebhook>,
-    pub previous_five_minutes: WebRepoWatchWebhookWindow,
-    pub previous_hour: WebRepoWatchWebhookWindow,
-    pub latest_projection_latency_milliseconds: Option<String>,
-    pub maximum_projection_latency_milliseconds_previous_hour: Option<String>,
-    pub event_kind_counts_previous_hour: Vec<WebRepoWatchEventKindCount>,
-    pub last_observed_event: Option<WebRepoWatchEvent>,
-    pub last_actionable_event: Option<WebRepoWatchEvent>,
-    pub last_dispatch_attempt: Option<WebRepoWatchDispatch>,
-    pub last_automation_settlement: Option<WebRepoWatchSettlement>,
-    pub held_slot_count: String,
-    pub queued_obligation_count: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchRepositoryStatusPage {
-    #[schemars(length(max = 64))]
-    pub repositories: Vec<WebRepoWatchRepositoryStatus>,
-    pub continuation_after_repository: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchLifecycle {
-    Open,
-    Closed,
-    Merged,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchMergeable {
-    Mergeable,
-    Conflicting,
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchDraftStatus {
-    Draft,
-    ReadyForReview,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchChecksStatus {
-    NoCompletedSuites,
-    Passing,
-    Failing,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchReviewDecision {
-    None,
-    Commented,
-    Approved,
-    ChangesRequested,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebRepoWatchAutomationStatus {
-    Unattempted {},
-    Held {
-        dispatch_id: String,
-    },
-    Queued {
-        latest_event_id: String,
-    },
-    NonConverged {
-        dispatch_id: String,
-    },
-    StaleSeal {
-        dispatch_id: String,
-        sealed_event_id: String,
-    },
-    CurrentHeadSealed {
-        dispatch_id: String,
-        sealed_event_id: String,
-        settled_at_unix_milliseconds: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchPullRequest {
-    pub number: String,
-    pub title: String,
-    pub head: String,
-    pub head_repository: String,
-    pub head_branch: String,
-    pub base_branch: String,
-    pub lifecycle: WebRepoWatchLifecycle,
-    pub mergeable: WebRepoWatchMergeable,
-    pub draft: WebRepoWatchDraftStatus,
-    pub checks: WebRepoWatchChecksStatus,
-    pub review_decision: WebRepoWatchReviewDecision,
-    pub stale_review_count: String,
-    pub unresolved_thread_count: String,
-    pub open_parent: Option<String>,
-    pub open_child_count: String,
-    pub automation: WebRepoWatchAutomationStatus,
-    pub last_observed_event: Option<WebRepoWatchEvent>,
-    pub last_actionable_event: Option<WebRepoWatchEvent>,
-    pub last_dispatch_attempt: Option<WebRepoWatchDispatch>,
-    pub last_automation_settlement: Option<WebRepoWatchSettlement>,
-    pub held_slot_count: String,
-    pub queued_obligation_count: String,
-    pub commissioned_session_count: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchPullRequestPage {
-    pub repository: String,
-    #[schemars(length(max = 64))]
-    pub pull_requests: Vec<WebRepoWatchPullRequest>,
-    pub continuation_after_pull_request: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchHeldSlotBlocker {
-    UndeliveredAction,
-    DeliveryTurnRuntimeRelevant,
-    LiveRuntimeTurn,
-    PursuingGoal,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebRepoWatchSingletonScope {
-    PullRequest {
-        repository: String,
-        number: String,
-    },
-    Stack {
-        repository: String,
-        root_pull_request: String,
-    },
-    Rule {},
-    Repository {
-        repository: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchHeldSlot {
-    pub dispatch_id: String,
-    pub scope: WebRepoWatchSingletonScope,
-    pub rule: String,
-    pub held_since_unix_microseconds: String,
-    pub session_ids: Vec<String>,
-    pub blockers: Vec<WebRepoWatchHeldSlotBlocker>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebRepoWatchObligationReadiness {
-    Ready {},
-    Occupied {
-        dispatch_id: String,
-        session_ids: Vec<String>,
-    },
-    /// Held by a live independently commissioned session, which owns no
-    /// repository-watch dispatch identity to report alongside it.
-    ExternallyBlocked {
-        session_ids: Vec<String>,
-    },
-    Cooldown {
-        eligible_at_unix_milliseconds: Option<String>,
-    },
-    Parked {
-        parked_at_unix_milliseconds: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchQueuedObligation {
-    pub id: String,
-    pub scope: WebRepoWatchSingletonScope,
-    pub rule: String,
-    pub first_event_id: String,
-    pub latest_event_id: String,
-    pub matched_event_count: String,
-    pub owed_since_unix_microseconds: String,
-    pub latest_match_at_unix_milliseconds: String,
-    pub failed_attempts: String,
-    pub readiness: WebRepoWatchObligationReadiness,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchHeldCursor {
-    pub held_since_unix_microseconds: String,
-    pub dispatch_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchObligationCursor {
-    pub owed_since_unix_microseconds: String,
-    pub obligation_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchWorkPage {
-    #[schemars(length(max = 64))]
-    pub held_slots: Vec<WebRepoWatchHeldSlot>,
-    pub held_continuation_after: Option<WebRepoWatchHeldCursor>,
-    #[schemars(length(max = 64))]
-    pub queued_obligations: Vec<WebRepoWatchQueuedObligation>,
-    pub obligation_continuation_after: Option<WebRepoWatchObligationCursor>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebRepoWatchSessionPurpose {
-    RuleDispatch {
-        dispatch_id: String,
-        event_id: String,
-        rule: String,
-        template: String,
-    },
-    OperatorCommission {
-        dispatch_id: String,
-        template: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchPullRequestSession {
-    pub commissioned_at_unix_microseconds: String,
-    pub purpose: WebRepoWatchSessionPurpose,
-    pub attention: WebAttentionSummary,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchSessionCursor {
-    pub commissioned_at_unix_microseconds: String,
-    pub session_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchPullRequestSessionPage {
-    #[schemars(length(max = 64))]
-    pub sessions: Vec<WebRepoWatchPullRequestSession>,
-    pub continuation_before: Option<WebRepoWatchSessionCursor>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebRepoWatchWebhookDisposition {
-    Projected,
-    Committed,
-    DuplicateState,
-    Superseded,
-    Ignored,
-    Quarantined,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchWebhookActivity {
-    pub receipt_sequence: String,
-    pub event_name: String,
-    pub action_name: Option<String>,
-    pub received_at_unix_milliseconds: String,
-    pub projection_count: String,
-    pub latest_projected_at_unix_milliseconds: Option<String>,
-    pub disposition: Option<WebRepoWatchWebhookDisposition>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchEventCursor {
-    pub cursor_generation: String,
-    pub event_ordinal: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebRepoWatchActivityPage {
-    #[schemars(length(max = 100))]
-    pub events: Vec<WebRepoWatchEvent>,
-    pub event_continuation_before: Option<WebRepoWatchEventCursor>,
-    #[schemars(length(max = 100))]
-    pub webhooks: Vec<WebRepoWatchWebhookActivity>,
-    pub webhook_continuation_before_receipt_sequence: Option<String>,
-}
-
 /// One generated file and its repository-relative destination.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedArtifact {
@@ -2697,35 +2279,6 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebUsageCallPage",
             decoder: "decodeWebUsageCallPage",
             schema: usage_call_page_schema,
-        },
-        ContractSchema {
-            name: "WebRepoWatchRepositoryStatusPage",
-            decoder: "decodeWebRepoWatchRepositoryStatusPage",
-            schema: canonical_schema(
-                schemars::schema_for!(WebRepoWatchRepositoryStatusPage).to_value(),
-            ),
-        },
-        ContractSchema {
-            name: "WebRepoWatchPullRequestPage",
-            decoder: "decodeWebRepoWatchPullRequestPage",
-            schema: canonical_schema(schemars::schema_for!(WebRepoWatchPullRequestPage).to_value()),
-        },
-        ContractSchema {
-            name: "WebRepoWatchWorkPage",
-            decoder: "decodeWebRepoWatchWorkPage",
-            schema: canonical_schema(schemars::schema_for!(WebRepoWatchWorkPage).to_value()),
-        },
-        ContractSchema {
-            name: "WebRepoWatchPullRequestSessionPage",
-            decoder: "decodeWebRepoWatchPullRequestSessionPage",
-            schema: canonical_schema(
-                schemars::schema_for!(WebRepoWatchPullRequestSessionPage).to_value(),
-            ),
-        },
-        ContractSchema {
-            name: "WebRepoWatchActivityPage",
-            decoder: "decodeWebRepoWatchActivityPage",
-            schema: canonical_schema(schemars::schema_for!(WebRepoWatchActivityPage).to_value()),
         },
     ])
 }
@@ -4289,7 +3842,6 @@ mod tests {
 
     use super::{
         WebAttentionStreamEvent, WebContractBootstrap, WebContractExample, WebDollarAmount,
-        WebRepoWatchAutomationStatus, WebRepoWatchObligationReadiness, WebRepoWatchSessionPurpose,
         WebSessionId, WebTimelineEventSequence, WebTimelineModelCallState, WebU64,
         WebUsageCallCount, WebUsageRateVersion, WebUsageTimestampMicros, generated_artifacts,
     };
@@ -4364,28 +3916,6 @@ mod tests {
         let encoded = r#"{"kind":"resync_required","cursor":"1","unexpected":true}"#;
 
         assert!(serde_json::from_str::<WebAttentionStreamEvent>(encoded).is_err());
-    }
-
-    #[test]
-    fn repository_tagged_variants_reject_unknown_fields() {
-        assert!(
-            serde_json::from_str::<WebRepoWatchAutomationStatus>(
-                r#"{"kind":"held","dispatch_id":"dispatch","future_field":true}"#,
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_str::<WebRepoWatchObligationReadiness>(
-                r#"{"kind":"ready","future_field":true}"#,
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_str::<WebRepoWatchSessionPurpose>(
-                r#"{"kind":"operator_commission","dispatch_id":"dispatch","template":"template","future_field":true}"#,
-            )
-            .is_err()
-        );
     }
 
     #[test]

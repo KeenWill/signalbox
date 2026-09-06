@@ -14,6 +14,7 @@ use signalbox_domain::{
     SessionOwnership, SessionPlacement, SessionTemplateProvenance, StartGate, TranscriptAncestry,
 };
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a caller-supplied command identity cannot enter canonical construction.
 ///
 /// docs/spec/identity-and-commands.md reserves nil and max UUIDs as invalid
@@ -22,22 +23,13 @@ use signalbox_domain::{
 /// identity generation, or durable-command lookup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvalidDurableCommandId {
+    #[error("nil durable command identity is reserved")]
     /// The supplied UUID contains all zero bits.
     Nil,
+    #[error("max durable command identity is reserved")]
     /// The supplied UUID contains all one bits.
     Max,
 }
-
-impl fmt::Display for InvalidDurableCommandId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Nil => formatter.write_str("nil durable command identity is reserved"),
-            Self::Max => formatter.write_str("max durable command identity is reserved"),
-        }
-    }
-}
-
-impl Error for InvalidDurableCommandId {}
 
 /// The complete admitted application request for user-initiated creation.
 ///
@@ -483,10 +475,10 @@ mod tests {
         }
     }
 
-    /// S01 / INV-001 / INV-012: sentinel command identities fail before
+    /// sentinel command identities fail before
     /// canonical command construction and claim nothing.
     #[test]
-    fn s01_inv001_inv012_request_rejects_reserved_command_identifiers() {
+    fn request_rejects_reserved_command_identifiers() {
         assert_eq!(
             CreateSessionRequest::try_new(
                 signalbox_domain::DurableCommandId::from_uuid(Uuid::nil()),
@@ -510,10 +502,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-001 / INV-002: production session identities are fresh
+    /// production session identities are fresh
     /// RFC-9562 UUIDv7 values, while their timestamp has no domain role.
     #[test]
-    fn s01_inv001_inv002_production_generator_supplies_fresh_uuid_v7_sessions() {
+    fn production_generator_supplies_fresh_uuid_v7_sessions() {
         let mut generator = UuidV7SessionIdGenerator;
         let first = generator.next_session_id();
         let second = generator.next_session_id();
@@ -531,11 +523,11 @@ mod tests {
         assert!(!session.as_uuid().is_max());
     }
 
-    /// S01 / INV-003 / INV-008 / INV-012: orchestration fixes the admitted
+    /// orchestration fixes the admitted
     /// provenance, establishes defaults version one, and calls the atomic port
     /// exactly once with the sealed candidate.
     #[test]
-    fn s01_inv003_inv008_inv012_orchestrates_one_atomic_creation() {
+    fn orchestrates_one_atomic_creation() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let candidate = session_id(3);
@@ -580,10 +572,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-012: equal replay returns the recorded receipt unchanged
+    /// equal replay returns the recorded receipt unchanged
     /// rather than the freshly generated candidate or a loaded Session.
     #[test]
-    fn s01_inv012_equal_replay_returns_original_receipt() {
+    fn equal_replay_returns_original_receipt() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let winner = session_id(3);
@@ -614,10 +606,10 @@ mod tests {
         assert_eq!(transaction.observed[1].session().id(), replay_candidate);
     }
 
-    /// S01 / INV-012: reusing one command ID for different canonical defaults
+    /// reusing one command ID for different canonical defaults
     /// returns a typed conflict and never substitutes the second candidate.
     #[test]
-    fn s01_inv012_conflicting_reuse_is_typed() {
+    fn conflicting_reuse_is_typed() {
         let command = command_id(1);
         let first = CreateSessionRequest::try_new(command, defaults(2))
             .expect("ordinary command identity is admitted");
@@ -664,10 +656,10 @@ mod tests {
         );
     }
 
-    /// S01 / INV-012: application orchestration neither retries transaction
+    /// application orchestration neither retries transaction
     /// failure nor fabricates a terminal command result.
     #[test]
-    fn s01_inv012_transaction_failure_is_returned_without_retry() {
+    fn transaction_failure_is_returned_without_retry() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let mut service = CreateSessionService::new(

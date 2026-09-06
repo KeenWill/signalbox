@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL creation and checked loading for imported-seeded sessions.
 
-use std::{error::Error, fmt, sync::Arc};
+use std::sync::Arc;
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -55,11 +55,14 @@ const INTERACTIVE: &str = "interactive";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";
 const APPLIED: &str = "applied";
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable imported-session shape that cannot reconstruct its domain value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImportedSessionCorruption {
+    #[error("missing imported-session {field_0}")]
     /// One required durable value is absent.
     Missing(&'static str),
+    #[error("unsupported imported-session {field}: {value}")]
     /// A closed discriminator or representation version is unsupported.
     Unsupported {
         /// Durable field being decoded.
@@ -67,8 +70,10 @@ pub enum ImportedSessionCorruption {
         /// Unsupported durable spelling.
         value: String,
     },
+    #[error("inconsistent imported-session {field_0}")]
     /// Independently stored values disagree.
     Inconsistent(&'static str),
+    #[error("invalid imported-session {field}: invalid ordinal: {reason}")]
     /// A stored positive ordinal cannot construct its domain value.
     InvalidOrdinal {
         /// Durable field carrying the ordinal.
@@ -76,157 +81,71 @@ pub enum ImportedSessionCorruption {
         /// Why the numeric value is invalid.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("invalid imported-session {field}: invalid command identity: {reason}")]
     /// A stored command identity is a reserved sentinel UUID.
     InvalidCommandIdentity {
         /// Durable field carrying the identity.
         field: &'static str,
+        #[source]
         /// Why the UUID cannot construct a command identity.
         reason: DurableCommandIdMappingError,
     },
+    #[error(transparent)]
     /// The referenced imported aggregate cannot be reconstructed.
-    ImportedConversation(ImportedConversationCorruption),
+    ImportedConversation(#[source] ImportedConversationCorruption),
+    #[error("imported-session creation reconstitution failed: {field_0:?}")]
     /// Stored creation facts fail domain-owned correlation.
     CreationDomain(CreateSessionFromImportedFrontierReconstitutionFailure),
+    #[error("bounded current imported-session reconstitution failed: {field_0:?}")]
     /// Stored bounded current-session facts fail domain-owned correlation.
     BoundedCurrentDomain(BoundedImportedSessionReconstitutionFailure),
+    #[error("complete current imported-session reconstitution failed: {field_0:?}")]
     /// Stored complete imported-session facts fail domain-owned correlation.
     CurrentDomain(ImportedSessionReconstitutionFailure),
 }
 
-impl fmt::Display for ImportedSessionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing imported-session {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported imported-session {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent imported-session {relationship}")
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(formatter, "invalid imported-session {field}: {reason}")
-            }
-            Self::InvalidCommandIdentity { field, reason } => {
-                write!(formatter, "invalid imported-session {field}: {reason}")
-            }
-            Self::ImportedConversation(error) => error.fmt(formatter),
-            Self::CreationDomain(failure) => {
-                write!(
-                    formatter,
-                    "imported-session creation reconstitution failed: {failure:?}"
-                )
-            }
-            Self::BoundedCurrentDomain(failure) => {
-                write!(
-                    formatter,
-                    "bounded current imported-session reconstitution failed: {failure:?}"
-                )
-            }
-            Self::CurrentDomain(failure) => {
-                write!(
-                    formatter,
-                    "complete current imported-session reconstitution failed: {failure:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ImportedSessionCorruption {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidCommandIdentity { reason, .. } => Some(reason),
-            Self::ImportedConversation(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
 /// Which generated imported-session identity collided with durable state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum ImportedSessionIdentityCollision {
     /// The proposed session identity already exists.
+    #[error("session identity already exists")]
     Session,
     /// A proposed semantic-entry identity already exists.
+    #[error("semantic-entry identity already exists")]
     SemanticEntry,
     /// The proposed seed context-frontier identity already exists.
+    #[error("seed context-frontier identity already exists")]
     SeedFrontier,
 }
 
-impl fmt::Display for ImportedSessionIdentityCollision {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let identity = match self {
-            Self::Session => "session",
-            Self::SemanticEntry => "semantic-entry",
-            Self::SeedFrontier => "seed context-frontier",
-        };
-        write!(formatter, "{identity} identity already exists")
-    }
-}
-
-impl Error for ImportedSessionIdentityCollision {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL or fail-closed imported-session repository failure.
 #[derive(Debug)]
 pub enum ImportedSessionRepositoryError {
+    #[error("imported-session database failure: {field_0}")]
     /// PostgreSQL failed before a commit could have succeeded.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("imported-session commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL obscured whether the requested commit succeeded.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("durable command {command_id:?} does not name CreateSessionFromImportedFrontier")]
     /// The command identity is valid but belongs to another command family.
     DifferentCommandKind {
         /// The cross-kind command identity.
         command_id: DurableCommandId,
     },
+    #[error("imported-session candidate preparation failed: {field_0:?}")]
     /// Application-supplied identities could not form a checked candidate.
     Preparation(CreateSessionFromImportedFrontierPreparationFailure),
+    #[error(transparent)]
     /// A supplied fresh identity already names a durable record.
-    IdentityCollision(ImportedSessionIdentityCollision),
+    IdentityCollision(#[source] ImportedSessionIdentityCollision),
+    #[error(transparent)]
     /// The referenced imported aggregate could not be loaded from blob storage.
-    ImportedConversation(ImportedConversationRepositoryError),
+    ImportedConversation(#[source] ImportedConversationRepositoryError),
+    #[error(transparent)]
     /// Durable facts cannot reconstruct their admitted domain values.
-    Corruption(ImportedSessionCorruption),
-}
-
-impl fmt::Display for ImportedSessionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "imported-session database failure: {error}")
-            }
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "imported-session commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::DifferentCommandKind { command_id } => write!(
-                formatter,
-                "durable command {command_id:?} does not name CreateSessionFromImportedFrontier"
-            ),
-            Self::Preparation(failure) => {
-                write!(
-                    formatter,
-                    "imported-session candidate preparation failed: {failure:?}"
-                )
-            }
-            Self::IdentityCollision(error) => error.fmt(formatter),
-            Self::ImportedConversation(error) => error.fmt(formatter),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ImportedSessionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::DifferentCommandKind { .. } | Self::Preparation(_) => None,
-            Self::IdentityCollision(error) => Some(error),
-            Self::ImportedConversation(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] ImportedSessionCorruption),
 }
 
 impl From<sqlx::Error> for ImportedSessionRepositoryError {
@@ -1627,6 +1546,29 @@ mod tests {
     use std::io;
 
     use super::ImportedSessionRepositoryError;
+
+    #[test]
+    fn operator_error_messages_distinguish_imported_session_scalar_failures() {
+        use super::ImportedSessionCorruption;
+        use crate::mapping::{DurableCommandIdMappingError, PositiveOrdinalMappingError};
+
+        let errors = [
+            ImportedSessionCorruption::InvalidOrdinal {
+                field: "position",
+                reason: PositiveOrdinalMappingError::NonPositive,
+            },
+            ImportedSessionCorruption::InvalidCommandIdentity {
+                field: "command_id",
+                reason: DurableCommandIdMappingError::SentinelUuid,
+            },
+        ];
+        let messages = errors.map(|error| error.to_string()).join("\n");
+
+        expect_test::expect![[r#"
+            invalid imported-session position: invalid ordinal: ordinal must be positive
+            invalid imported-session command_id: invalid command identity: durable-command identity must not be the nil or max UUID"#]]
+        .assert_eq(&messages);
+    }
 
     #[test]
     fn lost_commit_response_is_typed_as_ambiguous() {

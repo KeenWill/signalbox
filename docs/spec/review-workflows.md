@@ -20,8 +20,8 @@ run names one target, one workflow kind, and one frozen policy, and admits at
 most one pass. A pass names its run, its session, and the accepted input that
 carried it; its terminal state is the outcome of the workflow operation, and an
 optional bound result records the one typed effect it produced. A finding is
-immutable proposed content owned by one succeeded read-only-review pass, and its
-status is the tail of an append-only event history. A finding carries two
+immutable proposed content owned by one succeeded read-only-review pass; its
+status is the tail of an append-only event history, and it carries two
 independent confidences: whether the issue exists and merits attention, and
 whether its severity label is correct. An external link correlates a target,
 run, or finding with one object at one code host through a reservation, at most
@@ -101,9 +101,11 @@ producer.
 Accepted and posted transitions compare only is-real confidence against the
 frozen policy minimums; severity-label confidence is never a filter and no
 override exists. Why: uncertainty about whether a real issue is high or medium
-must not suppress the issue. Publication admission is also bound to the
-immutable target head: a moved change request is another target and does not
-authorize posting results produced against the earlier head.
+must not suppress the issue.
+
+Publication admission is bound to the immutable target head: a moved change
+request is another target and does not authorize posting results produced
+against the earlier head.
 
 The event pass's run supplies the exact policy frozen by the finding's producing
 run, so judgment, deduplication, and every later classification stay under one
@@ -170,13 +172,12 @@ belongs to [process protocol](process-protocol.md).
 Refreshing a moving change request creates another target snapshot; it never
 rewrites the revision under an existing run.
 
-An effect-producing terminal pass binds its result once. Equal replay observes
+An effect-producing terminal pass binds its result once: equal replay observes
 the existing effect, and no distinct later effect may cite that pass. A terminal
 pass that produced no typed effect may keep an absent result, but a
 read-only-review pass that completed output admission binds a produced-findings
-result, the empty inventory included. The complete-findings command is the sole
-success path for read-only review, and generic pass completion refuses read-only
-success.
+result, the empty inventory included. Read-only review succeeds only through the
+complete-findings command; generic pass completion refuses read-only success.
 
 The caller-selected external-link identity is the idempotency key: equal replay
 returns the same reservation, and reusing it for a different association,
@@ -193,7 +194,9 @@ referenced status, and the subject transition; no event-history snapshot decides
 them independently. An external-link transition locks the reservation and then
 any associated finding before loading its multi-statement projection. The lock
 protocol these orders extend belongs to
-[persistence protocol](persistence-protocol.md).
+[persistence protocol](persistence-protocol.md). A finding-reference edge that
+closes a direct or transitive cycle in a target's complete finding graph is
+corruption.
 
 One orchestration attempt names one immutable target, one frozen policy, one
 ordered concern-set version, and the exact template digests its passes use.
@@ -242,8 +245,32 @@ The orchestration loaders derive the current stage only from durable records;
 missing ancestry, an unknown closed value, a noncanonical count, or
 contradictory evidence is corruption and never an inferred result.
 
-The reviewer-verdict and usage-limit evidence rules belong to
-[tool loop](tool-loop.md).
+`signalbox-convergence` evaluates complete GitHub snapshots with an explicit
+reviewer and check policy. Its verdict combines thread dispositions,
+authenticated quiet reviews and exempt head changes, retained review waves,
+settled check inventories, current-head checks, mergeability, base ancestry,
+draft status, and description length according to explicit policy. Disposition
+grammars, informational classes and acknowledgements, the planning marker, and
+draft handling are policy fields; the description word limit is optional and
+absent by default. Repository values live in the crate policy example, whose
+fixing-revision grammar is
+`` (?i)^fixed in (?:commits?\s+)?`?([0-9a-f]{7,40})`? ``. Every recorded
+observation ends with a complete identity query. A later authenticated body
+finding invalidates an earlier quiet review on the same head. An escalation
+reply must follow the reviewer's latest edit. Incomplete pagination or a changed
+pull-request identity during decision revalidation is an error; the predicate
+performs no I/O. Persisted authentication and review waves are bound to the
+complete policy value and requalified when it changes. Exempt head changes are
+rename-only changes and clean base forwards; comment-only changes require a
+fresh quiet review. The crate's `reconcile` subcommand runs candidate selection,
+in-process fetch and evaluation, the dispatch fence, and repository-bound
+cool-off state. State decoding requires version 2 and all record fields, rejects
+unknown fields, and performs no migration. It syncs the state file and parent
+directory before starting a dispatch child; every ambiguous outcome retains the
+fence. Operator commands run as argv in their own process groups; timeout kills
+the group and reaps the child. `SIGINT` stops the loop. Reconciliation requires
+a configured policy path and an explicit state path when neither
+`XDG_STATE_HOME` nor `HOME` supplies a default.
 
 ## Planned
 

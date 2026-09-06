@@ -43,19 +43,6 @@ const productNavigationCommands = [
     run: (context: ProductCommandContext) => context.navigate('/sessions'),
   },
   {
-    id: 'navigate.activity',
-    title: 'Go to Activity',
-    description: 'Open bounded repository ingestion and automation reads.',
-    category: 'Navigate',
-    bindings: [
-      {
-        label: 'g t',
-        registration: { kind: 'sequence', sequence: ['G', 'T'] as HotkeySequence },
-      },
-    ],
-    run: (context: ProductCommandContext) => context.navigate('/activity'),
-  },
-  {
     id: 'navigate.imports',
     title: 'Go to Imports',
     description: 'Open conversation import operations.',

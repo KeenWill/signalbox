@@ -27,12 +27,12 @@ the two machines never disagree.
 Waiting carries a typed kind and the party expected to end the wait. Only an
 owned session carries a deadline, and its state sets the kind: admission covers
 created and dispatched, active stall covers active and recovering, and waiting
-covers waiting. Each of those states carries exactly one deadline; blocked and
+covers waiting, each of those states with exactly one deadline; blocked and
 parked carry none. The admission and waiting bounds come from configuration. A
-parked session carries a machine-readable cause and the responder who must act,
-the operator queue or one module. An expired waiting deadline and a module park
-are the two paths into parked. The operator queue is every parked session; the
-recorded responder does not filter it.
+parked session, reached only by an expired waiting deadline or a module park,
+carries a machine-readable cause and the responder who must act, the operator
+queue or one module. The operator queue is every parked session; the recorded
+responder does not filter it.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a finish check passed and declared when no check ran; a failed check blocks
@@ -108,7 +108,8 @@ Order comes from commit-ordered sequences, never from comparing wall-clock
 times. A liveness check that cannot query some kind of evidence skips the turn
 instead of ending it, and any event it does not recognize counts as progress.
 When a lifecycle guard trips on an admitted session, the daemon waits, asks, or
-parks the session; it never ends work on staleness evidence alone.
+parks the session, subject to the
+[quiescent-watchdog exception](turn-lifecycle-and-scheduling.md#boundary-contracts).
 
 An owned session that waits for an operator is parked, blocked on a goal that no
 automatic resumption will lift, or held in an exhausted recovery wait; a pending
@@ -125,17 +126,9 @@ classifier, and a read that encounters a state it does not recognize returns an
 error rather than a guess.
 
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
-daemon core; no module implements any of them except the core-integrated
-[convergence](repo-watch.md) sweep, which owns its dispatch failure budget and
-parks the session as a module when that budget is exhausted. A dispatched
-[repo-watch](repo-watch.md) session is the other exception: the module holds a
-start lease over the wait for that session's first model call, and an expired
-lease ends the commissioned goal generation through a composed goal stop rather
-than a lifecycle deadline, leaving the session non-terminal. Repo-watch also
-owns a dispatch-attempt budget, and an obligation that exhausts it parks the
-owned sessions it wraps as the module. Lifecycle behavior or an event kind a
-module needs and core does not provide is added to core, and modules never
-reconstruct events by joining core tables.
+daemon core. Lifecycle behavior or an event kind a module needs and core does
+not provide is added to core, and modules never reconstruct events by joining
+core tables.
 
 The attention classifier that
 [sessions and the transcript](sessions-and-transcript.md) owns is a projection
@@ -144,10 +137,8 @@ of lifecycle state and turn phase, never an independent machine.
 An absent configured bound leaves a deadline unbounded. An owned session in a
 deadline-bearing state with no deadline row is a violation.
 
-Parking overrides the turn projection: it suspends a live turn in place, the
-turn keeps its phase, and no new turn starts while the session is parked. Work
-already in flight continues, including the tool execution an in-flight call's
-response requests; that call runs to its end and records its result.
+A park takes effect at the next scheduler admission. Work already in flight
+completes; any further pass waits for resume. A stop ends the active turn.
 
 Verified achievement is recorded only when the declared finish check passes.
 
@@ -158,11 +149,9 @@ no finish condition. Attaching a goal to an unmonitored session records it as
 owned, with the adoption journaled to the attaching actor, in the same
 transaction.
 
-An unmonitored session has no deadlines and no automatic resumption; no external
-sweep other than the repo-watch start lease acts on it, and it is excluded from
-occupancy accounting only on the passes the reconciliation sweep admits under
-its ownership marker. Turn-liveness recovery covers its turns, because a dead
-turn left active would block its next input.
+An unmonitored session has no deadlines and no automatic resumption.
+Turn-liveness recovery covers its turns, because a dead turn left active would
+block its next input.
 
 Release never interrupts a live operation: a running turn completes to its
 boundary under the resources already held.
@@ -203,9 +192,6 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
   or an exhausted retry budget on a live owned session parks it with the typed
   cause instead of terminalizing it or stopping silently; see
   [session lifecycle design](../design/session-lifecycle.md).
-- Supersession by redispatch: a module redispatch that owns the retry closes the
-  parked predecessor, a structurally failed one included, as superseded by the
-  successor; see [session lifecycle design](../design/session-lifecycle.md).
 - Deadline events for modules: modules and the program substrate subscribe to
   deadline expiries instead of running their own watchdogs; see
   [session lifecycle design](../design/session-lifecycle.md).
@@ -221,12 +207,9 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
 - Active-stall expiry: the configured active-stall bound and the deadline pass
   that parks an active or recovering session on it; see
   [session lifecycle design](../design/session-lifecycle.md).
-- [Repo-watch](repo-watch.md) finish verification: a finish check that re-tests
-  the external gate on the exact head, so a declared achievement can settle as
-  verified; see [session lifecycle design](../design/session-lifecycle.md).
 - Sticky-stop suppression: re-dispatch of stopped work stays suppressed until
-  the dispatch source is updated; see
-  [session lifecycle design](../design/session-lifecycle.md).
+  the dispatch source is updated; see the
+  [repository-watch reaction contract](repo-watch.md#design-decisions).
 - Worktree and container cleanup on closure: a closed session's worktree and
   container are removed; see
   [session lifecycle design](../design/session-lifecycle.md).

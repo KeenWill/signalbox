@@ -1899,7 +1899,6 @@ mod tests {
         }
         .need()
         .expect("the operator-required need is admitted");
-
         let unmonitored = AutomaticResumption::Unmonitored
             .need()
             .expect("the unmonitored need is admitted");

@@ -1,5 +1,4 @@
 use std::{
-    error::Error,
     fmt,
     path::{Path, PathBuf},
 };
@@ -66,17 +65,11 @@ impl fmt::Debug for ConfiguredGitRemote {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("invalid configured Git remote")]
 /// Deployment remote configuration was not a bounded name and destination.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidConfiguredGitRemote;
-
-impl fmt::Display for InvalidConfiguredGitRemote {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid configured Git remote")
-    }
-}
-
-impl Error for InvalidConfiguredGitRemote {}
 
 /// One fully resolved push handed to the deployment transport.
 #[derive(Clone, Eq, PartialEq)]
@@ -164,40 +157,26 @@ impl GitPushReceipt {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("invalid Git push receipt")]
 /// A push transport returned an invalid acknowledgement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidGitPushReceipt;
 
-impl fmt::Display for InvalidGitPushReceipt {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid Git push receipt")
-    }
-}
-
-impl Error for InvalidGitPushReceipt {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Physical push outcome classification supplied by the injected transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitPushTransportFailure {
+    #[error("configured Git remote rejected the push")]
     /// The configured remote definitively rejected the update.
     Rejected,
+    #[error("Git push could not be dispatched")]
     /// Dispatch could not begin.
     PreDispatchInfrastructure,
+    #[error("Git push outcome is unknown")]
     /// Dispatch may have updated the remote.
     DispatchUnknown,
 }
-
-impl fmt::Display for GitPushTransportFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Rejected => "configured Git remote rejected the push",
-            Self::PreDispatchInfrastructure => "Git push could not be dispatched",
-            Self::DispatchUnknown => "Git push outcome is unknown",
-        })
-    }
-}
-
-impl Error for GitPushTransportFailure {}
 
 /// Deployment-owned push boundary. Implementations receive the fixed remote;
 /// the model never supplies or modifies a destination.

@@ -1,29 +1,24 @@
 //! Explicit mappings between domain values and PostgreSQL-compatible values.
 
-use std::{error::Error, fmt};
-
-use crate::repo_watch_webhook::RepoWatchWebhookDisposition;
+use crate::outbox::OutboxConsumer;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use signalbox_application::{
-    InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind, RepoWatchConvergenceVerdict,
-    RepoWatchPullRequestLifecycle, RepoWatchReviewDecision, RepoWatchThreadState,
-    SearchContentClass, UsageCallKind, UsageProvenance,
+    InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind, SearchContentClass,
+    UsageCallKind, UsageProvenance,
 };
 use signalbox_domain::{
-    AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
-    CodexCliServiceTier, CommandPrincipal, DangerousToolAutoApproval,
-    DelegateApprovalRecommendation, DelegationMessageDirection, DelegationOutcomeKind,
-    DelegationOutcomeReason, DelegationTransitionFailure, DelegationWaitMode, DeliveryKind,
-    DescendantTerminationScope, DirectModelSelection, DispatchingModule, DurableCommandId,
-    EffectiveModelSettings, FastMode, FastModeOverlay, FaultCause, FinishCondition,
-    FinishConditionStatement, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
-    GoalModelBlockedReasonKind, GoalUserAction, InstructionBundleKind,
-    InstructionDiscoveryRootKind, LifecycleActor, MergeableState, ModelChangeAdjustment,
+    AcceptedInputId, AnthropicServiceTier, BoundChildAction, CodexCliServiceTier, CommandPrincipal,
+    DangerousToolAutoApproval, DelegateApprovalRecommendation, DelegationMessageDirection,
+    DelegationOutcomeKind, DelegationOutcomeReason, DelegationTransitionFailure,
+    DelegationWaitMode, DeliveryKind, DescendantTerminationScope, DirectModelSelection,
+    DispatchingModule, DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay,
+    FaultCause, FinishCondition, FinishConditionStatement, GoalBlockedReasonKind,
+    GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
+    InstructionBundleKind, InstructionDiscoveryRootKind, LifecycleActor, ModelChangeAdjustment,
     ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
-    ProgramCapability, ReactionChange, ReactionSubject, ReasoningLevel, RejectReason,
-    RepoWatchEventKindNameV1, RequestKind, ReviewState, RunnerPlacementLossSource,
+    ProgramCapability, ReasoningLevel, RejectReason, RequestKind, RunnerPlacementLossSource,
     RunnerSandboxProfile, ScopeOperation, ServiceTier, SessionClosureOutcome,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
     SessionLifecycleCommandRejection, SessionLifecycleOperation, SessionLifecycleState,
@@ -33,6 +28,14 @@ use signalbox_domain::{
     TurnTerminalCause, UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
     WorkspaceOrigin,
 };
+
+/// Encodes one compiled-in outbox consumer for storage.
+pub(crate) const fn outbox_consumer_to_str(value: OutboxConsumer) -> &'static str {
+    match value {
+        OutboxConsumer::ProcessProtocol => "process_protocol",
+        OutboxConsumer::RepoWatch => "repo_watch",
+    }
+}
 
 pub(crate) const SESSION_CREATED: &str = "session_created";
 pub(crate) const SESSION_STATE_CHANGED: &str = "session_state_changed";
@@ -508,11 +511,6 @@ pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
-use crate::repo_watch::{
-    RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome,
-    RepoWatchStaleReviewClearanceReason,
-};
-
 use crate::{
     approval_judge::FailedApprovalJudgeDisposition,
     convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
@@ -674,38 +672,6 @@ pub(crate) const fn convergence_sweep_decision_outcome(
         ConvergenceSweepDecision::Converged => ConvergenceSweepOutcomeStorageKind::Converged,
         ConvergenceSweepDecision::CoolingOff => ConvergenceSweepOutcomeStorageKind::CoolingOff,
         ConvergenceSweepDecision::LiveSession => ConvergenceSweepOutcomeStorageKind::LiveSession,
-    }
-}
-
-/// Closed evaluation-corpus source discriminators stored by PostgreSQL.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EvaluationCorpusSourceStorageKind {
-    /// Cases originated in a repository checkout.
-    Repository,
-    /// Cases were authored directly into the instance database.
-    DatabaseNative,
-    /// Cases are addressed through a blob-store binding.
-    BlobReference,
-}
-
-/// Encodes an evaluation-corpus source as its closed PostgreSQL spelling.
-pub const fn evaluation_corpus_source_to_str(
-    value: EvaluationCorpusSourceStorageKind,
-) -> &'static str {
-    match value {
-        EvaluationCorpusSourceStorageKind::Repository => "repository",
-        EvaluationCorpusSourceStorageKind::DatabaseNative => "database_native",
-        EvaluationCorpusSourceStorageKind::BlobReference => "blob_reference",
-    }
-}
-
-/// Decodes an evaluation-corpus source from its closed PostgreSQL spelling.
-pub fn evaluation_corpus_source_from_str(value: &str) -> Option<EvaluationCorpusSourceStorageKind> {
-    match value {
-        "repository" => Some(EvaluationCorpusSourceStorageKind::Repository),
-        "database_native" => Some(EvaluationCorpusSourceStorageKind::DatabaseNative),
-        "blob_reference" => Some(EvaluationCorpusSourceStorageKind::BlobReference),
-        _ => None,
     }
 }
 
@@ -1099,35 +1065,6 @@ pub fn delegation_wake_subject_from_str(value: &str) -> Option<DelegationWakeSto
     match value {
         "result" => Some(DelegationWakeStorageKind::Result),
         "message" => Some(DelegationWakeStorageKind::Message),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_webhook_disposition_to_str(
-    value: RepoWatchWebhookDisposition,
-) -> &'static str {
-    match value {
-        RepoWatchWebhookDisposition::Projected => "projected",
-        RepoWatchWebhookDisposition::Committed => "committed",
-        RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
-        RepoWatchWebhookDisposition::Superseded => "superseded",
-        RepoWatchWebhookDisposition::Ignored => "ignored",
-        RepoWatchWebhookDisposition::Quarantined => "quarantined",
-    }
-}
-
-/// Paired with the encoder above so a renamed or added disposition cannot
-/// update the writer while leaving a reader interpreting the old spelling.
-pub(crate) fn repo_watch_webhook_disposition_from_str(
-    value: &str,
-) -> Option<RepoWatchWebhookDisposition> {
-    match value {
-        "projected" => Some(RepoWatchWebhookDisposition::Projected),
-        "committed" => Some(RepoWatchWebhookDisposition::Committed),
-        "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
-        "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
-        "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
-        "quarantined" => Some(RepoWatchWebhookDisposition::Quarantined),
         _ => None,
     }
 }
@@ -2184,537 +2121,19 @@ pub(crate) fn goal_command_rejection_from_str(value: &str) -> Option<GoalCommand
     }
 }
 
-/// Closed repository-watch singleton scopes stored by PostgreSQL.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RepoWatchSingletonScopeStorageKind {
-    PullRequest,
-    Stack,
-    Rule,
-    Repository,
-}
-
-pub(crate) const fn repo_watch_singleton_scope_to_str(
-    value: RepoWatchSingletonScopeStorageKind,
-) -> &'static str {
-    match value {
-        RepoWatchSingletonScopeStorageKind::PullRequest => "pull_request",
-        RepoWatchSingletonScopeStorageKind::Stack => "stack",
-        RepoWatchSingletonScopeStorageKind::Rule => "rule",
-        RepoWatchSingletonScopeStorageKind::Repository => "repo",
-    }
-}
-
-pub(crate) fn repo_watch_singleton_scope_from_str(
-    value: &str,
-) -> Option<RepoWatchSingletonScopeStorageKind> {
-    match value {
-        "pull_request" => Some(RepoWatchSingletonScopeStorageKind::PullRequest),
-        "stack" => Some(RepoWatchSingletonScopeStorageKind::Stack),
-        "rule" => Some(RepoWatchSingletonScopeStorageKind::Rule),
-        "repo" => Some(RepoWatchSingletonScopeStorageKind::Repository),
-        _ => None,
-    }
-}
-
-/// Closed lifecycle-cutoff dispositions stored by PostgreSQL.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RepoWatchLifecycleCutoffDispositionStorageKind {
-    Terminal,
-    Reopened,
-}
-
-pub(crate) const fn repo_watch_lifecycle_cutoff_disposition_to_str(
-    value: RepoWatchLifecycleCutoffDispositionStorageKind,
-) -> &'static str {
-    match value {
-        RepoWatchLifecycleCutoffDispositionStorageKind::Terminal => "terminal",
-        RepoWatchLifecycleCutoffDispositionStorageKind::Reopened => "reopened",
-    }
-}
-
-pub(crate) fn repo_watch_lifecycle_cutoff_disposition_from_str(
-    value: &str,
-) -> Option<RepoWatchLifecycleCutoffDispositionStorageKind> {
-    match value {
-        "terminal" => Some(RepoWatchLifecycleCutoffDispositionStorageKind::Terminal),
-        "reopened" => Some(RepoWatchLifecycleCutoffDispositionStorageKind::Reopened),
-        _ => None,
-    }
-}
-
-/// Closed outcomes stored for one repository-watch rule evaluation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RepoWatchEvaluationOutcomeStorageKind {
-    NotMatched,
-    TargetClosed,
-    TargetConverged,
-    Occupied,
-    Coalesced,
-    Cooldown,
-    Dispatched,
-}
-
-pub(crate) const fn repo_watch_evaluation_outcome_to_str(
-    value: RepoWatchEvaluationOutcomeStorageKind,
-) -> &'static str {
-    match value {
-        RepoWatchEvaluationOutcomeStorageKind::NotMatched => "not_matched",
-        RepoWatchEvaluationOutcomeStorageKind::TargetClosed => "target_closed",
-        RepoWatchEvaluationOutcomeStorageKind::TargetConverged => "target_converged",
-        RepoWatchEvaluationOutcomeStorageKind::Occupied => "occupied",
-        RepoWatchEvaluationOutcomeStorageKind::Coalesced => "coalesced",
-        RepoWatchEvaluationOutcomeStorageKind::Cooldown => "cooldown",
-        RepoWatchEvaluationOutcomeStorageKind::Dispatched => "dispatched",
-    }
-}
-
-pub(crate) fn repo_watch_evaluation_outcome_from_str(
-    value: &str,
-) -> Option<RepoWatchEvaluationOutcomeStorageKind> {
-    match value {
-        "not_matched" => Some(RepoWatchEvaluationOutcomeStorageKind::NotMatched),
-        "target_closed" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed),
-        "target_converged" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetConverged),
-        "occupied" => Some(RepoWatchEvaluationOutcomeStorageKind::Occupied),
-        "coalesced" => Some(RepoWatchEvaluationOutcomeStorageKind::Coalesced),
-        "cooldown" => Some(RepoWatchEvaluationOutcomeStorageKind::Cooldown),
-        "dispatched" => Some(RepoWatchEvaluationOutcomeStorageKind::Dispatched),
-        _ => None,
-    }
-}
-
-/// Closed settlement kinds stored for one repository-watch dispatch obligation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RepoWatchObligationSettlementStorageKind {
-    Deactivated,
-    TargetClosed,
-    TargetConverged,
-    Dispatched,
-}
-
-pub(crate) const fn repo_watch_obligation_settlement_to_str(
-    value: RepoWatchObligationSettlementStorageKind,
-) -> &'static str {
-    match value {
-        RepoWatchObligationSettlementStorageKind::Deactivated => "deactivated",
-        RepoWatchObligationSettlementStorageKind::TargetClosed => "target_closed",
-        RepoWatchObligationSettlementStorageKind::TargetConverged => "target_converged",
-        RepoWatchObligationSettlementStorageKind::Dispatched => "dispatched",
-    }
-}
-
-pub(crate) fn repo_watch_obligation_settlement_from_str(
-    value: &str,
-) -> Option<RepoWatchObligationSettlementStorageKind> {
-    match value {
-        "deactivated" => Some(RepoWatchObligationSettlementStorageKind::Deactivated),
-        "target_closed" => Some(RepoWatchObligationSettlementStorageKind::TargetClosed),
-        "target_converged" => Some(RepoWatchObligationSettlementStorageKind::TargetConverged),
-        "dispatched" => Some(RepoWatchObligationSettlementStorageKind::Dispatched),
-        _ => None,
-    }
-}
-
-/// Stored target shape for one repository-watch event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RepoWatchEventTargetStorageKind {
-    PullRequest,
-    Branch,
-}
-
-pub(crate) const fn repo_watch_event_target_to_str(
-    value: RepoWatchEventTargetStorageKind,
-) -> &'static str {
-    match value {
-        RepoWatchEventTargetStorageKind::PullRequest => "pull_request",
-        RepoWatchEventTargetStorageKind::Branch => "branch",
-    }
-}
-
-/// Which producer recorded one repository-watch event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RepoWatchEventProducerStorageKind {
-    Poll,
-    Webhook,
-}
-
-pub(crate) const fn repo_watch_event_producer_to_str(
-    value: RepoWatchEventProducerStorageKind,
-) -> &'static str {
-    match value {
-        RepoWatchEventProducerStorageKind::Poll => "poll",
-        RepoWatchEventProducerStorageKind::Webhook => "webhook",
-    }
-}
-
-pub(crate) fn repo_watch_event_producer_from_str(
-    value: &str,
-) -> Option<RepoWatchEventProducerStorageKind> {
-    match value {
-        "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
-        "webhook" => Some(RepoWatchEventProducerStorageKind::Webhook),
-        _ => None,
-    }
-}
-
-pub(crate) fn repo_watch_event_target_from_str(
-    value: &str,
-) -> Option<RepoWatchEventTargetStorageKind> {
-    match value {
-        "pull_request" => Some(RepoWatchEventTargetStorageKind::PullRequest),
-        "branch" => Some(RepoWatchEventTargetStorageKind::Branch),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_event_kind_to_str(value: RepoWatchEventKindNameV1) -> &'static str {
-    match value {
-        RepoWatchEventKindNameV1::PullRequestOpened => "pull_request_opened",
-        RepoWatchEventKindNameV1::PullRequestClosed => "pull_request_closed",
-        RepoWatchEventKindNameV1::PullRequestMerged => "pull_request_merged",
-        RepoWatchEventKindNameV1::HeadChanged => "head_changed",
-        RepoWatchEventKindNameV1::MergeableStateChanged => "mergeable_state_changed",
-        RepoWatchEventKindNameV1::ChecksCompleted => "checks_completed",
-        RepoWatchEventKindNameV1::CheckRunCompleted => "check_run_completed",
-        RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => "branch_workflow_run_completed",
-        RepoWatchEventKindNameV1::ReviewSubmitted => "review_submitted",
-        RepoWatchEventKindNameV1::ThreadOpened => "thread_opened",
-        RepoWatchEventKindNameV1::ThreadResolved => "thread_resolved",
-        RepoWatchEventKindNameV1::Labeled => "labeled",
-        RepoWatchEventKindNameV1::Unlabeled => "unlabeled",
-        RepoWatchEventKindNameV1::BaseAdvanced => "base_advanced",
-        RepoWatchEventKindNameV1::ReactionChanged => "reaction_changed",
-    }
-}
-
-pub(crate) fn repo_watch_event_kind_from_str(value: &str) -> Option<RepoWatchEventKindNameV1> {
-    match value {
-        "pull_request_opened" => Some(RepoWatchEventKindNameV1::PullRequestOpened),
-        "pull_request_closed" => Some(RepoWatchEventKindNameV1::PullRequestClosed),
-        "pull_request_merged" => Some(RepoWatchEventKindNameV1::PullRequestMerged),
-        "head_changed" => Some(RepoWatchEventKindNameV1::HeadChanged),
-        "mergeable_state_changed" => Some(RepoWatchEventKindNameV1::MergeableStateChanged),
-        "checks_completed" => Some(RepoWatchEventKindNameV1::ChecksCompleted),
-        "check_run_completed" => Some(RepoWatchEventKindNameV1::CheckRunCompleted),
-        "branch_workflow_run_completed" => {
-            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
-        }
-        "review_submitted" => Some(RepoWatchEventKindNameV1::ReviewSubmitted),
-        "thread_opened" => Some(RepoWatchEventKindNameV1::ThreadOpened),
-        "thread_resolved" => Some(RepoWatchEventKindNameV1::ThreadResolved),
-        "labeled" => Some(RepoWatchEventKindNameV1::Labeled),
-        "unlabeled" => Some(RepoWatchEventKindNameV1::Unlabeled),
-        "base_advanced" => Some(RepoWatchEventKindNameV1::BaseAdvanced),
-        "reaction_changed" => Some(RepoWatchEventKindNameV1::ReactionChanged),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_pull_request_lifecycle_to_str(
-    value: RepoWatchPullRequestLifecycle,
-) -> &'static str {
-    match value {
-        RepoWatchPullRequestLifecycle::Open => "open",
-        RepoWatchPullRequestLifecycle::Closed => "closed",
-        RepoWatchPullRequestLifecycle::Merged => "merged",
-    }
-}
-
-pub(crate) fn repo_watch_pull_request_lifecycle_from_str(
-    value: &str,
-) -> Option<RepoWatchPullRequestLifecycle> {
-    match value {
-        "open" => Some(RepoWatchPullRequestLifecycle::Open),
-        "closed" => Some(RepoWatchPullRequestLifecycle::Closed),
-        "merged" => Some(RepoWatchPullRequestLifecycle::Merged),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_mergeable_state_to_str(value: MergeableState) -> &'static str {
-    match value {
-        MergeableState::Mergeable => "mergeable",
-        MergeableState::Conflicting => "conflicting",
-        MergeableState::Unknown => "unknown",
-    }
-}
-
-pub(crate) fn repo_watch_mergeable_state_from_str(value: &str) -> Option<MergeableState> {
-    match value {
-        "mergeable" => Some(MergeableState::Mergeable),
-        "conflicting" => Some(MergeableState::Conflicting),
-        "unknown" => Some(MergeableState::Unknown),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_review_decision_to_str(
-    value: RepoWatchReviewDecision,
-) -> &'static str {
-    match value {
-        RepoWatchReviewDecision::None => "none",
-        RepoWatchReviewDecision::Approved => "approved",
-        RepoWatchReviewDecision::ReviewRequired => "review_required",
-        RepoWatchReviewDecision::ChangesRequested => "changes_requested",
-    }
-}
-
-pub fn repo_watch_review_decision_from_str(value: &str) -> Option<RepoWatchReviewDecision> {
-    match value {
-        "none" => Some(RepoWatchReviewDecision::None),
-        "approved" => Some(RepoWatchReviewDecision::Approved),
-        "review_required" => Some(RepoWatchReviewDecision::ReviewRequired),
-        "changes_requested" => Some(RepoWatchReviewDecision::ChangesRequested),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_stale_review_clearance_outcome_to_str(
-    value: RepoWatchStaleReviewClearanceOutcome,
-) -> &'static str {
-    match value {
-        RepoWatchStaleReviewClearanceOutcome::Dismissed => "dismissed",
-        RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed => "already_dismissed",
-        RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere => "cleared_elsewhere",
-        RepoWatchStaleReviewClearanceOutcome::Superseded => "superseded",
-    }
-}
-
-pub fn repo_watch_stale_review_clearance_outcome_from_str(
-    value: &str,
-) -> Option<RepoWatchStaleReviewClearanceOutcome> {
-    match value {
-        "dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
-        "already_dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
-        "cleared_elsewhere" => Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
-        "superseded" => Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_stale_review_clearance_reason_to_str(
-    value: RepoWatchStaleReviewClearanceReason,
-) -> &'static str {
-    match value {
-        RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks => "only_stale_review_blocks",
-    }
-}
-
-pub(crate) fn repo_watch_stale_review_clearance_reason_from_str(
-    value: &str,
-) -> Option<RepoWatchStaleReviewClearanceReason> {
-    match value {
-        "only_stale_review_blocks" => {
-            Some(RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_observed_review_state_to_str(
-    value: RepoWatchObservedReviewState,
-) -> &'static str {
-    match value {
-        RepoWatchObservedReviewState::Approved => "approved",
-        RepoWatchObservedReviewState::ChangesRequested => "changes_requested",
-        RepoWatchObservedReviewState::Commented => "commented",
-        RepoWatchObservedReviewState::Dismissed => "dismissed",
-        RepoWatchObservedReviewState::Pending => "pending",
-    }
-}
-
-pub fn repo_watch_observed_review_state_from_str(
-    value: &str,
-) -> Option<RepoWatchObservedReviewState> {
-    match value {
-        "approved" => Some(RepoWatchObservedReviewState::Approved),
-        "changes_requested" => Some(RepoWatchObservedReviewState::ChangesRequested),
-        "commented" => Some(RepoWatchObservedReviewState::Commented),
-        "dismissed" => Some(RepoWatchObservedReviewState::Dismissed),
-        "pending" => Some(RepoWatchObservedReviewState::Pending),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_convergence_verdict_to_str(
-    value: RepoWatchConvergenceVerdict,
-) -> &'static str {
-    match value {
-        RepoWatchConvergenceVerdict::NotConverged => "not_converged",
-        RepoWatchConvergenceVerdict::InternallyConverged => "internally_converged",
-        RepoWatchConvergenceVerdict::MergeReady => "merge_ready",
-    }
-}
-
-pub fn repo_watch_convergence_verdict_from_str(value: &str) -> Option<RepoWatchConvergenceVerdict> {
-    match value {
-        "not_converged" => Some(RepoWatchConvergenceVerdict::NotConverged),
-        "internally_converged" => Some(RepoWatchConvergenceVerdict::InternallyConverged),
-        "merge_ready" => Some(RepoWatchConvergenceVerdict::MergeReady),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_checks_outcome_to_str(value: ChecksOutcome) -> &'static str {
-    match value {
-        ChecksOutcome::Success => "success",
-        ChecksOutcome::Failure => "failure",
-    }
-}
-
-pub(crate) fn repo_watch_checks_outcome_from_str(value: &str) -> Option<ChecksOutcome> {
-    match value {
-        "success" => Some(ChecksOutcome::Success),
-        "failure" => Some(ChecksOutcome::Failure),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_check_conclusion_to_str(value: CheckConclusion) -> &'static str {
-    match value {
-        CheckConclusion::Success => "success",
-        CheckConclusion::Failure => "failure",
-        CheckConclusion::Neutral => "neutral",
-        CheckConclusion::Cancelled => "cancelled",
-        CheckConclusion::Skipped => "skipped",
-        CheckConclusion::TimedOut => "timed_out",
-        CheckConclusion::ActionRequired => "action_required",
-        CheckConclusion::Stale => "stale",
-        CheckConclusion::StartupFailure => "startup_failure",
-    }
-}
-
-pub(crate) fn repo_watch_check_conclusion_from_str(value: &str) -> Option<CheckConclusion> {
-    match value {
-        "success" => Some(CheckConclusion::Success),
-        "failure" => Some(CheckConclusion::Failure),
-        "neutral" => Some(CheckConclusion::Neutral),
-        "cancelled" => Some(CheckConclusion::Cancelled),
-        "skipped" => Some(CheckConclusion::Skipped),
-        "timed_out" => Some(CheckConclusion::TimedOut),
-        "action_required" => Some(CheckConclusion::ActionRequired),
-        "stale" => Some(CheckConclusion::Stale),
-        "startup_failure" => Some(CheckConclusion::StartupFailure),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_review_state_to_str(value: ReviewState) -> &'static str {
-    match value {
-        ReviewState::Approved => "approved",
-        ReviewState::ChangesRequested => "changes_requested",
-        ReviewState::Commented => "commented",
-    }
-}
-
-pub(crate) fn repo_watch_review_state_from_str(value: &str) -> Option<ReviewState> {
-    match value {
-        "approved" => Some(ReviewState::Approved),
-        "changes_requested" => Some(ReviewState::ChangesRequested),
-        "commented" => Some(ReviewState::Commented),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_thread_state_to_str(value: RepoWatchThreadState) -> &'static str {
-    match value {
-        RepoWatchThreadState::Open => "open",
-        RepoWatchThreadState::Resolved => "resolved",
-    }
-}
-
-pub(crate) fn repo_watch_thread_state_from_str(value: &str) -> Option<RepoWatchThreadState> {
-    match value {
-        "open" => Some(RepoWatchThreadState::Open),
-        "resolved" => Some(RepoWatchThreadState::Resolved),
-        _ => None,
-    }
-}
-
-pub(crate) const fn repo_watch_reaction_change_to_str(value: ReactionChange) -> &'static str {
-    match value {
-        ReactionChange::Added => "added",
-        ReactionChange::Removed => "removed",
-    }
-}
-
-pub(crate) fn repo_watch_reaction_change_from_str(value: &str) -> Option<ReactionChange> {
-    match value {
-        "added" => Some(ReactionChange::Added),
-        "removed" => Some(ReactionChange::Removed),
-        _ => None,
-    }
-}
-
-/// Stored subject shape for one reaction observation or event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RepoWatchReactionSubjectStorageKind {
-    PullRequestBody,
-    IssueComment,
-    ReviewComment,
-}
-
-pub(crate) const fn repo_watch_reaction_subject_to_storage(
-    value: ReactionSubject,
-) -> (RepoWatchReactionSubjectStorageKind, Option<u64>) {
-    match value {
-        ReactionSubject::PullRequestBody => {
-            (RepoWatchReactionSubjectStorageKind::PullRequestBody, None)
-        }
-        ReactionSubject::IssueComment { id } => (
-            RepoWatchReactionSubjectStorageKind::IssueComment,
-            Some(id.get()),
-        ),
-        ReactionSubject::ReviewComment { id } => (
-            RepoWatchReactionSubjectStorageKind::ReviewComment,
-            Some(id.get()),
-        ),
-    }
-}
-
-pub(crate) const fn repo_watch_reaction_subject_kind_to_str(
-    value: RepoWatchReactionSubjectStorageKind,
-) -> &'static str {
-    match value {
-        RepoWatchReactionSubjectStorageKind::PullRequestBody => "pull_request_body",
-        RepoWatchReactionSubjectStorageKind::IssueComment => "issue_comment",
-        RepoWatchReactionSubjectStorageKind::ReviewComment => "review_comment",
-    }
-}
-
-pub(crate) fn repo_watch_reaction_subject_kind_from_str(
-    value: &str,
-) -> Option<RepoWatchReactionSubjectStorageKind> {
-    match value {
-        "pull_request_body" => Some(RepoWatchReactionSubjectStorageKind::PullRequestBody),
-        "issue_comment" => Some(RepoWatchReactionSubjectStorageKind::IssueComment),
-        "review_comment" => Some(RepoWatchReactionSubjectStorageKind::ReviewComment),
-        _ => None,
-    }
-}
 /// Why a PostgreSQL `numeric(20, 0)` value is not a positive domain ordinal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum PositiveOrdinalMappingError {
     /// The value is zero or negative.
+    #[error("ordinal must be positive")]
     NonPositive,
     /// The value has a nonzero fractional component.
+    #[error("ordinal must not have a fractional component")]
     Fractional,
     /// The positive integral value exceeds `u64::MAX`.
+    #[error("ordinal exceeds the u64 range")]
     OutOfRange,
 }
-
-impl fmt::Display for PositiveOrdinalMappingError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::NonPositive => "ordinal must be positive",
-            Self::Fractional => "ordinal must not have a fractional component",
-            Self::OutOfRange => "ordinal exceeds the u64 range",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl Error for PositiveOrdinalMappingError {}
 
 /// Encodes a defaults version as its exact PostgreSQL `numeric(20, 0)` value.
 pub fn defaults_version_to_numeric(value: SessionConfigurationDefaultsVersion) -> Decimal {
@@ -2981,24 +2400,14 @@ pub fn tool_attempt_id_from_uuid(value: Uuid) -> ToolAttemptId {
 }
 
 /// Why a PostgreSQL `uuid` value is not a valid durable-command identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum DurableCommandIdMappingError {
     /// The value is the nil or max sentinel UUID, rejected as an invalid
     /// command identity before canonical command construction
     /// (docs/spec/identity-and-commands.md).
+    #[error("durable-command identity must not be the nil or max UUID")]
     SentinelUuid,
 }
-
-impl fmt::Display for DurableCommandIdMappingError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::SentinelUuid => "durable-command identity must not be the nil or max UUID",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl Error for DurableCommandIdMappingError {}
 
 /// Encodes a durable-command identity for a PostgreSQL `uuid` column.
 pub fn durable_command_id_to_uuid(value: DurableCommandId) -> Uuid {
@@ -3019,30 +2428,15 @@ pub fn durable_command_id_from_uuid(
     Ok(DurableCommandId::from_uuid(value))
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A stored settings document that cannot reconstruct domain validation
 /// evidence. Dynamic document content is deliberately omitted from display.
 #[derive(Debug)]
 pub(crate) enum StoredModelSettingsError {
-    Json(serde_json::Error),
+    #[error("stored model settings have an invalid shape")]
+    Json(#[source] serde_json::Error),
+    #[error("stored model settings have invalid {field_0}")]
     Invalid(&'static str),
-}
-
-impl fmt::Display for StoredModelSettingsError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Json(_) => formatter.write_str("stored model settings have an invalid shape"),
-            Self::Invalid(field) => write!(formatter, "stored model settings have invalid {field}"),
-        }
-    }
-}
-
-impl Error for StoredModelSettingsError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Json(error) => Some(error),
-            Self::Invalid(_) => None,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -3521,30 +2915,24 @@ mod tests {
     use std::{collections::BTreeSet, str::FromStr};
 
     use rust_decimal::Decimal;
-    use signalbox_application::{
-        InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
-        RepoWatchConvergenceVerdict, RepoWatchPullRequestLifecycle, RepoWatchReviewDecision,
-        RepoWatchThreadState,
-    };
+    use signalbox_application::{InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind};
     use signalbox_domain::{
-        AcceptedInputId, BoundChildAction, CheckConclusion, ChecksOutcome,
-        DelegateApprovalRecommendation, DelegationMessageDirection, DelegationOutcomeKind,
-        DelegationOutcomeReason, DelegationTransitionFailure, DelegationWaitMode,
-        DescendantTerminationScope, DirectModelSelection, DurableCommandId, FastMode,
-        FastModeOverlay, FastModeSupport, InstructionBundleKind, InstructionDiscoveryRootKind,
-        MergeableState, ModelCapabilities, ModelChangeAdjustment, ModelSettingsOverlay,
-        ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReasoningLevel,
-        RepoWatchEventKindNameV1, ReviewState, RunnerPlacementLossSource, RunnerSandboxProfile,
-        ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
-        SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
-        ToolPermissionDefault, TurnId,
+        AcceptedInputId, BoundChildAction, DelegateApprovalRecommendation,
+        DelegationMessageDirection, DelegationOutcomeKind, DelegationOutcomeReason,
+        DelegationTransitionFailure, DelegationWaitMode, DescendantTerminationScope,
+        DirectModelSelection, DurableCommandId, FastMode, FastModeOverlay, FastModeSupport,
+        InstructionBundleKind, InstructionDiscoveryRootKind, ModelCapabilities,
+        ModelChangeAdjustment, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
+        ReasoningLevel, RunnerPlacementLossSource, RunnerSandboxProfile, ServiceTier,
+        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
+        SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolPermissionDefault,
+        TurnId,
     };
     use sqlx::types::Uuid;
 
     use crate::{
         convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
         outbox::DispatchedRunnerState,
-        repo_watch::{RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome},
     };
 
     use super::{
@@ -3553,9 +2941,7 @@ mod tests {
         ConvergenceSweepOutcomeStorageKind, ConvergenceSweepStateStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        EvaluationCorpusSourceStorageKind, PlanEventStorageKind, PositiveOrdinalMappingError,
-        RepoWatchEvaluationOutcomeStorageKind, RepoWatchLifecycleCutoffDispositionStorageKind,
-        RepoWatchObligationSettlementStorageKind, RunnerLossPropagationStateStorageKind,
+        PlanEventStorageKind, PositiveOrdinalMappingError, RunnerLossPropagationStateStorageKind,
         SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
         SessionPlacementResultStorageKind, StoredModelSettingsError,
         ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
@@ -3583,29 +2969,13 @@ mod tests {
         delegation_wake_subject_from_str, delegation_wake_subject_to_str,
         dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
-        durable_command_kind_to_str, evaluation_corpus_source_from_str,
-        evaluation_corpus_source_to_str, input_position_from_numeric, input_position_to_numeric,
+        durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
         instruction_bundle_kind_from_str, instruction_bundle_kind_to_str,
         instruction_finding_kind_from_str, instruction_finding_kind_to_str,
         instruction_root_kind_from_str, instruction_root_kind_to_str,
         model_change_adjustments_from_json, model_change_adjustments_to_json,
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
-        plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
-        repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_convergence_verdict_from_str,
-        repo_watch_convergence_verdict_to_str, repo_watch_evaluation_outcome_from_str,
-        repo_watch_evaluation_outcome_to_str, repo_watch_event_kind_from_str,
-        repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
-        repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
-        repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
-        repo_watch_obligation_settlement_to_str, repo_watch_observed_review_state_from_str,
-        repo_watch_observed_review_state_to_str, repo_watch_pull_request_lifecycle_from_str,
-        repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_review_decision_from_str,
-        repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_from_str,
-        repo_watch_stale_review_clearance_outcome_to_str, repo_watch_thread_state_from_str,
-        repo_watch_thread_state_to_str, runner_loss_propagation_state_from_str,
+        plan_event_kind_from_str, plan_event_kind_to_str, runner_loss_propagation_state_from_str,
         runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
         runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
         session_creation_cause_from_str, session_creation_cause_to_str, session_id_from_uuid,
@@ -3679,7 +3049,7 @@ mod tests {
     }
 
     #[test]
-    fn inv061_workspace_instruction_root_and_bundle_mappings_are_closed() {
+    fn workspace_instruction_root_and_bundle_mappings_are_closed() {
         assert_eq!(
             instruction_root_kind_to_str(InstructionDiscoveryRootKind::Workspace),
             "workspace"
@@ -3726,7 +3096,7 @@ mod tests {
     }
 
     #[test]
-    fn inv061_workspace_instruction_finding_mapping_is_closed() {
+    fn workspace_instruction_finding_mapping_is_closed() {
         assert_instruction_finding_mapping(
             InstructionDiscoveryFindingKind::RootUnavailable,
             "root_unavailable",
@@ -3773,7 +3143,7 @@ mod tests {
     }
 
     #[test]
-    fn inv061_workspace_instruction_placement_authority_mapping_is_closed() {
+    fn workspace_instruction_placement_authority_mapping_is_closed() {
         assert_eq!(
             workspace_instruction_authority_from_placement_state("unpinned"),
             Some(WorkspaceInstructionAuthorityStorageKind::Runner)
@@ -3885,29 +3255,6 @@ mod tests {
     }
 
     #[test]
-    fn evaluation_corpus_source_mapping_is_closed() {
-        assert_eq!(
-            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
-                EvaluationCorpusSourceStorageKind::Repository,
-            )),
-            Some(EvaluationCorpusSourceStorageKind::Repository)
-        );
-        assert_eq!(
-            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
-                EvaluationCorpusSourceStorageKind::DatabaseNative,
-            )),
-            Some(EvaluationCorpusSourceStorageKind::DatabaseNative)
-        );
-        assert_eq!(
-            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
-                EvaluationCorpusSourceStorageKind::BlobReference,
-            )),
-            Some(EvaluationCorpusSourceStorageKind::BlobReference)
-        );
-        assert_eq!(evaluation_corpus_source_from_str("unknown"), None);
-    }
-
-    #[test]
     fn runner_loss_propagation_state_mapping_is_closed() {
         assert_eq!(
             runner_loss_propagation_state_from_str(runner_loss_propagation_state_to_str(
@@ -3922,44 +3269,6 @@ mod tests {
             Some(RunnerLossPropagationStateStorageKind::Completed)
         );
         assert_eq!(runner_loss_propagation_state_from_str("unknown"), None);
-    }
-
-    #[test]
-    fn repository_watch_target_closed_mappings_are_closed() {
-        assert_eq!(
-            repo_watch_evaluation_outcome_from_str(repo_watch_evaluation_outcome_to_str(
-                RepoWatchEvaluationOutcomeStorageKind::TargetClosed,
-            )),
-            Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed)
-        );
-        assert_eq!(repo_watch_evaluation_outcome_from_str("unknown"), None);
-        assert_eq!(
-            repo_watch_obligation_settlement_from_str(repo_watch_obligation_settlement_to_str(
-                RepoWatchObligationSettlementStorageKind::TargetClosed,
-            )),
-            Some(RepoWatchObligationSettlementStorageKind::TargetClosed)
-        );
-        assert_eq!(repo_watch_obligation_settlement_from_str("unknown"), None);
-        assert_eq!(
-            repo_watch_lifecycle_cutoff_disposition_from_str(
-                repo_watch_lifecycle_cutoff_disposition_to_str(
-                    RepoWatchLifecycleCutoffDispositionStorageKind::Terminal,
-                ),
-            ),
-            Some(RepoWatchLifecycleCutoffDispositionStorageKind::Terminal)
-        );
-        assert_eq!(
-            repo_watch_lifecycle_cutoff_disposition_from_str(
-                repo_watch_lifecycle_cutoff_disposition_to_str(
-                    RepoWatchLifecycleCutoffDispositionStorageKind::Reopened,
-                ),
-            ),
-            Some(RepoWatchLifecycleCutoffDispositionStorageKind::Reopened)
-        );
-        assert_eq!(
-            repo_watch_lifecycle_cutoff_disposition_from_str("unknown"),
-            None
-        );
     }
 
     #[test]
@@ -4028,7 +3337,7 @@ mod tests {
     ///
     /// The outbox dispatcher decodes the header's disposition for every
     /// committed `turn_terminal`, and a spelling it cannot read stalls the
-    /// singleton cursor for every session.
+    /// selected consumer cursor for every session.
     #[test]
     fn turn_disposition_mapping_is_closed() {
         assert_eq!(
@@ -4477,179 +3786,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn repository_watch_event_kind_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::PullRequestOpened
-            )),
-            Some(RepoWatchEventKindNameV1::PullRequestOpened)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::PullRequestClosed
-            )),
-            Some(RepoWatchEventKindNameV1::PullRequestClosed)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::PullRequestMerged
-            )),
-            Some(RepoWatchEventKindNameV1::PullRequestMerged)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::HeadChanged
-            )),
-            Some(RepoWatchEventKindNameV1::HeadChanged)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::MergeableStateChanged
-            )),
-            Some(RepoWatchEventKindNameV1::MergeableStateChanged)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::ChecksCompleted
-            )),
-            Some(RepoWatchEventKindNameV1::ChecksCompleted)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::CheckRunCompleted
-            )),
-            Some(RepoWatchEventKindNameV1::CheckRunCompleted)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::BranchWorkflowRunCompleted
-            )),
-            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::ReviewSubmitted
-            )),
-            Some(RepoWatchEventKindNameV1::ReviewSubmitted)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::ThreadOpened
-            )),
-            Some(RepoWatchEventKindNameV1::ThreadOpened)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::ThreadResolved
-            )),
-            Some(RepoWatchEventKindNameV1::ThreadResolved)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::Labeled
-            )),
-            Some(RepoWatchEventKindNameV1::Labeled)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::Unlabeled
-            )),
-            Some(RepoWatchEventKindNameV1::Unlabeled)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::BaseAdvanced
-            )),
-            Some(RepoWatchEventKindNameV1::BaseAdvanced)
-        );
-        assert_eq!(
-            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
-                RepoWatchEventKindNameV1::ReactionChanged
-            )),
-            Some(RepoWatchEventKindNameV1::ReactionChanged)
-        );
-        assert_eq!(repo_watch_event_kind_from_str(UNKNOWN_DISCRIMINATOR), None);
-    }
-
-    #[test]
-    fn repository_watch_payload_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_pull_request_lifecycle_from_str(repo_watch_pull_request_lifecycle_to_str(
-                RepoWatchPullRequestLifecycle::Merged
-            )),
-            Some(RepoWatchPullRequestLifecycle::Merged)
-        );
-        assert_eq!(
-            repo_watch_mergeable_state_from_str(repo_watch_mergeable_state_to_str(
-                MergeableState::Conflicting
-            )),
-            Some(MergeableState::Conflicting)
-        );
-        assert_eq!(
-            repo_watch_checks_outcome_from_str(repo_watch_checks_outcome_to_str(
-                ChecksOutcome::Failure
-            )),
-            Some(ChecksOutcome::Failure)
-        );
-        assert_eq!(
-            repo_watch_check_conclusion_from_str(repo_watch_check_conclusion_to_str(
-                CheckConclusion::StartupFailure
-            )),
-            Some(CheckConclusion::StartupFailure)
-        );
-        assert_eq!(
-            repo_watch_review_state_from_str(repo_watch_review_state_to_str(
-                ReviewState::ChangesRequested
-            )),
-            Some(ReviewState::ChangesRequested)
-        );
-        assert_eq!(
-            repo_watch_thread_state_from_str(repo_watch_thread_state_to_str(
-                RepoWatchThreadState::Resolved
-            )),
-            Some(RepoWatchThreadState::Resolved)
-        );
-        assert_eq!(
-            repo_watch_reaction_change_from_str(repo_watch_reaction_change_to_str(
-                ReactionChange::Removed
-            )),
-            Some(ReactionChange::Removed)
-        );
-        assert_eq!(
-            repo_watch_pull_request_lifecycle_from_str(UNKNOWN_DISCRIMINATOR),
-            None
-        );
-        assert_eq!(
-            repo_watch_mergeable_state_from_str(UNKNOWN_DISCRIMINATOR),
-            None
-        );
-        assert_eq!(
-            repo_watch_checks_outcome_from_str(UNKNOWN_DISCRIMINATOR),
-            None
-        );
-        assert_eq!(
-            repo_watch_check_conclusion_from_str(UNKNOWN_DISCRIMINATOR),
-            None
-        );
-        assert_eq!(
-            repo_watch_review_state_from_str(UNKNOWN_DISCRIMINATOR),
-            None
-        );
-        assert_eq!(
-            repo_watch_thread_state_from_str(UNKNOWN_DISCRIMINATOR),
-            None
-        );
-        assert_eq!(
-            repo_watch_reaction_change_from_str(UNKNOWN_DISCRIMINATOR),
-            None
-        );
-    }
-
-    /// INV-003 / INV-053: the JSONB mapping preserves complete model-settings
+    /// the JSONB mapping preserves complete model-settings
     /// precedence, effective value, source evidence, and validation identity.
     #[test]
-    fn inv003_inv053_model_settings_json_round_trips_complete_evidence() {
+    fn model_settings_json_round_trips_complete_evidence() {
         let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x51));
         let capabilities = ModelCapabilities::new(
             BTreeSet::from([ReasoningLevel::High]),
@@ -4676,10 +3816,10 @@ mod tests {
         assert_eq!(decoded, settings);
     }
 
-    /// INV-003: unknown stored settings members fail closed instead of being
+    /// unknown stored settings members fail closed instead of being
     /// silently ignored during reconstitution.
     #[test]
-    fn inv003_model_settings_json_rejects_unknown_members() {
+    fn model_settings_json_rejects_unknown_members() {
         let mut encoded =
             model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
         encoded
@@ -4706,10 +3846,10 @@ mod tests {
         assert!(matches!(nested_error, StoredModelSettingsError::Json(_)));
     }
 
-    /// INV-003: every nullable member remains required durable evidence, so
+    /// every nullable member remains required durable evidence, so
     /// omission cannot normalize a truncated document into provider defaults.
     #[test]
-    fn inv003_model_settings_json_rejects_missing_nullable_members() {
+    fn model_settings_json_rejects_missing_nullable_members() {
         let mut missing_source =
             model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
         missing_source
@@ -4737,10 +3877,10 @@ mod tests {
         assert!(matches!(effective_error, StoredModelSettingsError::Json(_)));
     }
 
-    /// INV-003: fast mode has no provider-default state in the domain, so a
+    /// fast mode has no provider-default state in the domain, so a
     /// durable spelling that invents one fails closed.
     #[test]
-    fn inv003_model_settings_overlay_rejects_provider_default_fast_mode() {
+    fn model_settings_overlay_rejects_provider_default_fast_mode() {
         let encoded = serde_json::json!({
             "reasoning_level": {"kind": "inherit"},
             "fast_mode": {"kind": "provider_default"},
@@ -5002,133 +4142,6 @@ mod tests {
     }
 
     #[test]
-    fn repository_watch_review_decision_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
-                RepoWatchReviewDecision::None,
-            )),
-            Some(RepoWatchReviewDecision::None),
-        );
-        assert_eq!(
-            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
-                RepoWatchReviewDecision::Approved,
-            )),
-            Some(RepoWatchReviewDecision::Approved),
-        );
-        assert_eq!(
-            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
-                RepoWatchReviewDecision::ReviewRequired,
-            )),
-            Some(RepoWatchReviewDecision::ReviewRequired),
-        );
-        assert_eq!(
-            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
-                RepoWatchReviewDecision::ChangesRequested,
-            )),
-            Some(RepoWatchReviewDecision::ChangesRequested),
-        );
-        assert_eq!(repo_watch_review_decision_from_str("unknown"), None);
-    }
-
-    #[test]
-    fn repository_watch_convergence_verdict_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
-                RepoWatchConvergenceVerdict::NotConverged,
-            )),
-            Some(RepoWatchConvergenceVerdict::NotConverged),
-        );
-        assert_eq!(
-            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
-                RepoWatchConvergenceVerdict::InternallyConverged,
-            )),
-            Some(RepoWatchConvergenceVerdict::InternallyConverged),
-        );
-        assert_eq!(
-            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
-                RepoWatchConvergenceVerdict::MergeReady,
-            )),
-            Some(RepoWatchConvergenceVerdict::MergeReady),
-        );
-        assert_eq!(repo_watch_convergence_verdict_from_str("unknown"), None);
-    }
-
-    #[test]
-    fn repository_watch_review_clearance_outcome_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str(
-                repo_watch_stale_review_clearance_outcome_to_str(
-                    RepoWatchStaleReviewClearanceOutcome::Dismissed,
-                ),
-            ),
-            Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
-        );
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str(
-                repo_watch_stale_review_clearance_outcome_to_str(
-                    RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
-                ),
-            ),
-            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
-        );
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str(
-                repo_watch_stale_review_clearance_outcome_to_str(
-                    RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
-                ),
-            ),
-            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
-        );
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str(
-                repo_watch_stale_review_clearance_outcome_to_str(
-                    RepoWatchStaleReviewClearanceOutcome::Superseded,
-                ),
-            ),
-            Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
-        );
-        assert_eq!(
-            repo_watch_stale_review_clearance_outcome_from_str("unknown"),
-            None
-        );
-    }
-
-    #[test]
-    fn repository_watch_observed_review_state_mapping_is_closed() {
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::Approved,
-            )),
-            Some(RepoWatchObservedReviewState::Approved),
-        );
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::ChangesRequested,
-            ),),
-            Some(RepoWatchObservedReviewState::ChangesRequested),
-        );
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::Commented,
-            )),
-            Some(RepoWatchObservedReviewState::Commented),
-        );
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::Dismissed,
-            )),
-            Some(RepoWatchObservedReviewState::Dismissed),
-        );
-        assert_eq!(
-            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
-                RepoWatchObservedReviewState::Pending,
-            )),
-            Some(RepoWatchObservedReviewState::Pending),
-        );
-        assert_eq!(repo_watch_observed_review_state_from_str("unknown"), None);
-    }
-
-    #[test]
     fn runner_sandbox_mapping_is_closed() {
         assert_eq!(
             runner_sandbox_from_str(runner_sandbox_to_str(RunnerSandboxProfile::Ambient)),
@@ -5213,10 +4226,10 @@ mod tests {
         assert_eq!(tool_approval_posture_from_str(UNKNOWN_POSTURE), None);
     }
 
-    /// INV-002: PostgreSQL numeric values are decoded and checked before a
+    /// PostgreSQL numeric values are decoded and checked before a
     /// domain defaults version exists.
     #[test]
-    fn inv002_defaults_version_numeric_boundary() {
+    fn defaults_version_numeric_boundary() {
         assert_eq!(
             defaults_version_from_numeric(Decimal::ZERO),
             Err(PositiveOrdinalMappingError::NonPositive)
@@ -5246,10 +4259,10 @@ mod tests {
         );
     }
 
-    /// INV-002: PostgreSQL numeric values are decoded and checked before a
+    /// PostgreSQL numeric values are decoded and checked before a
     /// domain input position exists.
     #[test]
-    fn inv002_input_position_numeric_boundary() {
+    fn input_position_numeric_boundary() {
         assert_eq!(
             input_position_from_numeric(Decimal::ZERO),
             Err(PositiveOrdinalMappingError::NonPositive)
@@ -5279,10 +4292,10 @@ mod tests {
         );
     }
 
-    /// INV-002: each CreateSession identity kind crosses the persistence
+    /// each CreateSession identity kind crosses the persistence
     /// boundary through its own typed conversion.
     #[test]
-    fn inv002_create_session_identity_mappings_remain_kind_specific() {
+    fn create_session_identity_mappings_remain_kind_specific() {
         let session_uuid = Uuid::from_u128(1);
         let command_uuid = Uuid::from_u128(2);
 
@@ -5295,10 +4308,10 @@ mod tests {
         assert_eq!(durable_command_id_to_uuid(command), command_uuid);
     }
 
-    /// INV-002: accepted-input and future-turn identities cross the SQL
+    /// accepted-input and future-turn identities cross the SQL
     /// boundary through distinct mappings even though both use native UUIDs.
     #[test]
-    fn inv002_submit_input_identity_mappings_remain_kind_specific() {
+    fn submit_input_identity_mappings_remain_kind_specific() {
         let accepted_uuid = Uuid::from_u128(3);
         let turn_uuid = Uuid::from_u128(4);
 
@@ -5311,10 +4324,10 @@ mod tests {
         assert_eq!(turn_id_to_uuid(turn), turn_uuid);
     }
 
-    /// INV-002: the durable-command boundary rejects the nil and max sentinel
+    /// the durable-command boundary rejects the nil and max sentinel
     /// UUIDs rather than admitting them as command identities.
     #[test]
-    fn inv002_durable_command_mapping_rejects_sentinel_uuids() {
+    fn durable_command_mapping_rejects_sentinel_uuids() {
         assert_eq!(
             durable_command_id_from_uuid(Uuid::nil()),
             Err(DurableCommandIdMappingError::SentinelUuid)

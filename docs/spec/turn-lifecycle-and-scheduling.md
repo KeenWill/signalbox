@@ -11,10 +11,10 @@ queued, active, or terminal, and a terminal turn carries one closed disposition;
 the types live in `crates/domain/src/turn_lifecycle.rs`. A retired turn is a
 queued turn that never activated. At most one turn per session is active, and it
 holds the session's progressing slot. An active turn is running or parked in a
-durable wait: on a tool approval, on a recovery decision after an ambiguous
-operation, on a lost runner, or on a foreground delegated child. Every wait
-retains the slot. Which credential a model call uses, and what happens to the
-turn when none is available, is owned by
+durable wait that retains the slot: on a tool approval, on a recovery decision
+after an ambiguous operation, on a lost runner, or on a foreground delegated
+child. Which credential a model call uses, and what happens to the turn when
+none is available, is owned by
 [credential-availability](credential-availability.md).
 
 A turn attempt is one exclusive physical orchestration tenure;
@@ -35,11 +35,9 @@ is owned by [persistence-protocol](persistence-protocol.md).
 The scheduler is a loop of per-session authoritative passes. An in-process nudge
 after an accepted input whose applied result is a turn origin feeds it first,
 and a periodic sweep over the durable rows (`PostgresEligibilitySweep`) backs it
-up. The sweep finds five shapes: a queued turn with no active turn, an active
+up. The sweep finds four shapes: a queued turn with no active turn, an active
 turn holding a prepared model call, an active tool round, a terminal pursuing
-goal turn that still lacks its goal disposition, and an unexpired
-repository-watch dispatch-start lease with no model-call evidence, which the
-sweep marks for the reserved dispatch-start place. A pass activates a turn and
+goal turn that still lacks its goal disposition. A pass activates a turn and
 then drives its model call through the execution ports owned by
 [model-call-execution](model-call-execution.md) and [tool-loop](tool-loop.md).
 
@@ -167,7 +165,8 @@ Order comes from commit-ordered sequences, never from comparing wall-clock
 times. A liveness check that cannot query some kind of evidence skips the turn
 instead of ending it, and any event it does not recognize counts as progress.
 When a lifecycle guard trips on an admitted session, the daemon waits, asks, or
-parks the session; it never ends work on staleness evidence alone.
+parks the session. The quiescent watchdog is the one exception: it terminalizes
+a turn whose evidence is unchanged past the configured bound.
 
 The only way to derive a new transcript snapshot is to append to the old one, so
 every earlier entry stays in order. Two frontiers are equal only if they are the
@@ -203,24 +202,21 @@ transaction, so no start references a missing or partial snapshot.
 
 The admission cap bounds concurrent per-session passes, not the durable queue; a
 cap of zero pauses execution and an absent cap admits every eligible session.
-For a cap above one, one place is reserved for a repository-watch dispatch start
-that carries no model-call evidence. Each pass first reconciles an active
-running tool round, then drives a retained prepared model call, and only then
-activates a queued turn; failure of either lookup is an ordinary failed pass,
-and only a failure after active-turn execution begins trips fatal recovery
-supervision. A candidate the sweep marked from a repository-watch dispatch-start
-lease first drives its active turn through the dispatch-start resume path, and
-only then activates. A pass releases its slot during attachment or blob-store
-I/O and reacquires one before send authorization, and its guarded transaction
-revalidates authority. A model-originated blob read authorizes no later send, so
-it reacquires its slot before the correlated tool result commits. A pass that
-cannot immediately get an attachment-preparation permit ends and leaves only the
-durable prepared row for a later sweep. When a pass exceeds its occupancy bound,
-the handoff invokes the startup-recovery transaction only for a turn whose
-attempt and turn-progress frontier did not change between two observations, and
-a resumability read that does not settle counts as a resumption; a pass that
-expires inside pre-activation compaction instead hands off only the exact
-compaction call that window made durable.
+Each pass first reconciles an active running tool round, then drives a retained
+prepared model call, and only then activates a queued turn; failure of either
+lookup is an ordinary failed pass, and only a failure after active-turn
+execution begins trips fatal recovery supervision. A pass releases its slot
+during attachment or blob-store I/O and reacquires one before send
+authorization, and its guarded transaction revalidates authority. A
+model-originated blob read authorizes no later send, so it reacquires its slot
+before the correlated tool result commits. A pass that cannot immediately get an
+attachment-preparation permit ends and leaves only the durable prepared row for
+a later sweep. When a pass exceeds its occupancy bound, the handoff invokes the
+startup-recovery transaction only for a turn whose attempt and turn-progress
+frontier did not change between two observations, and a resumability read that
+does not settle counts as a resumption; a pass that expires inside
+pre-activation compaction instead hands off only the exact compaction call that
+window made durable.
 
 A quiescent candidate is an active turn with an accepted-input origin in the
 running phase, with no tool round, approval, or recovery attempt, and no live
@@ -321,9 +317,9 @@ parked in the model-call recovery wait. The authoritative transaction
 revalidates the expected active turn under the scheduler lock and records an
 active-turn mismatch, or no-active-turn when a winning decision emptied the
 slot. Equal interrupt replay returns the original applied result; a distinct
-later interrupt records interrupt-already-applied without accepting an input or
-replacing the proof. An interrupt delivered while the active turn is parked on a
-tool-approval wait records interrupt-unavailable without accepting an input.
+later interrupt records interrupt-already-applied without replacing the proof,
+an interrupt delivered while the active turn is parked on a tool-approval wait
+records interrupt-unavailable, and neither accepts an input.
 
 An active turn already at a runner boundary moves to the runner-recovery wait
 when its placement is marked lost; the loss projection is owned by
@@ -429,9 +425,9 @@ scheduler stops admitting passes, and liveness stops scanning. Finite handlers,
 the current dispatcher transaction, in-flight scheduler passes, and an in-flight
 liveness read or terminalization share a grace window of the configured longest
 model exchange plus a fixed cleanup margin. An admitted pass stops spending its
-occupancy bound and drains under that window. After its in-flight operation
-reaches a durable boundary, a pass checkpoints the active turn and returns
-without issuing another, and a successor resumes from that boundary.
+occupancy bound and drains under that window: after its in-flight operation
+reaches a durable boundary, it checkpoints the active turn and returns without
+issuing another, and a successor resumes from that boundary.
 
 ## Planned
 

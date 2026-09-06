@@ -320,6 +320,7 @@ fn require_decoded_response(
         // `TerminalEvidence` variant fails to compile here instead of
         // silently inheriting this panic path.
         rejected @ (TerminalEvidence::Completed(_)
+        | TerminalEvidence::CompletedWithProviderCompaction { .. }
         | TerminalEvidence::Refused(_)
         | TerminalEvidence::ProviderError(_)
         | TerminalEvidence::CancellationConfirmed(_)
@@ -739,6 +740,8 @@ mod require_decoded_response_tests {
                 reported_model: None,
                 content: Vec::new(),
                 usage: usage(),
+                retained_input_tokens: None,
+                retained_output_tokens: None,
             }),
             &refusal_observed(),
         );

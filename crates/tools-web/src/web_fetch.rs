@@ -1,6 +1,6 @@
 //! Bounded daemon-local single-URL web fetch.
 
-use std::{collections::BTreeSet, error::Error, fmt, future::Future, time::Duration};
+use std::{collections::BTreeSet, fmt, future::Future, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{Client, Url};
@@ -80,28 +80,20 @@ impl Default for WebFetchEgressPolicy {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a deployment web-fetch egress policy was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebFetchEgressPolicyError {
+    #[error("web_fetch egress policy contains too many origins")]
     /// More than 64 exact origins were supplied.
     TooManyOrigins,
+    #[error("web_fetch egress policy repeats an origin")]
     /// Two entries canonicalized to the same exact origin.
     DuplicateOrigin,
+    #[error("web_fetch egress policy contains an invalid origin")]
     /// An entry was not one bare absolute HTTP(S) origin.
     InvalidOrigin,
 }
-
-impl fmt::Display for WebFetchEgressPolicyError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::TooManyOrigins => "web_fetch egress policy contains too many origins",
-            Self::DuplicateOrigin => "web_fetch egress policy repeats an origin",
-            Self::InvalidOrigin => "web_fetch egress policy contains an invalid origin",
-        })
-    }
-}
-
-impl Error for WebFetchEgressPolicyError {}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct WebFetchOrigin {
@@ -134,35 +126,27 @@ impl WebFetchOrigin {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static `web_fetch` declaration or production transport could not be
 /// constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebFetchToolConstructionError {
+    #[error("web_fetch static name is invalid")]
     /// The static name was rejected.
     Name,
+    #[error("web_fetch static schema is invalid")]
     /// The static schema was rejected.
     Schema,
+    #[error("web_fetch static error detail is invalid")]
     /// One static sanitized error detail was rejected.
     ErrorDetail,
+    #[error("web_fetch catalog is duplicated")]
     /// The one-entry catalog unexpectedly reported a duplicate.
     Duplicate,
+    #[error("web_fetch transport could not be constructed")]
     /// The HTTP client could not be constructed.
     Transport,
 }
-
-impl fmt::Display for WebFetchToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "web_fetch static name is invalid",
-            Self::Schema => "web_fetch static schema is invalid",
-            Self::ErrorDetail => "web_fetch static error detail is invalid",
-            Self::Duplicate => "web_fetch catalog is duplicated",
-            Self::Transport => "web_fetch transport could not be constructed",
-        })
-    }
-}
-
-impl Error for WebFetchToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for `web_fetch`.
 ///
@@ -473,28 +457,20 @@ pub struct WebFetchExecutor<Transport> {
     egress_policy: WebFetchEgressPolicy,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked catalog/executor assumption failed inside `web_fetch`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebFetchExecutorError {
+    #[error("web_fetch argument validation drifted")]
     /// Executor argument decoding disagreed with catalog validation.
     ArgumentValidationDrift,
+    #[error("web_fetch result encoding failed")]
     /// Compact result encoding unexpectedly failed.
     ResultEncoding,
+    #[error("web_fetch dispatch outcome is unknown")]
     /// Physical dispatch began without a complete bounded acknowledgement.
     DispatchUnknown,
 }
-
-impl fmt::Display for WebFetchExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ArgumentValidationDrift => "web_fetch argument validation drifted",
-            Self::ResultEncoding => "web_fetch result encoding failed",
-            Self::DispatchUnknown => "web_fetch dispatch outcome is unknown",
-        })
-    }
-}
-
-impl Error for WebFetchExecutorError {}
 
 impl ClassifyOperatorFailure for WebFetchExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

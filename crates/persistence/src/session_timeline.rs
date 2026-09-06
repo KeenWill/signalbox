@@ -1,6 +1,6 @@
 //! PostgreSQL adapter for bounded historical session-timeline reads.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::num::NonZeroU64;
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -32,90 +32,42 @@ use crate::{
 
 const PROJECTED_ITEM_ENVELOPE_BYTES: u32 = 64;
 
+#[derive(signalbox_derive::OperatorError)]
 /// Integrity failure in the durable timeline projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionTimelineCorruption {
+    #[error("missing session timeline {field_0}")]
     Missing(&'static str),
+    #[error("invalid session timeline {field_0}")]
     InvalidOrdinal(&'static str),
+    #[error("inconsistent session timeline {field_0}")]
     Inconsistent(&'static str),
+    #[error("unsupported session timeline event kind: {field_0}")]
     UnsupportedEventKind(String),
+    #[error("unsupported session timeline turn disposition: {field_0}")]
     UnsupportedTurnDisposition(String),
+    #[error("session timeline item projection overflowed")]
     ItemProjectionOverflow,
+    #[error("session timeline detail projection overflowed")]
     DetailProjectionOverflow,
+    #[error("missing session timeline detail record")]
     MissingDetailRecord,
 }
 
-impl fmt::Display for SessionTimelineCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing session timeline {field}"),
-            Self::InvalidOrdinal(field) => write!(formatter, "invalid session timeline {field}"),
-            Self::Inconsistent(field) => {
-                write!(formatter, "inconsistent session timeline {field}")
-            }
-            Self::UnsupportedEventKind(kind) => {
-                write!(formatter, "unsupported session timeline event kind: {kind}")
-            }
-            Self::UnsupportedTurnDisposition(disposition) => {
-                write!(
-                    formatter,
-                    "unsupported session timeline turn disposition: {disposition}"
-                )
-            }
-            Self::ItemProjectionOverflow => {
-                formatter.write_str("session timeline item projection overflowed")
-            }
-            Self::DetailProjectionOverflow => {
-                formatter.write_str("session timeline detail projection overflowed")
-            }
-            Self::MissingDetailRecord => {
-                formatter.write_str("missing session timeline detail record")
-            }
-        }
-    }
-}
-
-impl Error for SessionTimelineCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database or fail-closed projection failure.
 #[derive(Debug)]
 pub enum SessionTimelineRepositoryError {
-    Database(sqlx::Error),
+    #[error("session timeline database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("invalid session timeline detail query")]
     InvalidDetailQuery,
+    #[error("session timeline detail contains invalid stored UTF-8")]
     InvalidStoredUtf8,
-    Corruption(SessionTimelineCorruption),
-    Outbox(OutboxDispatchError),
-}
-
-impl fmt::Display for SessionTimelineRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "session timeline database failure: {error}")
-            }
-            Self::InvalidDetailQuery => {
-                formatter.write_str("invalid session timeline detail query")
-            }
-            Self::InvalidStoredUtf8 => {
-                formatter.write_str("session timeline detail contains invalid stored UTF-8")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::Outbox(error) => {
-                write!(formatter, "session timeline detail decode failed: {error}")
-            }
-        }
-    }
-}
-
-impl Error for SessionTimelineRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::InvalidDetailQuery | Self::InvalidStoredUtf8 => None,
-            Self::Corruption(error) => Some(error),
-            Self::Outbox(error) => Some(error),
-        }
-    }
+    #[error(transparent)]
+    Corruption(#[source] SessionTimelineCorruption),
+    #[error("session timeline detail decode failed: {field_0}")]
+    Outbox(#[source] OutboxDispatchError),
 }
 
 impl From<sqlx::Error> for SessionTimelineRepositoryError {

@@ -44,8 +44,8 @@ descriptor-pinned, no-follow, bounded-read contract.
 No operation accepts a command line, shell fragment, executable, repository
 path, or remote destination, and the implementation never spawns a Git binary.
 
-Minting a destination is a human act; pushing to a minted destination is an
-approval-gated agent act. A session cannot mint a workspace or a destination.
+Minting a destination is a human act, and a session cannot mint a workspace or a
+destination; pushing to a minted destination is an approval-gated agent act.
 
 Workspace, mint, and withdrawal rows are append-only; retiring a destination
 records a withdrawal rather than editing or deleting the mint. The live

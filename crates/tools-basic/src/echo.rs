@@ -1,6 +1,6 @@
 //! Daemon-local conformance echo tool.
 
-use std::{error::Error, fmt, future::Future};
+use std::future::Future;
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -35,31 +35,23 @@ impl ToolContract for EchoTool {
         "Returns the supplied text unchanged in a compact JSON object.";
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static `echo` declaration could not be compiled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EchoToolConstructionError {
+    #[error("echo static name is invalid")]
     /// The static name was rejected.
     Name,
+    #[error("echo static schema is invalid")]
     /// The static schema was rejected.
     Schema,
+    #[error("echo static error detail is invalid")]
     /// The static sanitized error detail was rejected.
     ErrorDetail,
+    #[error("echo catalog is duplicated")]
     /// The one-entry catalog unexpectedly reported a duplicate.
     Duplicate,
 }
-
-impl fmt::Display for EchoToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Name => "echo static name is invalid",
-            Self::Schema => "echo static schema is invalid",
-            Self::ErrorDetail => "echo static error detail is invalid",
-            Self::Duplicate => "echo catalog is duplicated",
-        })
-    }
-}
-
-impl Error for EchoToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for `echo`.
 ///
@@ -128,17 +120,11 @@ impl ToolArgumentValidator for EchoArgumentValidator {
 #[derive(Clone, Copy, Debug)]
 pub struct EchoExecutor;
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("echo argument validation drifted")]
 /// A checked catalog/executor assumption failed inside `echo`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EchoExecutorError;
-
-impl fmt::Display for EchoExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("echo argument validation drifted")
-    }
-}
-
-impl Error for EchoExecutorError {}
 
 impl ClassifyOperatorFailure for EchoExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

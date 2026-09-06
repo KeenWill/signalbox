@@ -237,9 +237,14 @@ pub async fn verify_pinned_codex_cli_version(
     let version = banner
         .lines()
         .next()
-        .and_then(|line| line.split_whitespace().next_back())
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|token| semver::Version::parse(token).ok())
+        })
         .ok_or(CodexCliVersionProbeError::InvalidBanner)?;
-    if version != SUPPORTED_CODEX_CLI_VERSION {
+    let supported = semver::Version::parse(SUPPORTED_CODEX_CLI_VERSION)
+        .map_err(|_| CodexCliVersionProbeError::InvalidBanner)?;
+    if version != supported {
         return Err(CodexCliVersionProbeError::VersionMismatch);
     }
     Ok(())
@@ -542,6 +547,8 @@ impl CodexCliRuntime {
             tool_choice: operation.tool_choice,
             output_contract: operation.output_contract,
             delivery: operation.delivery,
+            provider_compaction: operation.provider_compaction,
+            provider_compaction_supported: operation.provider_compaction_supported,
         };
         let capabilities = match self
             .model_capabilities
@@ -960,6 +967,16 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn pinned_version_probe_rejects_a_non_semver_banner() {
+        let (_directory, executable) = version_fixture("#!/bin/sh\nprintf 'codex-cli latest\\n'\n");
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn pinned_version_probe_bounds_a_hung_executable() {
         let (_directory, executable) = version_fixture("#!/bin/sh\nsleep 30\n");
 
@@ -978,10 +995,10 @@ mod tests {
         assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
     }
 
-    /// INV-035: the CLI receives only a reference to its ambient login store;
+    /// the CLI receives only a reference to its ambient login store;
     /// direct credential-value variables are absent from the inherited set.
     #[test]
-    fn inv_035_cli_environment_excludes_direct_credential_values() {
+    fn cli_environment_excludes_direct_credential_values() {
         assert!(
             CODEX_ENVIRONMENT
                 .iter()

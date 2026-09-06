@@ -18,11 +18,11 @@ challenges. The daemon records each connection under a durable connection epoch,
 marks a runner suspect and then lost when heartbeats stop, and propagates the
 loss to the sessions pinned to that runner. This registration slice and the
 `signalbox-runner` binary are the whole of what is built. The runner advertises
-no capability class, tool, workspace capability, or sandbox profile, sends an
-empty reconnect inventory, and executes nothing. The daemon catalog that would
-admit such claims is empty; the runner advertises only the credential-profile
-names and repository entries its strict configuration carries. Leases, dispatch,
-workspaces, sandboxes, and recovery are listed under Planned.
+only the credential-profile names and repository entries its strict
+configuration carries, and no capability class, tool, workspace capability, or
+sandbox profile; the daemon catalog that would admit such claims is empty, and
+the runner sends an empty reconnect inventory and executes nothing. Leases,
+dispatch, workspaces, sandboxes, and recovery are listed under Planned.
 
 The domain lives in `crates/domain/src/runner.rs` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,
@@ -46,14 +46,15 @@ state. The request states the runner selector and the session's choices on the
 four axes, workspace, repository, credentials, and sandbox. The aggregate starts
 unpinned; the first dispatch pins it to one runner, snapshots the registration
 it was validated against, and creates a `CredentialProfileGrant` when a profile
-was selected. A `RunnerLease` is the domain record of one tool attempt offered
-to that runner; its offer, claim, loss, and retry transitions are domain code,
-and the wire dispatch that would drive them is listed under Planned. A placement
-changes only by explicit transition: replacing a lost runner and replacing the
-pinned credential profile each advance its revision. When a pinned runner is
-lost, the placement enters a lost state that only two user commands leave:
-replace, which installs a successor placement, and abandon, which retires the
-placement.
+was selected. Pinning records the tool names the validated registration admits
+and their runner-only subset. A `RunnerLease` is the domain record of one tool
+attempt offered to that runner; its offer, claim, loss, and retry transitions
+are domain code, and the wire dispatch that would drive them is listed under
+Planned. A placement changes only by explicit transition: replacing a lost
+runner and replacing the pinned credential profile each advance its revision.
+When a pinned runner is lost, the placement enters a lost state that only two
+user commands leave: replace, which installs a successor placement, and abandon,
+which retires the placement.
 
 ## Design decisions
 
@@ -88,7 +89,9 @@ second source of policy.
 Without a durable no-execution proof, losing even an offered lease follows the
 execution-possible law: pure or idempotent work needs a fresh physical attempt,
 and side-effecting work needs crash classification. Why: the absence of a frame
-in process memory is never proof that nothing ran.
+in process memory is never proof that nothing ran. An offered lease lost with
+durable no-execution proof permits a checked successor generation for every
+effect class while retaining the unexecuted attempt.
 
 The rule that model-provider keys never reach the runner means the daemon has no
 runner-wire or environment-injection path for them; it is not a
@@ -142,11 +145,11 @@ independently of the name.
 
 Omitting a formerly advertised capability removes its availability from the new
 registration and never changes daemon-side policy. Omitting a combined-locus
-tool disables runner dispatch for that tool and keeps the placement: when both
-loci are admissible and the attached runner does not advertise the tool, the
-domain keeps daemon-local admissibility while runner lease creation fails
-`ToolUnavailable`. Daemon fallback transfers neither the consumed runner
-authorization nor the credential-profile grant to daemon execution.
+tool, one admissible on both loci that the attached runner does not advertise,
+disables runner dispatch for that tool and keeps the placement: the domain keeps
+daemon-local admissibility while runner lease creation fails `ToolUnavailable`.
+Daemon fallback transfers neither the consumed runner authorization nor the
+credential-profile grant to daemon execution.
 
 `RunnerToolDeclaration` is the one daemon-authoritative runner-dispatch
 declaration, so every runner-advertisable tool has model-facing description and
@@ -168,7 +171,10 @@ process-local connection state, so a reconnecting registration cannot recreate,
 complete, or discard a lease from an advertisement. Re-leasing continues one
 logical tool request and one lease lineage; its successor `RunnerGeneration` is
 distinct from the fresh physical attempt's `ToolDispatchGeneration`, which
-starts at first.
+starts at first. A lease claim or completion requires the exact lease, runner,
+tool, tool-attempt dispatch correlation, and lease generation. A runner
+generation with no representable successor fails closed as generation
+exhaustion.
 
 Workspace, repository, credentials, and sandbox are independent axes of one
 session: a choice on any axis constrains no other, and no axis is inferred from
@@ -183,13 +189,17 @@ dispatches. A profileless placement creates no grant, resolves no configured
 path, and injects no value. A repository-worktree requirement is satisfiable
 only when the selected registration advertises the per-session worktree
 capability and the repository key resolves in checked runner configuration to a
-credential-free HTTPS clone URL.
+credential-free HTTPS clone URL. Domain placement admission requires a matching
+runner selector, advertised support for the requested sandbox and any selected
+credential profile, and daemon-catalog admission of every overridden tool.
 
 Ordinary attachment and lease creation accept only the exact pinned runner and
 the current grant; re-registration and reconnect change none of the pinned
 facts. Pinned reconstitution validates against the exact registration snapshot
 that produced the pin, and a current narrowed re-registration is reconciled
-separately, never substituted for that snapshot.
+separately, never substituted for that snapshot. Lease reconstitution rejects as
+corrupt any disagreement in the independently recorded correlation, session,
+registration-declared effect class, credential authorization, or state.
 
 The generic snapshot writer stores neither runner replacement event and never
 installs loss. Each replacement runs in its own command-authorized transaction
@@ -200,7 +210,14 @@ so a stale epoch cannot write after that commit, and the connection-loss
 propagation transaction consumes the pinned evidence when it persists the lost
 state. [Persistence protocol](persistence-protocol.md) owns the lock order, the
 rule that no transaction stays open across runner I/O, and the validation of
-runner transition events against the placement revision they name.
+runner transition events against the placement revision they name. When a prior
+credential grant exists, domain runner replacement consumes it and creates its
+checked successor revision in the same transition. Replacing a pinned runner or
+its credential profile returns exact before-and-after placement and grant change
+facts. An active or revoked prior grant yields a checked successor that is
+active with a selected profile or a revoked tombstone without one, while its
+consumed revision remains terminal. The domain replaces an active grant on a
+pinned runner with an active successor or terminally revokes it.
 
 Reconnect of the lost identity cannot consume either replacement transition or
 clear a lost state. Safe retry authority exists only for a pinned lost runner,
@@ -218,7 +235,10 @@ lease, dispatch, result, evidence, transcript, and user-inspection projection.
 Changing it requires the same explicit replacement frontier as changing runners.
 Every surface names the unconfined profile `ambient`, and no surface calls it
 sandboxed. Profile or override policy cannot make a tool available, change its
-effect class, alter its arguments, or move its locus.
+effect class, alter its arguments, or move its locus. The domain rejects a
+placement whose selected registration does not advertise its sandbox profile. A
+placement override naming a tool absent from the validated registration's daemon
+catalog rejects the request as `ToolUndeclared`.
 
 No credential-value field exists in the runner-protocol domain; advertisements,
 registrations, placements, grants, leases, changes, and reconstitution inputs

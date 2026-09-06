@@ -25,6 +25,7 @@ mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;
 mod outbox_dispatch_and_process_read;
+mod ownership_seam_grants;
 mod restart_recovery_and_submit;
 mod search;
 mod session_creation_and_submit;
@@ -96,24 +97,25 @@ use signalbox_domain::{
     ModelTargetDefinition, NormalizedToolArguments, OverrideDeniedToolRequest,
     OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
     PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
-    PreparedCreateSession, PreparedModelCallRequest, ProviderModelCallFailureCause,
-    ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel, RecordedUserOverride,
-    RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionOwnership, SessionPlacement, SessionPlacementPath, SessionSystemPrompt,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance, SettingOverlay,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
-    ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDecisionSource,
-    ToolDenialReason, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault,
-    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, TurnTerminalCause, UserContent, UserContentPart,
+    PreparedCreateSession, PreparedModelCallRequest, ProviderCompactionBlock,
+    ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
+    ReasoningLevel, RecordedUserOverride, RefusedModelCallTurnIdentities, ReplaceSessionDefaults,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionInputPosition, SessionOwnership, SessionPlacement, SessionPlacementPath,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, SettingOverlay, StoppedToolResponsePartIdentity,
+    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptCrashOutcome,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure,
+    ToolCallProposal, ToolDecisionRationale, ToolDecisionSource, ToolDenialReason,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
+    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, TurnTerminalCause, UserContent, UserContentPart,
 };
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog,
@@ -153,8 +155,8 @@ use signalbox_persistence::{
         DispatchedDelegationWake, DispatchedInjectionOutcome, DispatchedModelCallState,
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
         DispatchedSessionCreation, DispatchedToolBatchState, DispatchedTurnTerminalDisposition,
-        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
-        OutboxDispatcher,
+        OutboxConsumer, OutboxConsumerReader, OutboxCorruption, OutboxDeliveryDecision,
+        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
@@ -182,9 +184,9 @@ use signalbox_persistence::{
         SessionDelegationCorruption, SessionDelegationRepository, SessionDelegationRepositoryError,
     },
     start_eligible_turn::{
-        CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
-        StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,
-        StartEligibleTurnRepositoryError,
+        CommitActivationPreviewOutcome, CommitCountedAttachmentFailurePreviewOutcome,
+        StartEligibleTurnCorruption, StartEligibleTurnIdentityCollision,
+        StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
     },
     startup::PostgresStartupScanRepository,
     submit_input::{
@@ -2511,23 +2513,23 @@ async fn rewind_outbox_delivery_before(
     sequence: Decimal,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(pool)
     .await?;
@@ -3631,7 +3633,11 @@ async fn checkpoint_suppressed_tool_round(
         .expect("the suppressed proposal forms one inert tool response");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     let outcome = model_repository
         .apply_terminal_observation(
             fixture.session,
@@ -3680,6 +3686,7 @@ async fn checkpoint_tool_batch_with_approval_and_attachment(
         initial_approval,
         ProviderReportedTokenUsage::unreported(),
         attachment,
+        None,
     )
     .await
 }
@@ -3706,6 +3713,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage(
         initial_approval,
         usage,
         None,
+        None,
     )
     .await
 }
@@ -3717,6 +3725,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
     initial_approval: InitialToolApproval,
     usage: ProviderReportedTokenUsage,
     attachment: Option<BlobDigest>,
+    provider_compaction: Option<ProviderCompactionBlock>,
 ) -> Result<
     (
         RestartModelCallFixture,
@@ -3738,28 +3747,38 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
         })
         .collect::<Vec<_>>();
     let response = ToolUsingAssistantResponse::try_from_parts(
-        proposals
+        provider_compaction
             .iter()
-            .map(|(tool_name, arguments)| {
+            .cloned()
+            .map(AssistantResponsePart::ProviderCompaction)
+            .chain(proposals.iter().map(|(tool_name, arguments)| {
                 AssistantResponsePart::ToolCall(ToolCallProposal::new(
                     ToolName::try_new(String::from(*tool_name)).expect("valid fixture tool name"),
                     NormalizedToolArguments::try_from_provider_text(String::from(*arguments))
                         .expect("bounded fixture arguments"),
                 ))
-            })
+            }))
             .collect(),
     )
     .expect("the proposals form a tool-using response");
     let observation = authorized
         .observation_correlation()
         .bind_terminal_observation_with_usage(
-            ModelCallTerminalObservation::CompletedWithTools { response },
+            ModelCallTerminalObservation::CompletedWithTools {
+                response,
+                retained_input_tokens: provider_compaction.as_ref().map(|_| 10),
+                retained_output_tokens: provider_compaction.as_ref().map(|_| 5),
+            },
             usage,
         );
-    let identities = requests
+    let identities = provider_compaction
         .iter()
-        .enumerate()
-        .map(|(index, request)| {
+        .map(|_| {
+            ToolResponsePartIdentity::provider_compaction(SemanticTranscriptEntryId::from_uuid(
+                Uuid::from_u128(seed + 0x7f),
+            ))
+        })
+        .chain(requests.iter().enumerate().map(|(index, request)| {
             ToolResponsePartIdentity::tool_call(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
                     seed + 0x80 + u128::try_from(index).expect("the bounded batch index fits u128"),
@@ -3767,7 +3786,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
                 *request,
                 initial_approval,
             )
-        })
+        }))
         .collect();
     let outcome = model_repository
         .apply_terminal_observation(
@@ -4992,7 +5011,11 @@ async fn prepare_delegated_tool_crash_fixture(
     let observation = fixture
         .authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     let outcome = fixture
         .repository
         .apply_terminal_observation(
@@ -5380,6 +5403,8 @@ async fn assert_delegated_nonterminal_reread_rejects_result(
                     .observation_correlation()
                     .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
                         response,
+                        retained_input_tokens: None,
+                        retained_output_tokens: None,
                     }),
                 ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
                     vec![ToolResponsePartIdentity::tool_call(

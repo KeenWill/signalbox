@@ -7,8 +7,6 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    error::Error,
-    fmt,
     num::NonZeroU64,
     sync::Arc,
 };
@@ -76,82 +74,20 @@ impl PlacementProjectionAuthority {
     }
 }
 
-/// Adapter-owned positive revision of one validated registration.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RunnerRegistrationRevision(NonZeroU64);
+signalbox_newtype::positive_ordinal!(
+    /// Adapter-owned positive revision of one validated registration.
+    RunnerRegistrationRevision
+);
 
-impl RunnerRegistrationRevision {
-    /// Returns the first admitted registration revision.
-    pub const fn first() -> Self {
-        Self(NonZeroU64::MIN)
-    }
+signalbox_newtype::positive_ordinal!(
+    /// Hub-issued positive identity of one physical runner connection.
+    RunnerConnectionEpoch
+);
 
-    /// Admits one nonzero revision value.
-    pub const fn try_from_u64(value: u64) -> Option<Self> {
-        match NonZeroU64::new(value) {
-            Some(value) => Some(Self(value)),
-            None => None,
-        }
-    }
-
-    /// Returns the positive integer carried by this revision.
-    pub const fn get(self) -> u64 {
-        self.0.get()
-    }
-
-    const fn checked_next(self) -> Option<Self> {
-        match self.get().checked_add(1) {
-            Some(value) => Self::try_from_u64(value),
-            None => None,
-        }
-    }
-}
-
-/// Hub-issued positive identity of one physical runner connection.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RunnerConnectionEpoch(NonZeroU64);
-
-impl RunnerConnectionEpoch {
-    /// Admits one nonzero epoch value.
-    pub const fn try_from_u64(value: u64) -> Option<Self> {
-        match NonZeroU64::new(value) {
-            Some(value) => Some(Self(value)),
-            None => None,
-        }
-    }
-
-    /// Returns the positive integer carried by this epoch.
-    pub const fn get(self) -> u64 {
-        self.0.get()
-    }
-
-    fn checked_next(self) -> Option<Self> {
-        self.get().checked_add(1).and_then(Self::try_from_u64)
-    }
-}
-
-/// Positive append-only epoch of one enrollment's terminal connection losses.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RunnerConnectionLossEpoch(NonZeroU64);
-
-impl RunnerConnectionLossEpoch {
-    /// Admits one nonzero loss-epoch value.
-    pub const fn try_from_u64(value: u64) -> Option<Self> {
-        match NonZeroU64::new(value) {
-            Some(value) => Some(Self(value)),
-            None => None,
-        }
-    }
-
-    /// Returns the positive integer carried by this loss epoch.
-    pub const fn get(self) -> u64 {
-        self.0.get()
-    }
-
-    fn checked_next(self) -> Option<Self> {
-        self.get().checked_add(1).and_then(Self::try_from_u64)
-    }
-}
+signalbox_newtype::positive_ordinal!(
+    /// Positive append-only epoch of one enrollment's terminal connection losses.
+    RunnerConnectionLossEpoch
+);
 
 /// Durable health state of the current physical runner connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,29 +125,50 @@ pub enum RunnerConnectionCause {
     EnrollmentRevoked,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One canonical durable connection lifecycle head.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunnerConnectionSnapshot {
+    /// Returns the physical connection epoch.
+    #[get(copy)]
     epoch: RunnerConnectionEpoch,
+    /// Returns the positive ordinal within this epoch's append-only event stream.
+    #[get(inner)]
     event_ordinal: NonZeroU64,
+    /// Returns the latest durable lifecycle state.
+    #[get(copy)]
     state: RunnerConnectionState,
+    /// Returns the typed evidence that produced the latest state.
+    #[get(copy)]
     cause: RunnerConnectionCause,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact terminal connection source named by the current durable loss fence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunnerConnectionLossSnapshot {
+    /// Returns the enrollment whose connection became terminally lost.
+    #[get(copy)]
     enrollment: RunnerEnrollmentId,
+    /// Returns this enrollment's positive append-only loss epoch.
+    #[get(copy)]
     loss_epoch: RunnerConnectionLossEpoch,
+    /// Returns the exact terminal physical connection epoch.
+    #[get(copy)]
     connection_epoch: RunnerConnectionEpoch,
+    /// Returns the exact terminal event ordinal within the connection epoch.
+    #[get(inner)]
     connection_event_ordinal: NonZeroU64,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded restart page for an enrollment's durable connection loss.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerConnectionLossPropagationPage {
     loss: RunnerConnectionLossSnapshot,
     propagated_through: Option<SessionId>,
+    /// Returns at most 64 affected session identities in canonical order.
+    #[get(slice)]
     sessions: Vec<SessionId>,
     complete: bool,
 }
@@ -243,58 +200,9 @@ impl RunnerConnectionLossPropagationPage {
         self.propagated_through
     }
 
-    /// Returns at most 64 affected session identities in canonical order.
-    pub fn sessions(&self) -> &[SessionId] {
-        &self.sessions
-    }
-
     /// Reports that this loss cursor has durably completed.
     pub const fn is_complete(&self) -> bool {
         self.complete
-    }
-}
-
-impl RunnerConnectionLossSnapshot {
-    /// Returns the enrollment whose connection became terminally lost.
-    pub const fn enrollment(self) -> RunnerEnrollmentId {
-        self.enrollment
-    }
-
-    /// Returns this enrollment's positive append-only loss epoch.
-    pub const fn loss_epoch(self) -> RunnerConnectionLossEpoch {
-        self.loss_epoch
-    }
-
-    /// Returns the exact terminal physical connection epoch.
-    pub const fn connection_epoch(self) -> RunnerConnectionEpoch {
-        self.connection_epoch
-    }
-
-    /// Returns the exact terminal event ordinal within the connection epoch.
-    pub const fn connection_event_ordinal(self) -> u64 {
-        self.connection_event_ordinal.get()
-    }
-}
-
-impl RunnerConnectionSnapshot {
-    /// Returns the physical connection epoch.
-    pub const fn epoch(self) -> RunnerConnectionEpoch {
-        self.epoch
-    }
-
-    /// Returns the positive ordinal within this epoch's append-only event stream.
-    pub const fn event_ordinal(self) -> u64 {
-        self.event_ordinal.get()
-    }
-
-    /// Returns the latest durable lifecycle state.
-    pub const fn state(self) -> RunnerConnectionState {
-        self.state
-    }
-
-    /// Returns the typed evidence that produced the latest state.
-    pub const fn cause(self) -> RunnerConnectionCause {
-        self.cause
     }
 }
 
@@ -333,42 +241,28 @@ pub enum RunnerConnectionTransitionOutcome {
     },
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One nonterminal current connection selected by the startup scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NonterminalRunnerConnection {
+    /// Returns the enrollment that owns the connection.
+    #[get(copy)]
     enrollment: RunnerEnrollmentId,
+    /// Returns the physical connection epoch selected by the scan.
+    #[get(copy)]
     epoch: RunnerConnectionEpoch,
 }
 
-impl NonterminalRunnerConnection {
-    /// Returns the enrollment that owns the connection.
-    pub const fn enrollment(self) -> RunnerEnrollmentId {
-        self.enrollment
-    }
-
-    /// Returns the physical connection epoch selected by the scan.
-    pub const fn epoch(self) -> RunnerConnectionEpoch {
-        self.epoch
-    }
-}
-
+#[derive(signalbox_derive::Accessors)]
 /// One lifecycle event that was appended for an enrollment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AppliedRunnerConnectionTransition {
-    enrollment: RunnerEnrollmentId,
-    snapshot: RunnerConnectionSnapshot,
-}
-
-impl AppliedRunnerConnectionTransition {
     /// Returns the enrollment whose lifecycle event was appended.
-    pub const fn enrollment(self) -> RunnerEnrollmentId {
-        self.enrollment
-    }
-
+    #[get(copy)]
+    enrollment: RunnerEnrollmentId,
     /// Returns the durable lifecycle head produced by the append.
-    pub const fn snapshot(self) -> RunnerConnectionSnapshot {
-        self.snapshot
-    }
+    #[get(copy)]
+    snapshot: RunnerConnectionSnapshot,
 }
 
 /// Whether a requested lifecycle transition appended a durable event.
@@ -392,10 +286,13 @@ impl RunnerConnectionTransitionEffect {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One canonical validated registration plus its durable adapter revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredValidatedRunnerRegistration {
     revision: RunnerRegistrationRevision,
+    /// Returns the domain-validated registration snapshot.
+    #[get]
     registration: ValidatedRunnerRegistration,
 }
 
@@ -420,11 +317,18 @@ impl RunnerEnrollmentRequestId {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Identities issued by the daemon for one logical runner enrollment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IssuedRunnerEnrollmentIdentities {
+    /// Returns the logical enrollment identity.
+    #[get(copy)]
     enrollment: RunnerEnrollmentId,
+    /// Returns the logical runner identity.
+    #[get(copy)]
     runner: RunnerId,
+    /// Returns the daemon-owned authentication-reference identity.
+    #[get(copy)]
     authentication: RunnerAuthenticationId,
 }
 
@@ -441,29 +345,17 @@ impl IssuedRunnerEnrollmentIdentities {
             authentication,
         }
     }
-
-    /// Returns the logical enrollment identity.
-    pub const fn enrollment(self) -> RunnerEnrollmentId {
-        self.enrollment
-    }
-
-    /// Returns the logical runner identity.
-    pub const fn runner(self) -> RunnerId {
-        self.runner
-    }
-
-    /// Returns the daemon-owned authentication-reference identity.
-    pub const fn authentication(self) -> RunnerAuthenticationId {
-        self.authentication
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Complete labeled input for one pristine runner enrollment attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PristineRunnerEnrollmentRequest {
     request: RunnerEnrollmentRequestId,
     issued: IssuedRunnerEnrollmentIdentities,
     allowed_classes: Vec<RunnerCapabilityClass>,
+    /// Returns peer-advertised availability.
+    #[get]
     advertisement: RunnerAdvertisement,
 }
 
@@ -497,11 +389,6 @@ impl PristineRunnerEnrollmentRequest {
     pub fn allowed_classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
         self.allowed_classes.iter()
     }
-
-    /// Returns peer-advertised availability.
-    pub const fn advertisement(&self) -> &RunnerAdvertisement {
-        &self.advertisement
-    }
 }
 
 /// Whether pristine enrollment created authority or replayed its exact receipt.
@@ -513,11 +400,16 @@ pub enum RunnerEnrollmentDisposition {
     Replayed,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Durable response facts for enrollment or registration resume.
 #[derive(Debug, Eq, PartialEq)]
 pub struct RunnerEnrollmentReceipt {
     request: RunnerEnrollmentRequestId,
+    /// Returns the canonical enrollment authority.
+    #[get]
     enrollment: RunnerEnrollment,
+    /// Returns the canonical validated registration and durable revision.
+    #[get]
     registration: StoredValidatedRunnerRegistration,
 }
 
@@ -527,11 +419,6 @@ impl RunnerEnrollmentReceipt {
         self.request
     }
 
-    /// Returns the canonical enrollment authority.
-    pub const fn enrollment(&self) -> &RunnerEnrollment {
-        &self.enrollment
-    }
-
     /// Returns the exact identities issued for this request.
     pub const fn identities(&self) -> IssuedRunnerEnrollmentIdentities {
         IssuedRunnerEnrollmentIdentities::new(
@@ -539,11 +426,6 @@ impl RunnerEnrollmentReceipt {
             self.enrollment.runner(),
             self.enrollment.authentication(),
         )
-    }
-
-    /// Returns the canonical validated registration and durable revision.
-    pub const fn registration(&self) -> &StoredValidatedRunnerRegistration {
-        &self.registration
     }
 
     /// Reconstructs the complete availability-only advertisement.
@@ -573,10 +455,13 @@ impl RunnerEnrollmentReceipt {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Evidence-bearing result of a pristine enrollment request.
 #[derive(Debug, Eq, PartialEq)]
 pub struct RunnerEnrollmentOutcome {
     disposition: RunnerEnrollmentDisposition,
+    /// Returns the exact durable receipt.
+    #[get]
     receipt: RunnerEnrollmentReceipt,
 }
 
@@ -584,11 +469,6 @@ impl RunnerEnrollmentOutcome {
     /// Reports whether the durable authority was created or replayed.
     pub const fn disposition(&self) -> RunnerEnrollmentDisposition {
         self.disposition
-    }
-
-    /// Returns the exact durable receipt.
-    pub const fn receipt(&self) -> &RunnerEnrollmentReceipt {
-        &self.receipt
     }
 
     /// Consumes the outcome into its exact durable receipt.
@@ -602,17 +482,15 @@ impl StoredValidatedRunnerRegistration {
     pub const fn revision(&self) -> RunnerRegistrationRevision {
         self.revision
     }
-
-    /// Returns the domain-validated registration snapshot.
-    pub const fn registration(&self) -> &ValidatedRunnerRegistration {
-        &self.registration
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One canonical placement record and its adapter event ordinal.
 #[derive(Debug, Eq, PartialEq)]
 pub struct StoredSessionRunnerPlacement {
     event_ordinal: u64,
+    /// Returns the domain-reconstituted placement.
+    #[get]
     placement: SessionRunnerPlacement,
     registration: Option<StoredValidatedRunnerRegistration>,
     grant: Option<CredentialProfileGrant>,
@@ -654,11 +532,6 @@ impl StoredSessionRunnerPlacement {
     /// Returns the durable placement event ordinal.
     pub const fn event_ordinal(&self) -> u64 {
         self.event_ordinal
-    }
-
-    /// Returns the domain-reconstituted placement.
-    pub const fn placement(&self) -> &SessionRunnerPlacement {
-        &self.placement
     }
 
     /// Returns the registration snapshot pinned by this placement, if any.
@@ -1462,7 +1335,7 @@ impl RunnerProtocolStore {
         let pending = enrollment
             .prepare_registration(advertisement, &self.catalog)
             .map_err(RunnerProtocolStoreError::Domain)?;
-        let revision = RunnerRegistrationRevision::first();
+        let revision = RunnerRegistrationRevision::MIN;
         if pending.registration().revision().get() != revision.get() {
             transaction.rollback().await?;
             return Err(RunnerProtocolStoreError::Domain(
@@ -1810,7 +1683,7 @@ impl RunnerProtocolStore {
                 .ok_or(RunnerProtocolStoreError::Corruption(
                     RunnerProtocolCorruption::GenerationExhausted,
                 ))?,
-            None => RunnerRegistrationRevision::first(),
+            None => RunnerRegistrationRevision::MIN,
         };
         if pending.registration().revision().get() != revision.get() {
             transaction.rollback().await?;
@@ -3969,16 +3842,10 @@ async fn load_enrollment_request_facts(
     connection: &mut PgConnection,
     request: RunnerEnrollmentRequestId,
 ) -> Result<Option<StoredEnrollmentRequestFacts>, RunnerProtocolStoreError> {
-    let row = sqlx::query(
-        "SELECT enrollment_id, runner_id, authentication_reference_id,
-                registration_revision
-           FROM runner_enrollment_request_receipt
-          WHERE request_id = $1
-          FOR SHARE",
-    )
-    .bind(request.into_uuid())
-    .fetch_optional(&mut *connection)
-    .await?;
+    let row = sqlx::query(crate::lock_inventory::RUNNER_ENROLLMENT_REQUEST_FACTS)
+        .bind(request.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
     row.map(|row| {
         Ok(StoredEnrollmentRequestFacts {
             identities: IssuedRunnerEnrollmentIdentities::new(
@@ -6571,24 +6438,14 @@ async fn lock_runner_lease_claim_connection_authority(
     .ok_or(RunnerProtocolStoreError::Domain(
         RunnerDomainError::InvalidState,
     ))?;
-    sqlx::query(
-        "SELECT enrollment_id
-           FROM runner_enrollment
-          WHERE enrollment_id = $1
-          FOR SHARE",
-    )
-    .bind(enrollment)
-    .fetch_one(&mut **transaction)
-    .await?;
-    sqlx::query(
-        "SELECT enrollment_id
-           FROM runner_connection_authority_head
-          WHERE enrollment_id = $1
-          FOR SHARE",
-    )
-    .bind(enrollment)
-    .fetch_optional(&mut **transaction)
-    .await?;
+    sqlx::query(crate::lock_inventory::RUNNER_LEASE_CLAIM_ENROLLMENT)
+        .bind(enrollment)
+        .fetch_one(&mut **transaction)
+        .await?;
+    sqlx::query(crate::lock_inventory::RUNNER_LEASE_CLAIM_CONNECTION_AUTHORITY)
+        .bind(enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?;
     Ok(())
 }
 
@@ -7684,9 +7541,11 @@ const fn session_id(value: Uuid) -> SessionId {
     SessionId::from_uuid(value)
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a pristine enrollment or registration resume fails before mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerEnrollmentRequestFailure {
+    #[error("runner enrollment request {} conflicts with active enrollment {}", request.as_uuid(), active_enrollment.as_uuid())]
     /// Another active version-one enrollment already occupies the singleton slot.
     ActiveEnrollmentExists {
         /// The rejected stable request identity.
@@ -7694,21 +7553,25 @@ pub enum RunnerEnrollmentRequestFailure {
         /// The enrollment currently occupying the active slot.
         active_enrollment: RunnerEnrollmentId,
     },
+    #[error("runner enrollment request {} replayed with different availability", request.as_uuid())]
     /// A replay changed the availability payload bound to its request identity.
     ReplayAdvertisementMismatch {
         /// The replayed stable request identity.
         request: RunnerEnrollmentRequestId,
     },
+    #[error("runner enrollment request {} replayed with different allowed classes", request.as_uuid())]
     /// A replay changed daemon-owned allowed classes bound to the enrollment.
     ReplayPolicyMismatch {
         /// The replayed stable request identity.
         request: RunnerEnrollmentRequestId,
     },
+    #[error("runner resume names unknown enrollment request {}", request.as_uuid())]
     /// Resume named no durable enrollment request.
     UnknownRequest {
         /// The unknown request identity.
         request: RunnerEnrollmentRequestId,
     },
+    #[error("runner resume {} identity mismatch: expected enrollment {}, runner {}, authentication {}; observed enrollment {}, runner {}, authentication {}", request.as_uuid(), expected.enrollment().as_uuid(), expected.runner().as_uuid(), expected.authentication().as_uuid(), observed.enrollment().as_uuid(), observed.runner().as_uuid(), observed.authentication().as_uuid())]
     /// Resume supplied identities other than those durably issued for the request.
     ResumeIdentityMismatch {
         /// The stable enrollment request identity.
@@ -7718,6 +7581,7 @@ pub enum RunnerEnrollmentRequestFailure {
         /// The identities supplied by the reconnecting runner.
         observed: IssuedRunnerEnrollmentIdentities,
     },
+    #[error("runner resume {} names revoked enrollment {}", request.as_uuid(), enrollment.as_uuid())]
     /// Resume attempted to use terminally revoked enrollment authority.
     EnrollmentRevoked {
         /// The stable enrollment request identity.
@@ -7725,6 +7589,7 @@ pub enum RunnerEnrollmentRequestFailure {
         /// The terminally revoked enrollment.
         enrollment: RunnerEnrollmentId,
     },
+    #[error("runner resume {} revision mismatch: expected {}, observed {}", request.as_uuid(), expected.get(), observed.get())]
     /// Resume supplied a registration revision other than the durable current head.
     ResumeRevisionMismatch {
         /// The stable enrollment request identity.
@@ -7734,6 +7599,7 @@ pub enum RunnerEnrollmentRequestFailure {
         /// The revision supplied by the reconnecting runner.
         observed: RunnerRegistrationRevision,
     },
+    #[error("runner resume {} at stale revision {} diverges from current registration revision {}", request.as_uuid(), prior.get(), current.get())]
     /// A stale resume also diverged from the durable current advertisement.
     StaleResumeAdvertisement {
         /// The stable enrollment request identity.
@@ -7745,209 +7611,73 @@ pub enum RunnerEnrollmentRequestFailure {
     },
 }
 
-impl fmt::Display for RunnerEnrollmentRequestFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ActiveEnrollmentExists {
-                request,
-                active_enrollment,
-            } => write!(
-                formatter,
-                "runner enrollment request {} conflicts with active enrollment {}",
-                request.as_uuid(),
-                active_enrollment.as_uuid()
-            ),
-            Self::ReplayAdvertisementMismatch { request } => write!(
-                formatter,
-                "runner enrollment request {} replayed with different availability",
-                request.as_uuid()
-            ),
-            Self::ReplayPolicyMismatch { request } => write!(
-                formatter,
-                "runner enrollment request {} replayed with different allowed classes",
-                request.as_uuid()
-            ),
-            Self::UnknownRequest { request } => write!(
-                formatter,
-                "runner resume names unknown enrollment request {}",
-                request.as_uuid()
-            ),
-            Self::ResumeIdentityMismatch {
-                request,
-                expected,
-                observed,
-            } => write!(
-                formatter,
-                "runner resume {} identity mismatch: expected enrollment {}, runner {}, authentication {}; observed enrollment {}, runner {}, authentication {}",
-                request.as_uuid(),
-                expected.enrollment().as_uuid(),
-                expected.runner().as_uuid(),
-                expected.authentication().as_uuid(),
-                observed.enrollment().as_uuid(),
-                observed.runner().as_uuid(),
-                observed.authentication().as_uuid()
-            ),
-            Self::EnrollmentRevoked {
-                request,
-                enrollment,
-            } => write!(
-                formatter,
-                "runner resume {} names revoked enrollment {}",
-                request.as_uuid(),
-                enrollment.as_uuid()
-            ),
-            Self::ResumeRevisionMismatch {
-                request,
-                expected,
-                observed,
-            } => write!(
-                formatter,
-                "runner resume {} revision mismatch: expected {}, observed {}",
-                request.as_uuid(),
-                expected.get(),
-                observed.get()
-            ),
-            Self::StaleResumeAdvertisement {
-                request,
-                prior,
-                current,
-            } => write!(
-                formatter,
-                "runner resume {} at stale revision {} diverges from current registration revision {}",
-                request.as_uuid(),
-                prior.get(),
-                current.get()
-            ),
-        }
-    }
-}
-
-impl Error for RunnerEnrollmentRequestFailure {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable runner-protocol shape that cannot reconstruct domain state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerProtocolCorruption {
+    #[error("canonical runner enrollment is missing")]
     /// Canonical enrollment state is absent.
     MissingCanonicalEnrollment,
+    #[error("canonical runner audit evidence is missing")]
     /// Canonical audit evidence is absent.
     MissingCanonicalAudit,
+    #[error("canonical runner registration is missing")]
     /// Canonical registration state is absent.
     MissingCanonicalRegistration,
+    #[error("canonical runner connection is missing")]
     /// Canonical physical connection state is absent.
     MissingCanonicalConnection,
+    #[error("canonical runner connection loss is missing")]
     /// Canonical connection-loss state or its propagation cursor is absent.
     MissingCanonicalLoss,
+    #[error("canonical runner lease is missing")]
     /// Canonical runner-lease state is absent.
     MissingCanonicalLease,
+    #[error("canonical runner placement is missing")]
     /// Canonical placement state is absent.
     MissingCanonicalPlacement,
+    #[error("canonical credential grant is missing")]
     /// Canonical credential-grant state is absent.
     MissingCanonicalGrant,
+    #[error("canonical physical tool attempt is missing")]
     /// Canonical tool-attempt state is absent.
     MissingCanonicalAttempt,
+    #[error("stored runner inventory is incomplete")]
     /// A declared count disagrees with its durable members.
     IncompleteInventory,
+    #[error("stored runner references are cross-wired")]
     /// Correlated durable records identify different domain values.
     CrossWiredReference,
+    #[error("stored runner column {field_0} has an invalid value")]
     /// A projected column cannot decode to its expected Rust type.
     InvalidColumn(&'static str),
+    #[error("stored runner encoding is invalid")]
     /// A stored scalar cannot construct its closed domain value.
     InvalidEncoding,
+    #[error("stored runner generation is exhausted")]
     /// A durable generation cannot advance without overflow.
     GenerationExhausted,
 }
 
-impl fmt::Display for RunnerProtocolCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingCanonicalEnrollment => {
-                formatter.write_str("canonical runner enrollment is missing")
-            }
-            Self::MissingCanonicalAudit => {
-                formatter.write_str("canonical runner audit evidence is missing")
-            }
-            Self::MissingCanonicalRegistration => {
-                formatter.write_str("canonical runner registration is missing")
-            }
-            Self::MissingCanonicalConnection => {
-                formatter.write_str("canonical runner connection is missing")
-            }
-            Self::MissingCanonicalLoss => {
-                formatter.write_str("canonical runner connection loss is missing")
-            }
-            Self::MissingCanonicalLease => formatter.write_str("canonical runner lease is missing"),
-            Self::MissingCanonicalPlacement => {
-                formatter.write_str("canonical runner placement is missing")
-            }
-            Self::MissingCanonicalGrant => {
-                formatter.write_str("canonical credential grant is missing")
-            }
-            Self::MissingCanonicalAttempt => {
-                formatter.write_str("canonical physical tool attempt is missing")
-            }
-            Self::IncompleteInventory => {
-                formatter.write_str("stored runner inventory is incomplete")
-            }
-            Self::CrossWiredReference => {
-                formatter.write_str("stored runner references are cross-wired")
-            }
-            Self::InvalidColumn(column) => {
-                write!(
-                    formatter,
-                    "stored runner column {column} has an invalid value"
-                )
-            }
-            Self::InvalidEncoding => formatter.write_str("stored runner encoding is invalid"),
-            Self::GenerationExhausted => {
-                formatter.write_str("stored runner generation is exhausted")
-            }
-        }
-    }
-}
-
-impl Error for RunnerProtocolCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database, durable-shape, or domain-admission failure.
 #[derive(Debug)]
 pub enum RunnerProtocolStoreError {
+    #[error("runner-protocol database failure: {field_0}")]
     /// PostgreSQL failed before a commit could have succeeded.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("runner-protocol commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL obscured whether the requested commit succeeded.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Durable records cannot reconstruct the admitted runner state.
-    Corruption(RunnerProtocolCorruption),
+    Corruption(#[source] RunnerProtocolCorruption),
+    #[error("runner-protocol domain failure: {field_0:?}")]
     /// Complete values fail a domain-owned runner transition or invariant.
     Domain(RunnerDomainError),
+    #[error(transparent)]
     /// Enrollment or resume input conflicts with durable request authority.
-    EnrollmentRequest(RunnerEnrollmentRequestFailure),
-}
-
-impl fmt::Display for RunnerProtocolStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "runner-protocol database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "runner-protocol commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::Domain(error) => write!(formatter, "runner-protocol domain failure: {error:?}"),
-            Self::EnrollmentRequest(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for RunnerProtocolStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::EnrollmentRequest(error) => Some(error),
-            Self::Domain(_) => None,
-        }
-    }
+    EnrollmentRequest(#[source] RunnerEnrollmentRequestFailure),
 }
 
 impl From<sqlx::Error> for RunnerProtocolStoreError {

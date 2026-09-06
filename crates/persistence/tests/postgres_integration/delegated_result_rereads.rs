@@ -2,12 +2,11 @@
 
 use crate::*;
 
-/// S18 / INV-006 / INV-010: a retained child relationship does not make a
+/// a retained child relationship does not make a
 /// later accepted-input turn subject to delegated initial-result closure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_successor_completion_rereads_without_delegated_result()
--> Result<(), Box<dyn Error>> {
+async fn successor_completion_rereads_without_delegated_result() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xeb00;
     let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
@@ -49,12 +48,11 @@ async fn s18_inv006_inv010_successor_completion_rereads_without_delegated_result
     Ok(())
 }
 
-/// S18 / INV-006 / INV-010: nonterminal observation reread likewise scopes
+/// nonterminal observation reread likewise scopes
 /// delegated-result absence to the exact delegation-origin turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_successor_tool_round_rereads_without_delegated_result()
--> Result<(), Box<dyn Error>> {
+async fn successor_tool_round_rereads_without_delegated_result() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xec00;
     let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
@@ -71,7 +69,11 @@ async fn s18_inv006_inv010_successor_tool_round_rereads_without_delegated_result
     let observation = fixture
         .authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     fixture
         .repository
         .apply_terminal_observation(
@@ -103,12 +105,11 @@ async fn s18_inv006_inv010_successor_tool_round_rereads_without_delegated_result
     Ok(())
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: a terminal background-delivery wake
+/// a terminal background-delivery wake
 /// authenticates its model-call closure without initial-child result evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_wake_completion_rereads_without_child_result()
--> Result<(), Box<dyn Error>> {
+async fn wake_completion_rereads_without_child_result() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xed00;
     let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
@@ -151,12 +152,11 @@ async fn s18_inv006_inv010_inv032_wake_completion_rereads_without_child_result()
     Ok(())
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: a continuing background-delivery wake
+/// a continuing background-delivery wake
 /// authenticates absence of initial-child result evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_wake_tool_round_rereads_without_child_result()
--> Result<(), Box<dyn Error>> {
+async fn wake_tool_round_rereads_without_child_result() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xee00;
     let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
@@ -173,7 +173,11 @@ async fn s18_inv006_inv010_inv032_wake_tool_round_rereads_without_child_result()
     let observation = fixture
         .authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     fixture
         .repository
         .apply_terminal_observation(
@@ -206,12 +210,11 @@ async fn s18_inv006_inv010_inv032_wake_tool_round_rereads_without_child_result()
     Ok(())
 }
 
-/// S18 / INV-006 / INV-010: a historical wake between accepted-input turns is
+/// a historical wake between accepted-input turns is
 /// not the baseline that precedes the session's earliest accepted input.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_historical_wake_does_not_replace_accepted_baseline()
--> Result<(), Box<dyn Error>> {
+async fn historical_wake_does_not_replace_accepted_baseline() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xef00;
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
@@ -485,13 +488,12 @@ async fn insert_historical_delegation_wake(
     Ok(())
 }
 
-/// S18 / INV-006 / INV-010: a failed delegated initial turn remains a complete
+/// a failed delegated initial turn remains a complete
 /// semantic subject when the child accepts its next user turn, even though the
 /// failed call produced no assistant entry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_failed_delegated_subject_allows_successor_input()
--> Result<(), Box<dyn Error>> {
+async fn failed_delegated_subject_allows_successor_input() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xed00;
     let fixture = delegated_capability_failure_fixture(&pool, seed).await?;
@@ -522,12 +524,11 @@ async fn s18_inv006_inv010_failed_delegated_subject_allows_successor_input()
     Ok(())
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: a retained relationship with a missing
+/// a retained relationship with a missing
 /// immutable initial task is corruption, not an ordinary-session reread.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_capability_reread_requires_initial_task()
--> Result<(), Box<dyn Error>> {
+async fn capability_reread_requires_initial_task() -> Result<(), Box<dyn Error>> {
     assert_delegated_capability_reread_rejects_damage(
         0xe080,
         DelegatedCapabilityResultDamage::InitialTask,
@@ -535,12 +536,11 @@ async fn s18_inv006_inv010_inv032_capability_reread_requires_initial_task()
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// ambiguous capability-failure reread
 /// authenticates the delegated child result itself.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_result()
--> Result<(), Box<dyn Error>> {
+async fn capability_reread_requires_delegated_result() -> Result<(), Box<dyn Error>> {
     assert_delegated_capability_reread_rejects_damage(
         0xe100,
         DelegatedCapabilityResultDamage::Result,
@@ -548,12 +548,11 @@ async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_result()
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// ambiguous capability-failure reread
 /// authenticates the exact delegated parent update satellite.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_update()
--> Result<(), Box<dyn Error>> {
+async fn capability_reread_requires_delegated_update() -> Result<(), Box<dyn Error>> {
     assert_delegated_capability_reread_rejects_damage(
         0xe200,
         DelegatedCapabilityResultDamage::Update,
@@ -561,12 +560,11 @@ async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_update()
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// ambiguous capability-failure reread
 /// requires the canonical delegated parent-update outbox kind.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_capability_reread_requires_update_header_kind()
--> Result<(), Box<dyn Error>> {
+async fn capability_reread_requires_update_header_kind() -> Result<(), Box<dyn Error>> {
     assert_delegated_capability_reread_rejects_damage(
         0xe280,
         DelegatedCapabilityResultDamage::UpdateHeaderKind,
@@ -574,22 +572,20 @@ async fn s18_inv006_inv010_inv032_capability_reread_requires_update_header_kind(
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// ambiguous capability-failure reread
 /// authenticates the exact delegated parent wake satellite.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_wake()
--> Result<(), Box<dyn Error>> {
+async fn capability_reread_requires_delegated_wake() -> Result<(), Box<dyn Error>> {
     assert_delegated_capability_reread_rejects_damage(0xe300, DelegatedCapabilityResultDamage::Wake)
         .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// ambiguous capability-failure reread
 /// requires the canonical delegated parent-wake outbox kind.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_capability_reread_requires_wake_header_kind()
--> Result<(), Box<dyn Error>> {
+async fn capability_reread_requires_wake_header_kind() -> Result<(), Box<dyn Error>> {
     assert_delegated_capability_reread_rejects_damage(
         0xe380,
         DelegatedCapabilityResultDamage::WakeHeaderKind,
@@ -597,12 +593,11 @@ async fn s18_inv006_inv010_inv032_capability_reread_requires_wake_header_kind()
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: a completed delegated observation reread
+/// a completed delegated observation reread
 /// authenticates its exact delivered child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_completed_observation_reread_requires_result()
--> Result<(), Box<dyn Error>> {
+async fn completed_observation_reread_requires_result() -> Result<(), Box<dyn Error>> {
     assert_delegated_observation_reread_requires_result(
         0xe400,
         DelegatedObservationDisposition::Completed,
@@ -610,12 +605,11 @@ async fn s18_inv006_inv010_inv032_completed_observation_reread_requires_result()
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: a known-failed delegated observation
+/// a known-failed delegated observation
 /// reread authenticates its exact delivered child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_failed_observation_reread_requires_result()
--> Result<(), Box<dyn Error>> {
+async fn failed_observation_reread_requires_result() -> Result<(), Box<dyn Error>> {
     assert_delegated_observation_reread_requires_result(
         0xe500,
         DelegatedObservationDisposition::KnownFailed,
@@ -623,12 +617,11 @@ async fn s18_inv006_inv010_inv032_failed_observation_reread_requires_result()
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: a refused delegated observation reread
+/// a refused delegated observation reread
 /// authenticates its exact delivered child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_refused_observation_reread_requires_result()
--> Result<(), Box<dyn Error>> {
+async fn refused_observation_reread_requires_result() -> Result<(), Box<dyn Error>> {
     assert_delegated_observation_reread_requires_result(
         0xe600,
         DelegatedObservationDisposition::Refused,
@@ -636,12 +629,11 @@ async fn s18_inv006_inv010_inv032_refused_observation_reread_requires_result()
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: a cancelled delegated observation reread
+/// a cancelled delegated observation reread
 /// authenticates its exact delivered child result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_cancelled_observation_reread_requires_result()
--> Result<(), Box<dyn Error>> {
+async fn cancelled_observation_reread_requires_result() -> Result<(), Box<dyn Error>> {
     assert_delegated_observation_reread_requires_result(
         0xe700,
         DelegatedObservationDisposition::Cancelled,
@@ -649,12 +641,11 @@ async fn s18_inv006_inv010_inv032_cancelled_observation_reread_requires_result()
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: authoritative terminal reread
+/// authoritative terminal reread
 /// authenticates the complete delivery set for waits that predated the result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_observation_reread_requires_wait_delivery()
--> Result<(), Box<dyn Error>> {
+async fn observation_reread_requires_wait_delivery() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xe800;
     let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
@@ -768,12 +759,11 @@ async fn s18_inv006_inv010_inv032_observation_reread_requires_wait_delivery()
     Ok(())
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: a tool-round observation cannot retain
+/// a tool-round observation cannot retain
 /// child-result closure while the delegated child continues.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_tool_round_reread_rejects_delegated_result()
--> Result<(), Box<dyn Error>> {
+async fn tool_round_reread_rejects_delegated_result() -> Result<(), Box<dyn Error>> {
     assert_delegated_nonterminal_reread_rejects_result(
         0xe900,
         DelegatedNonterminalObservation::CompletedWithTools,
@@ -781,12 +771,11 @@ async fn s18_inv006_inv010_inv032_tool_round_reread_rejects_delegated_result()
     .await
 }
 
-/// S18 / INV-006 / INV-010 / INV-032: an ambiguous observation cannot retain
+/// an ambiguous observation cannot retain
 /// child-result closure while recovery remains authoritative.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv006_inv010_inv032_ambiguous_reread_rejects_delegated_result()
--> Result<(), Box<dyn Error>> {
+async fn ambiguous_reread_rejects_delegated_result() -> Result<(), Box<dyn Error>> {
     assert_delegated_nonterminal_reread_rejects_result(
         0xea00,
         DelegatedNonterminalObservation::Ambiguous,
@@ -794,12 +783,11 @@ async fn s18_inv006_inv010_inv032_ambiguous_reread_rejects_delegated_result()
     .await
 }
 
-/// S17 / INV-010 / INV-032: known delegated tool-crash recovery publishes the
+/// known delegated tool-crash recovery publishes the
 /// typed failed child result, parent update, and parent wake atomically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv032_delegated_tool_crash_publishes_failed_result()
--> Result<(), Box<dyn Error>> {
+async fn delegated_tool_crash_publishes_failed_result() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xe000;
     let fixture = prepare_delegated_tool_crash_fixture(&pool, seed).await?;
@@ -844,12 +832,11 @@ async fn s17_inv010_inv032_delegated_tool_crash_publishes_failed_result()
     Ok(())
 }
 
-/// S18 / INV-009 / INV-010: startup classifies an undecodable delegated active
+/// startup classifies an undecodable delegated active
 /// phase as durable corruption rather than retryable database failure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv009_inv010_delegated_null_active_phase_fails_closed() -> Result<(), Box<dyn Error>>
-{
+async fn delegated_null_active_phase_fails_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xe400;
     let fixture = prepare_delegated_tool_crash_fixture(&pool, seed).await?;
@@ -888,12 +875,11 @@ async fn s18_inv009_inv010_delegated_null_active_phase_fails_closed() -> Result<
     Ok(())
 }
 
-/// S17 / INV-010 / INV-032: delegated startup crash recovery takes the parent
+/// delegated startup crash recovery takes the parent
 /// endpoint prefix before the child scheduler.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv010_inv032_delegated_tool_crash_locks_parent_before_child_scheduler()
--> Result<(), Box<dyn Error>> {
+async fn delegated_tool_crash_locks_parent_before_child_scheduler() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xe200;
     let fixture = prepare_delegated_tool_crash_fixture(&pool, seed).await?;
@@ -942,12 +928,11 @@ async fn s17_inv010_inv032_delegated_tool_crash_locks_parent_before_child_schedu
     Ok(())
 }
 
-/// S17 / INV-032: completing a delegated initial task atomically creates its
+/// completing a delegated initial task atomically creates its
 /// typed returned result, parent update, and parent wake before commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv032_delegated_completion_materializes_result_update_and_wake()
--> Result<(), Box<dyn Error>> {
+async fn delegated_completion_materializes_result_update_and_wake() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd500;
     let (parent, child, child_turn, spawning_request, selection) =
@@ -1007,11 +992,11 @@ async fn s17_inv032_delegated_completion_materializes_result_update_and_wake()
     Ok(())
 }
 
-/// S17 / INV-032: initial target resolution failure for a delegated child
+/// initial target resolution failure for a delegated child
 /// atomically materializes the failed result, parent update, and parent wake.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv032_delegated_initial_target_failure_materializes_parent_delivery()
+async fn delegated_initial_target_failure_materializes_parent_delivery()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd550;
@@ -1079,11 +1064,11 @@ async fn s17_inv032_delegated_initial_target_failure_materializes_parent_deliver
     Ok(())
 }
 
-/// S17 / INV-032: reconciliation-required delegated work remains unresolved
+/// reconciliation-required delegated work remains unresolved
 /// relationship work and cannot publish a child result, parent update, or wake.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv032_delegated_reconciliation_withholds_result_and_parent_delivery()
+async fn delegated_reconciliation_withholds_result_and_parent_delivery()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd600;
@@ -1176,13 +1161,12 @@ async fn s17_inv032_delegated_reconciliation_withholds_result_and_parent_deliver
     Ok(())
 }
 
-/// S17 / INV-032: daemon-owned reconciliation of an ambiguous delegated
+/// daemon-owned reconciliation of an ambiguous delegated
 /// initial task atomically publishes an unavailable child result and wakes its
 /// parent while retaining the reconciliation-required turn boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv032_automatic_delegated_reconciliation_closes_parent_delivery()
--> Result<(), Box<dyn Error>> {
+async fn automatic_delegated_reconciliation_closes_parent_delivery() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd680;
     let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
@@ -1278,13 +1262,13 @@ async fn s17_inv032_automatic_delegated_reconciliation_closes_parent_delivery()
     Ok(())
 }
 
-/// S17 / INV-010 / INV-032: a child terminal commit takes the canonical parent
+/// a child terminal commit takes the canonical parent
 /// session before the child scheduler and relationship, matching peer-message
 /// and descendant-cascade lock order.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv032_delegated_terminal_result_locks_parent_before_relationship()
--> Result<(), Box<dyn Error>> {
+async fn delegated_terminal_result_locks_parent_before_relationship() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd700;
     let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
@@ -1366,12 +1350,11 @@ async fn s17_inv032_delegated_terminal_result_locks_parent_before_relationship()
     Ok(())
 }
 
-/// S18 / INV-010: input submitted to a delegated child takes the canonical
+/// input submitted to a delegated child takes the canonical
 /// parent endpoint before the child session, scheduler, and relationship.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_delegated_input_locks_parent_before_child_scheduler()
--> Result<(), Box<dyn Error>> {
+async fn delegated_input_locks_parent_before_child_scheduler() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd780;
     let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
@@ -1728,13 +1711,12 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
     Ok(())
 }
 
-/// S03 / S10 / INV-007 / INV-009: the Postgres safety-net sweep finds durable
+/// the Postgres safety-net sweep finds durable
 /// queued work and resumable tool batches while excluding unrelated active
 /// model work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
--> Result<(), Box<dyn Error>> {
+async fn postgres_sweep_reconstructs_only_candidate_sessions() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x389, 0x789, direct(0x889)))
@@ -1798,7 +1780,7 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
         .await?;
 
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
-    let (candidates, _dispatch_starts, continuation) = EligibilitySweep::find_sessions(&mut sweep)
+    let (candidates, continuation) = EligibilitySweep::find_sessions(&mut sweep)
         .await?
         .into_parts();
     assert!(!continuation);
@@ -1826,12 +1808,11 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
     Ok(())
 }
 
-/// S17 / INV-032: a foreground result remains discoverable by the durable
+/// a foreground result remains discoverable by the durable
 /// reconciliation sweep after its best-effort same-process nudge is lost.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv032_foreground_delegation_result_is_a_durable_sweep_candidate()
--> Result<(), Box<dyn Error>> {
+async fn foreground_delegation_result_is_a_durable_sweep_candidate() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session_uuid = insert_outbox_session_fixture(&pool, 0xa900).await?;
     let turn_uuid = Uuid::from_u128(0xa901);
@@ -1891,7 +1872,7 @@ async fn s17_inv032_foreground_delegation_result_is_a_durable_sweep_candidate()
     .execute(&pool)
     .await?;
 
-    let (candidates, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (candidates, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -1903,12 +1884,12 @@ async fn s17_inv032_foreground_delegation_result_is_a_durable_sweep_candidate()
     Ok(())
 }
 
-/// S17 / INV-005 / INV-032: a parent-only interrupt closes a foreground
+/// a parent-only interrupt closes a foreground
 /// child wait without fabricating a child result or requiring cascade output.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv005_inv032_parent_only_interrupt_closes_foreground_wait_without_result()
--> Result<(), Box<dyn Error>> {
+async fn parent_only_interrupt_closes_foreground_wait_without_result() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xaa00;
     let (fixture, spawning_request, awaiting_request) =
@@ -1962,12 +1943,11 @@ async fn s17_inv005_inv032_parent_only_interrupt_closes_foreground_wait_without_
     Ok(())
 }
 
-/// S17 / INV-005 / INV-032: a durable foreground result reopens its exact
+/// a durable foreground result reopens its exact
 /// parked tool batch under a fresh continued attempt after restart.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s17_inv005_inv032_foreground_delegation_result_resumes_parked_tool_batch()
--> Result<(), Box<dyn Error>> {
+async fn foreground_delegation_result_resumes_parked_tool_batch() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xab00;
     let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(

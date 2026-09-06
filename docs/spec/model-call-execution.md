@@ -47,20 +47,55 @@ summarized range. Attachments render as the bounded textual stubs
 
 Context compaction produces its summary through a dedicated physical model call
 with its own durable prepared, in-flight, and terminal lifecycle, separate from
-ordinary calls. A headroom guard runs at two points. Before activating a queued
-turn it may spend one automatic compaction. When that compaction fails, or the
-request still exceeds the window after it, one transaction fails the queued turn
-with no ordinary call prepared. Inside the tool-result continuation transaction
-an exceeded bound commits the tool results, prepares no continuation call, and
-fails the turn with a headroom record. The guard adds the newest reported input
-for the pinned target, a byte allowance for model-visible content that input
-does not cover, and the configured output reservation, and compares the sum with
-the configured context window. The compaction call's own input budget is its
-context window less the output ceiling and the required prompt; when even the
-first safe prefix cannot fit that budget, no call is prepared and one
-transaction fails the turn as a compaction wall. Automatic compaction targets
-the first safe boundary at or beyond half the rendered bytes and falls back to
-the latest safe boundary that fits.
+ordinary calls. The compaction call's own input budget is its context window
+less the output ceiling and the required prompt; when even the first safe prefix
+cannot fit that budget, no call is prepared and one transaction fails the turn
+as a compaction wall. Automatic compaction targets the first safe boundary at or
+beyond half the rendered bytes and falls back to the latest safe boundary that
+fits. At two points a headroom guard adds the newest reported input for the
+pinned target, a byte allowance for model-visible content that input does not
+cover, and the configured output reservation, and compares the sum with the
+configured context window. Before activating a queued turn it may spend one
+automatic compaction; when that compaction fails, or the request still exceeds
+the window after it, one transaction fails the queued turn with no ordinary call
+prepared. Inside the tool-result continuation transaction an exceeded bound
+commits the tool results, prepares no continuation call, and fails the turn with
+a headroom record.
+
+Anthropic prospective input counting is the one provider interaction permitted
+before activation and before a `model_call` exists. The accepted input, frozen
+session epoch, pinned target preview, and credential pin authorize that
+stateless estimate; it has no completion semantics and creates no call outcome.
+Attachment verification precedes that interaction. Cancellation or transient
+attachment loss leaves the turn queued, and any later attempt must render and
+count the then-current preview again. A definitive attachment failure atomically
+activates and closes the exact prospective Prepared call with that evidence.
+Only a successful estimate whose input plus full output reservation is at most
+95 percent of the configured context ceiling enters the counted activation
+transaction; otherwise the turn compacts. An estimate that returns no validated
+count falls through to ordinary uncounted activation.
+
+Anthropic ordinary calls enable provider-default server-side compaction only
+when the exact effective provider target's configured capabilities explicitly
+set `provider_compaction = true`; a missing or false capability disables it.
+Each returned compaction block is an opaque ordered semantic entry replayed
+unchanged as Anthropic assistant content when the resolved target has that
+capability. A later call to an unsupported Anthropic target or another adapter
+omits the provider-qualified opaque block from its request projection and
+retains the preserved pre-compaction history; this projection neither removes
+nor rewrites the durable entry. The block's durable nullable `content` fact
+separately classifies its input as replaced or retained for later headroom
+accounting on calls that replay it: non-null replaces the pre-compaction input
+and null is a replayable no-op. This classification does not rewrite billing
+evidence. A refused response preserves its compaction suffix only when at least
+one validated block has non-null `content`; a suffix made only of replayable
+no-ops does not prove that the provider replaced the uploaded context. Anthropic
+iteration usage remains the sum of every reported iteration on the call's four
+usage axes, and an iteration missing required input or output usage is invalid
+response material. Configured per-response limit observations use the retained
+physical iteration rather than that multi-iteration billing sum. The
+tool-continuation guard likewise excludes replaced pre-compaction input from its
+retained-context baseline when the next request replays the block.
 
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five
@@ -84,15 +119,15 @@ recovery in `crates/persistence/src/startup.rs` then classifies every retained
 call from durable evidence.
 
 The runtime bridge in `crates/model-provider-runtime` maps the runtime's typed
-terminal evidence to exactly one disposition: completed text and tool-call
-content to `Completed`, refusal to `Refused`, a provider error or other proof of
-non-acceptance to `KnownFailed`, cancellation before send or confirmed
-cancellation to `Cancelled`, and loss after possible acceptance to `Ambiguous`.
-The requested selection, the pinned resolved target, and the provider-reported
-identity are three separate facts, and the bridge is the one place that relates
-the third to the second. Exactly one of three relations holds: exact, alias
-concretion (the configured spelling followed by a dated snapshot qualifier), or
-different lineage.
+terminal evidence to exactly one disposition: completed text, provider
+compaction blocks, and tool-call content to `Completed`, refusal to `Refused`, a
+provider error or other proof of non-acceptance to `KnownFailed`, cancellation
+before send or confirmed cancellation to `Cancelled`, and loss after possible
+acceptance to `Ambiguous`. The requested selection, the pinned resolved target,
+and the provider-reported identity are three separate facts, and the bridge is
+the one place that relates the third to the second. Exactly one of three
+relations holds: exact, alias concretion (the configured spelling followed by a
+dated snapshot qualifier), or different lineage.
 
 `apply_terminal_observation` derives one of seven outcomes from fresh state, and
 persistence commits the outcome atomically with its outbox rows. Ambiguity parks
@@ -102,12 +137,13 @@ also carries an applied-interrupt proof, the turn instead terminalizes as
 reconciliation required, with the wait set, an interrupt-requires-reconciliation
 marker, and a reconciliation outbox record, and releases the slot.
 
-A `KnownFailed` call whose cause is one of the three availability causes (quota
-exhausted, rate limited, or overloaded) and whose pool configures `switch_now`
-for that cause may be followed by a successor call: a distinct call on a
-successor turn attempt against the next admitted member of the same pool.
-`AvailabilitySuccessorModelCallTurn` is the aggregate transition that authorizes
-it.
+A `KnownFailed` call with proven non-acceptance may be followed by a successor
+call when the bounded same-credential retry below admits it or when its pinned
+pool action is `switch_now`. A `CredentialRejected` failure instead admits that
+`switch_now` successor without non-acceptance proof. `switch_now` uses the next
+admitted member of the same pool. `AvailabilitySuccessorModelCallTurn` is the
+aggregate transition that authorizes either distinct call on a successor turn
+attempt.
 
 Usage evidence is a projection of terminal physical model calls that never
 materializes the transcript; `UsageReader` in `crates/application/src/usage.rs`
@@ -187,38 +223,31 @@ provider acceptance is possible, which serializes execution passes for that
 attempt across the acceptance boundary without serializing interrupt
 application.
 
-The chain exclusion that removes the failed member commits in the observation
-transaction itself, because a crash between the observation and a later release
-could readmit the profile whose failure parked the turn. Identities knowable
-only under the lock are minted through application-owned generator closures that
-persistence invokes inside the transaction, so the locked pending count moves
-into the transaction without moving identity authority into persistence. A
-proven daemon-minted identity collision is the only failure retried within one
-invocation, with fresh candidates and no repeated credential or provider work,
-because a unique-violation rollback is the one failure that guarantees the
-transaction had no effect.
+A rotation's chain exclusion commits in the observation transaction itself, so a
+crash between the observation and a later release cannot readmit the failed
+profile. A same-credential transient successor instead records a durable retry
+deadline without a chain exclusion. Identities knowable only under the lock are
+minted through application-owned generator closures that persistence invokes
+inside the transaction, so the locked pending count moves into the transaction
+without moving identity authority into persistence. A proven daemon-minted
+identity collision is the only failure retried within one invocation, with fresh
+candidates and no repeated credential or provider work, because a
+unique-violation rollback is the one failure that guarantees the transaction had
+no effect.
 
 Ambiguity parks the turn instead of retrying or substituting, because a lost
 acknowledgement cannot prove the provider did not act, and an invented
 exactly-once claim could duplicate both an effect and its spend. Refusal never
 admits a successor: it is provider judgment about the request, so another
 account would refuse the same content and substituting one would only seek a
-different answer. Credential resolution failure and credential rejection never
-admit a successor: both are deployment misconfiguration, and moving to another
-account hides the account that is broken.
+different answer. Credential resolution failure never admits a successor: it is
+deployment misconfiguration. Credential rejection admits only the configured
+`switch_now` rotation; the rejection remains recorded durably on the failed
+attempt.
 
 A successful call ends its availability chain, and a later tool round starts a
 fresh one, so a round that exhausts the pool before calling carries no earlier
-round's failure. A successor prepared when a parked wait releases carries the
-predecessor call and its non-acceptance proof in its origin, so it is that
-failure's authorized successor rather than the start of a fresh chain. Releasing
-a wait never readmits the member whose failure parked the turn, because
-otherwise a one-member `switch_now` pool configured to park would wake at its
-deadline, drop the sole exclusion, and call the same profile again without
-bound. Goal disposition keys on whether the observation selected a wait, not on
-the pool's configured action, so a park pool whose members are all excluded
-blocks like any other failure rather than staying current forever;
-[goal-mode](goal-mode.md) owns the disposition.
+round's failure.
 
 The identity relation is derived from the configured target's own family, never
 from a table of known provider identifiers, so a newly published model needs no
@@ -270,15 +299,36 @@ A model call is one recorded attempt. The daemon sends each attempt to the
 provider at most once. A retry is a new recorded attempt; no code retries a call
 without recording the retry in the database. Before anything has been sent to
 the provider, the daemon may prepare an unsent call again. After a known failure
-the daemon may start a new attempt with a different credential. It never sends
-again with the credential that failed in that chain. A call whose outcome is
-unknown is never retried automatically; the turn parks for recovery. A CLI
-harness may retry inside itself. Those retries are provider-internal; the daemon
-neither observes nor records them and adds no retries of its own. A migration
-constraint enforces one call per attempt. A `switch_now` failure with proven
-non-acceptance writes a durable chain exclusion for the failed member, and
-successor selection and preparation skip excluded members; that selection, not a
-constraint, enforces no-reuse. The one-shot send capability, the per-attempt
+with proven non-acceptance, the failure-observation commit may immediately
+record a new successor attempt on the same credential for a rate-limited,
+overloaded or provider-internal call while the credential remains admitted and
+below the required finite-positive
+`numeric_bounds.max_same_credential_attempts_per_turn` configuration value. The
+contract fixes no numeric value; the initial call and every same-credential
+successor call count toward the configured bound. The commit stores the retry
+deadline on that successor attempt; call preparation and sending both wait for
+the deadline. [Credential availability](credential-availability.md) owns the
+credential-scoped durable transient exclusion, its reset deadline, and
+preparation admission for every session.
+
+When the failure observation commits, the same-credential retry for a
+rate-limit, overload or provider-internal failure is evaluated before any pinned
+pool action, and that action is not applied while the retry is admitted. If the
+configured bound is exhausted or the failed credential is no longer admitted at
+that commit, any pinned action is applied once. Quota exhaustion bypasses the
+same-credential retry and those bound and admission conditions, applying its
+pinned action immediately. `switch_now` starts a new attempt on another admitted
+credential and writes the failed member's durable chain exclusion only if no
+stop is requested; any other action terminalizes this turn after recording its
+own durable effect when applicable. Provider-internal failure has no trigger
+action and terminalizes at the bound. A call whose outcome is unknown is never
+retried automatically; the turn parks for recovery. A CLI harness may retry
+inside one provider invocation. Those internal retries remain part of that
+recorded call; the daemon neither observes nor separately records them. A proven
+terminal failure from a CLI remains eligible for the successor rule above. A
+migration constraint enforces one call per attempt. Successor selection and
+preparation skip chain-excluded members; that selection, not a constraint,
+enforces rotation no-reuse. The one-shot send capability, the per-attempt
 dispatch gate, the authorize-send commit, and startup parking of an issued call
 enforce at-most-once sending. Only the rule that no code retries a call without
 recording the retry is unenforced.
@@ -319,13 +369,14 @@ freeze.
 
 Missing usage fields stay missing and are never invented; classification does
 not derive usage from the disposition, content, context, or provider family, and
-adapters need no separate counting operation. Historical compaction calls with
-unknown cache-inclusion semantics are treated as cache-exclusive, so the guard
-may overcount but never omits reported cache axes. A definitive request-size
-failure on a frontier the prospective call preserves forces one automatic
-compaction when no later accepted call or completed compaction supersedes it,
-even without reported usage. Missing usage does not trigger the tool-result
-headroom boundary, and inconsistent producing-call evidence fails closed.
+classification issues no separate counting operation. Historical compaction
+calls with unknown cache-inclusion semantics are treated as cache-exclusive, so
+the guard may overcount but never omits reported cache axes. A definitive
+request-size failure on a frontier the prospective call preserves forces one
+automatic compaction when no later accepted call or completed compaction
+supersedes it, even without reported usage. Missing usage does not trigger the
+tool-result headroom boundary, and inconsistent producing-call evidence fails
+closed.
 
 A trustworthy ordinary capability failure commits the prepared-to-known-failed
 closure with attempt and turn failure in a separate guarded transaction. Every
@@ -353,36 +404,55 @@ while a successor or wait keeps the turn active;
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) owns
 reclassification at terminal outcomes. A concurrently accepted stop is
 serialized by the session-scheduler lock, so one commit can never both
-terminalize the turn and authorize a successor. The successor pins the same
-resolved target and a different credential reference, so no call changes
-identity mid-flight. For each admitted availability cause the adapter must
-supply distinct typed evidence that the request was not accepted; classification
-as quota, rate limit, or overload alone is insufficient. Without the exact
-applied-interrupt proof a physical cancellation is an unstopped known failure,
-and a stop-requested attempt whose call ends known-failed still fails and cannot
-admit a successor, because the physical result has not proven cancellation.
+terminalize the turn and authorize a successor. Every successor pins the same
+resolved target; a same-credential retry retains the credential reference, and a
+rotation successor pins a different one, so no call changes identity mid-flight.
+For each admitted availability cause the adapter must supply distinct typed
+evidence that the request was not accepted; classification as quota, rate limit,
+or overload alone is insufficient. Without the exact applied-interrupt proof a
+physical cancellation is an unstopped known failure, and a stop-requested
+attempt whose call ends known-failed still fails and cannot admit a successor,
+because the physical result has not proven cancellation.
 
-`Completed` admits only text and tool-call parts: empty text and empty thinking
-blocks are dropped, while thinking with text and redacted thinking fail the
-adapter stage closed as unsupported material, because no durable semantic
-representation exists for either. Tool content and a tool-use finish must agree;
-either one without the other is a known failure. The dedicated compaction call
-rejects every tool and suppressed-tool part and accepts a summary only from a
-completion that ended by end turn or stop sequence, because its completion must
-be whole summary text. Classification is an adapter contract consuming the
-full-request-send boundary; the daemon never reinterprets SDK errors by
-retryability or exception type. The identity relation applies to every identity
-the exchange reported, early observations and terminal evidence alike, because
-it is timing-sensitive. Different lineage is a substitution: the provider served
-a model the daemon never authorized, and it is never collapsed into the alias
-case or into an ordinary provider failure. When the Anthropic adapter sees the
-server-side fallback block, the response can never complete as the resolved
-target's output, whatever the block names; a block naming the configured target
-itself classifies as ambiguity rather than substitution, because no durable
-marker-only evidence exists to carry a substitution. Every classified outcome
-and every fail-closed bridge defect carries a stable sanitized cause code
-alongside the shared operator failure class defined in
-[runtime-substrate](runtime-substrate.md).
+`Completed` admits only text, provider-compaction, and tool-call parts. A
+provider-compaction part must be a complete validated `compaction` object, must
+contain no prepared credential, and its durable representation is replayed
+unchanged while only a non-text marker crosses the process protocol. A buffered
+object retains the provider's exact bytes; a streamed object is reconstructed
+structurally from its validated start and delta fields before those complete
+durable bytes are fixed. Empty text and empty thinking blocks are dropped, while
+thinking with text and redacted thinking fail the adapter stage closed as
+unsupported material, because no durable semantic representation exists for
+either. Tool content and a tool-use finish must agree; either one without the
+other is a known failure. An Anthropic response that contains provider
+compaction carries the final physical iteration's retained input count,
+including cache axes, and output count, and persists both on the model call
+separately from the all-iteration usage retained for billing. A completed
+response retains compaction among its ordered assistant parts; a refused
+response retains only its compaction parts and omits ordinary refusal text. The
+context guard uses those retained-iteration measures as its post-compaction
+baseline; it never treats billed iteration input or aggregate multi-iteration
+output as model-visible retained usage. A retained baseline is eligible only
+when its call used the same effective target the next request will use after
+applying fast-mode target mapping. Refusal output remains discarded from that
+baseline even when its final-iteration count is retained as evidence, and
+projected-content headroom excludes opaque compaction bytes when the effective
+target will omit the block. The dedicated compaction call rejects every tool and
+suppressed-tool part and accepts a summary only from a completion that ended by
+end turn or stop sequence, because its completion must be whole summary text.
+Classification is an adapter contract consuming the full-request-send boundary;
+the daemon never reinterprets SDK errors by retryability or exception type. The
+identity relation applies to every identity the exchange reported, early
+observations and terminal evidence alike, because it is timing-sensitive.
+Different lineage is a substitution: the provider served a model the daemon
+never authorized, and it is never collapsed into the alias case or into an
+ordinary provider failure. When the Anthropic adapter sees the server-side
+fallback block, the response can never complete as the resolved target's output,
+whatever the block names; a block naming the configured target itself classifies
+as ambiguity rather than substitution, because no durable marker-only evidence
+exists to carry a substitution. Every classified outcome and every fail-closed
+bridge defect carries a stable sanitized cause code alongside the shared
+operator failure class defined in [runtime-substrate](runtime-substrate.md).
 
 A model-call transaction that both appends an outbox event and locks shared
 credential-pool action heads first takes one global transaction-scoped ordering
