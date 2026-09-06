@@ -329,7 +329,10 @@ update rewrites history. Every current-placement load authenticates the
 contiguous history from version one through the selected head against each
 event's typed receipt and registry claim, rejects a head when history contains a
 later event, and fails closed as typed corruption on a missing or lagging head,
-cross-wired history, or invalid command fact.
+cross-wired history, or invalid command fact. A placement path requires one to
+sixty-four nonempty dot-separated segments of at most sixty-four bytes each,
+containing only ASCII alphanumerics, hyphens, or underscores; other values are
+rejected before command handling.
 
 A placed requester's readable scope is its parent directory's subtree, and a
 refusal is typed evidence carrying the requesting directory and a closed reason,
