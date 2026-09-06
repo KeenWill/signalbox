@@ -20,8 +20,8 @@ CREATE TABLE frontier (
     CHECK (pull_request_number IS NULL OR pull_request_number BETWEEN 1 AND 18446744073709551615)
 );
 
--- growth: append-only facts bounded by each row's retain_until.
--- retention: delete an event once retain_until is reached and no pending module command names it.
+-- growth: append-only normalized facts.
+-- retention: accepted events are permanent and are never deleted.
 CREATE TABLE gh_event (
     event_id uuid PRIMARY KEY,
     content_identity bytea NOT NULL UNIQUE,
