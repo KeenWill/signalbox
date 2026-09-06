@@ -151,9 +151,8 @@ ordinary single-account deployment and needs no trigger keys. Selection happens
 at model-call preparation, never at session creation: it prefers the sticky
 member while that member remains admissible and otherwise walks members in
 priority order, skipping excluded ones and breaking ties by the snapshot's rule.
-Trigger actions and the exclusions they create are durable. Retry-before-action
-ordering and every availability ending are owned by
-[credential availability](credential-availability.md).
+Trigger actions and the exclusions they create are durable. Every availability
+ending is owned by [credential availability](credential-availability.md).
 
 The session-template catalog is read after the model catalog. Each template
 binds a name and version to a model or alias, a system prompt, and a
