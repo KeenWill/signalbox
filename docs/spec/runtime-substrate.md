@@ -298,18 +298,19 @@ malformed value is no evidence; the Codex phrase admits only its bounded second
 and minute units.
 
 The non-acceptance proof on a provider error is an adapter-owned typed fact,
-never inferred from the error kind, status retryability or provider prose. An
-adapter admits it only when it decoded its own documented error envelope, the
-native token belongs to the closed set that adapter names for the proof, the
-HTTP status agrees with that token, and the envelope arrived as an error
-response decoded before any stream began. A status-derived fallback, an absent
-or undecodable body, or an unmapped token carries no proof and keeps its
-status-classified kind; a newly mapped availability token carries none until
-that set names it, and an SSE error record never carries it, so an availability
-failure that arrives mid-stream carries none. The Codex CLI adapter, which has
-no error envelope, admits the proof only when its event stream closes with a
-`turn.failed` event; a stream-level error that no matching `turn.failed` event
-closes carries none.
+never inferred from the error kind, status retryability or provider prose,
+except that a `CredentialRejected` authentication refusal itself proves
+non-acceptance. Otherwise an adapter admits it only when it decoded its own
+documented error envelope, the native token belongs to the closed set that
+adapter names for the proof, the HTTP status agrees with that token, and the
+envelope arrived as an error response decoded before any stream began. A
+status-derived fallback, an absent or undecodable body, or an unmapped token
+carries no proof and keeps its status-classified kind; a newly mapped
+availability token carries none until that set names it, and an SSE error record
+never carries it, so an availability failure that arrives mid-stream carries
+none. The Codex CLI adapter, which has no error envelope, admits the proof only
+when its event stream closes with a `turn.failed` event; a stream-level error
+that no matching `turn.failed` event closes carries none.
 
 Provider-internal non-acceptance proof is admitted for Anthropic `api_error` at
 HTTP 500, OpenAI `server_error`/`internal_server_error` at HTTP 500, and a Codex
