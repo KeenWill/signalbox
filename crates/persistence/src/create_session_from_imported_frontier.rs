@@ -73,7 +73,7 @@ pub enum ImportedSessionCorruption {
     #[error("inconsistent imported-session {field_0}")]
     /// Independently stored values disagree.
     Inconsistent(&'static str),
-    #[error("invalid imported-session {field}: {reason}")]
+    #[error("invalid imported-session {field}: invalid ordinal: {reason}")]
     /// A stored positive ordinal cannot construct its domain value.
     InvalidOrdinal {
         /// Durable field carrying the ordinal.
@@ -81,7 +81,7 @@ pub enum ImportedSessionCorruption {
         /// Why the numeric value is invalid.
         reason: PositiveOrdinalMappingError,
     },
-    #[error("invalid imported-session {field}: {reason}")]
+    #[error("invalid imported-session {field}: invalid command identity: {reason}")]
     /// A stored command identity is a reserved sentinel UUID.
     InvalidCommandIdentity {
         /// Durable field carrying the identity.
@@ -1546,6 +1546,29 @@ mod tests {
     use std::io;
 
     use super::ImportedSessionRepositoryError;
+
+    #[test]
+    fn operator_error_messages_distinguish_imported_session_scalar_failures() {
+        use super::ImportedSessionCorruption;
+        use crate::mapping::{DurableCommandIdMappingError, PositiveOrdinalMappingError};
+
+        let errors = [
+            ImportedSessionCorruption::InvalidOrdinal {
+                field: "position",
+                reason: PositiveOrdinalMappingError::NonPositive,
+            },
+            ImportedSessionCorruption::InvalidCommandIdentity {
+                field: "command_id",
+                reason: DurableCommandIdMappingError::SentinelUuid,
+            },
+        ];
+        let messages = errors.map(|error| error.to_string()).join("\n");
+
+        expect_test::expect![[r#"
+            invalid imported-session position: invalid ordinal: ordinal must be positive
+            invalid imported-session command_id: invalid command identity: durable-command identity must not be the nil or max UUID"#]]
+        .assert_eq(&messages);
+    }
 
     #[test]
     fn lost_commit_response_is_typed_as_ambiguous() {

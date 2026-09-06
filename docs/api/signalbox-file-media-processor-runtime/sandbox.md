@@ -5,10 +5,8 @@
 ## WorkerBinding
 
 ```rust
-#[cfg(target_os = "linux")]
 pub struct WorkerBinding {/* private */}
 // derives: clone::Clone, fmt::Debug
-#[cfg(target_os = "linux")]
 impl WorkerBinding {
     pub fn try_new(
         program: impl convert::Into<path::PathBuf>,
@@ -21,10 +19,8 @@ impl WorkerBinding {
 ## SandboxedFileMediaProcessor
 
 ```rust
-#[cfg(target_os = "linux")]
 pub struct SandboxedFileMediaProcessor {/* private */}
 // derives: clone::Clone, fmt::Debug
-#[cfg(target_os = "linux")]
 impl SandboxedFileMediaProcessor {
     pub fn try_new(
         bubblewrap: impl convert::Into<path::PathBuf>,
@@ -34,7 +30,6 @@ impl SandboxedFileMediaProcessor {
     pub async fn verify_isolation(&self) -> signalbox_file_media_runtime::ProcessorIsolation;
     pub const fn ceilings(&self) -> signalbox_file_media_runtime::FileMediaProcessCeilings;
 }
-#[cfg(target_os = "linux")]
 impl signalbox_file_media_runtime::FileMediaProcessor for SandboxedFileMediaProcessor {
     fn probe<'a>(
         &'a self,
@@ -71,7 +66,6 @@ impl signalbox_file_media_runtime::FileMediaProcessor for SandboxedFileMediaProc
 ## SandboxedFileMediaProcessorConstructionError
 
 ```rust
-#[cfg(target_os = "linux")]
 pub enum SandboxedFileMediaProcessorConstructionError {
     Unsupported,
     Bubblewrap,
@@ -85,10 +79,8 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     DuplicateReader,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-#[cfg(target_os = "linux")]
 impl fmt::Display for SandboxedFileMediaProcessorConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-#[cfg(target_os = "linux")]
 impl error::Error for SandboxedFileMediaProcessorConstructionError {}
 ```

@@ -1362,13 +1362,13 @@ mod tests {
         assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
     }
 
-    /// S20: the provider's server-side fallback marker is the distinct
+    /// the provider's server-side fallback marker is the distinct
     /// substitution signal. This adapter never enables fallback, so the
     /// response is not completion material, and the substituting identity is
     /// surfaced as a reported-model fact for the caller's provider-target
     /// rule rather than being lost in a generic unknown-block failure.
     #[test]
-    fn s20_server_side_fallback_block_reports_the_substituting_model() {
+    fn server_side_fallback_block_reports_the_substituting_model() {
         let (evidence, observations) = decode(
             r#"{
                 "id": "msg_1",
@@ -1403,7 +1403,7 @@ mod tests {
     /// A fallback marker without a named continuing model still refuses to
     /// complete; nothing is fabricated about which model served.
     #[test]
-    fn s20_fallback_block_without_a_named_model_still_refuses_to_complete() {
+    fn fallback_block_without_a_named_model_still_refuses_to_complete() {
         let (evidence, observations) = decode(
             r#"{
                 "id": "msg_1",

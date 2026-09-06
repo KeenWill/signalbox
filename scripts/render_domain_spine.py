@@ -126,6 +126,24 @@ def item_cfg(item):
                  for condition in cfg_attributes(attribute.get('other', '')))
 
 
+def has_complementary_export(item):
+    conditions = item_cfg(item)
+    if len(conditions) != 1 or not item['span']:
+        return False
+    source = ROOT / item['span']['filename']
+    if not source.is_file():
+        return False
+    condition = re.sub(r'\s+', '', conditions[0])
+    for gate, declaration in re.findall(r'(?m)^#\[cfg\((.+)\)\]\s*pub use ([^;]+);', source.read_text()):
+        gate = re.sub(r'\s+', '', gate)
+        if gate != f'not({condition})' and condition != f'not({gate})':
+            continue
+        names = re.findall(r'(?:^|::|\{|,)\s*(\w+)(?:\s+as\s+(\w+))?\s*(?=,|\}|$)', declaration)
+        if item['inner']['use']['name'] in {alias or name for name, alias in names}:
+            return True
+    return False
+
+
 def contains_generic(value, name):
     if isinstance(value, dict):
         return value.get('generic') == name or any(contains_generic(child, name) for child in value.values())
@@ -194,6 +212,8 @@ class Renderer:
                 target = self.index.get(str(body['use']['id']))
                 if target and target['crate_id'] == self.crate_id:
                     visit(target['id'], conditions, ancestors + (identity,))
+                    if has_complementary_export(item):
+                        visit(target['id'], inherited, ancestors + (identity,))
 
         visit(self.root['id'])
         self.conditions = {}
@@ -582,9 +602,10 @@ class Renderer:
                               if (headings := re.findall(r'^## (.+)$', path.read_text(), re.MULTILINE))}
                     chunks = [[]]
                     for block in group:
-                        if (chunks[-1] and (
-                                boundaries.get(chunks[-1][-1].splitlines()[0].removeprefix('## ')) == len(chunks)
-                                or starts.get(block.splitlines()[0].removeprefix('## ')) == len(chunks))
+                        while len(chunks) <= starts.get(block.splitlines()[0].removeprefix('## '), 0):
+                            chunks.append([])
+                        if (chunks[-1] and boundaries.get(
+                                chunks[-1][-1].splitlines()[0].removeprefix('## ')) == len(chunks)
                                 or not fits(page(f'{module}: {kind}', chunks[-1] + [block]))):
                             if not chunks[-1]:
                                 raise ValueError(f'{module}: one item exceeds the page limits')

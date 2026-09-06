@@ -16,9 +16,9 @@ only, except for the lines under Planned. `docs/design/` holds one document per
 subsystem with committed but unbuilt design, written for the agent that will
 build it; landed material is removed as it lands, and the document is deleted
 when no planned capability remains. [open-questions.md](../open-questions.md)
-holds undecided items. The generated APIs for the
-[configured crates](../api/crates.toml) sit outside those homes and declare
-normative public API shapes.
+holds undecided items. The generated APIs for the crates configured in
+`docs/api/crates.toml` sit outside those homes and declare normative public API
+shapes.
 
 A design document is titled `<Subsystem> design`, opens with a preamble saying
 it is not built and naming the spec page it extends, and has the sections Goal,

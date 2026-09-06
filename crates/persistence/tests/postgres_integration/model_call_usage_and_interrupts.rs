@@ -1958,7 +1958,7 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     Ok(())
 }
 
-/// S03 / S09: interrupting
+/// interrupting
 /// an issued call atomically records its stop proof and cancellation request;
 /// the durable signal resolves, physical cancellation closes the turn with its
 /// exact attempt history, and both command and observation replays converge on
@@ -2204,7 +2204,7 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
     Ok(())
 }
 
-/// S04 / S07: ambiguity observed
+/// ambiguity observed
 /// before or after an applied interrupt terminalizes as exact proof-bearing
 /// reconciliation, and retained observation and origin rereads recognize the
 /// committed closure.
@@ -2680,7 +2680,7 @@ async fn provider_failure_cause_round_trips_through_persistence_and_process_read
     Ok(())
 }
 
-/// S07 / S08: the stop-request migration keeps
+/// the stop-request migration keeps
 /// each stopping rejection paired with its immutable delivery and admits only
 /// a known-failed call as failed post-cancellation provenance.
 #[tokio::test(flavor = "multi_thread")]
@@ -2821,7 +2821,7 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
     Ok(())
 }
 
-/// S03 / S04 / S07: completion and restart can
+/// completion and restart can
 /// win after a durable stop request without erasing the applied interrupt.
 /// Terminal reload accepts the completion race, while restart retains an
 /// ambiguous call in proof-bearing terminal reconciliation.

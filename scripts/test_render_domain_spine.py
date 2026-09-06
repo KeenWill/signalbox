@@ -150,6 +150,33 @@ class RenderDomainSpineTests(unittest.TestCase):
         block = Renderer(document).block(document['index']['20'])
         self.assertIn('#[cfg(feature = "fixture")]\npub fn fetch()', block)
 
+    def test_complementary_source_exports_keep_the_public_type_available(self):
+        document = fixture()
+        document['index']['0']['inner']['module']['items'] = [30]
+        export = document['index']['30']
+        export['span']['filename'] = 'src/lib.rs'
+        export['inner']['use']['name'] = 'Record'
+        export['attrs'] = [{'other':
+            '#[attr = CfgTrace([NameValue { name: "target_os", value: Some("linux"), '
+            'span: src/lib.rs:2:7: 2:26 (#0) }])]'}]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'src').mkdir()
+            for counterpart, unconditional in [
+                ('unsupported::{Other, Record}', True),
+                ('unsupported::Fallback as Record', True),
+                ('unsupported::Other', False),
+            ]:
+                with self.subTest(counterpart=counterpart):
+                    (root / 'src/lib.rs').write_text(
+                        '#[cfg(target_os = "linux")]\npub use sandbox::Record;\n'
+                        '#[cfg(not(target_os = "linux"))]\npub use ' + counterpart + ';\n')
+                    with patch('render_domain_spine.ROOT', root):
+                        block = Renderer(document).block(document['index']['1'])
+                    self.assertEqual('#[cfg(target_os = "linux")]' not in block, unconditional)
+                    self.assertIn('pub struct Record', block)
+                    self.assertIn('pub fn new', block)
+
     def test_unconditional_export_does_not_inherit_a_gated_alias_condition(self):
         document = fixture()
         document['index']['30']['attrs'] = [{'other':
@@ -548,6 +575,25 @@ pub struct Token;
         self.assertIn('## Event', files['example/types-2.md'])
         self.assertIn('## Token', files['example/types-2.md'])
         self.assertNotIn('example/types-3.md', files)
+
+    def test_later_split_page_survives_an_empty_first_page(self):
+        document = fixture()
+        document['index']['0']['inner']['module']['items'] = [10, 40]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'docs/api/sample/example'
+            directory.mkdir(parents=True)
+            (directory / 'types.md').write_text('# example: types\n\n## Record\n')
+            (directory / 'types-2.md').write_text('# example: types-2\n\n## Event\n\n## Token\n')
+            with patch('render_domain_spine.ROOT', root):
+                files = Renderer(document).files('sample')
+                for name, content in files.items():
+                    (root / 'docs/api/sample' / name).write_text(content)
+                self.assertEqual(Renderer(document).files('sample'), files)
+        self.assertNotIn('## ', files['example/types.md'])
+        self.assertIn('## Event', files['example/types-2.md'])
+        self.assertIn('## Token', files['example/types-2.md'])
+        self.assertIn('](example/types-2.md)', files['README.md'])
 
     def test_oversized_type_group_continues_at_item_boundaries(self):
         document = fixture()

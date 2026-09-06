@@ -513,11 +513,11 @@ async fn an_outstanding_provider_call_moves_from_quiescent_to_slot_held_inventor
     Ok(())
 }
 
-/// S10: slot-held recovery revalidates the exact turn-progress evidence under
+/// slot-held recovery revalidates the exact turn-progress evidence under
 /// the scheduler lock and declines evidence that changed after observation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_slot_held_recovery_declines_changed_progress_evidence() -> Result<(), Box<dyn Error>> {
+async fn slot_held_recovery_declines_changed_progress_evidence() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x12_500).await?;
     checkpoint_model_call(&pool, &fixture, 0x12_500).await?;
@@ -557,7 +557,7 @@ async fn s10_slot_held_recovery_declines_changed_progress_evidence() -> Result<(
     Ok(())
 }
 
-/// S10: a lock refusal raised by the shared startup transition remains the
+/// a lock refusal raised by the shared startup transition remains the
 /// typed contention outcome that the detached scheduler recovery can retry.
 ///
 /// This repository classifies no lock site of its own on this path — it sets
@@ -567,8 +567,8 @@ async fn s10_slot_held_recovery_declines_changed_progress_evidence() -> Result<(
 /// session scheduler row that transition takes under that bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_slot_held_recovery_preserves_shared_transition_lock_refusal()
--> Result<(), Box<dyn Error>> {
+async fn slot_held_recovery_preserves_shared_transition_lock_refusal() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x12_700).await?;
     checkpoint_model_call(&pool, &fixture, 0x12_700).await?;
@@ -833,7 +833,7 @@ const RECOVERY_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis
 /// The wider bound the write phase is owed once the scheduler row is held.
 const RECOVERY_WRITE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_500);
 
-/// S10: slot-held recovery switches to its write budget once the scheduler row
+/// slot-held recovery switches to its write budget once the scheduler row
 /// is held, so the outbox sequence row every writer holds until it commits is
 /// ordinary contention rather than a stall refused at the acquisition budget.
 ///
@@ -843,8 +843,8 @@ const RECOVERY_WRITE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_
 /// thirty-minute watchdog.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_slot_held_recovery_spends_its_write_budget_on_the_outbox_row()
--> Result<(), Box<dyn Error>> {
+async fn slot_held_recovery_spends_its_write_budget_on_the_outbox_row() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let issued = checkpoint_restart_model_call(&pool, 0x15_900, true).await?;
     let repository = PostgresTurnLivenessRepository::new(
@@ -964,7 +964,7 @@ async fn abandoned_pre_activation_compaction(
     })
 }
 
-/// S11: the expiry handoff's compaction recovery acts on the abandoned
+/// the expiry handoff's compaction recovery acts on the abandoned
 /// compaction itself, so a session that holds none is left exactly as found.
 ///
 /// The handoff runs detached, its admission slot is released the moment the
@@ -973,7 +973,7 @@ async fn abandoned_pre_activation_compaction(
 /// through to whichever turn is active now would terminalize that successor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s11_compaction_recovery_spares_a_session_holding_no_abandoned_compaction()
+async fn compaction_recovery_spares_a_session_holding_no_abandoned_compaction()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let successor = checkpoint_restart_model_call(&pool, 0x15_a00, true).await?;
@@ -1004,7 +1004,7 @@ async fn s11_compaction_recovery_spares_a_session_holding_no_abandoned_compactio
     Ok(())
 }
 
-/// S12: an authorized compaction whose pass expired before it finished is the
+/// an authorized compaction whose pass expired before it finished is the
 /// evidence the handoff acts on, so recovery terminalizes it and frees the
 /// session boundary that was holding every queued turn out.
 ///
@@ -1012,7 +1012,7 @@ async fn s11_compaction_recovery_spares_a_session_holding_no_abandoned_compactio
 /// the boundary, and nothing else terminalizes them before a daemon restart.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s12_compaction_recovery_terminalizes_the_boundary_its_expired_pass_abandoned()
+async fn compaction_recovery_terminalizes_the_boundary_its_expired_pass_abandoned()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let abandoned = abandoned_pre_activation_compaction(&pool, 0x15_b00).await?;
@@ -1056,7 +1056,7 @@ async fn s12_compaction_recovery_terminalizes_the_boundary_its_expired_pass_aban
     Ok(())
 }
 
-/// S13: compaction recovery installs its lock budget server-side, so a
+/// compaction recovery installs its lock budget server-side, so a
 /// contended scheduler row is refused inside the budget instead of stranding
 /// the wait on a checked-out pooled connection.
 ///
@@ -1066,7 +1066,7 @@ async fn s12_compaction_recovery_terminalizes_the_boundary_its_expired_pass_aban
 /// simultaneous expiries would exhaust the pool.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s13_compaction_recovery_refuses_a_contended_scheduler_row_inside_its_budget()
+async fn compaction_recovery_refuses_a_contended_scheduler_row_inside_its_budget()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let abandoned = abandoned_pre_activation_compaction(&pool, 0x15_c00).await?;
@@ -1100,7 +1100,7 @@ async fn s13_compaction_recovery_refuses_a_contended_scheduler_row_inside_its_bu
     Ok(())
 }
 
-/// S14: compaction recovery names the exact call its expired window made
+/// compaction recovery names the exact call its expired window made
 /// durable, so a later pass's live compaction is not the one it terminalizes.
 ///
 /// Expiry inside the read-only preflight leaves no durable call at all, and the
@@ -1109,7 +1109,7 @@ async fn s13_compaction_recovery_refuses_a_contended_scheduler_row_inside_its_bu
 /// session. Selecting on the session alone would terminalize that one.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s14_compaction_recovery_spares_a_compaction_its_window_never_prepared()
+async fn compaction_recovery_spares_a_compaction_its_window_never_prepared()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let successor = abandoned_pre_activation_compaction(&pool, 0x15_d00).await?;
