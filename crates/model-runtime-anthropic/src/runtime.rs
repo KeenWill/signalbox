@@ -868,7 +868,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
                 && refusal
                     .content
                     .iter()
-                    .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. })) =>
+                    .any(provider_compaction_replaced_context) =>
         {
             // A completed provider-compaction block proves the provider
             // processed and replaced request context even when the final stop
@@ -891,6 +891,19 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
         }
         evidence => evidence,
     }
+}
+
+fn provider_compaction_replaced_context(part: &AssistantPart) -> bool {
+    let AssistantPart::ProviderCompaction { block_json } = part else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(block_json)
+        .ok()
+        .is_some_and(|block| {
+            block
+                .get("content")
+                .is_some_and(|content| !content.is_null())
+        })
 }
 
 async fn finish_error(
@@ -1109,6 +1122,28 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn refusal_after_only_no_op_provider_compaction_is_not_preserved() {
+        let refusal = TerminalEvidence::Refused(RefusalEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: vec![AssistantPart::ProviderCompaction {
+                block_json: String::from(
+                    r#"{"type":"compaction","content":null,"encrypted_content":"opaque"}"#,
+                ),
+            }],
+            usage: TokenUsage::unreported(),
+            retained_input_tokens: Some(21),
+            retained_output_tokens: Some(3),
+        });
+
+        let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
+            panic!("a no-op compaction does not prove that the complete upload was processed");
+        };
+        assert_eq!(error.native.error_token.as_deref(), Some("refusal"));
     }
 
     #[test]

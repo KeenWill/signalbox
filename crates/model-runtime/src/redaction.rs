@@ -619,11 +619,15 @@ fn provider_compaction_contains_credential(
         };
         block_json.contains(key)
             || json_escapes_decode_to_credential(block_json, key)
-            || provider_compaction_prefix_completed_by_text(block_json, &content[index + 1..], key)
+            || provider_compaction_prefix_completed_by_durable_parts(
+                block_json,
+                &content[index + 1..],
+                key,
+            )
     })
 }
 
-fn provider_compaction_prefix_completed_by_text(
+fn provider_compaction_prefix_completed_by_durable_parts(
     block_json: &str,
     following: &[AssistantPart],
     credential: &str,
@@ -637,27 +641,32 @@ fn provider_compaction_prefix_completed_by_text(
         .any(|value| {
             credential.char_indices().skip(1).any(|(split, _)| {
                 value.ends_with(&credential[..split])
-                    && following_text_starts_with(following, &credential[split..])
+                    && following_durable_parts_contain(following, &credential[split..])
             })
         })
 }
 
-fn following_text_starts_with(parts: &[AssistantPart], expected: &str) -> bool {
-    let mut remaining = expected;
-    for part in parts {
-        let AssistantPart::Text(text) = part else {
-            return false;
-        };
-        if text.starts_with(remaining) {
-            return true;
+fn following_durable_parts_contain(parts: &[AssistantPart], expected: &str) -> bool {
+    parts.iter().any(|part| match part {
+        AssistantPart::Text(text) => text.contains(expected),
+        AssistantPart::Thinking { text, signature } => {
+            text.contains(expected)
+                || signature
+                    .as_deref()
+                    .is_some_and(|signature| signature.contains(expected))
         }
-        if remaining.starts_with(text) {
-            remaining = &remaining[text.len()..];
-            continue;
+        AssistantPart::RedactedThinking { data } => data.contains(expected),
+        AssistantPart::ProviderCompaction { block_json } => {
+            block_json.contains(expected) || json_escapes_decode_to_credential(block_json, expected)
         }
-        return false;
-    }
-    false
+        AssistantPart::ToolCall(proposal) => {
+            proposal.id.as_str().contains(expected)
+                || proposal.name.as_str().contains(expected)
+                || proposal.arguments_json.contains(expected)
+                || json_escapes_decode_to_credential(&proposal.arguments_json, expected)
+        }
+        AssistantPart::SuppressedToolCall(name) => name.as_str().contains(expected),
+    })
 }
 
 fn redact_text(text: String, credential: &CredentialValue) -> String {
@@ -1697,6 +1706,72 @@ mod tests {
             error.native.error_token.as_deref(),
             Some("credential_in_provider_compaction")
         );
+    }
+
+    #[test]
+    fn credential_spanning_provider_compaction_and_each_durable_part_is_rejected() {
+        let following_parts = [
+            AssistantPart::Thinking {
+                text: "loop reasoning".to_string(),
+                signature: None,
+            },
+            AssistantPart::Thinking {
+                text: "safe".to_string(),
+                signature: Some("loop-signature".to_string()),
+            },
+            AssistantPart::RedactedThinking {
+                data: "loop-opaque".to_string(),
+            },
+            AssistantPart::ProviderCompaction {
+                block_json: r#"{"type":"compaction","content":"loop","encrypted_content":null}"#
+                    .to_string(),
+            },
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("loop-call"),
+                name: ToolName::new("lookup"),
+                arguments_json: r#"{"value":"safe"}"#.to_string(),
+            }),
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call-1"),
+                name: ToolName::new("loop"),
+                arguments_json: r#"{"value":"safe"}"#.to_string(),
+            }),
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call-1"),
+                name: ToolName::new("lookup"),
+                arguments_json: r#"{"value":"\u006coop"}"#.to_string(),
+            }),
+            AssistantPart::SuppressedToolCall(ToolName::new("loop")),
+        ];
+
+        for following in following_parts {
+            let key = credential("key_loop");
+            let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+                completion: CompletionEvidence {
+                    exchange: ExchangeFacts::default(),
+                    message_id: None,
+                    reported_model: None,
+                    finish: CompletionFinish::ToolUse,
+                    content: vec![
+                        AssistantPart::ProviderCompaction {
+                            block_json: r#"{"type":"compaction","content":"key_","encrypted_content":"opaque"}"#.to_string(),
+                        },
+                        following,
+                    ],
+                    usage: TokenUsage::unreported(),
+                },
+                retained_input_tokens: 12,
+                retained_output_tokens: 4,
+            };
+
+            let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+                panic!("cross-part credential evidence is rejected");
+            };
+            assert_eq!(
+                error.native.error_token.as_deref(),
+                Some("credential_in_provider_compaction")
+            );
+        }
     }
 
     #[test]

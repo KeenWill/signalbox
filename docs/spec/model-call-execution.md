@@ -88,11 +88,15 @@ nor rewrites the durable entry. The block's durable nullable `content` fact
 separately classifies its input as replaced or retained for later headroom
 accounting on calls that replay it: non-null replaces the pre-compaction input
 and null is a replayable no-op. This classification does not rewrite billing
-evidence. Anthropic iteration usage remains the sum of every reported iteration
-on the call's four usage axes, and an iteration missing required input or output
-usage is invalid response material. The tool-continuation guard likewise
-excludes replaced pre-compaction input from its retained-context baseline when
-the next request replays the block.
+evidence. A refused response preserves its compaction suffix only when at least
+one validated block has non-null `content`; a suffix made only of replayable
+no-ops does not prove that the provider replaced the uploaded context. Anthropic
+iteration usage remains the sum of every reported iteration on the call's four
+usage axes, and an iteration missing required input or output usage is invalid
+response material. Configured per-response limit observations use the retained
+physical iteration rather than that multi-iteration billing sum. The
+tool-continuation guard likewise excludes replaced pre-compaction input from its
+retained-context baseline when the next request replays the block.
 
 `ModelCallExecutionService::execute` in
 `crates/application/src/model_execution.rs` runs one linear invocation over five

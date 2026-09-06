@@ -132,9 +132,10 @@ HTTP server can act before end-of-request framing.
 Both HTTP decoders construct refusal evidence. Execute converts an ordinary
 refusal to an unrecognized provider error before returning, because a buffered
 HTTP request gives no proof that the response followed the complete upload. A
-refusal that carries a validated provider-compaction block remains refusal
-evidence because the completed compaction proves the provider processed and
-replaced the request context.
+refusal that carries at least one validated provider-compaction block with
+non-null replacement content remains refusal evidence because that completed
+replacement proves the provider processed and replaced the request context. A
+suffix containing only null-content no-op blocks does not supply that proof.
 
 The Claude Code CLI never supplies the non-acceptance proof: it classifies
 failures from rendered prose by substring and exposes no structured native code.

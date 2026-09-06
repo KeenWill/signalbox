@@ -160,6 +160,24 @@ fn configured_usage_limit_excess(
         .then_some(ConfiguredUsageLimitExcess::Context)
 }
 
+fn completed_iteration_usage(
+    aggregate: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
+) -> ReportedUsageLowerBound {
+    match (retained_input_tokens, retained_output_tokens) {
+        (Some(input_tokens), Some(output_tokens)) => ReportedUsageLowerBound {
+            // Retained compaction input already includes every input-side
+            // cache axis for the final physical iteration.
+            input_tokens: Some(input_tokens),
+            output_tokens: Some(output_tokens),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        },
+        _ => aggregate.into(),
+    }
+}
+
 /// Whether one call's stored input count already includes the cache axes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReportedInputCacheAxes {
@@ -385,9 +403,15 @@ where
                 | ModelCallTerminalObservation::CompletedWithProviderCompaction { .. }
                 | ModelCallTerminalObservation::CompletedWithTools { .. }
         );
-        if let Some(excess) = completed
-            .then(|| configured_usage_limit_excess(observation.usage(), capability.limits))
-            .flatten()
+        let iteration_usage = completed.then(|| {
+            completed_iteration_usage(
+                observation.usage(),
+                observation.observation().retained_input_tokens(),
+                observation.observation().retained_output_tokens(),
+            )
+        });
+        if let Some(excess) = iteration_usage
+            .and_then(|usage| configured_usage_limit_excess(usage, capability.limits))
         {
             tracing::warn!(
                 cause_code = excess.cause_code(),
@@ -417,7 +441,8 @@ mod tests {
     use super::{
         ConfiguredUsageLimitExcess, ConfiguredUsageLimits, ReportedInputCacheAxes,
         ReportedInputRetention, ReportedOutputRetention, UsageLimitedProviderError,
-        configured_usage_limit_excess, configured_usage_limits, reported_usage_requires_compaction,
+        completed_iteration_usage, configured_usage_limit_excess, configured_usage_limits,
+        reported_usage_requires_compaction,
     };
 
     #[derive(Debug)]
@@ -560,6 +585,34 @@ mod tests {
         };
 
         assert_eq!(configured_usage_limit_excess(usage, limits), None);
+    }
+
+    #[test]
+    fn compacted_completion_limits_use_the_retained_physical_iteration() {
+        let aggregate = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(180))
+            .with_output_tokens(Some(60))
+            .with_cache_creation_input_tokens(Some(30));
+        let limits = ConfiguredUsageLimits {
+            max_output_tokens: 50,
+            context_window_tokens: 100,
+            adapter: ModelAdapter::Anthropic,
+        };
+
+        let within_limits = completed_iteration_usage(aggregate, Some(40), Some(5));
+        assert_eq!(configured_usage_limit_excess(within_limits, limits), None);
+
+        let output_exceeded = completed_iteration_usage(aggregate, Some(40), Some(51));
+        assert_eq!(
+            configured_usage_limit_excess(output_exceeded, limits),
+            Some(ConfiguredUsageLimitExcess::Output)
+        );
+
+        let context_exceeded = completed_iteration_usage(aggregate, Some(96), Some(5));
+        assert_eq!(
+            configured_usage_limit_excess(context_exceeded, limits),
+            Some(ConfiguredUsageLimitExcess::Context)
+        );
     }
 
     #[test]
