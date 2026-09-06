@@ -272,9 +272,8 @@ selection_id = "00000000-0000-0000-0000-000000000001"
 
 fn reported_usage_preflight_configuration_text() -> String {
     MODEL_CONFIGURATION
-        // Anthropic admission now belongs to prospective provider counting.
-        // These fixtures exercise the reported-usage fallback retained for
-        // adapters without that operation.
+        // These fixtures exercise reported-usage preflight through an adapter
+        // without prospective token counting.
         .replace("adapter = \"anthropic\"", "adapter = \"openai\"")
         .replace("model_family = \"anthropic\"", "model_family = \"openai\"")
         .replace("max_output_tokens = 256", "max_output_tokens = 1")
