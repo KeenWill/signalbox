@@ -520,6 +520,7 @@ fn graphql_subprocess_timeout_uses_tick_failure_path() {
 fn ambiguous_timeout_retains_fence_but_definite_start_failure_removes_it() {
     for (outcome, retained) in [
         (CommandError::Timeout, true),
+        (CommandError::Interrupted, true),
         (
             CommandError::Start(std::io::Error::from_raw_os_error(2)),
             false,
@@ -553,6 +554,71 @@ fn ambiguous_timeout_retains_fence_but_definite_start_failure_removes_it() {
             retained
         );
     }
+}
+
+#[test]
+fn interruption_before_dispatch_start_clears_the_persisted_fence() {
+    struct InterruptedDispatch {
+        state_file: PathBuf,
+    }
+    impl Runtime for InterruptedDispatch {
+        fn github(&mut self, _: GitHubRequest, _: Duration) -> Result<Value, Error> {
+            panic!("this scenario uses recorded evidence")
+        }
+        fn command(&mut self, argv: &[String], timeout: Duration) -> Result<Output, CommandError> {
+            if argv[0] == "active" {
+                return exit(1);
+            }
+            let saved = load_state(&self.state_file, "KeenWill/signalbox").unwrap();
+            let number = &argv[argv.len() - 2];
+            assert_eq!(saved.pull_requests[number].last_dispatched_at, Some(1000.0));
+            let result = process::execute(argv, None, timeout, &AtomicBool::new(true));
+            assert!(
+                matches!(&result, Err(CommandError::Start(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+            );
+            result
+        }
+        fn now(&mut self) -> f64 {
+            1000.0
+        }
+    }
+
+    let dir = Directory::new();
+    let marker = dir.0.join("dispatch-started");
+    let cfg = Config {
+        dispatch: vec![
+            "sh".into(),
+            "-c".into(),
+            "printf started > \"$0\"".into(),
+            marker.to_string_lossy().into(),
+        ],
+        ..config(&dir)
+    };
+    let (node, evaluated) = red(&cfg);
+    let mut state = empty(&cfg);
+    let mut runtime = InterruptedDispatch {
+        state_file: cfg.state_file.clone(),
+    };
+    let result = process_candidate(
+        &cfg,
+        &mut state,
+        &node,
+        &evaluated,
+        &mut runtime,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(result["decision"], "skipped");
+    assert!(!marker.exists(), "interruption must prevent child startup");
+    let restarted = load_state(&cfg.state_file, &cfg.repository).unwrap();
+    let number = node["number"].to_string();
+    assert_eq!(state.pull_requests[&number].last_dispatched_at, None);
+    assert_eq!(restarted.pull_requests[&number].last_dispatched_at, None);
+    assert_eq!(restarted.pull_requests[&number].last_dispatched_head, None);
+    assert_eq!(
+        choose(&cfg, &restarted.pull_requests[&number], false, 1000.0, None).name,
+        "active-check-required"
+    );
 }
 #[test]
 fn dry_run_payload_and_log_record_observed_idle_time() {

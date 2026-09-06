@@ -31,7 +31,10 @@ pub(super) fn execute(
     stopped: &AtomicBool,
 ) -> Result<Output, CommandError> {
     if stopped.load(Ordering::Relaxed) {
-        return Err(CommandError::Interrupted);
+        return Err(CommandError::Start(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "interrupted before command startup",
+        )));
     }
     let program = argv.first().ok_or_else(|| {
         CommandError::Start(io::Error::new(io::ErrorKind::InvalidInput, "empty command"))
