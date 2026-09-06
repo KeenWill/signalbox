@@ -28,7 +28,8 @@ use std::{
 // blind to it would be multiplied by the same round count it is meant to
 // contain. It also sits far above any provider context window, so it cannot
 // refuse a turn a provider would accept.
-// numeric-bound: guard - prevents retained frontier content from exhausting daemon memory as rounds multiply
+// numeric-bound: guard - prevents retained frontier content from exhausting daemon memory as rounds
+// multiply
 const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize = 256 * 1024 * 1024;
 
 // Worst-case compact JSON for maximum checked metadata, u64 length, and digest.
@@ -3067,8 +3068,8 @@ mod tests {
             .expect("text-only fixture needs no attachment catalog facts")
     }
 
-    /// ordered attachment content becomes bounded
-    /// canonical text stubs with metadata visible and blob bytes absent.
+    /// ordered attachment content becomes bounded canonical text stubs with metadata visible and
+    /// blob bytes absent.
     #[test]
     fn attachment_frontier_renders_ordered_stubs_without_bytes() {
         let digest = BlobDigest::digest(b"secret blob bytes");
@@ -4594,9 +4595,8 @@ mod tests {
         );
     }
 
-    /// rendering binds the exact optional frozen-epoch system
-    /// prompt onto the provider-neutral operation without rewriting it, and
-    /// an epoch without a prompt renders none.
+    /// rendering binds the exact optional frozen-epoch system prompt onto the provider-neutral
+    /// operation without rewriting it, and an epoch without a prompt renders none.
     #[test]
     fn render_carries_the_frozen_epoch_system_prompt() {
         let (request, _) = prepared_fixture();
@@ -4745,10 +4745,9 @@ mod tests {
         )
     }
 
-    /// a recorded override substitutes for the judge only on the
-    /// exact denied command — a proposal with other arguments still parks for
-    /// the judge — and the selected approval carries the override command and
-    /// the overridden denial.
+    /// a recorded override substitutes for the judge only on the exact denied command — a proposal
+    /// with other arguments still parks for the judge — and the selected approval carries the
+    /// override command and the overridden denial.
     #[test]
     fn recorded_override_substitutes_for_the_judge_on_the_exact_command() {
         let recorded = recorded_guarded_override();
@@ -4773,8 +4772,8 @@ mod tests {
         );
     }
 
-    /// one recorded override pre-approves at most one proposal
-    /// per response; a second identical proposal parks for the judge again.
+    /// one recorded override pre-approves at most one proposal per response; a second identical
+    /// proposal parks for the judge again.
     #[test]
     fn recorded_override_is_consumed_at_most_once_per_response() {
         let recorded = recorded_guarded_override();
@@ -4796,8 +4795,8 @@ mod tests {
         );
     }
 
-    /// a recorded override substitutes only where the judge
-    /// would decide; a human-frozen selection is never overridden.
+    /// a recorded override substitutes only where the judge would decide; a human-frozen selection
+    /// is never overridden.
     #[test]
     fn recorded_override_never_bypasses_a_human_selection() {
         let approvals = guarded_tool_approvals(
@@ -4809,10 +4808,9 @@ mod tests {
         assert_eq!(approvals.as_ref(), [InitialToolApproval::Human]);
     }
 
-    /// one identity is minted per ordered response
-    /// part/request, approval stays pinned to the advertised catalog snapshot,
-    /// mixed auto/confirm policy parks without a continuation attempt, and the
-    /// adapter still receives a stopped race closure.
+    /// one identity is minted per ordered response part/request, approval stays pinned to the
+    /// advertised catalog snapshot, mixed auto/confirm policy parks without a continuation attempt,
+    /// and the adapter still receives a stopped race closure.
     #[test]
     fn tool_response_candidates_preserve_order_and_policy() {
         let schema =
@@ -4927,8 +4925,8 @@ mod tests {
         );
     }
 
-    /// a credential-suppressed proposal bypasses the
-    /// advertised execution policy and receives an automatic safety denial.
+    /// a credential-suppressed proposal bypasses the advertised execution policy and receives an
+    /// automatic safety denial.
     #[test]
     fn suppressed_proposal_forces_runtime_safety_denial() {
         let service = ModelCallExecutionService::new(
@@ -4971,9 +4969,8 @@ mod tests {
             [InitialToolApproval::RuntimeSafetyDeny]
         );
     }
-    /// attested imported text keeps its exact
-    /// source-attested role, semantic source, imported authority, and decoded
-    /// text without acquiring a native input or call identity.
+    /// attested imported text keeps its exact source-attested role, semantic source, imported
+    /// authority, and decoded text without acquiring a native input or call identity.
     #[test]
     fn frontier_rendering_preserves_imported_text_roles_and_sources() {
         let imported_user_entry =
@@ -5046,8 +5043,8 @@ mod tests {
         assert_eq!(content.as_str(), exact_assistant.as_str());
     }
 
-    /// typed imported text or speaker absence remains
-    /// model-invisible rather than guessing a role or fabricating content.
+    /// typed imported text or speaker absence remains model-invisible rather than guessing a role
+    /// or fabricating content.
     #[test]
     fn frontier_rendering_skips_imported_text_with_typed_absence() {
         let projected_session = identity(120, SessionId::from_uuid);
@@ -5122,9 +5119,9 @@ mod tests {
         );
     }
 
-    /// the conservative frontier renderer leaves
-    /// every imported non-text vocabulary member model-invisible without
-    /// removing it from the semantic frontier or inventing native tool facts.
+    /// the conservative frontier renderer leaves every imported non-text vocabulary member
+    /// model-invisible without removing it from the semantic frontier or inventing native tool
+    /// facts.
     #[test]
     fn frontier_rendering_skips_every_imported_non_text_variant() {
         let projected_session = identity(130, SessionId::from_uuid);
@@ -5257,9 +5254,9 @@ mod tests {
         );
     }
 
-    /// mixed semantic content keeps exact role order and
-    /// source-qualified provenance, including entries created by a different
-    /// session; terminal markers do not invent provider-visible messages.
+    /// mixed semantic content keeps exact role order and source-qualified provenance, including
+    /// entries created by a different session; terminal markers do not invent provider-visible
+    /// messages.
     #[test]
     fn frontier_rendering_preserves_mixed_roles_and_inherited_sources() {
         let inherited_session = identity(90, SessionId::from_uuid);
@@ -5462,9 +5459,8 @@ mod tests {
         );
     }
 
-    /// durable request, attempt, and denial authority renders
-    /// reference-only tool semantics into their exact provider-visible roles
-    /// without changing source order.
+    /// durable request, attempt, and denial authority renders reference-only tool semantics into
+    /// their exact provider-visible roles without changing source order.
     #[test]
     fn frontier_rendering_resolves_exact_tool_roles_in_source_order() {
         let completed_request = model_tool_request(0);
@@ -5649,8 +5645,8 @@ mod tests {
         );
     }
 
-    /// a terminal attempt from another turn cannot supply
-    /// authority for a tool-result semantic entry.
+    /// a terminal attempt from another turn cannot supply authority for a tool-result semantic
+    /// entry.
     #[test]
     fn frontier_rendering_rejects_cross_turn_tool_result_evidence() {
         let request = model_tool_request(0);
@@ -5698,8 +5694,8 @@ mod tests {
         );
     }
 
-    /// a newly committed Prepared checkpoint ends
-    /// the invocation before capability preparation or authorization.
+    /// a newly committed Prepared checkpoint ends the invocation before capability preparation or
+    /// authorization.
     #[tokio::test]
     async fn checkpoint_stops_before_every_later_port() {
         let checkpoint = identity(70, ModelCallId::from_uuid);
@@ -5727,8 +5723,8 @@ mod tests {
         assert_eq!(prepare.calls, 1);
     }
 
-    /// a proven fresh-identity collision retries only the
-    /// rolled-back prepare transaction with fresh candidates.
+    /// a proven fresh-identity collision retries only the rolled-back prepare transaction with
+    /// fresh candidates.
     #[tokio::test]
     async fn prepare_identity_collision_retries_transaction_only() {
         let checkpoint = identity(71, ModelCallId::from_uuid);
@@ -5840,9 +5836,8 @@ mod tests {
         );
     }
 
-    /// the execution loop presents the prepare transaction's
-    /// exact frozen-epoch system prompt to the provider port with the
-    /// capability operation; a promptless epoch presents none.
+    /// the execution loop presents the prepare transaction's exact frozen-epoch system prompt to
+    /// the provider port with the capability operation; a promptless epoch presents none.
     #[tokio::test]
     async fn prepared_capability_receives_the_frozen_epoch_system_prompt() {
         let (request, _) = prepared_fixture();
@@ -6227,10 +6222,9 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// a turn that reaches the automatic tool-round limit closes
-    /// with its distinct terminal reason before provider entry. This prevents
-    /// a runaway paid provider loop without misreporting saturation as a
-    /// capability failure.
+    /// a turn that reaches the automatic tool-round limit closes with its distinct terminal reason
+    /// before provider entry. This prevents a runaway paid provider loop without misreporting
+    /// saturation as a capability failure.
     #[tokio::test]
     async fn tool_round_limit_fires_before_provider_entry() {
         const CONFIGURED_TOOL_ROUND_LIMIT: usize = 7;
@@ -6784,10 +6778,9 @@ mod tests {
         );
     }
 
-    /// a turn whose retained tool content exceeds its ceiling
-    /// closes through the same pre-send terminal contract as round saturation
-    /// and never enters the provider. The round ceiling alone bounds latency and
-    /// spend but not retained memory, which is what this bound supplies.
+    /// a turn whose retained tool content exceeds its ceiling closes through the same pre-send
+    /// terminal contract as round saturation and never enters the provider. The round ceiling alone
+    /// bounds latency and spend but not retained memory, which is what this bound supplies.
     #[tokio::test]
     async fn retained_frontier_content_limit_fires_before_provider_entry() {
         // Two rounds and no configured round ceiling at all, so only the
@@ -7139,9 +7132,8 @@ mod tests {
         assert_eq!(provider.interaction_count(), 1);
     }
 
-    /// a non-collision observation failure retains
-    /// the exact result; later passes authoritatively resubmit it unchanged
-    /// while absent and stop once the original commit is observed.
+    /// a non-collision observation failure retains the exact result; later passes authoritatively
+    /// resubmit it unchanged while absent and stop once the original commit is observed.
     #[tokio::test]
     async fn failed_observation_commit_is_retained_and_reread() {
         let (request, authorized) = prepared_fixture();
@@ -7223,9 +7215,8 @@ mod tests {
         assert_eq!(provider.interaction_count(), 1);
     }
 
-    /// when authorization acknowledgement is lost,
-    /// the still-owned capability proves `invoke` was never entered. An
-    /// authoritative InFlight reread becomes a correlated known-failure
+    /// when authorization acknowledgement is lost, the still-owned capability proves `invoke` was
+    /// never entered. An authoritative InFlight reread becomes a correlated known-failure
     /// observation without any provider interaction.
     #[tokio::test]
     async fn ambiguous_authorization_classifies_unconsumed_in_flight() {
@@ -7528,9 +7519,8 @@ mod tests {
         assert_eq!(provider.remaining_step_count(), 0);
     }
 
-    /// the attempt gate transfers into the provider
-    /// interaction and is released at its acceptance-capable boundary while
-    /// the slow terminal response remains pending.
+    /// the attempt gate transfers into the provider interaction and is released at its
+    /// acceptance-capable boundary while the slow terminal response remains pending.
     #[tokio::test]
     async fn dispatch_gate_releases_at_acceptance_boundary() {
         let (request, authorized) = prepared_fixture();
