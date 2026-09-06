@@ -138,8 +138,7 @@ idempotent only when all retained command metadata agrees. One dispatch
 reference names exactly one rule revision and event evaluation, including its
 complete ordered action batch. Pending ledger rows remain recoverable without
 the removed or inactive rule, and newly resolved template or configuration
-values cannot replace the committed payload. Command families use the core
-durable discriminators, including `session_lifecycle`.
+values cannot replace the committed payload.
 
 ## Ingest
 
