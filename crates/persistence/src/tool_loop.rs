@@ -23,7 +23,7 @@ use signalbox_domain::{
     DecideToolRequestResult, DelegateApprovalRecommendation, DelegateToolApproval,
     DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
     DelegationProvenanceReconstitutionInput, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, EndedToolAttempt, GoalGeneration, NormalizedToolArguments,
+    DurableCommandId, EndedToolAttempt, FastMode, GoalGeneration, NormalizedToolArguments,
     OverrideDeniedToolRequest, OverrideDeniedToolRequestResult, PreparedDecideToolRequest,
     PreparedOverrideDeniedToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
     ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
@@ -1324,6 +1324,32 @@ impl PostgresToolLoopRepository {
                 },
             )
             .await?;
+            let fast_mode: String = sqlx::query_scalar(
+                "SELECT resolved_model_settings #>> '{effective,fast_mode}'
+                   FROM turn_model_settings_resolved
+                  WHERE session_id = $1
+                    AND turn_id = $2",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(turn_id_to_uuid(turn))
+            .fetch_one(&mut *transaction)
+            .await?;
+            let fast_mode = match fast_mode.as_str() {
+                "disabled" => FastMode::Disabled,
+                "enabled" => FastMode::Enabled,
+                _ => {
+                    return Err(ToolLoopCorruption::Inconsistent(
+                        "continuation effective fast mode",
+                    )
+                    .into());
+                }
+            };
+            let effective_target = self
+                .credential_families
+                .as_ref()
+                .map_or(prepared.call().target(), |families| {
+                    families.serving_target_for_call(prepared.call().target(), fast_mode)
+                });
             insert_prepared_call(
                 &mut transaction,
                 prepared,
@@ -1331,6 +1357,7 @@ impl PostgresToolLoopRepository {
                 None,
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
+                effective_target,
             )
             .await
             .map_err(map_model_call_error)?;

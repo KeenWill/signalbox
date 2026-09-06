@@ -502,6 +502,173 @@ async fn latest_reported_usage_does_not_cross_effective_fast_mode_targets()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn latest_reported_usage_does_not_cross_changed_alternate_target_mapping()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d7a;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 4));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let selected_target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let old_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 30),
+    ));
+    let new_fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 31),
+    ));
+
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared_with_fast_target(
+            seed + 7,
+            seed + 1,
+            selection,
+            old_fast_target,
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 8,
+                seed + 1,
+                "alternate target baseline",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 10),
+            starting_frontier: Uuid::from_u128(seed + 11),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        selected_target,
+    )])
+    .expect("one mapped-fast fixture target forms a catalog");
+    let old_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (old_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, old_fast_target)]))
+    .expect("the original alternate target has a credential family");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(old_families);
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                session,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the mapped-fast fixture call authorizes")
+    };
+    let stored_effective_target: Uuid = sqlx::query_scalar(
+        "SELECT effective_provider_model_identity_id
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored_effective_target,
+        old_fast_target.identity().into_uuid()
+    );
+
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"old fast summary","encrypted_content":"opaque"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22));
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation_with_usage(
+            ModelCallTerminalObservation::CompletedWithProviderCompaction {
+                response: vec![AssistantResponsePart::ProviderCompaction(compaction)],
+                retained_input_tokens: 19,
+                retained_output_tokens: 3,
+            },
+            ProviderReportedTokenUsage::unreported()
+                .with_input_tokens(Some(70))
+                .with_output_tokens(Some(3)),
+        );
+    repository
+        .apply_terminal_observation(
+            session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                terminal_frontier,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let new_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("the replacement alternate target has a credential family");
+    let restarted =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_session_credentials(new_families);
+    assert!(
+        restarted
+            .latest_reported_usage(
+                session,
+                selected_target,
+                FastMode::Enabled,
+                true,
+                terminal_frontier,
+            )
+            .await?
+            .is_none(),
+        "a replacement alternate target cannot reuse the old serving target's baseline"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn latest_reported_usage_excludes_unreplayed_provider_compaction_bytes()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;

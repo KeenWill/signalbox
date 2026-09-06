@@ -2395,10 +2395,11 @@ async fn insert_runner_recovery_turn_with_interrupted_loss_boundary(
         "INSERT INTO model_call
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id,
-             resolved_provider_model_identity_id, context_frontier_id,
+             resolved_provider_model_identity_id, effective_provider_model_identity_id,
+             context_frontier_id,
              credential_reference, state_kind, terminal_disposition_kind,
              turn_instruction_manifest_id)
-         VALUES ($1, $2, $3, $4, 'direct', $5, $6, $7,
+         VALUES ($1, $2, $3, $4, 'direct', $5, $6, $6, $7,
                  'synthetic-runner-recovery-test', 'terminal', 'completed', $8)",
     )
     .bind(facts.active_tool_round_call.into_uuid())
@@ -2556,10 +2557,11 @@ async fn attach_continuing_tool_round_projection(
         "INSERT INTO model_call
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id,
-             resolved_provider_model_identity_id, context_frontier_id,
+             resolved_provider_model_identity_id, effective_provider_model_identity_id,
+             context_frontier_id,
              credential_reference, state_kind, terminal_disposition_kind,
              turn_instruction_manifest_id)
-         VALUES ($1, $2, $3, $4, 'direct', $5, $6, $7,
+         VALUES ($1, $2, $3, $4, 'direct', $5, $6, $6, $7,
                  'synthetic-runner-recovery-test', 'terminal', 'completed', $8)",
     )
     .bind(producing_call.into_uuid())

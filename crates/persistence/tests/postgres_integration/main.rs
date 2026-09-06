@@ -2258,6 +2258,45 @@ fn prepared_with_low_reasoning(
     .expect("user-initiated creation without ancestry is preparable")
 }
 
+fn prepared_with_fast_target(
+    command: u128,
+    session: u128,
+    selection: DirectModelSelection,
+    fast_target: ResolvedProviderTarget,
+) -> PreparedCreateSession {
+    let precedence = ModelSettingsPrecedence::new(
+        ModelSettingsOverlay::inherit_all(),
+        ModelSettingsOverlay::new(
+            SettingOverlay::Inherit,
+            FastModeOverlay::Value(FastMode::Enabled),
+            SettingOverlay::Inherit,
+        ),
+        ModelSettingsOverlay::inherit_all(),
+        ModelSettingsOverlay::inherit_all(),
+    );
+    let settings = ModelCapabilities::new(
+        BTreeSet::new(),
+        FastModeSupport::AlternateTarget(fast_target),
+        BTreeSet::new(),
+    )
+    .validate_precedence(selection, precedence)
+    .expect("the fixture capability admits its alternate fast target");
+    let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+        ModelSelectionRequest::Direct(selection),
+        signalbox_domain::DangerousToolAutoApproval::Disabled,
+        None,
+        settings,
+    )
+    .expect("the fixture settings belong to the direct selection");
+    CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None),
+        defaults,
+    )
+    .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
+    .expect("user-initiated creation without ancestry is preparable")
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RecordedSettingsReplacement {
     session: SessionId,

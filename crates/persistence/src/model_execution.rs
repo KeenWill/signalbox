@@ -635,6 +635,8 @@ impl PostgresModelCallRepository {
         replays_provider_compaction: bool,
         prospective: impl Into<ProspectiveModelInput<'a>>,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
+        let effective_target =
+            serving_pool_target(self.credential_families.as_ref(), target, fast_mode);
         let (projected_members, uncommitted_content_bytes) = match prospective.into() {
             ProspectiveModelInput::Committed(frontier) => {
                 let mut connection = self.pool.acquire().await?;
@@ -721,6 +723,7 @@ impl PostgresModelCallRepository {
                    AND headroom.producing_model_call_id = model_call.model_call_id
                  WHERE model_call.session_id = $1
                    AND model_call.resolved_provider_model_identity_id = $2
+                   AND model_call.effective_provider_model_identity_id = $8
                    AND model_call.state_kind = 'terminal'
                    AND model_call.usage_input_tokens IS NOT NULL
                    AND settings.resolved_model_settings #>> '{effective,fast_mode}' = $6
@@ -965,6 +968,7 @@ impl PostgresModelCallRepository {
             FastMode::Enabled => "enabled",
         })
         .bind(replays_provider_compaction)
+        .bind(effective_target.identity().into_uuid())
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -1374,6 +1378,11 @@ impl PostgresModelCallRepository {
             selected.policy.as_ref(),
             self.cache_inclusive_input_targets
                 .contains(&prepared.call().target()),
+            serving_pool_target(
+                self.credential_families.as_ref(),
+                prepared.call().target(),
+                fast_mode,
+            ),
         )
         .await?;
         consume_pool_member_actions(
@@ -1712,6 +1721,11 @@ impl PostgresModelCallRepository {
                 selected.policy.as_ref(),
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
+                serving_pool_target(
+                    self.credential_families.as_ref(),
+                    prepared.call().target(),
+                    fast_mode,
+                ),
             )
             .await?;
             consume_pool_member_actions(
@@ -3333,6 +3347,7 @@ where
         &credential_reference,
         selected.policy.as_ref(),
         cache_inclusive_input_targets.contains(&prepared.call().target()),
+        serving_pool_target(credential_families, prepared.call().target(), fast_mode),
     )
     .await?;
     consume_pool_member_actions(
@@ -7270,6 +7285,7 @@ pub(crate) async fn insert_prepared_call(
     credential_reference: &ModelCallCredentialReference,
     credential_pool_policy: Option<&CredentialPoolRuntimePolicy>,
     input_includes_cache_tokens: bool,
+    effective_target: ResolvedProviderTarget,
 ) -> Result<(), ModelCallRepositoryError> {
     crate::convergence_sweep::lock_model_activity_fence(connection, prepared.session()).await?;
     let call = prepared.call();
@@ -7428,10 +7444,10 @@ pub(crate) async fn insert_prepared_call(
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id, frozen_model_alias_id,
              frozen_alias_selected_direct_id, resolved_provider_model_identity_id,
-             context_frontier_id, credential_reference,
+             effective_provider_model_identity_id, context_frontier_id, credential_reference,
              usage_input_includes_cache_tokens, turn_instruction_manifest_id, state_kind,
              terminal_disposition_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'prepared', NULL)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'prepared', NULL)",
     )
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(prepared.turn()))
@@ -7442,6 +7458,7 @@ pub(crate) async fn insert_prepared_call(
     .bind(alias)
     .bind(alias_selected)
     .bind(call.target().identity().into_uuid())
+    .bind(effective_target.identity().into_uuid())
     .bind(call.frontier().snapshot().into_uuid())
     .bind(credential_reference.as_str())
     .bind(input_includes_cache_tokens)

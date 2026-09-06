@@ -1637,7 +1637,7 @@ async fn s01_s20_s21_model_call_transactions_complete_first_reply() -> Result<()
             session,
             resolved_target,
             FastMode::Disabled,
-            false,
+            true,
             terminal_frontier,
         )
         .await?
