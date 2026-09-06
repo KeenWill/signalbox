@@ -189,3 +189,55 @@ fn optional<T>(v: &Value, decode: impl FnOnce(&Value) -> Option<T>) -> Option<Op
         Some(Some(decode(v)?))
     }
 }
+
+pub(crate) fn merged_baselines(
+    value: &Value,
+) -> Option<Vec<signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1>> {
+    use signalbox_ownership_seam::{
+        RepoWatchMergedCheckRunBaselineV1, RepoWatchMergedCheckSuiteBaselineV1,
+        RepoWatchMergedPullRequestBaselineInputV1, RepoWatchMergedPullRequestBaselineV1,
+    };
+    array(&value["merged_pull_requests"], |v| {
+        RepoWatchMergedPullRequestBaselineV1::try_new(RepoWatchMergedPullRequestBaselineInputV1 {
+            number: PullRequestNumber::new(positive(&v["number"])?),
+            head_sha: CommitSha::try_new(text(&v["head_sha"])?).ok()?,
+            signal_reviewers: array(&v["signal_reviewers"], |v| {
+                RepoWatchAuthorLogin::try_new(text(v)?).ok()
+            })?,
+            labels: array(&v["labels"], |v| LabelName::try_new(text(v)?).ok())?,
+            mergeable_state: mergeable(&v["mergeable_state"])?,
+            completed_check_suites: array(&v["completed_check_suites"], |v| {
+                Some(RepoWatchMergedCheckSuiteBaselineV1::new(
+                    object_id(&v["id"])?,
+                    generation(&v["completion_generation"])?,
+                ))
+            })?,
+            completed_check_runs: array(&v["completed_check_runs"], |v| {
+                Some(RepoWatchMergedCheckRunBaselineV1::new(
+                    object_id(&v["id"])?,
+                    generation(&v["completion_generation"])?,
+                    conclusion(&v["conclusion"])?,
+                ))
+            })?,
+            review_ids: array(&v["review_ids"], object_id)?,
+            threads: array(&v["threads"], |v| {
+                Some(RepoWatchThreadObservation::new(
+                    ReviewThreadId::try_new(text(&v["thread"])?).ok()?,
+                    match v["state"].as_str()? {
+                        "open" => RepoWatchThreadState::Open,
+                        "resolved" => RepoWatchThreadState::Resolved,
+                        _ => return None,
+                    },
+                ))
+            })?,
+            reactions: array(&v["reactions"], |v| {
+                Some(RepoWatchReactionObservation::new(
+                    reaction_subject(&v["subject"])?,
+                    RepoWatchAuthorLogin::try_new(text(&v["reactor"])?).ok()?,
+                    ReactionContent::try_new(text(&v["content"])?).ok()?,
+                ))
+            })?,
+        })
+        .ok()
+    })
+}

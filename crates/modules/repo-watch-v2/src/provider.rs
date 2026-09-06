@@ -8,11 +8,12 @@ use signalbox_ownership_seam::{
     OffsetDateTime, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
-    RepoWatchWorkflowRunObservation, RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchCheckSuiteObservation, RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    RepoWatchReviewObservation, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug, ReviewState,
+    ReviewThreadId, WorkflowName,
 };
 
 use crate::{
@@ -128,6 +129,7 @@ impl<Loader: RepositoryClientLoader> RepositoryTask for GitHubRepositoryTask<Loa
             &self.repository,
             &self.signal_reviewers,
             baseline.observation.as_ref(),
+            &baseline.merged_baselines,
         )
         .await
         .map_err(RepositoryAttemptError::Observation)?;
@@ -151,6 +153,7 @@ pub async fn fetch_observation(
     repository: &RepositorySlug,
     reviewers: &[RepoWatchAuthorLogin],
     previous: Option<&RepoWatchObservation>,
+    merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
 ) -> Result<RepositoryObservation, ObservationError> {
     let root = format!("/repos/{}", repository.as_str());
     let (metadata, _) = io.page(&root).await?;
@@ -186,6 +189,11 @@ pub async fn fetch_observation(
                 .map(|p| p.context().number()),
         );
     }
+    numbers.extend(
+        merged_baselines
+            .iter()
+            .map(RepoWatchMergedPullRequestBaselineV1::number),
+    );
     let mut pulls = Vec::new();
     for number in numbers {
         let prior = previous.and_then(|p| {
@@ -522,9 +530,14 @@ async fn fetch_workflows(
                 ))
                 .await?;
             for run in admit(value["workflow_runs"].as_array())? {
-                if run["status"] != "completed"
-                    || run["head_repository"]["full_name"] != repository.as_str()
-                {
+                if run["status"] != "completed" {
+                    continue;
+                }
+                let head_repository = admit(
+                    RepositorySlug::try_new(required_text(&run["head_repository"]["full_name"])?)
+                        .ok(),
+                )?;
+                if &head_repository != repository {
                     continue;
                 }
                 let branch = admit(BranchName::try_new(required_text(&run["head_branch"])?).ok())?;
@@ -667,6 +680,7 @@ mod tests {
             &repository,
             std::slice::from_ref(&reviewer),
             None,
+            &[],
         )
         .await
         .expect("complete observation");
@@ -695,7 +709,64 @@ mod tests {
         io.threads["errors"] = json!([{"message": "partial provider response"}]);
         let repository =
             RepositorySlug::try_new(String::from("example/project")).expect("repository");
-        let result = fetch_observation(&io, &repository, &[], None).await;
+        let result = fetch_observation(&io, &repository, &[], None, &[]).await;
         assert_eq!(result, Err(ObservationError::InvalidResponse));
+    }
+    #[tokio::test]
+    async fn workflow_repository_comparison_uses_canonical_slugs() {
+        let mut io = fixture();
+        io.pages
+            .get_mut("/repos/example/project/actions/workflows/5/runs?per_page=100&page=1")
+            .expect("workflow page")
+            .0["workflow_runs"][0]["head_repository"]["full_name"] = json!("Example/Project");
+        let repository =
+            RepositorySlug::try_new(String::from("EXAMPLE/Project")).expect("repository");
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("observation");
+        assert_eq!(observed.observation.state().workflow_runs().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn compacted_merged_numbers_are_refetched_without_an_open_pull_request() {
+        use signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineInputV1;
+        let mut io = fixture();
+        *io.pages
+            .get_mut("/repos/example/project/pulls?state=open&per_page=100&page=1")
+            .expect("pull page") = (json!([]), false);
+        let detail = &mut io
+            .pages
+            .get_mut("/repos/example/project/pulls/1")
+            .expect("pull detail")
+            .0;
+        detail["state"] = json!("closed");
+        detail["merged_at"] = json!("2026-09-06T00:00:00Z");
+        let compacted = RepoWatchMergedPullRequestBaselineV1::try_new(
+            RepoWatchMergedPullRequestBaselineInputV1 {
+                number: PullRequestNumber::new(
+                    std::num::NonZeroU64::new(1).expect("positive fixture number"),
+                ),
+                head_sha: CommitSha::try_new(HEAD.to_owned()).expect("head"),
+                signal_reviewers: Vec::new(),
+                labels: Vec::new(),
+                mergeable_state: MergeableState::Unknown,
+                completed_check_suites: Vec::new(),
+                completed_check_runs: Vec::new(),
+                review_ids: Vec::new(),
+                threads: Vec::new(),
+                reactions: Vec::new(),
+            },
+        )
+        .expect("compacted baseline");
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let observed = fetch_observation(&io, &repository, &[], None, &[compacted])
+            .await
+            .expect("refetch merged subject");
+        assert_eq!(observed.observation.state().pull_requests().len(), 1);
+        assert_eq!(
+            observed.observation.state().pull_requests()[0].lifecycle(),
+            RepoWatchPullRequestLifecycle::Merged
+        );
     }
 }

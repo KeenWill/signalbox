@@ -170,6 +170,12 @@ pub use signalbox_application::UuidV7RepoWatchEventIdGenerator;
 pub use signalbox_application::derive_repo_watch_events;
 ```
 
+## derive_repo_watch_events_with_merged_baselines
+
+```rust
+pub use signalbox_application::derive_repo_watch_events_with_merged_baselines;
+```
+
 ## BranchName
 
 ```rust

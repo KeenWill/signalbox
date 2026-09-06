@@ -2017,6 +2017,114 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert!(lineage.0 > 0);
     assert!(lineage.1);
 
+    let compact_repository = RepositorySlug::try_new(String::from("compacted-restart/project"))?;
+    let source = &comparison_baseline.state().pull_requests()[0];
+    let merged = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context: source.context().clone(),
+        lifecycle: RepoWatchPullRequestLifecycle::Merged,
+        mergeable_state: source.mergeable_state(),
+        completed_check_suites: source.completed_check_suites().to_vec(),
+        completed_check_runs: source.completed_check_runs().to_vec(),
+        reviews: source.reviews().to_vec(),
+        threads: source.threads().to_vec(),
+        reactions: source.reactions().to_vec(),
+    })?;
+    let compacted =
+        signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+            &merged,
+            comparison_baseline.signal_reviewers(),
+        )?
+        .expect("merged baseline");
+    let compact_observation = RepoWatchObservation::new(
+        comparison_baseline.signal_reviewers().to_vec(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                default_branch.clone(),
+                default_head.clone(),
+            )],
+        })?,
+    );
+    let compact_projection = RepositoryProjection {
+        repository: RepositoryState {
+            repository: &compact_repository,
+            default_branch: &default_branch,
+            default_head: &default_head,
+            observed_at,
+        },
+        pull_requests: Vec::new(),
+        comparison_baseline: &compact_observation,
+        merged_baselines: std::slice::from_ref(&compacted),
+    };
+    store
+        .commit_frontier_candidate(
+            &compact_projection,
+            0,
+            &[],
+            &[],
+            EventProducer::Poll,
+            observed_at,
+        )
+        .await?;
+    let reopened = RepoWatchStore::new(module_pool.clone());
+    let restored = reopened.ingest_baseline(&compact_repository).await?;
+    assert_eq!(restored.merged_baselines, vec![compacted]);
+    let mut completed_check_runs = merged.completed_check_runs().to_vec();
+    // A distinct completed run is the only change after compaction and restart.
+    completed_check_runs.push(RepoWatchCheckRunObservation::new(
+        GitHubObjectId::new(NonZeroU64::new(900001).expect("new fixture check identity")),
+        RepoWatchCheckCompletionGeneration::try_new(String::from("post-merge-completion"))?,
+        CheckRunName::try_new(String::from("post-merge"))?,
+        CheckConclusion::Success,
+    ));
+    let changed = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context: merged.context().clone(),
+        lifecycle: RepoWatchPullRequestLifecycle::Merged,
+        mergeable_state: merged.mergeable_state(),
+        completed_check_suites: merged.completed_check_suites().to_vec(),
+        completed_check_runs,
+        reviews: merged.reviews().to_vec(),
+        threads: merged.threads().to_vec(),
+        reactions: merged.reactions().to_vec(),
+    })?;
+    let next = signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+        repository: compact_repository.clone(),
+        default_branch: default_branch.clone(),
+        default_head: default_head.clone(),
+        observed_at,
+        observation: RepoWatchObservation::new(
+            comparison_baseline.signal_reviewers().to_vec(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: vec![changed],
+                workflow_runs: Vec::new(),
+                branch_heads: compact_observation.state().branch_heads().to_vec(),
+            })?,
+        ),
+    };
+    reopened
+        .ingest_observation(&restored, &next, EventProducer::Poll)
+        .await?;
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT event_kind FROM gh_event WHERE repository = $1 ORDER BY repository_event_ordinal",
+    )
+    .bind(compact_repository.as_str())
+    .fetch_all(&module_pool)
+    .await?;
+    assert_eq!(kinds, vec![String::from("check_run_completed")]);
+    let retained = reopened.ingest_baseline(&compact_repository).await?;
+    assert_eq!(retained.merged_baselines.len(), 1);
+    assert_eq!(
+        retained.merged_baselines[0].completed_check_runs().len(),
+        merged.completed_check_runs().len() + 1
+    );
+    assert_eq!(
+        reopened
+            .ingest_observation(&retained, &next, EventProducer::Poll)
+            .await?,
+        FrontierEventAdmission::Unchanged
+    );
+
     module_pool.close().await;
     core_pool.close().await;
     drop(container);

@@ -6,8 +6,9 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::Value;
 use signalbox_ownership_seam::{
     BranchName, CommitSha, OffsetDateTime, RepoWatchEventIdentityFrontierEntryV1,
-    RepoWatchEventIdentityFrontierV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-    RepositorySlug, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchEventIdentityFrontierV1, RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepositorySlug, UuidV7RepoWatchEventIdGenerator,
+    derive_repo_watch_events_with_merged_baselines,
 };
 use tokio::{
     sync::{Notify, watch},
@@ -34,6 +35,7 @@ pub struct RepositoryObservation {
 pub struct IngestBaseline {
     pub generation: u64,
     pub observation: Option<RepoWatchObservation>,
+    pub merged_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
     pub frontier: RepoWatchEventIdentityFrontierV1,
 }
 
@@ -62,7 +64,7 @@ impl RepoWatchStore {
         .fetch_all(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        let (generation, observation) = match row {
+        let (generation, observation, merged_baselines) = match row {
             Some((generation, observation)) => {
                 let value: Value = serde_json::from_str(&observation)
                     .map_err(|_| StoreError::InvalidComparisonBaseline)?;
@@ -74,9 +76,11 @@ impl RepoWatchStore {
                         observation_decode::observation(&value)
                             .ok_or(StoreError::InvalidComparisonBaseline)?,
                     ),
+                    observation_decode::merged_baselines(&value)
+                        .ok_or(StoreError::InvalidComparisonBaseline)?,
                 )
             }
-            None => (0, None),
+            None => (0, None, Vec::new()),
         };
         let frontier = entries
             .into_iter()
@@ -106,6 +110,7 @@ impl RepoWatchStore {
         Ok(IngestBaseline {
             generation,
             observation,
+            merged_baselines,
             frontier: RepoWatchEventIdentityFrontierV1::try_from_entries(frontier)
                 .map_err(|_| StoreError::InvalidComparisonBaseline)?,
         })
@@ -119,14 +124,36 @@ impl RepoWatchStore {
         producer: EventProducer,
     ) -> Result<FrontierEventAdmission, StoreError> {
         let mut frontier = baseline.frontier.clone();
-        let occurrences = derive_repo_watch_events(
+        let occurrences = derive_repo_watch_events_with_merged_baselines(
             &observed.repository,
             baseline.observation.as_ref(),
+            &baseline.merged_baselines,
             &observed.observation,
             &mut frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|_| StoreError::InvalidComparisonBaseline)?;
+        let merged_baselines = baseline
+            .merged_baselines
+            .iter()
+            .map(|retained| {
+                let Some(current) = observed
+                    .observation
+                    .state()
+                    .pull_requests()
+                    .iter()
+                    .find(|p| p.context().number() == retained.number())
+                else {
+                    return Ok(retained.clone());
+                };
+                RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+                    current,
+                    observed.observation.signal_reviewers(),
+                )
+                .map(|updated| updated.unwrap_or_else(|| retained.clone()))
+                .map_err(|_| StoreError::InvalidComparisonBaseline)
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
         let projection = RepositoryProjection {
             repository: RepositoryState {
                 repository: &observed.repository,
@@ -162,7 +189,7 @@ impl RepoWatchStore {
                 })
                 .collect(),
             comparison_baseline: &observed.observation,
-            merged_baselines: &[],
+            merged_baselines: &merged_baselines,
         };
         let events = occurrences
             .iter()
@@ -208,10 +235,12 @@ pub async fn run_repository_task(
         let producer = tokio::select! {
             biased;
             _ = shutdown.changed() => return,
-            () = wake.notified() => EventProducer::Webhook,
             () = sleep_until(next_start) => EventProducer::Poll,
+            () = wake.notified() => EventProducer::Webhook,
         };
-        next_start = Instant::now() + interval;
+        if producer == EventProducer::Poll {
+            next_start = Instant::now() + interval;
+        }
         tokio::select! {
             _ = shutdown.changed() => return,
             result = task.poll(producer) => {
@@ -279,5 +308,42 @@ mod tests {
         assert_eq!(producer, EventProducer::Webhook);
         shutdown.send(true).expect("stop repository task");
         task.await.expect("repository task exits cleanly");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn frequent_webhook_wakes_do_not_postpone_the_periodic_poll() {
+        // Wakes occur five times per arbitrary periodic interval.
+        let interval = Duration::from_secs(10);
+        let (started, mut starts) = mpsc::unbounded_channel();
+        let (finish, finishes) = mpsc::unbounded_channel();
+        let (shutdown, stopped) = watch::channel(false);
+        let wake = Arc::new(Notify::new());
+        let task = tokio::spawn(run_repository_task(
+            Attempt {
+                started,
+                finish: finishes,
+            },
+            interval,
+            wake.clone(),
+            stopped,
+        ));
+        let (first, producer) = starts.recv().await.expect("initial poll");
+        assert_eq!(producer, EventProducer::Poll);
+        finish.send(()).expect("finish poll");
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+            tokio::time::advance(interval / 5).await;
+            wake.notify_one();
+            let (_, producer) = starts.recv().await.expect("wake");
+            assert_eq!(producer, EventProducer::Webhook);
+            finish.send(()).expect("finish wake");
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(interval / 5).await;
+        wake.notify_one();
+        let (next, producer) = starts.recv().await.expect("due poll wins over wake");
+        assert_eq!(next - first, interval);
+        assert_eq!(producer, EventProducer::Poll);
+        shutdown.send(true).expect("shutdown");
+        task.await.expect("task exits");
     }
 }
