@@ -623,10 +623,22 @@ test('catalog keyboard selection opens a session', async ({ page }) => {
   await expect(page.getByRole('dialog', { name: 'Deployment decision' })).toBeVisible()
 })
 
-test('keeps catalog rows when a lifecycle filter has no rates yet or rates fail', async ({
+test('keeps catalog rows and their order while outcomes are pending or unavailable', async ({
   page,
 }) => {
   await useCatalogFixture(page)
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({
+      json: {
+        ...firstPage,
+        summaries: [
+          { ...firstPage.summaries[0], session_id: secondSessionId },
+          { ...firstPage.summaries[1], session_id: firstSessionId },
+          ...firstPage.summaries.slice(2),
+        ],
+      },
+    }),
+  )
   let finish = () => {}
   const pending = new Promise<void>((resolve) => {
     finish = resolve
@@ -642,10 +654,14 @@ test('keeps catalog rows when a lifecycle filter has no rates yet or rates fail'
   })
   await page.goto('/sessions')
   await expect(page.locator('.catalog-list li')).toHaveCount(32)
+  const rows = await page.locator('.catalog-list li strong').allTextContents()
+  await page.getByLabel('Order on this page').selectOption('failure')
   await page.getByLabel('State on this page').selectOption('parked')
   await expect(page.locator('.catalog-list li')).toHaveCount(32)
+  await expect(page.locator('.catalog-list li strong')).toHaveText(rows)
   finish()
   await expect(page.getByText('Session outcomes unavailable.')).toBeVisible()
+  await expect(page.locator('.catalog-list li strong')).toHaveText(rows)
   await expect(page.locator('.catalog-list li')).toHaveCount(32)
 })
 

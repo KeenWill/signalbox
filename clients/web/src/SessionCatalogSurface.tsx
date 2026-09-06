@@ -100,7 +100,7 @@ export function SessionCatalogSurface({
         lifecycleFilter === 'all' ||
         rateById.get(row.session_id)?.lifecycle_state === lifecycleFilter,
     )
-    if (pageOrder === 'failure')
+    if (pageOrder === 'failure' && rates.data !== undefined)
       rows.sort((a, b) => {
         const left = BigInt(rateById.get(a.session_id)?.last_failure_sequence ?? '0')
         const right = BigInt(rateById.get(b.session_id)?.last_failure_sequence ?? '0')
