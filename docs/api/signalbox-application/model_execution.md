@@ -110,7 +110,7 @@ pub enum ModelConversationMessage {
     AssistantToolUse {
         source: context_frontier::SemanticTranscriptEntryRef,
         producing_call: signalbox_domain::ModelCallId,
-        request: tool::ToolRequest,
+        request: request::ToolRequest,
     },
     ToolResult {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -135,10 +135,10 @@ pub enum ModelConversationMessage {
 
 ```rust
 pub enum ModelToolResultContent {
-    Success(tool::ToolResultContent),
+    Success(result::ToolResultContent),
     ExecutionError(tool_attempt::ToolExecutionError),
     Denied {
-        reason: option::Option<tool::ToolDenialReason>,
+        reason: option::Option<policy::ToolDenialReason>,
     },
     ClosedByTurnEnd,
     Delegation(outcome::DelegationOutcome),
@@ -239,8 +239,8 @@ pub enum PrepareModelCallOutcome {
     Ready {
         request: boxed::Box<model_execution::PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,
-        dangerous_tool_auto_approval: tool::DangerousToolAutoApproval,
-        recorded_user_overrides: boxed::Box<[tool::RecordedUserOverride]>,
+        dangerous_tool_auto_approval: policy::DangerousToolAutoApproval,
+        recorded_user_overrides: boxed::Box<[override_denial::RecordedUserOverride]>,
         system_prompt: option::Option<configuration::SessionSystemPrompt>,
         tool_entries: boxed::Box<[ResolvedToolConversationEntry]>,
     },

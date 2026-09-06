@@ -13,7 +13,7 @@ pub fn approval_judge_output_contract_text() -> string::String;
 
 ```rust
 pub struct ApprovalJudgeModelRequest {
-    pub request: tool::ToolRequest,
+    pub request: request::ToolRequest,
     pub call: signalbox_domain::ModelCallId,
     pub selection: configuration::DirectModelSelection,
     pub target: model_call::ResolvedProviderTarget,
@@ -35,8 +35,8 @@ where
 ```rust
 pub struct ApprovalJudgeModelResult {
     pub call: signalbox_domain::ModelCallId,
-    pub recommendation: tool::DelegateApprovalRecommendation,
-    pub rationale: tool::ToolDecisionRationale,
+    pub recommendation: policy::DelegateApprovalRecommendation,
+    pub rationale: policy::ToolDecisionRationale,
     pub reported_model: option::Option<target::ProviderReportedModel>,
     pub usage: usage::TokenUsage,
 }

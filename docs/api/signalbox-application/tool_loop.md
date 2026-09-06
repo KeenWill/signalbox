@@ -19,7 +19,7 @@ impl ToolInputSchema {
 pub enum ToolInputSchemaFailure {
     NotJson,
     NotObject,
-    OutsideArgumentBound(tool::ToolArgumentsFailure),
+    OutsideArgumentBound(arguments::ToolArgumentsFailure),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -43,19 +43,19 @@ pub struct ToolDefinition {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ToolDefinition {
     pub const fn new(
-        name: tool::ToolName,
+        name: name::ToolName,
         description: string::String,
         input_schema: ToolInputSchema,
-        permission_default: tool::ToolPermissionDefault,
-        effect_class: tool::ToolEffectClass,
+        permission_default: policy::ToolPermissionDefault,
+        effect_class: policy::ToolEffectClass,
     ) -> Self;
-    pub const fn name(&self) -> &tool::ToolName;
+    pub const fn name(&self) -> &name::ToolName;
     pub fn description(&self) -> &str;
     pub const fn input_schema(&self) -> &ToolInputSchema;
-    pub const fn permission_default(&self) -> tool::ToolPermissionDefault;
-    pub const fn with_approval_posture(self, posture: tool::ToolApprovalPosture) -> Self;
-    pub const fn approval_posture(&self) -> option::Option<tool::ToolApprovalPosture>;
-    pub const fn effect_class(&self) -> tool::ToolEffectClass;
+    pub const fn permission_default(&self) -> policy::ToolPermissionDefault;
+    pub const fn with_approval_posture(self, posture: policy::ToolApprovalPosture) -> Self;
+    pub const fn approval_posture(&self) -> option::Option<policy::ToolApprovalPosture>;
+    pub const fn effect_class(&self) -> policy::ToolEffectClass;
 }
 ```
 
@@ -65,11 +65,11 @@ impl ToolDefinition {
 pub trait ToolArgumentValidator: marker::Send + marker::Sync {
     fn validate(
         &self,
-        arguments: &tool::NormalizedToolArguments,
+        arguments: &arguments::NormalizedToolArguments,
     ) -> result::Result<(), tool_attempt::ToolExecutionErrorDetail>;
     fn preauthorization(
         &self,
-        _arguments: &tool::NormalizedToolArguments,
+        _arguments: &arguments::NormalizedToolArguments,
     ) -> result::Result<ToolPreauthorization, tool_attempt::ToolExecutionErrorDetail> {
         /* provided */
     }
@@ -77,14 +77,14 @@ pub trait ToolArgumentValidator: marker::Send + marker::Sync {
 impl<Validate> ToolArgumentValidator for Validate
 where
     Validate: function::Fn(
-            &tool::NormalizedToolArguments,
+            &arguments::NormalizedToolArguments,
         ) -> result::Result<(), tool_attempt::ToolExecutionErrorDetail>
         + marker::Send
         + marker::Sync,
 {
     fn validate(
         &self,
-        arguments: &tool::NormalizedToolArguments,
+        arguments: &arguments::NormalizedToolArguments,
     ) -> result::Result<(), tool_attempt::ToolExecutionErrorDetail>;
 }
 ```
@@ -126,7 +126,7 @@ impl CompiledTool {
 pub struct DuplicateToolDefinition {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl DuplicateToolDefinition {
-    pub const fn name(&self) -> &tool::ToolName;
+    pub const fn name(&self) -> &name::ToolName;
 }
 ```
 
@@ -142,16 +142,16 @@ impl CompiledToolCatalog {
 }
 impl ToolCatalog for CompiledToolCatalog {
     fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
-    fn definition(&self, name: &tool::ToolName) -> option::Option<ToolDefinition>;
+    fn definition(&self, name: &name::ToolName) -> option::Option<ToolDefinition>;
     fn validate_arguments(
         &self,
-        name: &tool::ToolName,
-        arguments: &tool::NormalizedToolArguments,
+        name: &name::ToolName,
+        arguments: &arguments::NormalizedToolArguments,
     ) -> result::Result<(), ToolCatalogValidationFailure>;
     fn preauthorization(
         &self,
-        name: &tool::ToolName,
-        arguments: &tool::NormalizedToolArguments,
+        name: &name::ToolName,
+        arguments: &arguments::NormalizedToolArguments,
     ) -> result::Result<ToolPreauthorization, ToolCatalogValidationFailure>;
 }
 ```
@@ -161,16 +161,16 @@ impl ToolCatalog for CompiledToolCatalog {
 ```rust
 pub trait ToolCatalog: marker::Send + marker::Sync {
     fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
-    fn definition(&self, name: &tool::ToolName) -> option::Option<ToolDefinition>;
+    fn definition(&self, name: &name::ToolName) -> option::Option<ToolDefinition>;
     fn validate_arguments(
         &self,
-        name: &tool::ToolName,
-        arguments: &tool::NormalizedToolArguments,
+        name: &name::ToolName,
+        arguments: &arguments::NormalizedToolArguments,
     ) -> result::Result<(), ToolCatalogValidationFailure>;
     fn preauthorization(
         &self,
-        _name: &tool::ToolName,
-        _arguments: &tool::NormalizedToolArguments,
+        _name: &name::ToolName,
+        _arguments: &arguments::NormalizedToolArguments,
     ) -> result::Result<ToolPreauthorization, ToolCatalogValidationFailure> {
         /* provided */
     }
@@ -184,11 +184,11 @@ pub struct NoToolCatalog;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl ToolCatalog for NoToolCatalog {
     fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
-    fn definition(&self, _name: &tool::ToolName) -> option::Option<ToolDefinition>;
+    fn definition(&self, _name: &name::ToolName) -> option::Option<ToolDefinition>;
     fn validate_arguments(
         &self,
-        _name: &tool::ToolName,
-        _arguments: &tool::NormalizedToolArguments,
+        _name: &name::ToolName,
+        _arguments: &arguments::NormalizedToolArguments,
     ) -> result::Result<(), ToolCatalogValidationFailure>;
 }
 ```
@@ -211,7 +211,7 @@ pub enum ToolCatalogValidationFailure {
 pub struct ToolExecutionInvocation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ToolExecutionInvocation {
-    pub const fn request(&self) -> &tool::ToolRequest;
+    pub const fn request(&self) -> &request::ToolRequest;
     pub const fn dispatch_authority(&self) -> &tool_attempt::ToolDispatchAuthority;
     pub const fn definition(&self) -> &ToolDefinition;
     pub const fn correlation(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
@@ -360,9 +360,9 @@ where
 {
     pub async fn execute(
         &mut self,
-        command: tool::DecideToolRequest,
+        command: decide::DecideToolRequest,
     ) -> result::Result<
-        tool::PreparedDecideToolRequest,
+        decide::PreparedDecideToolRequest,
         <Transaction as DecideToolRequestTransaction>::Error,
     >;
 }
@@ -382,9 +382,9 @@ where
 {
     pub async fn execute(
         &mut self,
-        command: tool::OverrideDeniedToolRequest,
+        command: override_denial::OverrideDeniedToolRequest,
     ) -> result::Result<
-        tool::PreparedOverrideDeniedToolRequest,
+        override_denial::PreparedOverrideDeniedToolRequest,
         <Transaction as OverrideDeniedToolRequestTransaction>::Error,
     >;
 }

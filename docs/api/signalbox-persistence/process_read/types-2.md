@@ -269,11 +269,11 @@ where
 {
 }
 impl process_read::ProcessToolApproval {
-    pub const fn decision(&self) -> &tool::ToolApprovalDecision;
+    pub const fn decision(&self) -> &approval::ToolApprovalDecision;
 }
 impl process_read::ProcessToolApproval {
-    pub const fn decider(&self) -> tool::ToolApprovalDecider;
-    pub const fn rationale(&self) -> option::Option<&tool::ToolDecisionRationale>;
+    pub const fn decider(&self) -> policy::ToolApprovalDecider;
+    pub const fn rationale(&self) -> option::Option<&policy::ToolDecisionRationale>;
 }
 ```
 

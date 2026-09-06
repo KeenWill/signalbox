@@ -299,7 +299,7 @@ where
 }
 impl SessionDelegationRequestDecodeError {
     pub const fn failure(&self) -> SessionDelegationRequestDecodeFailure;
-    pub fn into_request(self) -> tool::ToolRequest;
+    pub fn into_request(self) -> request::ToolRequest;
 }
 impl fmt::Display for SessionDelegationRequestDecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -313,7 +313,7 @@ impl error::Error for SessionDelegationRequestDecodeError {
 
 ```rust
 pub fn foreground_await_request(
-    request: &tool::ToolRequest,
+    request: &request::ToolRequest,
 ) -> option::Option<request::DelegationAwaitRequest>;
 ```
 

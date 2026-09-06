@@ -142,7 +142,7 @@ where
 {
 }
 impl approval_judge::PreparedApprovalJudge {
-    pub const fn request(&self) -> &tool::ToolRequest;
+    pub const fn request(&self) -> &request::ToolRequest;
     pub fn credential_reference(&self) -> &str;
     pub const fn session_context(&self) -> &approval_judge::SessionAuthorityContext;
 }
@@ -202,7 +202,7 @@ where
 {
 }
 impl approval_judge::ApprovalJudgeAuthorization for approval_judge::AuthorizedApprovalJudge {
-    fn request(&self) -> &tool::ToolRequest;
+    fn request(&self) -> &request::ToolRequest;
     fn call(&self) -> signalbox_domain::ModelCallId;
     fn selection(&self) -> configuration::DirectModelSelection;
     fn target(&self) -> model_call::ResolvedProviderTarget;
@@ -538,8 +538,8 @@ impl approval_judge::PostgresApprovalJudgeRepository {
     pub async fn complete<NextClosedResultEntry>(
         &self,
         prepared: &approval_judge::PreparedApprovalJudge,
-        recommendation: tool::DelegateApprovalRecommendation,
-        rationale: tool::ToolDecisionRationale,
+        recommendation: policy::DelegateApprovalRecommendation,
+        rationale: policy::ToolDecisionRationale,
         usage: model_execution::ProviderReportedTokenUsage,
         identities: approval_judge::ApprovalJudgeCompletionIdentities,
         next_closed_result_entry: NextClosedResultEntry,

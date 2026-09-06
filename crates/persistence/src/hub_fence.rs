@@ -93,7 +93,7 @@ impl AdvancedHubFence<'_> {
         fenced_pool_options(min_connections)
             .after_connect(move |connection, _metadata| {
                 Box::pin(async move {
-                    sqlx::query("SELECT pg_advisory_lock_shared($1)")
+                    sqlx::query(crate::lock_inventory::HUB_FENCE_POOL_GENERATION)
                         .bind(key)
                         .execute(&mut *connection)
                         .await?;
@@ -146,7 +146,7 @@ pub async fn advance_hub_fence(
         .ok_or(HubFenceCorruption::GenerationExhausted)?;
     let prior_key = advisory_key(prior);
 
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    sqlx::query(crate::lock_inventory::HUB_FENCE_PRIOR_GENERATION)
         .bind(prior_key)
         .execute(&mut *transaction)
         .await?;
@@ -166,21 +166,22 @@ pub async fn advance_hub_fence(
         return Err(HubFenceCorruption::InvalidGeneration.into());
     }
 
-    let retained: bool = match sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-        .bind(prior_key)
-        .fetch_one(&mut *transaction)
-        .await
-    {
-        Ok(retained) => retained,
-        Err(error) => {
-            transaction.rollback().await?;
-            let _unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
-                .bind(prior_key)
-                .fetch_one(connection)
-                .await?;
-            return Err(error.into());
-        }
-    };
+    let retained: bool =
+        match sqlx::query_scalar(crate::lock_inventory::HUB_FENCE_RETAIN_PRIOR_GENERATION)
+            .bind(prior_key)
+            .fetch_one(&mut *transaction)
+            .await
+        {
+            Ok(retained) => retained,
+            Err(error) => {
+                transaction.rollback().await?;
+                let _unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+                    .bind(prior_key)
+                    .fetch_one(connection)
+                    .await?;
+                return Err(error.into());
+            }
+        };
     if !retained {
         return Err(HubFenceCorruption::FenceRetentionFailed.into());
     }
@@ -207,7 +208,7 @@ pub async fn retire_hub_fence_generation(
     connection: &mut PgConnection,
     generation: HubFenceGeneration,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_lock($1)")
+    sqlx::query(crate::lock_inventory::HUB_FENCE_RETIRE_GENERATION)
         .bind(advisory_key(generation.get()))
         .execute(connection)
         .await?;
