@@ -1664,7 +1664,8 @@ async fn exact_completed(
 
 /// Reads the identities a headless escalation durably closed the turn under.
 ///
-/// Only the commissioned-dispatch audit family retains this legacy path.
+/// The commissioned-dispatch audit supplies the identities needed to replay the
+/// completion outcome.
 async fn headless_escalation_identities(
     connection: &mut PgConnection,
     call: ModelCallId,

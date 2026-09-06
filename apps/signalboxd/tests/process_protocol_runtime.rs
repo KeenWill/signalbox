@@ -2500,10 +2500,8 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
 // configuration. The cap is deployment configuration rather than a compiled
 // constant, so the derived ordinary limit below is stated against it.
 const FLEET_PASS_ADMISSION_CAP: usize = 16;
-// numeric-bound: derived ceiling from the configured pass admission cap.
-// One place inside the shared admission cap stays reserved for a
-// repository-watch dispatch start, so a fleet that saturates ordinary
-// scheduler capacity is one session smaller than the cap itself.
+// numeric-bound: derived ceiling - ordinary scheduler work can use the complete
+// configured pass admission cap.
 const FLEET_SESSION_COUNT: usize = FLEET_PASS_ADMISSION_CAP;
 // numeric-bound: test setup - preserves the ordinary production occupancy fixture
 const FLEET_BASELINE_OCCUPANCY_BOUND: Duration = Duration::from_secs(900);
