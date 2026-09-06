@@ -270,6 +270,26 @@ alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
 selection_id = "00000000-0000-0000-0000-000000000001"
 "#;
 
+fn reported_usage_preflight_configuration_text() -> String {
+    MODEL_CONFIGURATION
+        // Anthropic admission now belongs to prospective provider counting.
+        // These fixtures exercise the reported-usage fallback retained for
+        // adapters without that operation.
+        .replace("adapter = \"anthropic\"", "adapter = \"openai\"")
+        .replace("model_family = \"anthropic\"", "model_family = \"openai\"")
+        .replace("max_output_tokens = 256", "max_output_tokens = 1")
+        .replace(
+            "context_window_tokens = 200000",
+            "context_window_tokens = 4096",
+        )
+}
+
+fn reported_usage_preflight_configuration() -> Result<HubModelConfiguration, Box<dyn Error>> {
+    Ok(support::parse_model_configuration(
+        &reported_usage_preflight_configuration_text(),
+    )?)
+}
+
 fn session_template_configuration(
     models: &HubModelConfiguration,
 ) -> Result<SessionTemplateConfiguration, Box<dyn Error>> {
@@ -845,16 +865,21 @@ impl RunningRuntime {
     async fn start_with_optional_compaction(
         compaction_model: Option<ScriptedModel<ModelCallId>>,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_with_options(compaction_model, BlobStorageFixtureMode::Disabled).await
+        Self::start_with_options(compaction_model, BlobStorageFixtureMode::Disabled, None).await
     }
 
     async fn start_with_blob_storage() -> Result<Self, Box<dyn Error>> {
-        Self::start_with_options(None, BlobStorageFixtureMode::Enabled).await
+        Self::start_with_options(None, BlobStorageFixtureMode::Enabled, None).await
+    }
+
+    async fn start_with_model_configuration(configuration: &str) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_options(None, BlobStorageFixtureMode::Disabled, Some(configuration)).await
     }
 
     async fn start_with_options(
         compaction_model: Option<ScriptedModel<ModelCallId>>,
         blob_storage: BlobStorageFixtureMode,
+        configuration_override: Option<&str>,
     ) -> Result<Self, Box<dyn Error>> {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
@@ -869,9 +894,14 @@ impl RunningRuntime {
             BlobStorageFixtureMode::Disabled => None,
             BlobStorageFixtureMode::Enabled => Some(BlobStorageFixture::create()?),
         };
-        let configuration = blob_storage_root.as_ref().map_or_else(
-            || String::from(MODEL_CONFIGURATION),
-            BlobStorageFixture::model_configuration,
+        let configuration = configuration_override.map_or_else(
+            || {
+                blob_storage_root.as_ref().map_or_else(
+                    || String::from(MODEL_CONFIGURATION),
+                    BlobStorageFixture::model_configuration,
+                )
+            },
+            String::from,
         );
         let model_configuration = support::parse_model_configuration(&configuration)?;
         let blob_store_registry = match blob_storage {
@@ -2314,6 +2344,25 @@ async fn execute_streamed_turn_until(
     settle: TurnSettle,
 ) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
     let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    execute_streamed_turn_until_with_configuration(
+        runtime,
+        scripted,
+        model_configuration,
+        session_id,
+        turn_id,
+        settle,
+    )
+    .await
+}
+
+async fn execute_streamed_turn_until_with_configuration(
+    runtime: &mut RunningRuntime,
+    scripted: ScriptedModel<ModelCallId>,
+    model_configuration: HubModelConfiguration,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    settle: TurnSettle,
+) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
     let probe = scripted.clone();
     let provider =
         RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
@@ -9176,7 +9225,8 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
 -> Result<(), Box<dyn Error>> {
-    let mut runtime = RunningRuntime::start().await?;
+    let configuration_text = reported_usage_preflight_configuration_text();
+    let mut runtime = RunningRuntime::start_with_model_configuration(&configuration_text).await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let (_, first_turn) = submit_first_input(
@@ -9196,8 +9246,15 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
         "reported usage historical reply",
         saturated_usage,
     ));
-    let first_probe =
-        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    let first_probe = execute_streamed_turn_until_with_configuration(
+        &mut runtime,
+        first_runtime,
+        reported_usage_preflight_configuration()?,
+        session_id,
+        first_turn,
+        TurnSettle::Terminal,
+    )
+    .await?;
     assert_eq!(first_probe.received_operations().len(), 1);
 
     connection
@@ -9215,14 +9272,7 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
-    let configuration = support::parse_model_configuration(
-        &MODEL_CONFIGURATION
-            .replace("max_output_tokens = 256", "max_output_tokens = 1")
-            .replace(
-                "context_window_tokens = 200000",
-                "context_window_tokens = 4096",
-            ),
-    )?;
+    let configuration = reported_usage_preflight_configuration()?;
     let runtime_models = configuration.runtime_model_catalog();
     let saturated_summary_usage = TokenUsage {
         input_tokens: Some(5000),
@@ -9296,7 +9346,8 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s01_s03_inv014_inv015_reported_usage_preflight_counts_the_queued_input()
 -> Result<(), Box<dyn Error>> {
-    let mut runtime = RunningRuntime::start().await?;
+    let configuration_text = reported_usage_preflight_configuration_text();
+    let mut runtime = RunningRuntime::start_with_model_configuration(&configuration_text).await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let (_, first_turn) = submit_first_input(
@@ -9318,8 +9369,15 @@ async fn s01_s03_inv014_inv015_reported_usage_preflight_counts_the_queued_input(
         "queued input preflight historical reply",
         fitting_usage,
     ));
-    let first_probe =
-        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    let first_probe = execute_streamed_turn_until_with_configuration(
+        &mut runtime,
+        first_runtime,
+        reported_usage_preflight_configuration()?,
+        session_id,
+        first_turn,
+        TurnSettle::Terminal,
+    )
+    .await?;
     assert_eq!(first_probe.received_operations().len(), 1);
 
     // 103 ASCII characters: under the byte-per-token allowance the queued input
@@ -9342,14 +9400,7 @@ async fn s01_s03_inv014_inv015_reported_usage_preflight_counts_the_queued_input(
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
-    let configuration = support::parse_model_configuration(
-        &MODEL_CONFIGURATION
-            .replace("max_output_tokens = 256", "max_output_tokens = 1")
-            .replace(
-                "context_window_tokens = 200000",
-                "context_window_tokens = 4096",
-            ),
-    )?;
+    let configuration = reported_usage_preflight_configuration()?;
     let runtime_models = configuration.runtime_model_catalog();
     let summary_text = String::from("queued input preflight summary");
     let summary_runtime = ScriptedModel::single(completed_script(
