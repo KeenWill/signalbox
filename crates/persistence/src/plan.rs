@@ -1,10 +1,6 @@
 //! PostgreSQL storage for append-only session plan events.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    error::Error,
-    fmt,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -458,13 +454,17 @@ const HISTORY_SQL: &str = "SELECT event.event_ordinal, event.event_kind,
  ORDER BY event.event_ordinal
  LIMIT $2";
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable plan row failed checked reconstruction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionPlanCorruption {
+    #[error("session plan is missing {field_0}")]
     /// A required durable field was absent.
     Missing(&'static str),
+    #[error("session plan has invalid positive {field_0}")]
     /// A numeric value was not a positive u64.
     InvalidPositiveInteger(&'static str),
+    #[error("session plan has unsupported {field}: {value}")]
     /// A closed discriminator was unsupported.
     Unsupported {
         /// Durable field being decoded.
@@ -472,70 +472,27 @@ pub enum SessionPlanCorruption {
         /// Unsupported spelling.
         value: String,
     },
+    #[error("session plan has mismatched {field_0}")]
     /// Two stored identity fields disagreed.
     MismatchedIdentity(&'static str),
+    #[error("session plan has invalid {field_0} payload")]
     /// Nullable event payload fields did not match their discriminator.
     InvalidEventPayload(&'static str),
+    #[error("session plan has invalid entry text")]
     /// Stored text violated the tool boundary.
     InvalidText,
+    #[error("session plan event sequence is invalid")]
     /// The durable event sequence has a gap or a mutation without a creation.
     InvalidEventSequence,
+    #[error("session plan history is invalid: {field_0}")]
     /// The chronological durable prefix cannot be folded.
-    InvalidHistory(PlanFoldError),
+    InvalidHistory(#[source] PlanFoldError),
+    #[error("session plan history repeats tool-attempt provenance")]
     /// Two durable events claim the same physical tool attempt.
     DuplicateProvenance,
+    #[error("session plan provenance lacks durable authority")]
     /// Durable provenance does not match tool-attempt authority.
     UntrustedProvenance,
-}
-
-impl fmt::Display for SessionPlanCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "session plan is missing {field}"),
-            Self::InvalidPositiveInteger(field) => {
-                write!(formatter, "session plan has invalid positive {field}")
-            }
-            Self::Unsupported { field, value } => {
-                write!(formatter, "session plan has unsupported {field}: {value}")
-            }
-            Self::MismatchedIdentity(field) => {
-                write!(formatter, "session plan has mismatched {field}")
-            }
-            Self::InvalidEventPayload(kind) => {
-                write!(formatter, "session plan has invalid {kind} payload")
-            }
-            Self::InvalidText => formatter.write_str("session plan has invalid entry text"),
-            Self::InvalidEventSequence => {
-                formatter.write_str("session plan event sequence is invalid")
-            }
-            Self::InvalidHistory(error) => {
-                write!(formatter, "session plan history is invalid: {error}")
-            }
-            Self::DuplicateProvenance => {
-                formatter.write_str("session plan history repeats tool-attempt provenance")
-            }
-            Self::UntrustedProvenance => {
-                formatter.write_str("session plan provenance lacks durable authority")
-            }
-        }
-    }
-}
-
-impl Error for SessionPlanCorruption {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidHistory(error) => Some(error),
-            Self::InvalidEventSequence
-            | Self::Missing(_)
-            | Self::InvalidPositiveInteger(_)
-            | Self::Unsupported { .. }
-            | Self::MismatchedIdentity(_)
-            | Self::InvalidEventPayload(_)
-            | Self::InvalidText
-            | Self::DuplicateProvenance
-            | Self::UntrustedProvenance => None,
-        }
-    }
 }
 
 #[derive(signalbox_derive::OperatorError)]

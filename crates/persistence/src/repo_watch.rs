@@ -2,8 +2,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    error::Error,
-    fmt,
     num::{NonZeroU16, NonZeroU32, NonZeroU64},
     time::Duration,
 };
@@ -329,17 +327,11 @@ impl RepoWatchEventPageSize {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("repository-watch event page size exceeds 100")]
 /// A requested durable event page exceeded the fixed bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchPageSizeError;
-
-impl fmt::Display for RepoWatchPageSizeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("repository-watch event page size exceeds 100")
-    }
-}
-
-impl Error for RepoWatchPageSizeError {}
 
 /// One positioned durable repository-watch fact.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -384,146 +376,72 @@ impl RepoWatchEventPage {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Closed fail-closed classification for malformed durable repository-watch data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchPersistenceCorruption {
+    #[error("invalid cursor generation")]
     InvalidCursorGeneration,
+    #[error("malformed cursor document")]
     MalformedCursorDocument,
+    #[error("unsupported cursor version")]
     UnsupportedCursorVersion,
+    #[error("invalid cursor field {field_0}")]
     InvalidCursorField(&'static str),
+    #[error("unknown cursor discriminator {field_0}")]
     UnknownCursorDiscriminator(&'static str),
+    #[error("noncanonical cursor payload")]
     NonCanonicalCursor,
+    #[error("invalid event position")]
     InvalidEventPosition,
+    #[error("unsupported event version")]
     UnsupportedEventVersion,
+    #[error("unsupported event content identity version")]
     UnsupportedEventContentIdentityVersion,
+    #[error("invalid event content identity")]
     InvalidEventContentIdentity,
+    #[error("unknown event producer")]
     UnknownEventProducer,
+    #[error("invalid event field {field_0}")]
     InvalidEventField(&'static str),
+    #[error("unknown event discriminator {field_0}")]
     UnknownEventDiscriminator(&'static str),
+    #[error("invalid stored domain value")]
     InvalidStoredDomainValue,
+    #[error("event row shape mismatch")]
     EventShapeMismatch,
 }
 
-impl fmt::Display for RepoWatchPersistenceCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidCursorGeneration => formatter.write_str("invalid cursor generation"),
-            Self::MalformedCursorDocument => formatter.write_str("malformed cursor document"),
-            Self::UnsupportedCursorVersion => formatter.write_str("unsupported cursor version"),
-            Self::InvalidCursorField(field) => write!(formatter, "invalid cursor field {field}"),
-            Self::UnknownCursorDiscriminator(field) => {
-                write!(formatter, "unknown cursor discriminator {field}")
-            }
-            Self::NonCanonicalCursor => formatter.write_str("noncanonical cursor payload"),
-            Self::InvalidEventPosition => formatter.write_str("invalid event position"),
-            Self::UnsupportedEventVersion => formatter.write_str("unsupported event version"),
-            Self::UnsupportedEventContentIdentityVersion => {
-                formatter.write_str("unsupported event content identity version")
-            }
-            Self::InvalidEventContentIdentity => {
-                formatter.write_str("invalid event content identity")
-            }
-            Self::UnknownEventProducer => formatter.write_str("unknown event producer"),
-            Self::InvalidEventField(field) => write!(formatter, "invalid event field {field}"),
-            Self::UnknownEventDiscriminator(field) => {
-                write!(formatter, "unknown event discriminator {field}")
-            }
-            Self::InvalidStoredDomainValue => formatter.write_str("invalid stored domain value"),
-            Self::EventShapeMismatch => formatter.write_str("event row shape mismatch"),
-        }
-    }
-}
-
-impl Error for RepoWatchPersistenceCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database, request, or fail-closed repository-watch storage failure.
 #[derive(Debug)]
 pub enum RepoWatchStoreError {
-    Database(sqlx::Error),
-    CommitAmbiguous(sqlx::Error),
-    CursorEncoding(serde_json::Error),
-    Corruption(RepoWatchPersistenceCorruption),
+    #[error("repository-watch database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("repository-watch commit outcome is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("repository-watch cursor encoding failed: {field_0}")]
+    CursorEncoding(#[source] serde_json::Error),
+    #[error("repository-watch storage is corrupt: {field_0}")]
+    Corruption(#[source] RepoWatchPersistenceCorruption),
+    #[error("repository-watch event names another repository")]
     EventRepositoryMismatch,
+    #[error("repository-watch event batch repeats identity {field_0:?}")]
     DuplicateEventIdentity(RepoWatchEventId),
+    #[error("repository-watch event batch repeats content identity {:02x?}", field_0.as_bytes())]
     DuplicateEventContentIdentity(RepoWatchEventContentIdentityV1),
+    #[error("repository-watch events accompany an unchanged cursor state")]
     EventsWithoutStateChange,
+    #[error("repository-watch cursor generation is exhausted")]
     CursorGenerationExhausted,
+    #[error("repository-watch event batch exceeds the durable ordinal range")]
     EventBatchTooLarge,
+    #[error("repository-watch convergence evidence exceeds durable bounds")]
     ConvergenceEvidenceTooLarge,
+    #[error("repository-watch convergence evidence names another cursor state")]
     ConvergenceEvidenceMismatch,
+    #[error("repository-watch stale review clearance names ineligible or changed evidence")]
     StaleReviewClearanceMismatch,
-}
-
-impl fmt::Display for RepoWatchStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "repository-watch database failure: {error}")
-            }
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "repository-watch commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::CursorEncoding(error) => {
-                write!(
-                    formatter,
-                    "repository-watch cursor encoding failed: {error}"
-                )
-            }
-            Self::Corruption(error) => {
-                write!(formatter, "repository-watch storage is corrupt: {error}")
-            }
-            Self::EventRepositoryMismatch => {
-                formatter.write_str("repository-watch event names another repository")
-            }
-            Self::DuplicateEventIdentity(id) => write!(
-                formatter,
-                "repository-watch event batch repeats identity {id:?}"
-            ),
-            Self::DuplicateEventContentIdentity(identity) => write!(
-                formatter,
-                "repository-watch event batch repeats content identity {:02x?}",
-                identity.as_bytes()
-            ),
-            Self::EventsWithoutStateChange => {
-                formatter.write_str("repository-watch events accompany an unchanged cursor state")
-            }
-            Self::CursorGenerationExhausted => {
-                formatter.write_str("repository-watch cursor generation is exhausted")
-            }
-            Self::EventBatchTooLarge => formatter
-                .write_str("repository-watch event batch exceeds the durable ordinal range"),
-            Self::ConvergenceEvidenceTooLarge => {
-                formatter.write_str("repository-watch convergence evidence exceeds durable bounds")
-            }
-            Self::ConvergenceEvidenceMismatch => formatter
-                .write_str("repository-watch convergence evidence names another cursor state"),
-            Self::StaleReviewClearanceMismatch => formatter.write_str(
-                "repository-watch stale review clearance names ineligible or changed evidence",
-            ),
-        }
-    }
-}
-
-impl Error for RepoWatchStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::CursorEncoding(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::EventRepositoryMismatch
-            | Self::DuplicateEventIdentity(_)
-            | Self::DuplicateEventContentIdentity(_)
-            | Self::EventsWithoutStateChange
-            | Self::CursorGenerationExhausted
-            | Self::EventBatchTooLarge
-            | Self::ConvergenceEvidenceTooLarge
-            | Self::ConvergenceEvidenceMismatch
-            | Self::StaleReviewClearanceMismatch => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for RepoWatchStoreError {

@@ -4,7 +4,7 @@ mod headline;
 
 use headline::decode_headline;
 
-use std::{error::Error, fmt, num::NonZeroU64, sync::LazyLock};
+use std::{num::NonZeroU64, sync::LazyLock};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -367,11 +367,14 @@ RETURNING 1
 )
 SELECT value FROM compatible";
 
+#[derive(signalbox_derive::OperatorError)]
 /// Integrity failure in the dedicated search projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SearchProjectionCorruption {
+    #[error("invalid search projection {field_0}")]
     /// A required projected field was absent or malformed.
     Invalid(&'static str),
+    #[error("unsupported search projection {field}: {value}")]
     /// A closed stored discriminator was unsupported.
     Unsupported {
         /// Projection field carrying the unsupported spelling.
@@ -379,49 +382,21 @@ pub enum SearchProjectionCorruption {
         /// Exact unsupported spelling.
         value: String,
     },
+    #[error("search projection source shape is invalid")]
     /// Stored source fields contradicted the selected typed source.
     SourceShape,
 }
 
-impl fmt::Display for SearchProjectionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid(field) => write!(formatter, "invalid search projection {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported search projection {field}: {value}")
-            }
-            Self::SourceShape => formatter.write_str("search projection source shape is invalid"),
-        }
-    }
-}
-
-impl Error for SearchProjectionCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Database or fail-closed lexical projection failure.
 #[derive(Debug)]
 pub enum SearchRepositoryError {
+    #[error("search database failure: {field_0}")]
     /// PostgreSQL query failure.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Projection row violated the application representation.
-    Corruption(SearchProjectionCorruption),
-}
-
-impl fmt::Display for SearchRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "search database failure: {error}"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for SearchRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] SearchProjectionCorruption),
 }
 
 impl From<sqlx::Error> for SearchRepositoryError {

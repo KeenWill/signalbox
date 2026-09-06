@@ -1,6 +1,6 @@
 //! Durable explicit context-compaction command and call lifecycle.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -1539,30 +1539,29 @@ fn require_single(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Committed storage facts could not form one exact compaction lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextCompactionCorruption {
+    #[error("context compaction storage is inconsistent")]
     /// Required durable fact was absent.
     Missing(&'static str),
+    #[error("context compaction storage is inconsistent")]
     /// Stored ordinal was outside the admitted u64 range.
     InvalidOrdinal(&'static str),
+    #[error("context compaction storage is inconsistent")]
     /// Related lifecycle facts disagreed.
     Inconsistent(&'static str),
+    #[error("context compaction storage is inconsistent")]
     /// Stored command result discriminator is unknown.
     UnsupportedResult(String),
+    #[error("context compaction storage is inconsistent")]
     /// Stored user-global command-kind discriminator is unknown.
     UnsupportedCommandKind(String),
+    #[error("context compaction storage is inconsistent")]
     /// Summary text did not satisfy the semantic entry scalar.
     InvalidSummary,
 }
-
-impl fmt::Display for ContextCompactionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("context compaction storage is inconsistent")
-    }
-}
-
-impl Error for ContextCompactionCorruption {}
 
 #[derive(signalbox_derive::OperatorError)]
 /// Database, collision, or fail-closed corruption from compaction persistence.

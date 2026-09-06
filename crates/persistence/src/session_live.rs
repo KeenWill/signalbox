@@ -1,7 +1,5 @@
 //! PostgreSQL adapter for the bounded current-session projection.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use signalbox_application::{
     SessionLiveActiveState, SessionLiveActiveTurn, SessionLiveReader, SessionLiveReconciliation,
@@ -16,36 +14,18 @@ use crate::process_read::{
     ProcessRunnerProjectionState, load_process_runner_projection,
 };
 
+#[derive(signalbox_derive::OperatorError)]
 /// Database or fail-closed live-projection failure.
 #[derive(Debug)]
 pub enum SessionLiveRepositoryError {
-    Database(sqlx::Error),
-    Process(ProcessReadError),
+    #[error("session live database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
+    Process(#[source] ProcessReadError),
+    #[error("invalid session live {field_0}")]
     Corruption(&'static str),
+    #[error("unsupported session live {field}: {value}")]
     Unsupported { field: &'static str, value: String },
-}
-
-impl fmt::Display for SessionLiveRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "session live database failure: {error}"),
-            Self::Process(error) => error.fmt(formatter),
-            Self::Corruption(field) => write!(formatter, "invalid session live {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported session live {field}: {value}")
-            }
-        }
-    }
-}
-
-impl Error for SessionLiveRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Process(error) => Some(error),
-            Self::Corruption(_) | Self::Unsupported { .. } => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for SessionLiveRepositoryError {

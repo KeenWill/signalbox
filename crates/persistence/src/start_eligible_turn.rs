@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL activation of the earliest eligible accepted-input turn.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::num::NonZeroU64;
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StartEligibleTurnOutcome,
@@ -44,69 +44,39 @@ use crate::{
 };
 
 /// Which fresh activation identity collided with an existing durable identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, signalbox_derive::OperatorError)]
 pub enum StartEligibleTurnIdentityCollision {
     /// The proposed model-identity boundary semantic entry already exists.
+    #[error("model-identity semantic-entry identity already exists")]
     ModelIdentityEntry,
     /// The proposed semantic origin-entry identity already exists.
+    #[error("origin semantic-entry identity already exists")]
     OriginEntry,
     /// The proposed starting context-frontier identity already exists.
+    #[error("starting context-frontier identity already exists")]
     StartingFrontier,
     /// The proposed initial turn-attempt identity already exists.
+    #[error("initial turn-attempt identity already exists")]
     InitialAttempt,
 }
 
-impl fmt::Display for StartEligibleTurnIdentityCollision {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let identity = match self {
-            Self::ModelIdentityEntry => "model-identity semantic-entry",
-            Self::OriginEntry => "origin semantic-entry",
-            Self::StartingFrontier => "starting context-frontier",
-            Self::InitialAttempt => "initial turn-attempt",
-        };
-        write!(formatter, "{identity} identity already exists")
-    }
-}
-
-impl Error for StartEligibleTurnIdentityCollision {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct or commit one eligibility pass.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StartEligibleTurnCorruption {
+    #[error("missing StartEligibleTurn {field_0}")]
     /// One required durable record is absent.
     Missing(&'static str),
+    #[error("inconsistent StartEligibleTurn {field_0}")]
     /// Correlated durable records disagree.
     Inconsistent(&'static str),
+    #[error("StartEligibleTurn current Session is invalid: {field_0}")]
     /// The current session projection is invalid.
     CurrentSession(SessionCorruption),
+    #[error("StartEligibleTurn scheduling projection is invalid: {field_0}")]
     /// Complete scheduling records fail their checked persistence mapping.
     Scheduling(SubmitInputCorruption),
 }
-
-impl fmt::Display for StartEligibleTurnCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(record) => write!(formatter, "missing StartEligibleTurn {record}"),
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent StartEligibleTurn {relationship}")
-            }
-            Self::CurrentSession(error) => {
-                write!(
-                    formatter,
-                    "StartEligibleTurn current Session is invalid: {error}"
-                )
-            }
-            Self::Scheduling(error) => {
-                write!(
-                    formatter,
-                    "StartEligibleTurn scheduling projection is invalid: {error}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for StartEligibleTurnCorruption {}
 
 #[derive(signalbox_derive::OperatorError)]
 /// A database, integrity, or identity-collision failure during eligibility.
@@ -172,35 +142,19 @@ impl StartEligibleTurnRepositoryError {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure while atomically binding a counted activation to its Prepared call.
 #[derive(Debug)]
 pub enum CommitActivationPreviewError {
+    #[error(transparent)]
     /// Activation revalidation, persistence, or commit failed.
-    Activation(StartEligibleTurnRepositoryError),
+    Activation(#[source] StartEligibleTurnRepositoryError),
+    #[error(transparent)]
     /// The exact initial model-call checkpoint could not be persisted.
-    ModelCall(crate::model_execution::ModelCallRepositoryError),
+    ModelCall(#[source] crate::model_execution::ModelCallRepositoryError),
+    #[error(transparent)]
     /// Complete instruction evidence could not join the activation commit.
-    WorkspaceInstructions(WorkspaceInstructionRepositoryError),
-}
-
-impl fmt::Display for CommitActivationPreviewError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Activation(error) => error.fmt(formatter),
-            Self::ModelCall(error) => error.fmt(formatter),
-            Self::WorkspaceInstructions(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for CommitActivationPreviewError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Activation(error) => Some(error),
-            Self::ModelCall(error) => Some(error),
-            Self::WorkspaceInstructions(error) => Some(error),
-        }
-    }
+    WorkspaceInstructions(#[source] WorkspaceInstructionRepositoryError),
 }
 
 impl ClassifyOperatorFailure for CommitActivationPreviewError {

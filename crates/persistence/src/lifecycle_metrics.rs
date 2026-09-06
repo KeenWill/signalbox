@@ -6,8 +6,6 @@
 //! status surface and the Prometheus gauges read the same statements, so they
 //! cannot report two different numbers for one metric.
 
-use std::{error::Error, fmt};
-
 use signalbox_domain::SessionId;
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid, types::time::PrimitiveDateTime};
 
@@ -26,47 +24,24 @@ pub(crate) const MAX_REPORTED_WEEKS: i64 = 104;
 // numeric-bound: not-a-bound - fixed-point scale for exact rate arithmetic
 const PARTS_PER_MILLION: u128 = 1_000_000;
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable metric shape this module cannot read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LifecycleMetricsCorruption {
+    #[error("missing lifecycle metric {field_0}")]
     Missing(&'static str),
+    #[error("invalid lifecycle metric {field_0}")]
     Invalid(&'static str),
 }
 
-impl fmt::Display for LifecycleMetricsCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing lifecycle metric {field}"),
-            Self::Invalid(field) => write!(formatter, "invalid lifecycle metric {field}"),
-        }
-    }
-}
-
-impl Error for LifecycleMetricsCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Why one lifecycle metric read produced no report.
 #[derive(Debug)]
 pub enum LifecycleMetricsError {
-    Database(sqlx::Error),
-    Corruption(LifecycleMetricsCorruption),
-}
-
-impl fmt::Display for LifecycleMetricsError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "lifecycle metric read failed: {error}"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for LifecycleMetricsError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    #[error("lifecycle metric read failed: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
+    Corruption(#[source] LifecycleMetricsCorruption),
 }
 
 impl From<sqlx::Error> for LifecycleMetricsError {

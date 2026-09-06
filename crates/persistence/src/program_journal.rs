@@ -1,7 +1,5 @@
 //! PostgreSQL adapter for durable program execution journals.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use signalbox_domain::{
     DeliveryFrame, DeliveryKind, DeliveryOrdinal, EffectRequest, FaultCause, FaultEvidenceRef,
@@ -53,46 +51,36 @@ const LOAD_JOURNAL: &str = r#"SELECT entry.journal_position, entry.frame_directi
  WHERE entry.run_id = $1
  ORDER BY entry.journal_position"#;
 
+#[derive(signalbox_derive::OperatorError)]
 /// Durable rows could not reconstruct one checked typed journal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProgramJournalCorruption {
+    #[error("program journal stream is missing")]
     MissingStream,
+    #[error("program journal sequence state is missing")]
     MissingSequenceState,
+    #[error("invalid program journal {field_0}")]
     InvalidOrdinal(&'static str),
+    #[error("unsupported program journal {field}: {value}")]
     Unsupported { field: &'static str, value: String },
+    #[error("inconsistent program journal {field_0}")]
     Inconsistent(&'static str),
+    #[error(transparent)]
     Domain(ProgramJournalError),
 }
 
-impl fmt::Display for ProgramJournalCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingStream => formatter.write_str("program journal stream is missing"),
-            Self::MissingSequenceState => {
-                formatter.write_str("program journal sequence state is missing")
-            }
-            Self::InvalidOrdinal(field) => write!(formatter, "invalid program journal {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported program journal {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent program journal {relationship}")
-            }
-            Self::Domain(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ProgramJournalCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// Storage failure, preserving whether a final commit response was ambiguous.
 #[derive(Debug)]
 pub enum ProgramJournalRepositoryError {
+    #[error("program journal database: {source}")]
     Database {
+        #[source]
         source: sqlx::Error,
         commit_ambiguous: bool,
     },
-    Corruption(ProgramJournalCorruption),
+    #[error(transparent)]
+    Corruption(#[source] ProgramJournalCorruption),
 }
 
 impl ProgramJournalRepositoryError {
@@ -109,26 +97,6 @@ impl ProgramJournalRepositoryError {
                 commit_ambiguous, ..
             } => *commit_ambiguous,
             Self::Corruption(_) => false,
-        }
-    }
-}
-
-impl fmt::Display for ProgramJournalRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "program journal database: {source}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ProgramJournalRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
         }
     }
 }
