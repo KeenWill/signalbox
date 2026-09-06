@@ -1,6 +1,5 @@
 crates = [
     "signalbox-application",
-    "signalbox-approval-judge-eval",
     "signalbox-blob-store",
     "signalbox-blob-store-filesystem",
     "signalbox-blob-store-s3",
