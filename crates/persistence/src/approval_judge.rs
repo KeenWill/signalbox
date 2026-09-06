@@ -711,12 +711,10 @@ impl PostgresApprovalJudgeRepository {
     }
 }
 
-/// The generation a repository-watch dispatch commissions in the session it
-/// creates, which is the only generation its authority describes.
+/// The first goal generation commissioned by a commissioned dispatch.
 ///
-/// The dispatch creates the session and commissions its goal in one
-/// transaction, so the commission is that session's first generation. Repository
-/// watch identifies the commission it owns through the same provenance.
+/// A commissioned dispatch creates the session and commissions its goal in one
+/// transaction, so its authority describes that session's first generation.
 const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(NonZeroU64::MIN);
 
 /// Returns the commissioned dispatch for an unattended escalation closeout.
@@ -1160,25 +1158,14 @@ async fn load_session_authority_context(
     )
 }
 
-/// Reads the dispatch authority in force for one judged turn.
+/// Reads the commissioned-dispatch authority in force for one judged turn.
 ///
-/// Two append-only sources may record a fence: the repository-watch dispatch
-/// action and the operator-commissioned dispatch. Both commission generation
-/// one of the session they create in the transaction that creates it, so one
-/// generation gate serves both, and one session recording both is corruption.
-///
-/// A dispatch commissions generation one of the session it creates and owns
-/// nothing else in it: [`docs/spec/repo-watch.md`] admits a later unrelated
-/// successor goal on the same session, and that generation's turns were never
-/// described by the dispatch's repository, head, and base values. Binding by
-/// session alone would judge such a turn against that stale fence and send its
-/// escalation down the headless path, which fails the turn and blocks the goal
-/// instead of parking it for the user whose goal it is.
+/// A commissioned dispatch commissions generation one of the session it
+/// creates and owns nothing else in it. Binding by session alone would judge a
+/// later unrelated successor goal against the stale commissioned fence.
 ///
 /// A turn no generation recorded is not dispatched work either, and resolves to
 /// no authority for the same reason.
-///
-/// [`docs/spec/repo-watch.md`]: ../../../docs/spec/repo-watch.md
 async fn load_dispatch_authority(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1190,12 +1177,10 @@ async fn load_dispatch_authority(
     load_commissioned_dispatch_authority(&mut *connection, session).await
 }
 
-/// Reads the repository-watch fence recorded for one dispatched session.
 /// Reads the commissioned fence recorded for one operator-commissioned session.
 ///
-/// The row is written by the commissioning transaction itself, so unlike the
-/// repository-watch source there is no action/event join and no multi-action
-/// ambiguity: the session identity is unique in the table.
+/// The row is written by the commissioning transaction itself, and the session
+/// identity is unique in the table.
 async fn load_commissioned_dispatch_authority(
     connection: &mut PgConnection,
     session: SessionId,

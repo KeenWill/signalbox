@@ -7,16 +7,11 @@ behavior that no present surface provides.
 ## Goal
 
 Every owned session reaches a terminal outcome or a human, and no module writes
-lifecycle machinery of its own beyond the retained repo-watch start lease, the
-core-integrated convergence sweep's cool-off, and the repo-watch
-dispatch-attempt budget whose exhaustion parks the owned sessions the obligation
-wraps as the module. A failure parks the session instead of ending it or
-stalling silently, a redispatch closes the session it replaces, modules receive
-deadline expiries as events, every dispatched session records what it was
-handed, and a program run acts under its own actor. An active stall parks the
-session, a repo-watch achievement is verified against its gate, a sticky stop
-holds off redispatch, and a closure removes the worktree and container the
-session held.
+lifecycle machinery of its own. A failure parks the session instead of ending it
+or stalling silently, modules receive deadline expiries as events, every
+dispatched session records what it was handed, and a program run acts under its
+own actor. An active stall parks the session, and a closure removes the worktree
+and container the session held.
 
 ## Design
 
@@ -38,14 +33,6 @@ driver: the turn liveness pass, the goal disposition pass, and model-call
 failure classification call the park path with the classified cause inside the
 transaction that records the failure.
 
-When a module's redispatch owns the retry of parked work, the redispatch issues
-supersede against the parked predecessor, naming the successor, in the same
-transaction that creates the successor, so the successor never duplicates a
-pursuit the predecessor still owns. The unattended
-[repo-watch](../spec/repo-watch.md) escalation is the present case: its fresh
-dispatch fails the predecessor's turn instead of superseding the session. The
-superseded outcome and the supersede command exist; no dispatch path issues it.
-
 Every deadline expiry is a published transition with the expired deadline named
 in its cause. Admission expiry reaches the terminal event the satellite's
 trigger appends; the state-change event for a waiting or active-stall expiry is
@@ -54,9 +41,8 @@ daemon reads the active-stall bound from configuration, and the pass parks an
 active or recovering session whose stall exceeds it, with the cause selected
 from the state: active-stall deadline expired from active, recovering deadline
 expired from recovering. Modules and the program substrate subscribe to those
-events and run no timer over a session of their own, the repo-watch start lease
-and the core-integrated convergence sweep's cool-off excepted. A module that
-needs a deadline core does not arm asks for a new deadline kind in core.
+events and run no timer over a session of their own. A module that needs a
+deadline core does not arm asks for a new deadline kind in core.
 
 The lifecycle actor vocabulary gains a run-scoped program-run actor, a reference
 to the program run rather than a module name, for commands issued by a
@@ -75,11 +61,8 @@ interactive session has no payload at creation; it records the same two
 measurements when its first input is accepted, because that input is what the
 session was handed.
 
-A repo-watch session's finish check re-tests the external gate on the exact head
-the achievement names, and only a pass settles the achievement as verified. A
-redispatch reads the sticky flag on a stopped predecessor and dispatches nothing
-for that source until the source is updated. A closure whose outcome releases
-resources removes the session's worktree and container.
+A closure whose outcome releases resources removes the session's worktree and
+container.
 
 ## Compatibility constraints
 
@@ -87,9 +70,6 @@ No automatic failure-handling path terminalizes an owned session on a structural
 failure, an unknown failure, or an exhausted retry budget; a path that today
 ends the run as a blocked goal leaves the goal blocked and the session
 non-terminal, which is the state the parking driver will read.
-
-No dispatch path that replaces parked work terminalizes the predecessor as
-failed; the predecessor stays in a state supersede can close.
 
 No module adds a timer that compares a session-scoped timestamp to the clock to
 decide a lifecycle transition.
@@ -110,12 +90,8 @@ terminal only after a closure command.
 The goal disposition pass at either limit leaves the goal's session parked with
 cause retry budget exhausted, and the operator queue lists it.
 
-A redispatch of parked repo-watch work leaves the predecessor terminal as
-superseded, naming the successor, in the commit that creates the successor.
-
-No module owns a session timer beyond the repo-watch start lease and the
-core-integrated convergence sweep's cool-off; every other module transition that
-follows a deadline follows a published expiry event.
+No module owns a session timer; every module transition that follows a deadline
+follows a published expiry event.
 
 A lifecycle command issued by a program run records the program-run actor with
 its run reference, and replaying the command classifies it identically.
@@ -127,12 +103,6 @@ input.
 An active or recovering session whose stall exceeds the configured bound is
 parked by the deadline pass, and a waiting or active-stall expiry appends a
 state-change event naming the deadline.
-
-A repo-watch declaration settles verified only after the external gate passes on
-the exact head.
-
-After a sticky stop, new activity on the same dispatch source dispatches nothing
-until the source is updated.
 
 A closure that releases resources leaves no worktree or container for the
 session.
