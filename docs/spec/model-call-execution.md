@@ -139,10 +139,10 @@ marker, and a reconciliation outbox record, and releases the slot.
 A `KnownFailed` call with proven non-acceptance may be followed by a successor
 call when the bounded same-credential retry below admits it or when its pinned
 pool action is `switch_now`. A `CredentialRejected` failure instead admits that
-`switch_now` successor without non-acceptance proof; its `non_acceptance_proven`
-bit remains false. `switch_now` uses the next admitted member of the same pool.
-`AvailabilitySuccessorModelCallTurn` is the aggregate transition that authorizes
-either distinct call on a successor turn attempt.
+`switch_now` successor without non-acceptance proof. `switch_now` uses the next
+admitted member of the same pool. `AvailabilitySuccessorModelCallTurn` is the
+aggregate transition that authorizes either distinct call on a successor turn
+attempt.
 
 Usage evidence is a projection of terminal physical model calls that never
 materializes the transcript; `UsageReader` in `crates/application/src/usage.rs`
