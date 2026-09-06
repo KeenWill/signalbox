@@ -359,13 +359,13 @@ fn exempt_change(
         return Ok(true);
     }
     let commits = array(&delta["commits"]);
-    if commits.len() == 1
-        && commits[0]["sha"] == head
-        && array(&commits[0]["parents"])
-            .iter()
-            .map(|p| text(&p["sha"]))
-            .eq([reviewed, base])
-    {
+    if commits.iter().any(|commit| {
+        commit["sha"] == head
+            && array(&commit["parents"])
+                .iter()
+                .map(|parent| text(&parent["sha"]))
+                .eq([reviewed, base])
+    }) {
         let merge_base = text(&available(reviewed, base)?["merge_base_commit"]["sha"]);
         if !merge_base.is_empty() {
             let base_delta = available(merge_base, base)?;

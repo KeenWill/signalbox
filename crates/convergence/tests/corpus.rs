@@ -408,65 +408,72 @@ fn live_recording_fetches_old_review_comparison_and_finishes_with_identity()
 -> Result<(), Box<dyn Error>> {
     use signalbox_convergence::fetch::{GitHubRequest, RequestFuture, record_with};
     let policy = policy()?;
-    let fixture = Recording::read(&root().join("fixtures/mutations/live-exempt-comparison.json"))?;
-    let mut transcript = fixture.observations.iter().flatten();
-    let mut compared = Vec::new();
-    let mut send = |request| -> RequestFuture<'_> {
-        let result = match request {
-            GitHubRequest::GraphQl { query, variables } => {
-                let recorded = transcript.next().ok_or_else(|| {
-                    signalbox_convergence::Error::Evidence("unexpected GraphQL request".into())
-                });
-                recorded.and_then(|recorded| {
-                    if query != recorded.query {
-                        return Err(signalbox_convergence::Error::Evidence(
-                            "GraphQL query differs from recorded transcript".into(),
-                        ));
-                    }
-                    if variables.get("id").is_some() {
-                        assert_eq!(variables["id"], recorded.variables["id"]);
-                    }
-                    Ok(recorded.response.clone())
-                })
-            }
-            GitHubRequest::Rest { path } => {
-                let key = path
-                    .split("/compare/")
-                    .nth(1)
-                    .unwrap_or_default()
-                    .to_owned();
-                compared.push(key.clone());
-                fixture.comparisons.get(&key).cloned().ok_or_else(|| {
-                    signalbox_convergence::Error::Evidence(format!("unrecorded comparison {key}"))
-                })
-            }
+    for name in [
+        "live-exempt-comparison.json",
+        "multi-commit-clean-base-forward.json",
+    ] {
+        let fixture = Recording::read(&root().join("fixtures/mutations").join(name))?;
+        let mut transcript = fixture.observations.iter().flatten();
+        let mut compared = Vec::new();
+        let mut send = |request| -> RequestFuture<'_> {
+            let result = match request {
+                GitHubRequest::GraphQl { query, variables } => {
+                    let recorded = transcript.next().ok_or_else(|| {
+                        signalbox_convergence::Error::Evidence("unexpected GraphQL request".into())
+                    });
+                    recorded.and_then(|recorded| {
+                        if query != recorded.query {
+                            return Err(signalbox_convergence::Error::Evidence(
+                                "GraphQL query differs from recorded transcript".into(),
+                            ));
+                        }
+                        if variables.get("id").is_some() {
+                            assert_eq!(variables["id"], recorded.variables["id"]);
+                        }
+                        Ok(recorded.response.clone())
+                    })
+                }
+                GitHubRequest::Rest { path } => {
+                    let key = path
+                        .split("/compare/")
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_owned();
+                    compared.push(key.clone());
+                    fixture.comparisons.get(&key).cloned().ok_or_else(|| {
+                        signalbox_convergence::Error::Evidence(format!(
+                            "unrecorded comparison {key}"
+                        ))
+                    })
+                }
+            };
+            Box::pin(async move { result })
         };
-        Box::pin(async move { result })
-    };
-    let result = futures_executor::block_on(record_with(
-        &mut send,
-        fixture.previous.clone(),
-        &fixture.repository,
-        fixture.number,
-        &policy,
-    ))?;
-    assert!(
-        transcript.next().is_none(),
-        "all final identity responses must be consumed"
-    );
-    assert!(compared.iter().any(|key| {
-        key.starts_with(
-            fixture.previous["authenticated_review_head"]
-                .as_str()
-                .unwrap_or_default(),
-        )
-    }));
-    let mut snapshot = result.snapshot(&policy)?;
-    snapshot.previous = evaluate(&snapshot, &policy)?.state;
-    assert!(
-        evaluate(&snapshot, &policy)?.converged,
-        "an exempt head with settled new CI retains its review"
-    );
+        let result = futures_executor::block_on(record_with(
+            &mut send,
+            fixture.previous.clone(),
+            &fixture.repository,
+            fixture.number,
+            &policy,
+        ))?;
+        assert!(
+            transcript.next().is_none(),
+            "all final identity responses must be consumed"
+        );
+        assert!(compared.iter().any(|key| {
+            key.starts_with(
+                fixture.previous["authenticated_review_head"]
+                    .as_str()
+                    .unwrap_or_default(),
+            )
+        }));
+        let mut snapshot = result.snapshot(&policy)?;
+        snapshot.previous = evaluate(&snapshot, &policy)?.state;
+        assert!(
+            evaluate(&snapshot, &policy)?.converged,
+            "an exempt head with settled new CI retains its review"
+        );
+    }
     Ok(())
 }
 

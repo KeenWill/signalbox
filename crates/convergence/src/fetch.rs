@@ -437,18 +437,13 @@ pub async fn record_with(
     }
     let merged_heads: Vec<_> = comparisons
         .values()
-        .filter(|value| {
-            let commits = array(&value["commits"]);
-            commits.len() == 1
-                && commits[0]["sha"] == head
-                && array(&commits[0]["parents"]).len() == 2
-                && commits[0]["parents"][1]["sha"] == base
+        .flat_map(|value| array(&value["commits"]))
+        .filter(|commit| {
+            commit["sha"] == head
+                && array(&commit["parents"]).len() == 2
+                && commit["parents"][1]["sha"] == base
         })
-        .filter_map(|value| {
-            value["commits"][0]["parents"][0]["sha"]
-                .as_str()
-                .map(str::to_owned)
-        })
+        .filter_map(|commit| commit["parents"][0]["sha"].as_str().map(str::to_owned))
         .collect();
     for reviewed in merged_heads {
         let key = format!("{reviewed}...{base}");
