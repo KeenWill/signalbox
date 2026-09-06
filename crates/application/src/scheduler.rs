@@ -2195,7 +2195,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn inv007_same_process_nudge_is_the_primary_hint() {
+    async fn same_process_nudge_is_the_primary_hint() {
         let nudged = session(1);
         let swept = session(2);
         let interval = ReconciliationSweepInterval::try_new(Duration::from_secs(1))
@@ -2211,7 +2211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv007_nudge_proceeds_while_reconciliation_is_in_progress() {
+    async fn nudge_proceeds_while_reconciliation_is_in_progress() {
         let nudged = session(35);
         let swept = session(36);
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2241,7 +2241,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn inv007_nudge_interleaves_with_pending_sweep_backlog() {
+    async fn nudge_interleaves_with_pending_sweep_backlog() {
         let first_swept = session(37);
         let second_swept = session(38);
         let first_nudged = session(39);
@@ -2264,7 +2264,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn inv007_continuation_pages_do_not_wait_for_another_interval() {
+    async fn continuation_pages_do_not_wait_for_another_interval() {
         let first = session(43);
         let second = session(44);
         let third = session(47);
@@ -2291,7 +2291,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn inv007_slow_sweep_yields_and_deduplicates_pending_hints() {
+    async fn slow_sweep_yields_and_deduplicates_pending_hints() {
         let first = session(41);
         let second = session(42);
         let interval = ReconciliationSweepInterval::try_new(Duration::from_secs(5))
@@ -2333,7 +2333,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn s03_inv007_lost_nudge_is_recovered_by_periodic_sweep() {
+    async fn s03_lost_nudge_is_recovered_by_periodic_sweep() {
         let recovered = session(3);
         let interval = ReconciliationSweepInterval::try_new(Duration::from_secs(5))
             .expect("test interval is nonzero");
@@ -2351,7 +2351,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn inv007_missed_reconciliation_ticks_do_not_burst() {
+    async fn missed_reconciliation_ticks_do_not_burst() {
         let initial = session(30);
         let first_periodic = session(31);
         let second_periodic = session(32);
@@ -2375,7 +2375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv069_dispatch_start_nudges_coalesce_and_upgrade_pending_admission() {
+    async fn dispatch_start_nudges_coalesce_and_upgrade_pending_admission() {
         let selected = session(33);
         let (nudge, mut source) =
             InProcessEligibilityWorkSource::new(FakeSweep::returning([Ok(vec![])]));
@@ -2390,7 +2390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv069_out_of_band_priority_take_preserves_its_channel_token() {
+    async fn out_of_band_priority_take_preserves_its_channel_token() {
         let selected = session(34);
         let (nudge, mut source) =
             InProcessEligibilityWorkSource::new(FakeSweep::returning([Ok(vec![])]));
@@ -2405,7 +2405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv069_an_equal_nudge_does_not_consume_another_buffer_slot() {
+    async fn an_equal_nudge_does_not_consume_another_buffer_slot() {
         let first = session(33);
         let second = session(34);
         let (nudge, _source) = InProcessEligibilityWorkSource::with_options(
@@ -2423,7 +2423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv069_full_ordinary_buffer_retains_one_complete_dispatch_batch() {
+    async fn full_ordinary_buffer_retains_one_complete_dispatch_batch() {
         let ordinary = session(40);
         let dispatch_starts = (0..MINIMUM_DISPATCH_START_BACKLOG_CAPACITY)
             .map(|offset| session(100 + offset as u128))
@@ -2460,7 +2460,7 @@ mod tests {
     }
 
     #[test]
-    fn inv069_failed_dispatch_start_pass_waits_for_a_later_hint() {
+    fn failed_dispatch_start_pass_waits_for_a_later_hint() {
         assert_eq!(
             pass_continuation_priority(EligibilityHintPriority::DispatchStart, false),
             None
@@ -2476,7 +2476,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv069_dropping_a_source_exposes_closed_instead_of_stale_coalescing() {
+    async fn dropping_a_source_exposes_closed_instead_of_stale_coalescing() {
         let selected = session(35);
         let (nudge, source) = InProcessEligibilityWorkSource::new(FakeSweep::returning([]));
 
@@ -2492,7 +2492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv007_full_nudge_buffer_drops_only_the_hint() {
+    async fn full_nudge_buffer_drops_only_the_hint() {
         let first = session(33);
         let second = session(34);
         let (nudge, _source) = InProcessEligibilityWorkSource::with_options(
@@ -2682,7 +2682,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv048_successful_pass_reconciles_goal_continuation_once() {
+    async fn successful_pass_reconciles_goal_continuation_once() {
         let selected_session = session(51);
         let disposition = RecordingGoalDisposition::default();
         let calls = Arc::clone(&disposition.calls);
@@ -2697,7 +2697,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv048_failed_selected_turn_blocks_goal_without_retrying_the_pass() {
+    async fn failed_selected_turn_blocks_goal_without_retrying_the_pass() {
         let selected_session = session(51);
         let selected_turn = signalbox_domain::TurnId::from_uuid(Uuid::from_u128(52));
         let disposition = RecordingGoalDisposition::default();
@@ -2750,7 +2750,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv007_scheduler_continues_after_a_failed_authoritative_pass() {
+    async fn scheduler_continues_after_a_failed_authoritative_pass() {
         let first = session(5);
         let second = session(6);
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
@@ -2818,10 +2818,10 @@ mod tests {
         }
     }
 
-    /// S10 / INV-007: a provider future that never returns cannot retain a
+    /// S10: a provider future that never returns cannot retain a
     /// scheduler admission slot past the compiled-or-lowered occupancy bound.
     #[tokio::test(start_paused = true)]
-    async fn inv007_scheduler_expires_a_stalled_pass_and_calls_recovery() {
+    async fn scheduler_expires_a_stalled_pass_and_calls_recovery() {
         capture_telemetry_for_this_thread();
         let selected = session(51);
         let started = Arc::new(Notify::new());
@@ -2954,7 +2954,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn inv007_paused_scheduler_admits_no_authoritative_passes() {
+    async fn paused_scheduler_admits_no_authoritative_passes() {
         let selected = session(50);
         let (unused_pass_shutdown, pass_shutdown_receiver) = oneshot::channel();
         let pass = FakePass::failing_once(selected, 1, unused_pass_shutdown);
@@ -2992,7 +2992,7 @@ mod tests {
     const FIXTURE_PASS_ADMISSION_CAP: usize = 16;
 
     #[test]
-    fn inv069_dispatch_start_admission_reserves_capacity_inside_the_shared_cap() {
+    fn dispatch_start_admission_reserves_capacity_inside_the_shared_cap() {
         let ordinary = session(48);
         let dispatch_start = session(49);
         let mut in_flight = HashSet::from_iter([ordinary]);
@@ -3031,7 +3031,7 @@ mod tests {
     }
 
     #[test]
-    fn inv069_ordinary_admission_cannot_consume_reserved_capacity() {
+    fn ordinary_admission_cannot_consume_reserved_capacity() {
         let ordinary = session(50);
         let in_flight = HashSet::from_iter(
             (0..ordinary_pass_limit(FIXTURE_PASS_ADMISSION_CAP))
@@ -3073,7 +3073,7 @@ mod tests {
     }
 
     #[test]
-    fn inv007_explicit_scheduler_bound_is_used_exactly() {
+    fn explicit_scheduler_bound_is_used_exactly() {
         let requested = NonZeroUsize::new(19).expect("the fixture bound is positive");
         let scheduler = SchedulerLoop::with_max_in_flight((), (), requested);
 
@@ -3193,7 +3193,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv001_inv007_stateful_activation_ids_are_not_cloned_per_pass() {
+    async fn stateful_activation_ids_are_not_cloned_per_pass() {
         let first = session(48);
         let second = session(49);
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
@@ -3261,7 +3261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv007_blocked_session_does_not_block_unrelated_session() {
+    async fn blocked_session_does_not_block_unrelated_session() {
         let blocked = session(35);
         let unrelated = session(36);
         let blocked_started = Arc::new(Notify::new());
@@ -3360,10 +3360,10 @@ mod tests {
         }
     }
 
-    /// INV-007: a pass completion cannot cancel a reconciliation read after
+    /// a pass completion cannot cancel a reconciliation read after
     /// its interval tick has been consumed.
     #[tokio::test]
-    async fn inv007_pass_completion_preserves_in_progress_reconciliation() {
+    async fn pass_completion_preserves_in_progress_reconciliation() {
         let first = session(37);
         let second = session(38);
         let first_started = Arc::new(Notify::new());
@@ -3452,7 +3452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv007_nudge_during_in_flight_pass_schedules_one_rerun() {
+    async fn nudge_during_in_flight_pass_schedules_one_rerun() {
         let target = session(45);
         let first_started = Arc::new(Notify::new());
         let release_first = Arc::new(Notify::new());
@@ -3542,7 +3542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv007_work_source_remains_driven_at_pass_capacity() {
+    async fn work_source_remains_driven_at_pass_capacity() {
         let sweep_driven = Arc::new(Notify::new());
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let mut scheduler = SchedulerLoop::with_max_in_flight(
@@ -3571,7 +3571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv069_dispatch_start_wakes_when_the_ordinary_nudge_buffer_is_full() {
+    async fn dispatch_start_wakes_when_the_ordinary_nudge_buffer_is_full() {
         let ordinary = session(53);
         let dispatch_start = session(54);
         let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
@@ -3660,7 +3660,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv069_new_dispatch_start_wakes_the_reserved_lane_at_ordinary_capacity() {
+    async fn new_dispatch_start_wakes_the_reserved_lane_at_ordinary_capacity() {
         let first_ordinary = session(55);
         let queued_ordinary = session(56);
         let dispatch_start = session(57);

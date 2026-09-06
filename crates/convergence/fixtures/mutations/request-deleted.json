@@ -1,0 +1,28 @@
+{
+  "source": "settled.json",
+  "edge": "deleted qualifying review request",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/comments",
+      "value": {
+        "totalCount": 0,
+        "nodes": [],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/comments",
+      "value": {
+        "totalCount": 0,
+        "nodes": [],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    }
+  ]
+}

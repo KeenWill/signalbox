@@ -1,0 +1,18 @@
+{
+  "source": "settled.json",
+  "edge": "unconfigured reviewer cannot authenticate quiet evidence",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews/nodes/0/author",
+      "value": {
+        "login": "KeenWill"
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/nodes/0/author",
+      "value": {
+        "login": "KeenWill"
+      }
+    }
+  ]
+}

@@ -4,3 +4,5 @@
 # fenced code blocks are untouched).
 wrap = 80     # wrap prose at 80 columns; long unbreakable tokens may exceed
 number = true # keep consecutive ordered-list numbering
+
+exclude = ["docs/api/**"]
