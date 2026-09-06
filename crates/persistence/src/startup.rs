@@ -106,45 +106,31 @@ impl fmt::Display for StartupScanCorruption {
 
 impl Error for StartupScanCorruption {}
 
+#[derive(signalbox_derive::OperatorError)]
 /// Database, integrity, or identity-collision failure during startup scan.
 #[derive(Debug)]
 pub enum StartupScanRepositoryError {
+    #[error("startup scan failed: {source}")]
     /// PostgreSQL could not complete the operation.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Durable records cannot reconstruct or commit the accepted shape.
     Corruption {
+        #[source]
         /// The invalid durable shape.
         source: StartupScanCorruption,
         /// The active durable turn observed for the scoped session.
         turn: Option<TurnId>,
     },
+    #[error(transparent)]
     /// A supplied fresh identity already names a durable record.
-    IdentityCollision(StartupScanIdentityCollision),
-}
-
-impl fmt::Display for StartupScanRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => write!(formatter, "startup scan failed: {source}"),
-            Self::Corruption { source, .. } => source.fmt(formatter),
-            Self::IdentityCollision(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for StartupScanRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption { source, .. } => Some(source),
-            Self::IdentityCollision(error) => Some(error),
-        }
-    }
+    IdentityCollision(#[source] StartupScanIdentityCollision),
 }
 
 impl ClassifyOperatorFailure for StartupScanRepositoryError {

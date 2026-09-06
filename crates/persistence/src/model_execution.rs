@@ -325,51 +325,31 @@ impl fmt::Display for ModelCallCorruption {
 
 impl Error for ModelCallCorruption {}
 
+#[derive(signalbox_derive::OperatorError)]
 /// Database, integrity, identity, or caller failure at the execution boundary.
 #[derive(Debug)]
 pub enum ModelCallRepositoryError {
+    #[error("model-call database failure: {source}")]
     /// PostgreSQL could not complete the operation.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Committed rows cannot form the accepted aggregate.
-    Corruption(ModelCallCorruption),
+    Corruption(#[source] ModelCallCorruption),
+    #[error(transparent)]
     /// A fresh identity collided durably.
-    IdentityCollision(ModelCallIdentityCollision),
+    IdentityCollision(#[source] ModelCallIdentityCollision),
+    #[error("no live model-call execution exists")]
     /// The application invoked an execution transition without a live turn.
     NoLiveExecution,
+    #[error("model-call transition rejected: {field_0}")]
     /// A checked transition rejected an application-supplied operation.
     InvalidTransition(&'static str),
-}
-
-impl fmt::Display for ModelCallRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "model-call database failure: {source}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::IdentityCollision(error) => error.fmt(formatter),
-            Self::NoLiveExecution => formatter.write_str("no live model-call execution exists"),
-            Self::InvalidTransition(operation) => {
-                write!(formatter, "model-call transition rejected: {operation}")
-            }
-        }
-    }
-}
-
-impl Error for ModelCallRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision(error) => Some(error),
-            Self::NoLiveExecution | Self::InvalidTransition(_) => None,
-        }
-    }
 }
 
 impl ClassifyOperatorFailure for ModelCallRepositoryError {

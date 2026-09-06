@@ -108,51 +108,28 @@ impl fmt::Display for StartEligibleTurnCorruption {
 
 impl Error for StartEligibleTurnCorruption {}
 
+#[derive(signalbox_derive::OperatorError)]
 /// A database, integrity, or identity-collision failure during eligibility.
 #[derive(Debug)]
 pub enum StartEligibleTurnRepositoryError {
+    #[error("StartEligibleTurn database failure: {source}")]
     /// PostgreSQL could not complete the transaction.
     Database {
+        #[source]
         /// The underlying SQLx failure.
         source: sqlx::Error,
         /// Whether the failure occurred while awaiting commit.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Durable records cannot reconstruct or commit the accepted domain shape.
-    Corruption(StartEligibleTurnCorruption),
+    Corruption(#[source] StartEligibleTurnCorruption),
+    #[error(transparent)]
     /// A supplied fresh identity already names a durable record.
-    IdentityCollision(StartEligibleTurnIdentityCollision),
+    IdentityCollision(#[source] StartEligibleTurnIdentityCollision),
+    #[error("StartEligibleTurn hub invariant failed: {field_0}")]
     /// Checked activation output violated an internal hub invariant.
     HubInvariant(&'static str),
-}
-
-impl fmt::Display for StartEligibleTurnRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "StartEligibleTurn database failure: {source}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::IdentityCollision(error) => error.fmt(formatter),
-            Self::HubInvariant(invariant) => {
-                write!(
-                    formatter,
-                    "StartEligibleTurn hub invariant failed: {invariant}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for StartEligibleTurnRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision(error) => Some(error),
-            Self::HubInvariant(_) => None,
-        }
-    }
 }
 
 impl ClassifyOperatorFailure for StartEligibleTurnRepositoryError {

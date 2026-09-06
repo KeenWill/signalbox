@@ -190,62 +190,34 @@ impl fmt::Display for ToolLoopCorruption {
 
 impl Error for ToolLoopCorruption {}
 
+#[derive(signalbox_derive::OperatorError)]
 /// Database, replay, corruption, or rejected transition at the tool boundary.
 #[derive(Debug)]
 pub enum ToolLoopRepositoryError {
+    #[error("tool-loop database failure: {source}")]
     /// PostgreSQL failure.
     Database {
+        #[source]
         /// Original driver error.
         source: sqlx::Error,
         /// Whether a failed commit acknowledgement leaves outcome unknown.
         commit_ambiguous: bool,
     },
+    #[error("tool-loop identity candidate already exists")]
     /// A fresh application-owned identity collided with durable state.
     IdentityCollision,
+    #[error(transparent)]
     /// Durable facts failed closed reconstruction.
-    Corruption(ToolLoopCorruption),
+    Corruption(#[source] ToolLoopCorruption),
+    #[error("command identity already belongs to another kind")]
     /// The command identity belongs to another durable command kind.
     DifferentCommandKind,
+    #[error("command replay payload differs from the durable command")]
     /// The command identity is recorded with a different decision payload.
     ConflictingCommandReuse,
+    #[error("tool-loop transition rejected: {field_0}")]
     /// Caller supplied a transition the current batch does not authorize.
     InvalidTransition(&'static str),
-}
-
-impl fmt::Display for ToolLoopRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "tool-loop database failure: {source}")
-            }
-            Self::IdentityCollision => {
-                formatter.write_str("tool-loop identity candidate already exists")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::DifferentCommandKind => {
-                formatter.write_str("command identity already belongs to another kind")
-            }
-            Self::ConflictingCommandReuse => {
-                formatter.write_str("command replay payload differs from the durable command")
-            }
-            Self::InvalidTransition(value) => {
-                write!(formatter, "tool-loop transition rejected: {value}")
-            }
-        }
-    }
-}
-
-impl Error for ToolLoopRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision
-            | Self::DifferentCommandKind
-            | Self::ConflictingCommandReuse
-            | Self::InvalidTransition(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for ToolLoopRepositoryError {
