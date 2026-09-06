@@ -84,10 +84,14 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** A client disconnect does not cancel the call.
   Target-resolution failure creates no model call. Send preparation failure
   leaves the already-created call known-failed. No durable authorization is
-  retried, and an ambiguous outcome never creates a successor. When pool policy
-  selects `switch_now`, a proven availability failure may create the S22
-  successor on a new attempt against the same target and a different credential
-  profile, under [availability successor calls](spec/model-call-execution.md),
+  retried, and an ambiguous outcome never creates a successor. A proven
+  rate-limit, overload, or provider-internal failure may create the S22
+  successor on a new attempt against the same target and credential below its
+  bound before the pinned pool action applies. For a failure class with a pinned
+  `switch_now` action, that action instead creates the successor against a
+  different eligible credential; a provider-internal failure terminalizes at the
+  bound. These outcomes follow
+  [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
   No partial draft becomes final content. A later authorized call must retain
@@ -707,37 +711,45 @@ INV-tagged test names and attached doc comments.
 
 ## S22 — Apply an availability fallback
 
-- **User intent:** If explicitly configured, continue through a classified
-  capacity/availability failure using another account without changing models.
+- **User intent:** Continue through a classified capacity/availability failure
+  without changing models, using bounded retry-before-action and configured pool
+  behavior.
 - **Durable commands:** Record the predecessor call's exact requested selection,
   daemon-resolved target, credential profile, provider-reported identity when
   available, failure classification, and typed non-acceptance evidence; evaluate
   the session-pinned pool policy; create a distinct successor attempt and model
-  call that pin the same target, a different eligible profile from that pool,
-  the predecessor call, and the qualifying cause, as owned by
+  call that pin the same target, the predecessor call, the qualifying cause, and
+  either the same profile for retry-before-action or a different eligible
+  profile for `switch_now`, as owned by
   [availability successor calls](spec/model-call-execution.md),
   [the credential-availability machine](spec/credential-availability.md), and
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
 - **State transitions:** Predecessor call → known availability failure and
   predecessor attempt → known failed; turn → successor eligible; successor
-  attempt/call → terminal. Each availability-successor chain is bounded to at
-  most one call per pool member; a successful call ends that chain before later
-  continuation, while releasing a parked wait resumes the chain the wait belongs
-  to ([availability successor calls](spec/model-call-execution.md)).
+  attempt/call → terminal. A credential's initial call and same-credential
+  successors are bounded by
+  `numeric_bounds.max_same_credential_attempts_per_turn`; `switch_now`
+  chain-excludes the failed profile and selects a different eligible profile. A
+  successful call ends that chain before later continuation, while releasing a
+  parked wait resumes the chain the wait belongs to
+  ([availability successor calls](spec/model-call-execution.md)).
 - **Transient updates:** No current client update announces that a successor is
   being considered or selected. The predecessor, cause, and successor are
-  committed future durable evidence that no present migration or repository
-  operation stores; no current process-protocol snapshot or history message
-  projects that chain to a client either.
+  committed durable evidence, but no current process-protocol snapshot or
+  history message projects that chain to a client.
 - **Owning component:** Daemon pool policy authorizes and selects the profile;
   provider adapters supply the typed classification and separate evidence that
   the request was not accepted. Adapters do not select successors.
-- **Failure behavior:** Only quota exhaustion, rate limiting, or overload with
-  distinct non-acceptance evidence may authorize the successor. Classification
-  alone is insufficient. Ambiguity, refusal, credential resolution failure, and
-  credential rejection never do. The successor cannot cross adapters or change
-  the exact target. Exhausting the pool follows its configured durable park or
-  known-failure outcome
+- **Failure behavior:** Only quota exhaustion, rate limiting, overload, or
+  provider-internal failure with distinct non-acceptance evidence may authorize
+  the successor. Rate limiting, overload, and provider-internal failure retry
+  the same profile below its bound before the pinned pool action applies.
+  `switch_now` rotates a rate-limit, overload, or quota failure when its pinned
+  trigger selects that action; a provider-internal failure terminalizes at the
+  bound. Classification alone is insufficient. Ambiguity, refusal, credential
+  resolution failure, and credential rejection never authorize a successor. The
+  successor cannot cross adapters or change the exact target. Exhausting the
+  pool follows its configured durable park or known-failure outcome
   ([credential pools and selection](spec/configuration-and-credentials.md)). A
   provider-reported mismatch against either call's own target follows the
   accepted timing-sensitive mismatch failure rule
