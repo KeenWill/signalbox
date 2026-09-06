@@ -25,6 +25,7 @@ mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;
 mod outbox_dispatch_and_process_read;
+mod ownership_seam_grants;
 mod restart_recovery_and_submit;
 mod search;
 mod session_creation_and_submit;
@@ -153,8 +154,8 @@ use signalbox_persistence::{
         DispatchedDelegationWake, DispatchedInjectionOutcome, DispatchedModelCallState,
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
         DispatchedSessionCreation, DispatchedToolBatchState, DispatchedTurnTerminalDisposition,
-        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
-        OutboxDispatcher,
+        OutboxConsumer, OutboxConsumerReader, OutboxCorruption, OutboxDeliveryDecision,
+        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
@@ -182,9 +183,9 @@ use signalbox_persistence::{
         SessionDelegationCorruption, SessionDelegationRepository, SessionDelegationRepositoryError,
     },
     start_eligible_turn::{
-        CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
-        StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,
-        StartEligibleTurnRepositoryError,
+        CommitActivationPreviewOutcome, CommitCountedAttachmentFailurePreviewOutcome,
+        StartEligibleTurnCorruption, StartEligibleTurnIdentityCollision,
+        StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
     },
     startup::PostgresStartupScanRepository,
     submit_input::{
@@ -2511,23 +2512,23 @@ async fn rewind_outbox_delivery_before(
     sequence: Decimal,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         DISABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(pool)
     .await?;
     sqlx::query(
-        "UPDATE outbox_delivery_state
+        "UPDATE outbox_consumer_cursor
             SET delivered_through = $1 - 1,
                 last_delivery_xid = pg_current_xact_id()
-          WHERE singleton",
+          WHERE consumer_name = 'process_protocol'",
     )
     .bind(sequence)
     .execute(pool)
     .await?;
     sqlx::query(
-        "ALTER TABLE outbox_delivery_state
-         ENABLE TRIGGER outbox_delivery_advances_prefix",
+        "ALTER TABLE outbox_consumer_cursor
+         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
     )
     .execute(pool)
     .await?;

@@ -34,6 +34,8 @@ use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
 use crate::translate::build_request_with_fast_mode;
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
 
+const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
+
 /// The Anthropic Messages adapter.
 ///
 /// Implements [`ModelRuntime`]: executes exactly one authorized operation as
@@ -376,7 +378,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
         if request_fast_mode == FastMode::Enabled {
-            builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
+            builder = builder.header("anthropic-beta", FAST_MODE_BETA);
         }
         let request = match build_http_request(builder) {
             Ok(request) => request,
@@ -680,7 +682,7 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
         if request_fast_mode == FastMode::Enabled {
-            builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
+            builder = builder.header("anthropic-beta", FAST_MODE_BETA);
         }
         let request = match build_http_request(builder) {
             Ok(request) => request,
@@ -965,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_complete_credential_ending_in_its_own_prefix_is_redacted_in_place() {
+    fn complete_credential_ending_in_its_own_prefix_is_redacted_in_place() {
         let credential = CredentialValue::new(b"synthetic_s".to_vec());
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &credential);

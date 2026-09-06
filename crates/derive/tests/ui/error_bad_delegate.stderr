@@ -1,0 +1,5 @@
+error: bad delegate target
+ --> tests/ui/error_bad_delegate.rs:7:5
+  |
+7 |     Broken { detail: String },
+  |     ^^^^^^

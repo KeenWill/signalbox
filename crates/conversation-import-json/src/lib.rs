@@ -302,7 +302,7 @@ mod tests {
     const FINAL_RECORD: &[u8] = b"last";
 
     #[test]
-    fn s28_inv038_preserves_object_member_order() {
+    fn s28_preserves_object_member_order() {
         let parsed = parse_record(br#"{"first":0,"second":1}"#).expect("synthetic JSON is valid");
         let ImportedStructuredValue::Object(members) = &parsed else {
             panic!("synthetic root should be an object");
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_duplicate_object_members() {
+    fn s28_preserves_duplicate_object_members() {
         let parsed = parse_record(br#"{"same":0,"same":1}"#).expect("synthetic JSON is valid");
         let ImportedStructuredValue::Object(members) = &parsed else {
             panic!("synthetic root should be an object");
@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_json_number_spelling() {
+    fn s28_preserves_json_number_spelling() {
         let parsed = parse_record(br#"{"number":1e+09}"#).expect("synthetic JSON is valid");
         let ImportedStructuredValue::Object(members) = &parsed else {
             panic!("synthetic root should be an object");
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_decodes_json_unicode_escapes() {
+    fn s28_decodes_json_unicode_escapes() {
         let parsed = parse_record(br#"{"text":"\u0000"}"#).expect("synthetic JSON is valid");
         let ImportedStructuredValue::Object(members) = &parsed else {
             panic!("synthetic root should be an object");
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_counts_top_level_object_as_first_container() {
+    fn s28_counts_top_level_object_as_first_container() {
         let accepted = format!("{{\"nested\":{}0{}}}", "[".repeat(127), "]".repeat(127));
         let rejected = format!("{{\"nested\":{}0{}}}", "[".repeat(128), "]".repeat(128));
         assert!(parse_record(accepted.as_bytes()).is_ok());
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_blank_record_for_reporting() {
+    fn s28_preserves_blank_record_for_reporting() {
         let records = split_jsonl_records(b"\nlast")
             .expect("the bounded synthetic JSONL positions are representable");
 
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_strips_crlf_delimiter_from_record_bytes() {
+    fn s28_strips_crlf_delimiter_from_record_bytes() {
         let records = split_jsonl_records(b"first\r\n")
             .expect("the bounded synthetic JSONL positions are representable");
 
@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_preserves_unterminated_final_record() {
+    fn s28_preserves_unterminated_final_record() {
         let records = split_jsonl_records(b"first\nlast")
             .expect("the bounded synthetic JSONL positions are representable");
 
@@ -392,12 +392,12 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_converts_zero_based_index_to_one_based_ordinal() {
+    fn s28_converts_zero_based_index_to_one_based_ordinal() {
         assert_eq!(one_based_ordinal(0), Some(1));
     }
 
     #[test]
-    fn s28_inv038_terminal_delimiter_does_not_create_an_extra_record() {
+    fn s28_terminal_delimiter_does_not_create_an_extra_record() {
         let records = split_jsonl_records(b"first\n")
             .expect("the bounded synthetic JSONL positions are representable");
 
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_empty_source_contains_no_records() {
+    fn s28_empty_source_contains_no_records() {
         let records =
             split_jsonl_records(b"").expect("the empty source requires no representable position");
 
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_split_failure_display_is_content_silent() {
+    fn s28_split_failure_display_is_content_silent() {
         assert_eq!(
             JsonlRecordSplitFailure::PositionExhausted.to_string(),
             "JSONL record splitting failed"
@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_distinguishes_invalid_utf8_from_truncated_json() {
+    fn s28_distinguishes_invalid_utf8_from_truncated_json() {
         assert_eq!(parse_record(b"\xff"), Err(JsonFailure::InvalidUtf8));
         assert_eq!(
             parse_record(br#"{"type":"event""#),
