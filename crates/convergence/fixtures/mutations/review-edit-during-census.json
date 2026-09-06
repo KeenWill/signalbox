@@ -1,0 +1,10 @@
+{
+  "source": "settled.json",
+  "edge": "review evidence changes before the decision",
+  "mutations": [
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews/nodes/0/body",
+      "value": "A later body finding."
+    }
+  ]
+}

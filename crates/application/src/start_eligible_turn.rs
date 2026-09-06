@@ -482,11 +482,11 @@ mod tests {
         assert!(!value.is_max());
     }
 
-    /// INV-001 / INV-002: each production activation identity is a fresh
+    /// each production activation identity is a fresh
     /// UUIDv7 value of its distinct domain kind without using UUID order as
     /// authority.
     #[test]
-    fn inv001_inv002_production_generator_supplies_fresh_uuid_v7_candidates() {
+    fn production_generator_supplies_fresh_uuid_v7_candidates() {
         let mut generator = UuidV7StartEligibleTurnIdGenerator;
         let first_model_identity = generator.next_model_identity_entry_id();
         let first_origin = generator.next_origin_entry_id();
@@ -544,10 +544,10 @@ mod tests {
         assert_uuid_v7_candidate(second_attempt_uuid);
     }
 
-    /// S01 / INV-002 / INV-009: orchestration forwards one exact session and
+    /// S01: orchestration forwards one exact session and
     /// identity set to the atomic port without selecting a target turn.
     #[test]
-    fn s01_inv002_inv009_forwards_one_exact_session_and_identity_set() {
+    fn s01_forwards_one_exact_session_and_identity_set() {
         let session = session_id(1);
         let identities = AcceptedInputTurnActivationIdentities::new(
             origin_entry_id(u128::MAX),
@@ -577,10 +577,10 @@ mod tests {
         assert_eq!(transaction.observed, vec![(session, identities)]);
     }
 
-    /// S01 / INV-009: the committed activated-turn view returned by the
+    /// S01: the committed activated-turn view returned by the
     /// transaction passes through without application reconstruction.
     #[test]
-    fn s01_inv009_activated_outcome_passes_through_unchanged() {
+    fn s01_activated_outcome_passes_through_unchanged() {
         let activated = activated_turn();
         let expected = StartEligibleTurnOutcome::Activated(Box::new(activated.into()));
         let mut service = StartEligibleTurnService::new(
@@ -595,10 +595,10 @@ mod tests {
         assert_eq!(service.into_parts().1.observed.len(), 1);
     }
 
-    /// S03 / INV-009: a transaction failure remains nonterminal after one
+    /// S03: a transaction failure remains nonterminal after one
     /// call; orchestration does not retry or fabricate an eligibility result.
     #[test]
-    fn s03_inv009_transaction_failure_is_returned_without_retry() {
+    fn s03_transaction_failure_is_returned_without_retry() {
         let mut service = StartEligibleTurnService::new(
             FakeIds::supplying_one_candidate_set(),
             FakeTransaction::returning([Err(FakeTransactionError::Unavailable)]),

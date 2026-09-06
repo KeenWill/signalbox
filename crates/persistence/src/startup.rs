@@ -1251,10 +1251,10 @@ mod tests {
     };
     use crate::tool_loop::ToolLoopRepositoryError;
 
-    /// INV-034: a generated source-turn identity is a retryable collision, not
+    /// a generated source-turn identity is a retryable collision, not
     /// durable corruption.
     #[test]
-    fn inv034_generated_successor_source_candidate_is_a_retryable_collision() {
+    fn generated_successor_source_candidate_is_a_retryable_collision() {
         let source = TurnId::from_uuid(Uuid::from_u128(1));
         let mut proposed = BTreeSet::new();
 
@@ -1266,10 +1266,10 @@ mod tests {
         ));
     }
 
-    /// INV-034: a duplicate generated successor is a retryable collision, not
+    /// a duplicate generated successor is a retryable collision, not
     /// durable corruption.
     #[test]
-    fn inv034_generated_successor_duplicate_is_a_retryable_collision() {
+    fn generated_successor_duplicate_is_a_retryable_collision() {
         let source = TurnId::from_uuid(Uuid::from_u128(1));
         let successor = TurnId::from_uuid(Uuid::from_u128(2));
         let mut proposed = BTreeSet::new();

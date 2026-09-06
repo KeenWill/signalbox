@@ -655,7 +655,7 @@ fn redact_json(raw: String, credential: &CredentialValue) -> String {
     if key.is_empty() {
         return raw;
     }
-    if serde_json::value::RawValue::from_string(raw.clone()).is_err() {
+    let Ok(_) = serde_json::from_str::<serde_json::Value>(&raw) else {
         // A partial or malformed JSON value can encode a credential or its
         // trailing prefix with escapes that literal replacement cannot see.
         // Reuse the streaming decoder, then fail closed on any held prefix;
@@ -665,69 +665,90 @@ fn redact_json(raw: String, credential: &CredentialValue) -> String {
             redacted.push_str("[redacted]");
         }
         return redacted;
-    }
+    };
+    let token = raw.trim();
+    let Ok(redacted) = redact_json_value(token, key) else {
+        return "\"[redacted]\"".to_string();
+    };
+    let leading = raw.len() - raw.trim_start().len();
+    format!(
+        "{}{}{}",
+        &raw[..leading],
+        redacted,
+        &raw[leading + token.len()..]
+    )
+}
 
-    let mut redacted = String::with_capacity(raw.len());
-    let mut cursor = 0;
-    while cursor < raw.len() {
-        if raw.as_bytes()[cursor] == b'"' {
-            let mut end = cursor + 1;
-            let mut escaped = false;
-            while end < raw.len() {
-                let byte = raw.as_bytes()[end];
-                end += 1;
-                if escaped {
-                    escaped = false;
-                } else if byte == b'\\' {
-                    escaped = true;
-                } else if byte == b'"' {
-                    break;
+/// Borrows object keys and values in source order, including duplicate members.
+struct RawJsonChildren<'a>(Vec<&'a serde_json::value::RawValue>);
+
+impl<'de> serde::Deserialize<'de> for RawJsonChildren<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ChildrenVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ChildrenVisitor {
+            type Value = RawJsonChildren<'de>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object or array")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut children = Vec::new();
+                while let Some(value) = sequence.next_element()? {
+                    children.push(value);
                 }
+                Ok(RawJsonChildren(children))
             }
-            let token = &raw[cursor..end];
-            let Ok(decoded) = serde_json::from_str::<String>(token) else {
-                return redact_text(raw, credential);
-            };
-            if decoded.contains(key) {
-                let Ok(sanitized) = serde_json::to_string(&decoded.replace(key, "[redacted]"))
-                else {
-                    return "\"[redacted]\"".to_string();
-                };
-                redacted.push_str(&sanitized);
-            } else {
-                redacted.push_str(token);
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut object: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut children = Vec::new();
+                while let Some((key, value)) = object.next_entry()? {
+                    children.push(key);
+                    children.push(value);
+                }
+                Ok(RawJsonChildren(children))
             }
-            cursor = end;
-            continue;
         }
 
-        if matches!(
-            raw.as_bytes()[cursor],
-            b'{' | b'}' | b'[' | b']' | b',' | b':'
-        ) || raw.as_bytes()[cursor].is_ascii_whitespace()
-        {
-            redacted.push(raw.as_bytes()[cursor] as char);
-            cursor += 1;
-            continue;
-        }
-
-        let start = cursor;
-        while cursor < raw.len()
-            && !matches!(
-                raw.as_bytes()[cursor],
-                b'{' | b'}' | b'[' | b']' | b',' | b':' | b' ' | b'\t' | b'\r' | b'\n'
-            )
-        {
-            cursor += 1;
-        }
-        let token = &raw[start..cursor];
-        if token.contains(key) {
-            redacted.push_str("\"[redacted]\"");
-        } else {
-            redacted.push_str(token);
-        }
+        deserializer.deserialize_any(ChildrenVisitor)
     }
-    redacted
+}
+
+fn redact_json_value(raw: &str, credential: &str) -> Result<String, serde_json::Error> {
+    match raw.as_bytes().first() {
+        Some(b'{' | b'[') => {
+            let RawJsonChildren(children) = serde_json::from_str(raw)?;
+            let mut redacted = String::with_capacity(raw.len());
+            let mut remaining = raw;
+            for child in children {
+                let token = child.get();
+                // RawValue borrows its exact token from this source document.
+                let offset = token.as_ptr() as usize - remaining.as_ptr() as usize;
+                redacted.push_str(&remaining[..offset]);
+                redacted.push_str(&redact_json_value(token, credential)?);
+                remaining = &remaining[offset + token.len()..];
+            }
+            redacted.push_str(remaining);
+            Ok(redacted)
+        }
+        Some(b'"') => {
+            let text: String = serde_json::from_str(raw)?;
+            if text.contains(credential) {
+                serde_json::to_string(&text.replace(credential, "[redacted]"))
+            } else {
+                Ok(raw.to_string())
+            }
+        }
+        _ if raw.contains(credential) => Ok("\"[redacted]\"".to_string()),
+        _ => Ok(raw.to_string()),
+    }
 }
 
 fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
@@ -1005,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn json_redaction_preserves_untouched_raw_lexemes_and_duplicate_keys() {
+    fn json_redaction_preserves_unredacted_tokens_and_duplicate_members() {
         let key = credential("key_loop");
         let raw = r#"{"token":"key_loop","id":184467440737095516160,"dup":1,"dup":2}"#;
 
@@ -1013,6 +1034,23 @@ mod tests {
             redact_json(raw.to_string(), &key),
             r#"{"token":"[redacted]","id":184467440737095516160,"dup":1,"dup":2}"#
         );
+    }
+
+    #[test]
+    fn json_redaction_preserves_whitespace_escapes_and_numeric_spellings() {
+        let key = credential("key_loop");
+        let raw = r#"  { "dup": 1e+02, "dup": -0, "escaped": "\u0061", "nested": [ { "key_\u006coop": "key_loop" } ] }  "#;
+        assert_eq!(
+            redact_json(raw.to_string(), &key),
+            r#"  { "dup": 1e+02, "dup": -0, "escaped": "\u0061", "nested": [ { "[redacted]": "[redacted]" } ] }  "#,
+        );
+    }
+
+    #[test]
+    fn json_without_a_credential_remains_verbatim() {
+        let key = credential("key_loop");
+        let raw = r#" { "dup": 1, "dup": 2, "escaped": "\u0061", "number": 1e+02 } "#;
+        assert_eq!(redact_json(raw.to_string(), &key), raw);
     }
 
     #[test]
@@ -1769,11 +1807,11 @@ mod tests {
         assert_eq!(pending, "ke");
     }
 
-    /// INV-035: a credential the provider echoes back with ordinary JSON
+    /// a credential the provider echoes back with ordinary JSON
     /// escapes is caught even when the arrival boundary falls inside the
     /// escape itself, which is where `input_json_delta` is free to split.
     #[test]
-    fn inv_035_simple_escaped_credential_split_mid_escape_is_redacted() {
+    fn simple_escaped_credential_split_mid_escape_is_redacted() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -1857,7 +1895,7 @@ mod tests {
     ///
     /// Deliberately mirrors [`redact_observation_fact`]: production decides
     /// which fields a credential can reach by redacting them, so a field it
-    /// scrubs and this classifier reports as `Absent` is a field no INV-035
+    /// scrubs and this classifier reports as `Absent` is a field no
     /// case would ever inspect — deleting that production redaction would
     /// leave the suite green while the credential is emitted. The two matches
     /// are meant to name the same surface, and only `SendCommenced` and
@@ -2149,11 +2187,9 @@ mod tests {
         }
     }
 
-    /// The reassembly is the only reason the check is stronger than a
-    /// per-observation scan, and a helper carrying logic the INV-035 cases
-    /// depend on is verified rather than assumed: a credential split across
-    /// two deltas leaks recoverably even though neither fragment contains it,
-    /// and the projection those cases use never reconstructs that stream.
+    /// The reassembly check catches a credential split across two deltas even
+    /// though neither fragment contains it. A projection that never
+    /// reconstructs that stream cannot detect the recoverable credential.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
     fn split_credential_on_an_uninspected_stream_is_caught() {
@@ -2324,7 +2360,7 @@ mod tests {
     /// The reconstructed arguments for one tool index, as a reader of the
     /// stream would see them.
     ///
-    /// INV-035 constrains the *content* a consumer reassembles — safe bytes
+    /// The check constrains the *content* a consumer reassembles — safe bytes
     /// preserved, credential absent — not how the scrubber chops it into
     /// deltas. Asserting exact fragment boundaries would fail a
     /// behaviour-preserving change that buffered the safe prefix or coalesced
@@ -2344,7 +2380,7 @@ mod tests {
             .collect()
     }
 
-    /// INV-035: the credential is scrubbed from the facts that carry a single
+    /// the credential is scrubbed from the facts that carry a single
     /// provider-controlled value, not only from the delta streams.
     ///
     /// Each of these is redacted by `redact_observation_fact`, so each is a
@@ -2352,7 +2388,7 @@ mod tests {
     /// carrying the credential, deleting that production redaction would leave
     /// this suite green.
     #[test]
-    fn inv_035_single_value_facts_are_credential_scrubbed() {
+    fn single_value_facts_are_credential_scrubbed() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -2382,8 +2418,8 @@ mod tests {
         // Pinned exactly rather than by credential absence and a count. Those
         // two hold just as well when redaction replaces the *whole* value, so
         // a regression that scrubbed `model-` and `-v1` away with the
-        // credential would satisfy them while losing the safe bytes INV-035
-        // preserves. Comparing the forwarded facts states both halves at once:
+        // credential would satisfy them while losing safe bytes.
+        // Comparing the forwarded facts states both halves at once:
         // the credential is gone, the surrounding bytes and the non-credential
         // `http_status` are untouched, and each variant is still itself.
         assert_eq!(
@@ -2632,7 +2668,7 @@ mod tests {
         assert_eq!(decoded_escapes(r"\ud83d"), "\\ud83d");
     }
 
-    /// INV-035: a disguised credential emitted on a stream the intended-stream
+    /// a disguised credential emitted on a stream the intended-stream
     /// assertion never reconstructs is still caught.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
@@ -2649,7 +2685,7 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: a proposal's provider-controlled id and name are scrubbed
+    /// a proposal's provider-controlled id and name are scrubbed
     /// alongside its arguments, pinned to their exact redacted values.
     ///
     /// `redact_tool_proposal` scrubs all three fields, but the sibling case
@@ -2659,7 +2695,7 @@ mod tests {
     /// than mere absence: replacing a whole field would satisfy an absence
     /// check while discarding the safe bytes around the credential.
     #[test]
-    fn inv_035_proposed_identifiers_and_names_are_credential_scrubbed() {
+    fn proposed_identifiers_and_names_are_credential_scrubbed() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -2687,7 +2723,7 @@ mod tests {
         );
     }
 
-    /// INV-035: a disguised credential in proposed arguments is scrubbed by
+    /// a disguised credential in proposed arguments is scrubbed by
     /// the sink itself, pinned to the exact forwarded proposal.
     ///
     /// Driven through `CredentialRedactingSink` rather than starting from an
@@ -2695,7 +2731,7 @@ mod tests {
     /// the helper works and nothing about the production path, so a regression
     /// in `redact_tool_proposal` would not reach it.
     #[test]
-    fn inv_035_disguised_credential_in_proposed_arguments_is_scrubbed() {
+    fn disguised_credential_in_proposed_arguments_is_scrubbed() {
         let key = credential("fixture/secret");
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
         let mut observed = Vec::new();
@@ -2725,7 +2761,7 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: the sink scrubs a disguised credential from a stream that
+    /// the sink scrubs a disguised credential from a stream that
     /// stops before closing its document, pinned to the exact forwarded value.
     ///
     /// Driven through production rather than from an already-leaked fact: a
@@ -2733,7 +2769,7 @@ mod tests {
     /// nothing about `redact_json_stream_fragment`, so a regression requiring
     /// a complete document before redacting would not reach it.
     #[test]
-    fn inv_035_sink_scrubs_a_disguise_in_an_unfinished_document() {
+    fn sink_scrubs_a_disguise_in_an_unfinished_document() {
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
 
         assert_eq!(
@@ -2742,9 +2778,9 @@ mod tests {
         );
     }
 
-    /// INV-035: the same holds for a token the stream never closed.
+    /// the same holds for a token the stream never closed.
     #[test]
-    fn inv_035_sink_scrubs_a_disguise_in_an_unclosed_token() {
+    fn sink_scrubs_a_disguise_in_an_unclosed_token() {
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
 
         assert_eq!(
@@ -2753,10 +2789,10 @@ mod tests {
         );
     }
 
-    /// INV-035: and for a disguise behind an invalid escape, which production
+    /// and for a disguise behind an invalid escape, which production
     /// redacts through its malformed-fragment path.
     #[test]
-    fn inv_035_sink_scrubs_a_disguise_behind_a_malformed_escape() {
+    fn sink_scrubs_a_disguise_behind_a_malformed_escape() {
         let [_, _, partial, ..] = &REPRESENTATIVE_DISGUISES;
 
         assert_eq!(
@@ -2798,7 +2834,7 @@ mod tests {
         fragment.clone()
     }
 
-    /// INV-035: a disguised credential in a token the stream never closed is
+    /// a disguised credential in a token the stream never closed is
     /// caught, the shape a truncated argument delta actually takes.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
@@ -2815,7 +2851,7 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: an invalid escape ahead of a disguised credential does not
+    /// an invalid escape ahead of a disguised credential does not
     /// hide it.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
@@ -2848,10 +2884,10 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: a credential spelled as a surrogate pair survives a boundary
+    /// a credential spelled as a surrogate pair survives a boundary
     /// that falls between the pair's two halves.
     #[test]
-    fn inv_035_surrogate_pair_credential_split_mid_escape_is_redacted() {
+    fn surrogate_pair_credential_split_mid_escape_is_redacted() {
         let key = credential("key\u{1f600}loop");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -2878,11 +2914,11 @@ mod tests {
         assert_eq!(arguments, r#"{"emoji":"[redacted]"}"#);
     }
 
-    /// INV-035: a held credential prefix ending inside an escape is replaced
+    /// a held credential prefix ending inside an escape is replaced
     /// rather than forwarded when another tool call's arguments arrive, so no
     /// later observation can reassemble it across the fact boundary.
     #[test]
-    fn inv_035_held_partial_escape_is_flushed_closed_before_another_tool_index() {
+    fn held_partial_escape_is_flushed_closed_before_another_tool_index() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);

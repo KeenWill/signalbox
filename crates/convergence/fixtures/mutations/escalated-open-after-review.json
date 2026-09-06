@@ -1,0 +1,146 @@
+{
+  "source": "escalation-wave-8.json",
+  "edge": "accepted escalation remains open after an authenticated quiet review",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews",
+      "value": {
+        "totalCount": 3,
+        "nodes": [
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 1
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T12:00:00Z"
+          },
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 0
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUktNA",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T14:00:00Z"
+          },
+          {
+            "author": {
+              "login": "KeenWill"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 1
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUlcDA",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T13:00:00Z"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews",
+      "value": {
+        "totalCount": 3,
+        "nodes": [
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 1
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T12:00:00Z"
+          },
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 0
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUktNA",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T14:00:00Z"
+          },
+          {
+            "author": {
+              "login": "KeenWill"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 1
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUlcDA",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T13:00:00Z"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/id",
+      "value": "PRRC_kwDOTWhy-87q6Gzo"
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/pullRequestReview",
+      "value": {
+        "id": "PRR_kwDOTWhy-88AAAABMUlcDA"
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/id",
+      "value": "PRRC_kwDOTWhy-87q6Gzo"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/pullRequestReview",
+      "value": {
+        "id": "PRR_kwDOTWhy-88AAAABMUlcDA"
+      }
+    }
+  ]
+}

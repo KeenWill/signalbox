@@ -2191,11 +2191,11 @@ mod tests {
         assert_eq!(error.input(), &unchanged);
     }
 
-    /// S28 / INV-015 / INV-038 / INV-039: preparation projects every exact
+    /// S28: preparation projects every exact
     /// imported prefix member once, in order, and couples it to one exact
     /// separately identified seed frontier.
     #[test]
-    fn s28_inv015_inv038_inv039_preparation_materializes_exact_imported_seed() {
+    fn s28_preparation_materializes_exact_imported_seed() {
         let conversation = conversation(1);
         let command = command_for(&conversation);
         let calls = Cell::new(0_u128);
@@ -2241,10 +2241,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-012 / INV-039: mismatched target identities fail before any
+    /// S28: mismatched target identities fail before any
     /// semantic identity is generated or command identity is claimed.
     #[test]
-    fn s28_inv012_inv039_target_mismatch_precedes_projection() {
+    fn s28_target_mismatch_precedes_projection() {
         let selected = conversation(1);
         let supplied = conversation(2);
         let command = command_for(&selected);
@@ -2288,10 +2288,10 @@ mod tests {
         assert_eq!(calls.get(), 0);
     }
 
-    /// S28 / INV-001 / INV-039: a faulty generator is called exactly once per
+    /// S28: a faulty generator is called exactly once per
     /// prefix member, then duplicate semantic identity fails closed.
     #[test]
-    fn s28_inv001_inv039_duplicate_generated_identity_fails_closed() {
+    fn s28_duplicate_generated_identity_fails_closed() {
         let conversation = conversation(1);
         let command = command_for(&conversation);
         let calls = Cell::new(0);
@@ -2312,10 +2312,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-003 / INV-008 / INV-012 / INV-039: complete matching
+    /// S28: complete matching
     /// creation facts reconstruct the exact prepared session seed.
     #[test]
-    fn s28_inv003_inv008_inv012_inv039_creation_reconstitutes_complete_seed() {
+    fn s28_creation_reconstitutes_complete_seed() {
         let (conversation, command, prepared) = prepared_fixture();
         let input = creation_input(&conversation, command.clone(), &prepared);
 
@@ -2334,10 +2334,10 @@ mod tests {
         assert_eq!(reconstituted.applied_result(), prepared.applied_result());
     }
 
-    /// S28 / INV-002 / INV-003 / INV-015 / INV-039: current-session
+    /// S28: current-session
     /// reconstitution requires and returns the exact seed identity and prefix.
     #[test]
-    fn s28_inv002_inv003_inv015_inv039_current_session_reconstitutes_seed() {
+    fn s28_current_session_reconstitutes_seed() {
         let (conversation, _, prepared) = prepared_fixture();
         let mut input = current_input(&conversation, &prepared);
         let placement = VersionedSessionPlacement::reconstitute(
@@ -2369,11 +2369,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-015 / INV-039: an ordinary imported-session load
+    /// S28: an ordinary imported-session load
     /// proves the immutable seed from constant-size records without loading
     /// semantic-prefix members.
     #[test]
-    fn s28_inv002_inv015_inv039_bounded_current_session_reconstitutes() {
+    fn s28_bounded_current_session_reconstitutes() {
         let (_, _, prepared) = prepared_fixture();
         let mut input = bounded_input(&prepared);
         let placement = VersionedSessionPlacement::reconstitute(
@@ -2403,9 +2403,9 @@ mod tests {
         assert_eq!(session.current_placement(), &placement);
     }
 
-    /// S18 / INV-003: delegated bounded current sessions reject imported ancestry.
+    /// S18: delegated bounded current sessions reject imported ancestry.
     #[test]
-    fn s18_inv003_bounded_current_session_rejects_delegated_imported_ancestry() {
+    fn s18_bounded_current_session_rejects_delegated_imported_ancestry() {
         let (_, _, prepared) = prepared_fixture();
         let mut input = bounded_input(&prepared);
         input.provenance = SessionCreationProvenance::new(
@@ -2421,10 +2421,10 @@ mod tests {
         );
     }
 
-    /// S18 / INV-003: full imported-session reconstitution rejects the same
+    /// S18: full imported-session reconstitution rejects the same
     /// impossible delegated/imported provenance pairing before yielding a session.
     #[test]
-    fn s18_inv003_full_current_session_rejects_delegated_imported_ancestry() {
+    fn s18_full_current_session_rejects_delegated_imported_ancestry() {
         let (conversation, _, prepared) = prepared_fixture();
         let mut input = current_input(&conversation, &prepared);
         input.provenance = SessionCreationProvenance::new(
@@ -2445,10 +2445,10 @@ mod tests {
         assert_eq!(error.input(), &unchanged);
     }
 
-    /// S18 / INV-003: delegated no-ancestry facts remain a request to use the
+    /// S18: delegated no-ancestry facts remain a request to use the
     /// wrong reconstitution seam, rather than claiming imported ancestry.
     #[test]
-    fn s18_inv003_bounded_delegated_no_ancestry_is_not_imported() {
+    fn s18_bounded_delegated_no_ancestry_is_not_imported() {
         let (_, _, prepared) = prepared_fixture();
         let mut input = bounded_input(&prepared);
         input.provenance = SessionCreationProvenance::delegated(tool_request_id(90));
@@ -2459,10 +2459,10 @@ mod tests {
         );
     }
 
-    /// S18 / INV-003: the full imported-session seam preserves the same
+    /// S18: the full imported-session seam preserves the same
     /// no-ancestry classification for delegated creation.
     #[test]
-    fn s18_inv003_full_delegated_no_ancestry_is_not_imported() {
+    fn s18_full_delegated_no_ancestry_is_not_imported() {
         let (conversation, _, prepared) = prepared_fixture();
         let mut input = current_input(&conversation, &prepared);
         input.provenance = SessionCreationProvenance::delegated(tool_request_id(90));
@@ -2480,11 +2480,11 @@ mod tests {
         assert_eq!(error.input(), &unchanged);
     }
 
-    /// S28 / INV-002 / INV-003 / INV-015 / INV-039: every constructible
+    /// S28: every constructible
     /// bounded imported-session mismatch retains its input and reports one
     /// exact typed cause.
     #[test]
-    fn s28_inv002_inv003_inv015_inv039_bounded_seed_corruption_is_typed() {
+    fn s28_bounded_seed_corruption_is_typed() {
         let (_, _, prepared) = prepared_fixture();
 
         let mut requested_session = bounded_input(&prepared);
@@ -2626,10 +2626,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-003: current imported-session placement rows and
+    /// S28: current imported-session placement rows and
     /// pointers cannot be cross-wired across session identities or versions.
     #[test]
-    fn s28_inv002_inv003_current_placement_corruption_is_typed() {
+    fn s28_current_placement_corruption_is_typed() {
         let (conversation, _, prepared) = prepared_fixture();
 
         let mut current_placement_session = current_input(&conversation, &prepared);
@@ -2656,10 +2656,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-015 / INV-039: missing, duplicate, cross-session, and
+    /// S28: missing, duplicate, cross-session, and
     /// equal-content-but-different-identity seed facts are typed corruption.
     #[test]
-    fn s28_inv015_inv039_seed_record_and_identity_corruption_is_typed() {
+    fn s28_seed_record_and_identity_corruption_is_typed() {
         let (conversation, _, prepared) = prepared_fixture();
 
         let mut missing = current_input(&conversation, &prepared);
@@ -2719,10 +2719,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038 / INV-039: imported identity, speaker, content, and
+    /// S28: imported identity, speaker, content, and
     /// ordered snapshot membership are independently checked.
     #[test]
-    fn s28_inv038_inv039_semantic_prefix_corruption_is_typed() {
+    fn s28_semantic_prefix_corruption_is_typed() {
         let (conversation, _, prepared) = prepared_fixture();
 
         let mut wrong_imported_entry = current_input(&conversation, &prepared);
@@ -2806,11 +2806,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-003 / INV-015 / INV-038 / INV-039: every
+    /// S28: every
     /// constructible imported-seed corruption branch retains its complete
     /// input and reports one exact typed cause.
     #[test]
-    fn s28_inv002_inv003_inv015_inv038_inv039_seed_corruption_matrix_is_complete() {
+    fn s28_seed_corruption_matrix_is_complete() {
         let (imported_conversation, _, prepared) = prepared_fixture();
         let other_conversation = conversation(2);
 
@@ -2963,11 +2963,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-002 / INV-003 / INV-008 / INV-012 / INV-039: every
+    /// S28: every
     /// constructible top-level creation mismatch returns the complete
     /// unchanged reconstitution input.
     #[test]
-    fn s28_inv002_inv003_inv008_inv012_inv039_creation_corruption_matrix_is_complete() {
+    fn s28_creation_corruption_matrix_is_complete() {
         let (conversation, command, prepared) = prepared_fixture();
 
         let mut result_mismatch = creation_input(&conversation, command.clone(), &prepared);
@@ -3016,10 +3016,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-039: a different selected imported boundary cannot
+    /// S28: a different selected imported boundary cannot
     /// reconstruct the semantic prefix of another boundary.
     #[test]
-    fn s28_inv039_mismatched_boundary_fails_closed() {
+    fn s28_mismatched_boundary_fails_closed() {
         let (conversation, _, prepared) = prepared_fixture();
         let mut input = current_input(&conversation, &prepared);
         input.provenance = SessionCreationProvenance::new(

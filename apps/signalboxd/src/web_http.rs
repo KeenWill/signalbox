@@ -39,6 +39,7 @@ use headers::{
     ETag as TypedEtag, HeaderMapExt as _, IfNoneMatch as TypedIfNoneMatch, IfRange as TypedIfRange,
     Range as TypedRange,
 };
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     AttentionAction, AttentionActivityKind, AttentionBlockedReason, AttentionChanges,
@@ -4278,14 +4279,29 @@ fn insert_header(headers: &mut HeaderMap, name: axum::http::HeaderName, value: S
 }
 
 fn content_disposition(filename: &str) -> String {
-    let mut encoded = String::new();
-    for byte in filename.bytes() {
-        if byte.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&byte) {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
+    const RFC_5987_VALUE: &AsciiSet = &CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'%')
+        .add(b'\'')
+        .add(b'(')
+        .add(b')')
+        .add(b'*')
+        .add(b',')
+        .add(b'/')
+        .add(b':')
+        .add(b';')
+        .add(b'<')
+        .add(b'=')
+        .add(b'>')
+        .add(b'?')
+        .add(b'@')
+        .add(b'[')
+        .add(b'\\')
+        .add(b']')
+        .add(b'{')
+        .add(b'}');
+    let encoded = utf8_percent_encode(filename, RFC_5987_VALUE);
     format!("attachment; filename=\"download\"; filename*=UTF-8''{encoded}")
 }
 

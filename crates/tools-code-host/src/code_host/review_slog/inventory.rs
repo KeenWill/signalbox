@@ -172,14 +172,6 @@ impl ThreadInventoryResult {
         })
     }
 
-    pub(super) const fn truncated(&self) -> bool {
-        self.truncated
-    }
-
-    pub(super) fn head_revision(&self) -> &str {
-        &self.head_revision
-    }
-
     pub(super) fn into_value(self) -> Value {
         json!({
             "next_cursor": self.next_cursor,

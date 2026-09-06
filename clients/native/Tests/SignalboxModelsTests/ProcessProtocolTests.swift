@@ -25,7 +25,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-033: every metadata last-writer actor the daemon can send decodes into
+  /// every metadata last-writer actor the daemon can send decodes into
   /// its own typed variant carrying the reference that actor object states, so
   /// a tool-written or model-written snapshot is readable rather than opaque.
   func testMetadataLastWriterDecodesEveryActor() throws {
@@ -68,7 +68,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-033: every metadata last-writer actor encodes to its exact wire bytes
+  /// every metadata last-writer actor encodes to its exact wire bytes
   /// and decodes back to the same value. The two arms are hand-written and
   /// separate, so an encoder that dropped a carried reference, or spelled a
   /// member differently from the decoder, would otherwise ship unseen.
@@ -110,7 +110,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-033: turn stops encode the required descendant scope in version one.
+  /// turn stops encode the required descendant scope in version one.
   func testTurnStopRequestEncodesItsDescendantScope() throws {
     let frame = SignalboxProcessClientFrame(
       requestID: try SignalboxRequestID(validating: 9),
@@ -132,7 +132,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-012 / INV-060: multipart decoding preserves ordered attachment
+  /// multipart decoding preserves ordered attachment
   /// metadata and structural replay equality.
   func testUserInputContentPreservesOrderedAttachmentMetadata() throws {
     let content = try SignalboxUserInputContent(validating: [
@@ -213,7 +213,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-012: native multipart decoding stops at the retained-parts bound
+  /// native multipart decoding stops at the retained-parts bound
   /// without decoding an unbounded remainder.
   func testUserInputContentDecodingStopsAtThePartLimit() throws {
     let retained = Array(
@@ -483,7 +483,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-033: imported continuation requests retain their closed version-one shape.
+  /// imported continuation requests retain their closed version-one shape.
   func testImportedContinuationRequestUsesTheVersionOneFrontierShape() throws {
     let importedConversationID = "33333333-3333-4333-8333-333333333333"
     let aliasID = "44444444-4444-4444-8444-444444444444"
@@ -510,7 +510,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-033: admitted imported-entry members decode without weakening the closed shape.
+  /// admitted imported-entry members decode without weakening the closed shape.
   func testImportedConversationEntryDecodesItsAttestedTextPreview() throws {
     let importedEntryID = "33333333-3333-4333-8333-333333333333"
     let position = SignalboxCanonicalUInt64(rawValue: 1)
@@ -543,7 +543,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(entry.textPreview?.truncated, false)
   }
 
-  /// INV-033: omitting a required nullable imported-entry member fails explicitly.
+  /// omitting a required nullable imported-entry member fails explicitly.
   func testImportedConversationEntryRequiresExplicitNullablePreview() throws {
     let encoded = Data(
       """
@@ -607,7 +607,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-033: explicit null preview admission stays distinct from an omitted member.
+  /// explicit null preview admission stays distinct from an omitted member.
   func testImportedConversationEntryAcceptsAttestedSpeakerWithoutTextPreview() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.attestedSpeakerWithoutTextPreviewFrame()
@@ -655,7 +655,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-033 / INV-044: session summaries retain the same complete runner
+  /// session summaries retain the same complete runner
   /// projection as transcript snapshot boundaries.
   func testSessionSummaryDecodesCompleteRunnerProjection() throws {
     let runnerID = "44444444-4444-4444-8444-444444444444"
@@ -713,7 +713,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(frame.message, .sessionSummary(expected))
   }
 
-  /// INV-033: the session-summary runner member is required even when null.
+  /// the session-summary runner member is required even when null.
   func testSessionSummaryMissingRunnerDegradesWithDiagnostic() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: Data(
@@ -914,7 +914,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-033 / INV-044: runner transitions remain typed native session events.
+  /// runner transitions remain typed native session events.
   func testRunnerStateTransitionDecodesItsClosedPayload() throws {
     let runnerID = "44444444-4444-4444-8444-444444444444"
     let encoded = Data(
@@ -2030,7 +2030,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  /// INV-033 / INV-044: a daemon-only transcript snapshot carries its nullable
+  /// a daemon-only transcript snapshot carries its nullable
   /// runner member without becoming an unknown message.
   func testTranscriptSnapshotStartDecodesAbsentRunnerProjection() throws {
     let frame = try SignalboxProcessServerFrame.decode(
@@ -2058,7 +2058,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(frame.message, .transcriptSnapshotStart(expected))
   }
 
-  /// INV-033 / INV-044: the native boundary retains every axis of one complete
+  /// the native boundary retains every axis of one complete
   /// runner projection rather than silently discarding the new wire member.
   func testTranscriptSnapshotStartDecodesCompleteRunnerProjection() throws {
     let runnerID = "44444444-4444-4444-8444-444444444444"
@@ -2110,7 +2110,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(frame.message, .transcriptSnapshotStart(expected))
   }
 
-  /// INV-033: the required nullable runner member cannot be omitted from a
+  /// the required nullable runner member cannot be omitted from a
   /// known transcript snapshot boundary.
   func testTranscriptSnapshotStartMissingRunnerDegradesWithDiagnostic() throws {
     let encoded = Data(
@@ -2132,7 +2132,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
   }
 
-  /// INV-033: capability names retain the portable runner-name grammar at the
+  /// capability names retain the portable runner-name grammar at the
   /// native protocol boundary.
   func testTranscriptSnapshotStartRejectsInvalidRunnerCapabilityName() throws {
     let frame = try SignalboxProcessServerFrame.decode(
@@ -2148,7 +2148,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
   }
 
-  /// INV-033: credential profiles retain the portable runner-name grammar at
+  /// credential profiles retain the portable runner-name grammar at
   /// the native protocol boundary.
   func testTranscriptSnapshotStartRejectsInvalidRunnerCredentialProfile() throws {
     let frame = try SignalboxProcessServerFrame.decode(
@@ -2164,7 +2164,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
   }
 
-  /// INV-033: repository keys retain the portable runner-name grammar at the
+  /// repository keys retain the portable runner-name grammar at the
   /// native protocol boundary.
   func testTranscriptSnapshotStartRejectsInvalidRunnerRepositoryKey() throws {
     let frame = try SignalboxProcessServerFrame.decode(
@@ -2180,7 +2180,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
   }
 
-  /// INV-033: runner working-directory text retains its exact byte bound at
+  /// runner working-directory text retains its exact byte bound at
   /// the native protocol boundary.
   func testTranscriptSnapshotStartRejectsOversizedRunnerWorkingDirectory() throws {
     let oversizedDirectory = String(repeating: "x", count: 4_097)
@@ -2197,7 +2197,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
   }
 
-  /// INV-033: runner working-directory text rejects NUL at the native protocol
+  /// runner working-directory text rejects NUL at the native protocol
   /// boundary.
   func testTranscriptSnapshotStartRejectsNULBearingRunnerWorkingDirectory() throws {
     let frame = try SignalboxProcessServerFrame.decode(

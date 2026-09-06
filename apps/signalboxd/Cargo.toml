@@ -13,9 +13,12 @@ test-support = [
     "signalbox-blob-store-s3/test-support",
     "signalbox-persistence/postgres-integration",
     "signalbox-persistence/test-support",
+    "signalbox-module-repo-watch-v2/test-support",
 ]
 
 [dependencies]
+signalbox-convergence = { path = "../../crates/convergence" }
+toml = "1.1.3"
 hex = "0.4.3"
 axum = { version = "0.8.9", default-features = false, features = [
     "http1",
@@ -28,12 +31,14 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 hmac = { version = "0.13.0", default-features = false }
 headers = "0.4.1"
 http = "1.3.1"
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 image = { version = "0.25.8", default-features = false, features = [
     "gif",
     "jpeg",
     "png",
     "webp",
 ] }
+percent-encoding = "2.3.2"
 mime = "0.3.17"
 # Classifies the error `axum::body::to_bytes` returns: only its
 # `LengthLimitError` is an oversized body; anything else is transport failure.
@@ -89,6 +94,8 @@ signalbox-model-runtime-anthropic = { path = "../../crates/model-runtime-anthrop
 signalbox-model-runtime-claude-cli = { path = "../../crates/model-runtime-claude-cli" }
 signalbox-model-runtime-codex-cli = { path = "../../crates/model-runtime-codex-cli" }
 signalbox-model-runtime-openai = { path = "../../crates/model-runtime-openai" }
+signalbox-module-repo-watch-v2 = { path = "../../crates/modules/repo-watch-v2" }
+signalbox-ownership-seam = { path = "../../crates/ownership-seam" }
 signalbox-persistence = { path = "../../crates/persistence" }
 signalbox-process-protocol = { path = "../../crates/process-protocol" }
 signalbox-runner-wire = { path = "../../crates/runner-wire" }

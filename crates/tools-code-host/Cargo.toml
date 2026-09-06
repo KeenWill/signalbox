@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+signalbox-convergence = { path = "../convergence" }
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 reqwest = { version = "0.13.4", default-features = false, features = [
     "rustls-no-provider",
@@ -30,6 +31,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "macros",
     "rt-multi-thread",
     "time",
+    "sync",
 ] }
 
 [dev-dependencies]

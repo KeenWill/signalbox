@@ -1,0 +1,22 @@
+{
+  "source": "declined-finding.json",
+  "edge": "edited disposition",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/createdAt",
+      "value": "2026-09-05T11:00:00Z"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/createdAt",
+      "value": "2026-09-05T11:00:00Z"
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/lastEditedAt",
+      "value": "2026-09-05T13:00:00Z"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/lastEditedAt",
+      "value": "2026-09-05T13:00:00Z"
+    }
+  ]
+}
