@@ -562,7 +562,7 @@ jobs:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
-    # Generous by design: this job now absorbs all six suites' compilation,
+    # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
