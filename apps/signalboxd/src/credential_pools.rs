@@ -568,12 +568,15 @@ impl CredentialPoolTrigger {
         }
     }
 
-    /// Reports whether this cause carries proof the request was not accepted,
-    /// which is what admits a successor call on the same turn.
+    /// Reports whether this cause admits a successor call on the same turn.
+    ///
+    /// Availability causes need adapter proof that the request was not
+    /// accepted. A rejected credential is itself sufficient to rotate, because
+    /// the provider refused authentication before serving the request.
     const fn admits_switch_now(self) -> bool {
         matches!(
             self,
-            Self::QuotaExhausted | Self::RateLimited | Self::Overloaded
+            Self::QuotaExhausted | Self::RateLimited | Self::Overloaded | Self::CredentialRejected
         )
     }
 

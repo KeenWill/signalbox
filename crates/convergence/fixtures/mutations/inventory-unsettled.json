@@ -1,0 +1,10 @@
+{
+  "source": "settled.json",
+  "edge": "gating check absent on the prior tick",
+  "mutations": [
+    {
+      "path": "/previous/check_inventory",
+      "value": []
+    }
+  ]
+}

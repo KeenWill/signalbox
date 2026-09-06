@@ -1300,24 +1300,24 @@ impl RepoWatchObservation {
 /// Why normalized repository state could not be made canonical.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchRepositoryStateError {
-    # [error ("duplicate pull request {}" , field_0 . get ())]
+    #[error("duplicate pull request {}", field_0.get())]
     DuplicatePullRequest(PullRequestNumber),
     #[error("repository-watch cursor exceeds 1000000 merged baselines")]
     MergedPullRequestBaselineLimit,
-    # [error ("duplicate check suite {}" , field_0 . get ())]
+    #[error("duplicate check suite {}", field_0.get())]
     DuplicateCheckSuite(GitHubObjectId),
-    # [error ("duplicate check run {}" , field_0 . get ())]
+    #[error("duplicate check run {}", field_0.get())]
     DuplicateCheckRun(GitHubObjectId),
-    # [error ("duplicate review {}" , field_0 . get ())]
+    #[error("duplicate review {}", field_0.get())]
     DuplicateReview(GitHubObjectId),
-    # [error ("duplicate review thread {}" , field_0 . as_str ())]
+    #[error("duplicate review thread {}", field_0.as_str())]
     DuplicateThread(ReviewThreadId),
-    # [error ("duplicate branch workflow {}/{}" , branch . as_str () , workflow_id . get ())]
+    #[error("duplicate branch workflow {}/{}", branch.as_str(), workflow_id.get())]
     DuplicateWorkflow {
         branch: BranchName,
         workflow_id: GitHubObjectId,
     },
-    # [error ("duplicate branch head {}" , field_0 . as_str ())]
+    #[error("duplicate branch head {}", field_0.as_str())]
     DuplicateBranchHead(BranchName),
 }
 
@@ -3645,7 +3645,7 @@ mod tests {
     }
 
     #[test]
-    fn inv072_current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
+    fn current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
         let assessment = convergence_assessment(ConvergenceFacts {
             base_branch: BASE_BRANCH,
             mergeable_state: MergeableState::Mergeable,

@@ -5,7 +5,6 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    num::NonZeroU64,
 };
 
 use signalbox_application::{
@@ -43,37 +42,10 @@ const ENTRY_NOT_FOUND_DETAIL: &str = "plan entry not found";
 const DEPENDENCY_CYCLE_DETAIL: &str = "plan dependency would create a cycle";
 const DEPENDENCY_LIMIT_DETAIL: &str = "plan entry dependency limit reached";
 
-#[derive(signalbox_derive::Accessors)]
-/// One positive ordinal in a session's append-only plan history.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PlanEventOrdinal(
-    /// Returns the durable integer.
-    #[get(inner, as = "as_u64")]
-    NonZeroU64,
+signalbox_newtype::positive_ordinal!(
+    /// One positive ordinal in a session's append-only plan history.
+    PlanEventOrdinal
 );
-
-impl PlanEventOrdinal {
-    /// Reconstitutes a positive durable ordinal.
-    pub const fn try_from_u64(value: u64) -> Option<Self> {
-        match NonZeroU64::new(value) {
-            Some(value) => Some(Self(value)),
-            None => None,
-        }
-    }
-
-    /// Returns the first event ordinal.
-    pub const fn first() -> Self {
-        Self(NonZeroU64::MIN)
-    }
-
-    /// Returns the next ordinal when representable.
-    pub const fn checked_next(self) -> Option<Self> {
-        match self.0.get().checked_add(1) {
-            Some(value) => Self::try_from_u64(value),
-            None => None,
-        }
-    }
-}
 
 #[derive(signalbox_derive::Accessors)]
 /// Stable entry identity: the ordinal of its creation event.
@@ -100,7 +72,7 @@ impl PlanEntryId {
 
     /// Returns the model-facing integer.
     pub const fn as_u64(self) -> u64 {
-        self.0.as_u64()
+        self.0.get()
     }
 }
 
@@ -436,7 +408,7 @@ impl FoldedPlan {
 /// Why an event sequence cannot represent one session plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlanFoldError {
-    #[error("plan required event ordinal {}", expected.as_u64())]
+    #[error("plan required event ordinal {}", expected.get())]
     /// Ordinals were not contiguous from one.
     NoncontiguousOrdinal {
         /// Next required ordinal.
@@ -464,7 +436,7 @@ pub enum PlanFoldError {
 
 /// Folds one complete session history into current entries.
 pub fn fold_plan_events(events: &[PlanEvent]) -> Result<FoldedPlan, PlanFoldError> {
-    let mut expected = PlanEventOrdinal::first();
+    let mut expected = PlanEventOrdinal::MIN;
     let mut session = None;
     let mut entries = Vec::<PlanEntry>::new();
     for (index, event) in events.iter().enumerate() {
@@ -1470,7 +1442,7 @@ struct EventOutput {
 
 impl From<PlanEvent> for EventOutput {
     fn from(value: PlanEvent) -> Self {
-        let ordinal = value.ordinal.as_u64();
+        let ordinal = value.ordinal.get();
         let provenance = value.provenance.into();
         let kind = match value.kind {
             PlanEventKind::Created { text } => EventKindOutput::Created {

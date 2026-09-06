@@ -11,11 +11,9 @@ use syn::{
 enum Mode {
     Ref,
     Copy,
-    Clone,
     Str,
     Slice,
     Inner,
-    OptRef,
     Unbox,
 }
 
@@ -76,11 +74,9 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                         .unwrap_or_default();
                     let selected = match selected.as_str() {
                         "copy" => Mode::Copy,
-                        "clone" => Mode::Clone,
                         "str" => Mode::Str,
                         "slice" => Mode::Slice,
                         "inner" => Mode::Inner,
-                        "opt_ref" => Mode::OptRef,
                         "unbox" => Mode::Unbox,
                         _ => return Err(meta.error("unknown get mode")),
                     };
@@ -111,9 +107,6 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let method = match mode.unwrap_or(Mode::Ref) {
             Mode::Ref => quote!(pub const fn #name(&self) -> &#ty { &self.#member }),
             Mode::Copy => quote!(pub const fn #name(self) -> #ty { self.#member }),
-            Mode::Clone => {
-                quote!(pub fn #name(&self) -> #ty where #ty: ::std::clone::Clone { ::std::clone::Clone::clone(&self.#member) })
-            }
             Mode::Str => {
                 quote!(pub fn #name(&self) -> &str { ::std::convert::AsRef::<str>::as_ref(&self.#member) })
             }
@@ -163,12 +156,6 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     })?;
                 let primitive = Ident::new(&primitive, ty.span());
                 quote!(pub const fn #name(self) -> #primitive { self.#member.get() })
-            }
-            Mode::OptRef => {
-                let inner = argument(ty, "Option").ok_or_else(|| {
-                    syn::Error::new_spanned(ty, "opt_ref requires an Option field")
-                })?;
-                quote!(pub fn #name(&self) -> ::std::option::Option<&#inner> { self.#member.as_ref() })
             }
             Mode::Unbox => {
                 let inner = argument(ty, "Box")

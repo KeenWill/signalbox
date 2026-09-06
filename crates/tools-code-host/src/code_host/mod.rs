@@ -6,6 +6,8 @@ mod change_request_checks_status;
 mod change_request_ci_job_log;
 mod change_request_comment;
 mod change_request_convergence_state;
+mod convergence_read;
+pub use convergence_read::ConvergenceReadResult;
 mod change_request_file_patch;
 mod change_request_rerun_failed_jobs;
 mod change_request_review_threads;
@@ -66,14 +68,10 @@ pub use result::{
     RerunFailedJobsResult, ReviewThread, ReviewThreadComment, ReviewThreadFields,
     ReviewThreadResolution, ReviewThreadsResult, ThreadReplyResult, ThreadResolveResult,
 };
-pub use review_gate_check::{ReviewGateCheckArguments, ReviewGatePurpose};
+pub use review_gate_check::ReviewGateCheckArguments;
 pub use review_slog::{
-    ChildStackState, ConvergenceStateFields, ConvergenceStateResult, ConvergenceVerdict,
-    ESCALATION_MARKER, ReviewAuthorClass, ReviewCheck, ReviewDispositionClass,
-    ReviewGateBlockerCode, ReviewGateCheckResult, ReviewThreadIdentity,
-    ReviewThreadInventoryFields, ReviewThreadInventoryItem, ReviewerVerdictEvidence,
-    ReviewerVerdictFields, ReviewerVerdictStatus, StackStateFields, StackStateResult,
-    ThreadInventoryResult,
+    ChildStackState, ReviewAuthorClass, ReviewDispositionClass, ReviewThreadInventoryFields,
+    ReviewThreadInventoryItem, StackStateFields, StackStateResult, ThreadInventoryResult,
 };
 
 /// Non-secret name of the daemon-held code-host credential.
@@ -1781,23 +1779,6 @@ mod tests {
             review_gate_check::NAME,
             expect_test::expect![[r##"
             {
-              "$defs": {
-                "ReviewGatePurpose": {
-                  "description": "The protocol boundary the caller is checking.",
-                  "oneOf": [
-                    {
-                      "const": "request_review_wave",
-                      "description": "Whether a new external review wave may be requested.",
-                      "type": "string"
-                    },
-                    {
-                      "const": "declare_convergence",
-                      "description": "Whether the change request may be declared converged.",
-                      "type": "string"
-                    }
-                  ]
-                }
-              },
               "additionalProperties": false,
               "properties": {
                 "number": {
@@ -1805,10 +1786,6 @@ mod tests {
                   "maximum": 2147483647,
                   "minimum": 1,
                   "type": "integer"
-                },
-                "purpose": {
-                  "$ref": "#/$defs/ReviewGatePurpose",
-                  "description": "Protocol boundary to evaluate."
                 },
                 "repository": {
                   "description": "Exact owner/repository spelling.",
@@ -1819,8 +1796,7 @@ mod tests {
               },
               "required": [
                 "repository",
-                "number",
-                "purpose"
+                "number"
               ],
               "type": "object"
             }"##]],
@@ -2134,11 +2110,11 @@ mod tests {
         assert_valid(
             &catalog(),
             review_gate_check::NAME,
-            r#"{"number":17,"purpose":"declare_convergence","repository":"owner/repository"}"#,
+            r#"{"number":17,"repository":"owner/repository"}"#,
         );
     }
 
-    /// INV-035: credential text and its JSON-escaped spelling are scrubbed
+    /// credential text and its JSON-escaped spelling are scrubbed
     /// recursively before a successful result can enter durable tool evidence.
     #[test]
     fn credential_scrubber_redacts_exact_and_json_escaped_values() {

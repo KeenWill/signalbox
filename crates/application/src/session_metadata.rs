@@ -620,10 +620,10 @@ mod tests {
         }
     }
 
-    /// INV-012: reserved user-global identifiers fail before transaction
+    /// reserved user-global identifiers fail before transaction
     /// construction and therefore claim no command meaning.
     #[test]
-    fn inv012_reserved_command_identities_fail_before_transaction_construction() {
+    fn reserved_command_identities_fail_before_transaction_construction() {
         let target = session_id(1);
 
         assert_eq!(
@@ -644,9 +644,9 @@ mod tests {
         );
     }
 
-    /// INV-020: process-facing metadata replacement fixes user agency.
+    /// process-facing metadata replacement fixes user agency.
     #[test]
-    fn inv020_replacement_orchestration_fixes_user_actor() {
+    fn replacement_orchestration_fixes_user_actor() {
         let request =
             ReplaceSessionMetadataRequest::try_new(command_id(1), session_id(2), metadata(true))
                 .expect("ordinary command identity is admitted");

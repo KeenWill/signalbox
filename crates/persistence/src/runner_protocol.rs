@@ -74,82 +74,20 @@ impl PlacementProjectionAuthority {
     }
 }
 
-#[derive(signalbox_derive::Accessors)]
-/// Adapter-owned positive revision of one validated registration.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RunnerRegistrationRevision(
-    /// Returns the positive integer carried by this revision.
-    #[get(inner, as = "get")]
-    NonZeroU64,
+signalbox_newtype::positive_ordinal!(
+    /// Adapter-owned positive revision of one validated registration.
+    RunnerRegistrationRevision
 );
 
-impl RunnerRegistrationRevision {
-    /// Returns the first admitted registration revision.
-    pub const fn first() -> Self {
-        Self(NonZeroU64::MIN)
-    }
-
-    /// Admits one nonzero revision value.
-    pub const fn try_from_u64(value: u64) -> Option<Self> {
-        match NonZeroU64::new(value) {
-            Some(value) => Some(Self(value)),
-            None => None,
-        }
-    }
-
-    const fn checked_next(self) -> Option<Self> {
-        match self.get().checked_add(1) {
-            Some(value) => Self::try_from_u64(value),
-            None => None,
-        }
-    }
-}
-
-#[derive(signalbox_derive::Accessors)]
-/// Hub-issued positive identity of one physical runner connection.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RunnerConnectionEpoch(
-    /// Returns the positive integer carried by this epoch.
-    #[get(inner, as = "get")]
-    NonZeroU64,
+signalbox_newtype::positive_ordinal!(
+    /// Hub-issued positive identity of one physical runner connection.
+    RunnerConnectionEpoch
 );
 
-impl RunnerConnectionEpoch {
-    /// Admits one nonzero epoch value.
-    pub const fn try_from_u64(value: u64) -> Option<Self> {
-        match NonZeroU64::new(value) {
-            Some(value) => Some(Self(value)),
-            None => None,
-        }
-    }
-
-    fn checked_next(self) -> Option<Self> {
-        self.get().checked_add(1).and_then(Self::try_from_u64)
-    }
-}
-
-#[derive(signalbox_derive::Accessors)]
-/// Positive append-only epoch of one enrollment's terminal connection losses.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RunnerConnectionLossEpoch(
-    /// Returns the positive integer carried by this loss epoch.
-    #[get(inner, as = "get")]
-    NonZeroU64,
+signalbox_newtype::positive_ordinal!(
+    /// Positive append-only epoch of one enrollment's terminal connection losses.
+    RunnerConnectionLossEpoch
 );
-
-impl RunnerConnectionLossEpoch {
-    /// Admits one nonzero loss-epoch value.
-    pub const fn try_from_u64(value: u64) -> Option<Self> {
-        match NonZeroU64::new(value) {
-            Some(value) => Some(Self(value)),
-            None => None,
-        }
-    }
-
-    fn checked_next(self) -> Option<Self> {
-        self.get().checked_add(1).and_then(Self::try_from_u64)
-    }
-}
 
 /// Durable health state of the current physical runner connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1397,7 +1335,7 @@ impl RunnerProtocolStore {
         let pending = enrollment
             .prepare_registration(advertisement, &self.catalog)
             .map_err(RunnerProtocolStoreError::Domain)?;
-        let revision = RunnerRegistrationRevision::first();
+        let revision = RunnerRegistrationRevision::MIN;
         if pending.registration().revision().get() != revision.get() {
             transaction.rollback().await?;
             return Err(RunnerProtocolStoreError::Domain(
@@ -1745,7 +1683,7 @@ impl RunnerProtocolStore {
                 .ok_or(RunnerProtocolStoreError::Corruption(
                     RunnerProtocolCorruption::GenerationExhausted,
                 ))?,
-            None => RunnerRegistrationRevision::first(),
+            None => RunnerRegistrationRevision::MIN,
         };
         if pending.registration().revision().get() != revision.get() {
             transaction.rollback().await?;
