@@ -1984,15 +1984,17 @@ fn classify_terminal(
         })
     };
 
-    let (evidence, retained_input_tokens) = match evidence {
+    let (evidence, retained_input_tokens, retained_output_tokens) = match evidence {
         TerminalEvidence::CompletedWithProviderCompaction {
             completion,
             retained_input_tokens,
+            retained_output_tokens,
         } => (
             TerminalEvidence::Completed(completion),
             Some(retained_input_tokens),
+            Some(retained_output_tokens),
         ),
-        evidence => (evidence, None),
+        evidence => (evidence, None, None),
     };
     match evidence {
         TerminalEvidence::Completed(completion) => {
@@ -2092,6 +2094,11 @@ fn classify_terminal(
                         ModelCallTerminalObservation::CompletedWithProviderCompaction {
                             response: response_parts,
                             retained_input_tokens,
+                            retained_output_tokens: retained_output_tokens.ok_or_else(|| {
+                                ClassificationFailure::bare(
+                                    RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                                )
+                            })?,
                         },
                         ModelCallCauseCode::Completed,
                     )
@@ -2127,6 +2134,7 @@ fn classify_terminal(
                     ModelCallTerminalObservation::CompletedWithTools {
                         response,
                         retained_input_tokens,
+                        retained_output_tokens,
                     },
                     ModelCallCauseCode::Completed,
                 )
@@ -2978,7 +2986,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_compaction_completion_preserves_retained_input_measure() {
+    fn provider_compaction_completion_preserves_retained_iteration_usage() {
         let completion = CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
@@ -3001,6 +3009,7 @@ mod tests {
             TerminalEvidence::CompletedWithProviderCompaction {
                 completion,
                 retained_input_tokens: 37,
+                retained_output_tokens: 8,
             },
             &[],
             &configured("model-exact"),
@@ -3011,13 +3020,14 @@ mod tests {
             classified.observation,
             ModelCallTerminalObservation::CompletedWithProviderCompaction {
                 retained_input_tokens: 37,
+                retained_output_tokens: 8,
                 ..
             }
         ));
     }
 
     #[test]
-    fn provider_compaction_tool_completion_preserves_retained_input_measure() {
+    fn provider_compaction_tool_completion_preserves_retained_iteration_usage() {
         let completion = CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
@@ -3042,6 +3052,7 @@ mod tests {
             TerminalEvidence::CompletedWithProviderCompaction {
                 completion,
                 retained_input_tokens: 37,
+                retained_output_tokens: 8,
             },
             &[],
             &configured("model-exact"),
@@ -3052,6 +3063,7 @@ mod tests {
             classified.observation,
             ModelCallTerminalObservation::CompletedWithTools {
                 retained_input_tokens: Some(37),
+                retained_output_tokens: Some(8),
                 ..
             }
         ));

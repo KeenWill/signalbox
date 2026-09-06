@@ -2334,6 +2334,8 @@ pub enum ModelCallTerminalObservation {
         /// iteration, including cache axes and excluding earlier billed
         /// iterations.
         retained_input_tokens: u64,
+        /// Provider-reported output from the final physical iteration.
+        retained_output_tokens: u64,
     },
     /// Definitive success whose ordered response contains tool proposals.
     CompletedWithTools {
@@ -2342,6 +2344,8 @@ pub enum ModelCallTerminalObservation {
         /// Provider-reported input retained after an in-response compaction,
         /// when the tool response contains a provider compaction block.
         retained_input_tokens: Option<u64>,
+        /// Provider-reported final-iteration output paired with retained input.
+        retained_output_tokens: Option<u64>,
     },
     /// Evidence establishes a known failure.
     KnownFailed,
@@ -2366,6 +2370,22 @@ impl ModelCallTerminalObservation {
                 retained_input_tokens,
                 ..
             } => *retained_input_tokens,
+            _ => None,
+        }
+    }
+
+    /// Returns provider-reported final-iteration output for an in-response
+    /// compaction, separate from billed physical-iteration usage.
+    pub const fn retained_output_tokens(&self) -> Option<u64> {
+        match self {
+            Self::CompletedWithProviderCompaction {
+                retained_output_tokens,
+                ..
+            } => Some(*retained_output_tokens),
+            Self::CompletedWithTools {
+                retained_output_tokens,
+                ..
+            } => *retained_output_tokens,
             _ => None,
         }
     }
@@ -6082,6 +6102,7 @@ mod tests {
                     ),
                 ],
                 retained_input_tokens: 23,
+                retained_output_tokens: 5,
             },
         );
         let outcome = execution
@@ -7912,6 +7933,7 @@ mod tests {
                 ])
                 .expect("the response contains one tool proposal"),
                 retained_input_tokens: None,
+                retained_output_tokens: None,
             },
         );
         let outcome = execution
@@ -8157,6 +8179,7 @@ mod tests {
                 ])
                 .expect("the response contains tool proposals"),
                 retained_input_tokens: None,
+                retained_output_tokens: None,
             },
         );
         let outcome = execution
@@ -8321,6 +8344,7 @@ mod tests {
                 ])
                 .expect("the response contains one tool proposal"),
                 retained_input_tokens: None,
+                retained_output_tokens: None,
             },
         );
         let outcome = execution

@@ -205,16 +205,16 @@ impl ReportedInputRetention {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReportedOutputRetention {
     /// Completion kept the output as transcript the next request carries.
-    Retained,
+    Retained(Option<u64>),
     /// Another terminal disposition left no assistant transcript behind.
     Discarded,
 }
 
 impl ReportedOutputRetention {
     /// Names the axis the durable usage read answers as a stored boolean.
-    pub(crate) const fn from_retained(retained: bool) -> Self {
+    pub(crate) const fn from_retained(retained: bool, retained_output_tokens: Option<u64>) -> Self {
         if retained {
-            Self::Retained
+            Self::Retained(retained_output_tokens)
         } else {
             Self::Discarded
         }
@@ -259,7 +259,10 @@ pub(crate) fn reported_usage_requires_compaction(
     };
     input_tokens
         .saturating_add(match output {
-            ReportedOutputRetention::Retained => usage.output_tokens().unwrap_or(0),
+            ReportedOutputRetention::Retained(Some(retained_output_tokens)) => {
+                retained_output_tokens
+            }
+            ReportedOutputRetention::Retained(None) => usage.output_tokens().unwrap_or(0),
             ReportedOutputRetention::Discarded => 0,
         })
         // CLI-backed adapters expose no tokenizer-only operation. UTF-8
@@ -569,7 +572,7 @@ mod tests {
             usage,
             ReportedInputCacheAxes::Included,
             ReportedInputRetention::Retained(None),
-            ReportedOutputRetention::Retained,
+            ReportedOutputRetention::Retained(None),
             0,
             16,
             100
@@ -587,7 +590,7 @@ mod tests {
             usage,
             ReportedInputCacheAxes::Included,
             ReportedInputRetention::Retained(None),
-            ReportedOutputRetention::Retained,
+            ReportedOutputRetention::Retained(None),
             0,
             15,
             100
@@ -596,7 +599,7 @@ mod tests {
             usage,
             ReportedInputCacheAxes::Excluded,
             ReportedInputRetention::Retained(None),
-            ReportedOutputRetention::Retained,
+            ReportedOutputRetention::Retained(None),
             0,
             16,
             100
@@ -611,7 +614,7 @@ mod tests {
             usage,
             ReportedInputCacheAxes::Included,
             ReportedInputRetention::Retained(None),
-            ReportedOutputRetention::Retained,
+            ReportedOutputRetention::Retained(None),
             0,
             100,
             100
@@ -637,7 +640,7 @@ mod tests {
             usage,
             ReportedInputCacheAxes::Included,
             ReportedInputRetention::Retained(None),
-            ReportedOutputRetention::Retained,
+            ReportedOutputRetention::Retained(None),
             0,
             11,
             100
@@ -658,7 +661,7 @@ mod tests {
             compaction_usage,
             ReportedInputCacheAxes::Included,
             ReportedInputRetention::Replaced,
-            ReportedOutputRetention::Retained,
+            ReportedOutputRetention::Retained(None),
             4,
             10,
             100
@@ -675,7 +678,7 @@ mod tests {
             usage,
             ReportedInputCacheAxes::Included,
             ReportedInputRetention::Retained(None),
-            ReportedOutputRetention::Retained,
+            ReportedOutputRetention::Retained(None),
             0,
             10,
             100
@@ -684,7 +687,7 @@ mod tests {
             usage,
             ReportedInputCacheAxes::Included,
             ReportedInputRetention::Retained(None),
-            ReportedOutputRetention::Retained,
+            ReportedOutputRetention::Retained(None),
             26,
             10,
             100
@@ -692,16 +695,16 @@ mod tests {
     }
 
     #[test]
-    fn provider_compaction_headroom_uses_retained_input_not_billed_iterations() {
+    fn provider_compaction_headroom_uses_only_the_final_retained_iteration() {
         let billed = ProviderReportedTokenUsage::unreported()
             .with_input_tokens(Some(180))
-            .with_output_tokens(Some(5));
+            .with_output_tokens(Some(60));
 
         assert!(!reported_usage_requires_compaction(
             billed,
             ReportedInputCacheAxes::Excluded,
             ReportedInputRetention::Retained(Some(40)),
-            ReportedOutputRetention::Retained,
+            ReportedOutputRetention::Retained(Some(5)),
             0,
             10,
             100

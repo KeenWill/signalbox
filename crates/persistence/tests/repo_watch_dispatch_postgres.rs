@@ -1596,6 +1596,7 @@ async fn checkpoint_delegated_approval_at(
         .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
             response,
             retained_input_tokens: None,
+            retained_output_tokens: None,
         });
     let ModelCallTerminalOutcome::ToolRound(round) = repository
         .apply_terminal_observation(

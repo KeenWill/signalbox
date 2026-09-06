@@ -4573,10 +4573,12 @@ pub enum ModelCallTerminalObservation {
     CompletedWithProviderCompaction {
         response: Vec<AssistantResponsePart>,
         retained_input_tokens: u64,
+        retained_output_tokens: u64,
     },
     CompletedWithTools {
         response: ToolUsingAssistantResponse,
         retained_input_tokens: Option<u64>,
+        retained_output_tokens: Option<u64>,
     },
     KnownFailed,
     Refused,
@@ -4584,7 +4586,7 @@ pub enum ModelCallTerminalObservation {
     Ambiguous,
 }
 impl ModelCallTerminalObservation {
-    // accessors: retained_input_tokens(), disposition()
+    // accessors: retained_input_tokens(), retained_output_tokens(), disposition()
 }
 pub struct PendingSteeringReclassificationIdentity { /* private */ }
 impl PendingSteeringReclassificationIdentity {

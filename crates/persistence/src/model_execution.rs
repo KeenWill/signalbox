@@ -167,6 +167,7 @@ pub struct ReportedModelCallUsage {
     input_includes_cache_tokens: bool,
     input_is_retained: bool,
     retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
     output_is_retained: bool,
     projected_unreported_content_bytes: u64,
 }
@@ -197,6 +198,12 @@ impl ReportedModelCallUsage {
     /// compaction, including cache axes and separate from billed usage.
     pub const fn retained_input_tokens(self) -> Option<u64> {
         self.retained_input_tokens
+    }
+
+    /// Provider-reported final-iteration output retained after in-response
+    /// compaction, separate from billed usage.
+    pub const fn retained_output_tokens(self) -> Option<u64> {
+        self.retained_output_tokens
     }
 
     /// Whether reported output became assistant transcript for the next call.
@@ -761,6 +768,7 @@ impl PostgresModelCallRepository {
                        model_call.usage_input_includes_cache_tokens,
                        true AS input_is_retained,
                        model_call.retained_input_tokens,
+                       model_call.retained_output_tokens,
                        model_call.terminal_disposition_kind = 'completed' AS output_is_retained,
                        model_call.usage_input_tokens,
                        model_call.usage_output_tokens,
@@ -815,6 +823,7 @@ impl PostgresModelCallRepository {
                        latest.usage_input_includes_cache_tokens,
                        false AS input_is_retained,
                        NULL::numeric AS retained_input_tokens,
+                       NULL::numeric AS retained_output_tokens,
                        true AS output_is_retained,
                        latest.usage_input_tokens,
                        latest.usage_output_tokens,
@@ -856,7 +865,8 @@ impl PostgresModelCallRepository {
                  WHERE latest_call.call_kind = 'ordinary'
              )
              SELECT usage_input_includes_cache_tokens, input_is_retained,
-                    retained_input_tokens, has_provider_compaction,
+                    retained_input_tokens, retained_output_tokens,
+                    has_provider_compaction,
                     output_is_retained,
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
@@ -1037,9 +1047,12 @@ impl PostgresModelCallRepository {
                 .transpose()
         };
         let retained_input_tokens = decode("retained_input_tokens")?;
-        if row.try_get::<bool, _>("has_provider_compaction")? && retained_input_tokens.is_none() {
+        let retained_output_tokens = decode("retained_output_tokens")?;
+        if row.try_get::<bool, _>("has_provider_compaction")?
+            && (retained_input_tokens.is_none() || retained_output_tokens.is_none())
+        {
             return Err(ModelCallCorruption::Missing(
-                "provider-compaction retained input token count",
+                "provider-compaction retained iteration token counts",
             )
             .into());
         }
@@ -1052,6 +1065,7 @@ impl PostgresModelCallRepository {
             input_includes_cache_tokens: row.try_get("usage_input_includes_cache_tokens")?,
             input_is_retained: row.try_get("input_is_retained")?,
             retained_input_tokens,
+            retained_output_tokens,
             output_is_retained: row.try_get("output_is_retained")?,
             projected_unreported_content_bytes: decode("projected_unreported_content_bytes")?
                 .ok_or(ModelCallCorruption::Missing(
@@ -1884,6 +1898,7 @@ impl PostgresModelCallRepository {
             )?;
             let usage = observation.usage();
             let retained_input_tokens = observation.observation().retained_input_tokens();
+            let retained_output_tokens = observation.observation().retained_output_tokens();
             let provider_failure_cause = observation.provider_failure_cause();
             let retry_after = observation.retry_after();
             if let ModelCallTerminalIdentityCandidates::Availability {
@@ -1919,6 +1934,7 @@ impl PostgresModelCallRepository {
                         usage,
                         provider_failure_cause,
                         retained_input_tokens,
+                        retained_output_tokens,
                     )
                     .await?;
                     return Ok(Some(ModelCallObservationCommitOutcome::Terminal(Box::new(
@@ -2089,6 +2105,7 @@ impl PostgresModelCallRepository {
                     usage,
                     provider_failure_cause,
                     retained_input_tokens,
+                    retained_output_tokens,
                 )
                 .await?;
                 if let Some(pool_name) = pool_exhausted_name {
@@ -2122,6 +2139,7 @@ impl PostgresModelCallRepository {
                 usage,
                 provider_failure_cause,
                 retained_input_tokens,
+                retained_output_tokens,
             )
             .await?;
             Ok(Some(ModelCallObservationCommitOutcome::Terminal(Box::new(
@@ -2561,7 +2579,7 @@ impl PostgresModelCallRepository {
                         usage_input_tokens, usage_output_tokens,
                         usage_cache_creation_input_tokens,
                         usage_cache_read_input_tokens,
-                        retained_input_tokens
+                        retained_input_tokens, retained_output_tokens
                    FROM model_call
                   WHERE model_call_id = $1",
             )
@@ -2651,6 +2669,11 @@ impl PostgresModelCallRepository {
                             == observation
                                 .observation()
                                 .retained_input_tokens()
+                                .map(Decimal::from)
+                        && stored.retained_output_tokens
+                            == observation
+                                .observation()
+                                .retained_output_tokens()
                                 .map(Decimal::from) =>
                 {
                     // A commit-ambiguous driver error can hide a commit that
@@ -3387,6 +3410,7 @@ async fn load_tool_continuation_headroom_evidence(
                 usage_cache_creation_input_tokens,
                 usage_cache_read_input_tokens,
                 retained_input_tokens,
+                retained_output_tokens,
                 EXISTS (
                     SELECT 1
                       FROM semantic_transcript_entry AS compacted
@@ -3501,10 +3525,14 @@ async fn load_tool_continuation_headroom_evidence(
         return Ok(None);
     };
     let retained_input_tokens = decode("retained_input_tokens")?;
-    if row.try_get::<bool, _>("has_provider_compaction")? && retained_input_tokens.is_none() {
-        return Err(
-            ModelCallCorruption::Missing("provider-compaction retained input token count").into(),
-        );
+    let retained_output_tokens = decode("retained_output_tokens")?;
+    if row.try_get::<bool, _>("has_provider_compaction")?
+        && (retained_input_tokens.is_none() || retained_output_tokens.is_none())
+    {
+        return Err(ModelCallCorruption::Missing(
+            "provider-compaction retained iteration token counts",
+        )
+        .into());
     }
     let input_is_retained: bool = row.try_get("input_is_retained")?;
     let input_tokens = if let Some(retained_input_tokens) = retained_input_tokens {
@@ -3519,7 +3547,11 @@ async fn load_tool_continuation_headroom_evidence(
             .saturating_add(usage.cache_read_input_tokens().unwrap_or(0))
     };
     let exhausted = input_tokens
-        .saturating_add(usage.output_tokens().unwrap_or(0))
+        .saturating_add(
+            retained_output_tokens
+                .or(usage.output_tokens())
+                .unwrap_or(0),
+        )
         // Provider-neutral CLI adapters expose no tokenizer-only operation.
         // UTF-8 payload bytes therefore reserve a deliberately conservative
         // allowance for result material appended after the reported input.
@@ -7930,6 +7962,7 @@ pub(crate) async fn persist_terminal_outcome(
         ProviderReportedTokenUsage::unreported(),
         None,
         None,
+        None,
     )
     .await
 }
@@ -7941,12 +7974,20 @@ async fn persist_terminal_outcome_with_usage(
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
     retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
     match outcome {
         ModelCallTerminalOutcome::Completed(completed) => {
             lock_delegated_child_result_frontier(connection, completed.session(), completed.turn())
                 .await?;
-            persist_completed(connection, completed, usage, retained_input_tokens).await?;
+            persist_completed(
+                connection,
+                completed,
+                usage,
+                retained_input_tokens,
+                retained_output_tokens,
+            )
+            .await?;
             persist_delegated_child_result(
                 connection,
                 &DelegationOutcome::from_completed_child(completed),
@@ -7954,12 +7995,26 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::ToolRound(round) => {
-            persist_tool_round(connection, round, usage, retained_input_tokens).await
+            persist_tool_round(
+                connection,
+                round,
+                usage,
+                retained_input_tokens,
+                retained_output_tokens,
+            )
+            .await
         }
         ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) => {
             lock_delegated_child_result_frontier(connection, cancelled.session(), cancelled.turn())
                 .await?;
-            persist_cancelled_tool_round(connection, cancelled, usage).await?;
+            persist_cancelled_tool_round(
+                connection,
+                cancelled,
+                usage,
+                retained_input_tokens,
+                retained_output_tokens,
+            )
+            .await?;
             persist_delegated_child_result(
                 connection,
                 &DelegationOutcome::from_cancelled_tool_round_child(cancelled),
@@ -8545,14 +8600,16 @@ async fn persist_tool_round(
     round: &ToolRoundModelCallTurn,
     usage: ProviderReportedTokenUsage,
     retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call_with_retained_input(
+    persist_ended_call_with_retained_usage(
         connection,
         round.session(),
         round.turn(),
         round.call(),
         usage,
         retained_input_tokens,
+        retained_output_tokens,
     )
     .await?;
     persist_ended_attempt(connection, round.session(), round.turn(), round.attempt()).await?;
@@ -8724,6 +8781,7 @@ async fn persist_availability_successor(
             provider_failure_cause: Some(cause),
             attachment_failure: None,
             retained_input_tokens: None,
+            retained_output_tokens: None,
         },
     )
     .await?;
@@ -8938,13 +8996,17 @@ async fn persist_cancelled_tool_round(
     connection: &mut PgConnection,
     cancelled: &CancelledToolRoundModelCallTurn,
     usage: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call(
+    persist_ended_call_with_retained_usage(
         connection,
         cancelled.session(),
         cancelled.turn(),
         cancelled.call(),
         usage,
+        retained_input_tokens,
+        retained_output_tokens,
     )
     .await?;
     persist_ended_attempt(
@@ -9293,14 +9355,16 @@ async fn persist_completed(
     completed: &CompletedModelCallTurn,
     usage: ProviderReportedTokenUsage,
     retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call_with_retained_input(
+    persist_ended_call_with_retained_usage(
         connection,
         completed.session(),
         completed.turn(),
         completed.call(),
         usage,
         retained_input_tokens,
+        retained_output_tokens,
     )
     .await?;
     persist_ended_attempt(
@@ -9449,6 +9513,7 @@ async fn persist_failed(
                 provider_failure_cause,
                 attachment_failure,
                 retained_input_tokens: None,
+                retained_output_tokens: None,
             },
         )
         .await?;
@@ -9929,6 +9994,7 @@ struct StoredModelCallObservation {
     provider_failure_cause: Option<String>,
     usage: EncodedTokenUsage,
     retained_input_tokens: Option<Decimal>,
+    retained_output_tokens: Option<Decimal>,
 }
 
 fn decode_stored_model_call_observation(
@@ -9950,6 +10016,7 @@ fn decode_stored_model_call_observation(
             cache_read_input_tokens: row.try_get("usage_cache_read_input_tokens")?,
         },
         retained_input_tokens: row.try_get("retained_input_tokens")?,
+        retained_output_tokens: row.try_get("retained_output_tokens")?,
     })
 }
 
@@ -9960,16 +10027,17 @@ async fn persist_ended_call(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call_with_retained_input(connection, session, turn, call, usage, None).await
+    persist_ended_call_with_retained_usage(connection, session, turn, call, usage, None, None).await
 }
 
-async fn persist_ended_call_with_retained_input(
+async fn persist_ended_call_with_retained_usage(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
     retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
     persist_ended_call_with_provider_failure_cause(
         connection,
@@ -9981,6 +10049,7 @@ async fn persist_ended_call_with_retained_input(
             provider_failure_cause: None,
             attachment_failure: None,
             retained_input_tokens,
+            retained_output_tokens,
         },
     )
     .await
@@ -9992,6 +10061,7 @@ struct EndedCallEvidence {
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
     attachment_failure: Option<AttachmentPreparationFailure>,
     retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 }
 
 async fn persist_ended_call_with_provider_failure_cause(
@@ -10006,6 +10076,7 @@ async fn persist_ended_call_with_provider_failure_cause(
         provider_failure_cause,
         attachment_failure,
         retained_input_tokens,
+        retained_output_tokens,
     } = evidence;
     let usage = encode_token_usage(usage);
     let attachment_failure = attachment_failure
@@ -10020,13 +10091,14 @@ async fn persist_ended_call_with_provider_failure_cause(
                 usage_cache_creation_input_tokens = $4,
                 usage_cache_read_input_tokens = $5,
                 retained_input_tokens = $6,
-                terminal_provider_failure_cause = $7,
-                terminal_attachment_preparation_failure_cause = $8,
-                terminal_attachment_preparation_failure_maximum_bytes = $9
-          WHERE model_call_id = $10
-            AND turn_id = $11
-            AND session_id = $12
-            AND turn_attempt_id = $13
+                retained_output_tokens = $7,
+                terminal_provider_failure_cause = $8,
+                terminal_attachment_preparation_failure_cause = $9,
+                terminal_attachment_preparation_failure_maximum_bytes = $10
+          WHERE model_call_id = $11
+            AND turn_id = $12
+            AND session_id = $13
+            AND turn_attempt_id = $14
             AND state_kind <> 'terminal'
             AND terminal_disposition_kind IS NULL",
     )
@@ -10036,6 +10108,7 @@ async fn persist_ended_call_with_provider_failure_cause(
     .bind(usage.cache_creation_input_tokens)
     .bind(usage.cache_read_input_tokens)
     .bind(retained_input_tokens.map(Decimal::from))
+    .bind(retained_output_tokens.map(Decimal::from))
     .bind(provider_failure_cause.map(encode_provider_failure_cause))
     .bind(attachment_failure.map(|(cause, _)| cause))
     .bind(attachment_failure.and_then(|(_, maximum_bytes)| maximum_bytes))

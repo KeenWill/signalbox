@@ -59,6 +59,7 @@ pub enum TerminalEvidence {
     CompletedWithProviderCompaction {
         completion: CompletionEvidence,
         retained_input_tokens: u64,
+        retained_output_tokens: u64,
     },
     /// A complete exchange whose response reports the provider's refusal
     /// outcome rather than completion material.

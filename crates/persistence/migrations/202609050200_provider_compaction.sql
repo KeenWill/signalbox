@@ -2,12 +2,21 @@
 
 ALTER TABLE model_call
     ADD COLUMN retained_input_tokens numeric(20,0),
+    ADD COLUMN retained_output_tokens numeric(20,0),
     ADD CONSTRAINT model_call_retained_input_tokens_u64
         CHECK (retained_input_tokens IS NULL OR
                retained_input_tokens BETWEEN 0 AND 18446744073709551615),
     ADD CONSTRAINT model_call_retained_input_tokens_is_terminal_completion
         CHECK (retained_input_tokens IS NULL OR
-               (state_kind = 'terminal' AND terminal_disposition_kind = 'completed'));
+               (state_kind = 'terminal' AND terminal_disposition_kind = 'completed')),
+    ADD CONSTRAINT model_call_retained_output_tokens_u64
+        CHECK (retained_output_tokens IS NULL OR
+               retained_output_tokens BETWEEN 0 AND 18446744073709551615),
+    ADD CONSTRAINT model_call_retained_output_tokens_is_terminal_completion
+        CHECK (retained_output_tokens IS NULL OR
+               (state_kind = 'terminal' AND terminal_disposition_kind = 'completed')),
+    ADD CONSTRAINT model_call_retained_iteration_usage_is_paired
+        CHECK ((retained_input_tokens IS NULL) = (retained_output_tokens IS NULL));
 
 CREATE OR REPLACE FUNCTION reject_model_call_unsent_usage() RETURNS trigger
     LANGUAGE plpgsql
@@ -21,6 +30,7 @@ BEGIN
            OR NEW.usage_cache_creation_input_tokens IS NOT NULL
            OR NEW.usage_cache_read_input_tokens IS NOT NULL
            OR NEW.retained_input_tokens IS NOT NULL
+           OR NEW.retained_output_tokens IS NOT NULL
        )
     THEN
         RAISE EXCEPTION 'an unsent call cannot carry provider-reported token usage'

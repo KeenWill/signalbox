@@ -3635,6 +3635,7 @@ async fn checkpoint_suppressed_tool_round(
         .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
             response,
             retained_input_tokens: None,
+            retained_output_tokens: None,
         });
     let outcome = model_repository
         .apply_terminal_observation(
@@ -3765,6 +3766,7 @@ async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
             ModelCallTerminalObservation::CompletedWithTools {
                 response,
                 retained_input_tokens: provider_compaction.as_ref().map(|_| 10),
+                retained_output_tokens: provider_compaction.as_ref().map(|_| 5),
             },
             usage,
         );
@@ -5011,6 +5013,7 @@ async fn prepare_delegated_tool_crash_fixture(
         .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
             response,
             retained_input_tokens: None,
+            retained_output_tokens: None,
         });
     let outcome = fixture
         .repository
@@ -5400,6 +5403,7 @@ async fn assert_delegated_nonterminal_reread_rejects_result(
                     .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
                         response,
                         retained_input_tokens: None,
+                        retained_output_tokens: None,
                     }),
                 ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
                     vec![ToolResponsePartIdentity::tool_call(

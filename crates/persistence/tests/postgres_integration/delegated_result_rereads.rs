@@ -74,6 +74,7 @@ async fn s18_inv006_inv010_successor_tool_round_rereads_without_delegated_result
         .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
             response,
             retained_input_tokens: None,
+            retained_output_tokens: None,
         });
     fixture
         .repository
@@ -179,6 +180,7 @@ async fn s18_inv006_inv010_inv032_wake_tool_round_rereads_without_child_result()
         .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
             response,
             retained_input_tokens: None,
+            retained_output_tokens: None,
         });
     fixture
         .repository

@@ -26,6 +26,7 @@ use signalbox_model_runtime::{
 
 use crate::response::{
     convert_usage, iteration_usage_is_complete, map_finish, retained_input_tokens,
+    retained_output_tokens,
 };
 use crate::status::classify_error_token;
 use crate::wire::{
@@ -90,6 +91,7 @@ pub(crate) struct StreamDecoder {
     reported_model: Option<ProviderReportedModel>,
     usage: TokenUsage,
     retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
     input_usage_reported: bool,
     final_output_usage_reported: bool,
     finish: Option<FinishReason>,
@@ -115,6 +117,7 @@ impl StreamDecoder {
             reported_model: None,
             usage: TokenUsage::unreported(),
             retained_input_tokens: None,
+            retained_output_tokens: None,
             input_usage_reported: false,
             final_output_usage_reported: false,
             finish: None,
@@ -440,6 +443,7 @@ impl StreamDecoder {
         self.input_usage_reported = true;
         self.message_id = Some(ProviderMessageId::new(id));
         self.retained_input_tokens = retained_input_tokens(usage);
+        self.retained_output_tokens = retained_output_tokens(usage);
         let usage = convert_usage(usage);
         self.usage.absorb(usage);
         Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
@@ -855,6 +859,7 @@ impl StreamDecoder {
                         .is_some_and(|items| !items.is_empty())
                     {
                         self.retained_input_tokens = retained_input_tokens(usage);
+                        self.retained_output_tokens = retained_output_tokens(usage);
                     }
                     let usage = convert_usage(usage);
                     if event
@@ -916,6 +921,7 @@ impl StreamDecoder {
                 .is_some_and(|items| !items.is_empty())
             {
                 self.retained_input_tokens = retained_input_tokens(usage);
+                self.retained_output_tokens = retained_output_tokens(usage);
             }
             let usage = convert_usage(usage);
             if event
@@ -967,10 +973,11 @@ impl StreamDecoder {
             .closed
             .values()
             .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. }));
-        if has_provider_compaction && self.retained_input_tokens.is_none() {
-            return self.violation(
-                "provider compaction response omits final-iteration retained input usage",
-            );
+        if has_provider_compaction
+            && (self.retained_input_tokens.is_none() || self.retained_output_tokens.is_none())
+        {
+            return self
+                .violation("provider compaction response omits final-iteration retained usage");
         }
         let evidence = match finish.completion_finish() {
             None => TerminalEvidence::Refused(RefusalEvidence {
@@ -989,11 +996,14 @@ impl StreamDecoder {
                     content: std::mem::take(&mut self.closed).into_values().collect(),
                     usage: self.usage,
                 };
-                match self.retained_input_tokens {
-                    Some(retained_input_tokens) if has_provider_compaction => {
+                match (self.retained_input_tokens, self.retained_output_tokens) {
+                    (Some(retained_input_tokens), Some(retained_output_tokens))
+                        if has_provider_compaction =>
+                    {
                         TerminalEvidence::CompletedWithProviderCompaction {
                             completion,
                             retained_input_tokens,
+                            retained_output_tokens,
                         }
                     }
                     _ => TerminalEvidence::Completed(completion),
@@ -1308,11 +1318,13 @@ mod tests {
         let Some(TerminalEvidence::CompletedWithProviderCompaction {
             completion,
             retained_input_tokens,
+            retained_output_tokens,
         }) = terminal
         else {
             panic!("compaction stream gated on message_stop must complete");
         };
         assert_eq!(retained_input_tokens, 25);
+        assert_eq!(retained_output_tokens, 7);
         let [AssistantPart::ProviderCompaction { block_json }] = completion.content.as_slice()
         else {
             panic!("compaction stream must retain exactly one opaque block");

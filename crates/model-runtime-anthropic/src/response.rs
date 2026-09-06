@@ -86,6 +86,13 @@ pub(crate) fn retained_input_tokens(wire: &WireUsage) -> Option<u64> {
         .checked_add(final_iteration.cache_read_input_tokens.unwrap_or(0))
 }
 
+/// Returns the provider-reported output from the final physical iteration.
+/// Earlier iteration output is billing evidence already represented in the
+/// next iteration's retained input and must not be counted twice for headroom.
+pub(crate) fn retained_output_tokens(wire: &WireUsage) -> Option<u64> {
+    wire.iterations.as_deref()?.last()?.output_tokens
+}
+
 /// Whether every provider iteration carries both required token axes and all
 /// four aggregate axes fit the durable unsigned representation.
 pub(crate) fn iteration_usage_is_complete(wire: &WireUsage) -> bool {
@@ -319,6 +326,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         .map(convert_usage)
         .unwrap_or_default();
     let retained_input_tokens = response.usage.as_ref().and_then(retained_input_tokens);
+    let retained_output_tokens = response.usage.as_ref().and_then(retained_output_tokens);
     let message_id = response.id.map(ProviderMessageId::new);
     if reported_model.is_none()
         || message_id.is_none()
@@ -586,11 +594,14 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 usage,
             };
             if has_provider_compaction {
-                let Some(retained_input_tokens) = retained_input_tokens else {
+                let (Some(retained_input_tokens), Some(retained_output_tokens)) =
+                    (retained_input_tokens, retained_output_tokens)
+                else {
                     return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
                         cause: LossCause::ResponseUnintelligible {
-                            detail: "provider compaction response omits final-iteration retained input usage"
-                                .to_string(),
+                            detail:
+                                "provider compaction response omits final-iteration retained usage"
+                                    .to_string(),
                         },
                         exchange: completion.exchange,
                         reported_model: completion.reported_model,
@@ -602,6 +613,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 TerminalEvidence::CompletedWithProviderCompaction {
                     completion,
                     retained_input_tokens,
+                    retained_output_tokens,
                 }
             } else {
                 TerminalEvidence::Completed(completion)
@@ -743,11 +755,13 @@ mod tests {
         let TerminalEvidence::CompletedWithProviderCompaction {
             completion,
             retained_input_tokens,
+            retained_output_tokens,
         } = evidence
         else {
             panic!("compaction response must be completion evidence");
         };
         assert_eq!(retained_input_tokens, 7);
+        assert_eq!(retained_output_tokens, 4);
         assert_eq!(
             completion.content,
             vec![

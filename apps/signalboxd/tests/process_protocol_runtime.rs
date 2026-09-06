@@ -6377,6 +6377,7 @@ async fn park_turn_on_tool_approval(
         .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
             response,
             retained_input_tokens: None,
+            retained_output_tokens: None,
         });
     let identities = request_ids
         .iter()

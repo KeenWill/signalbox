@@ -3457,6 +3457,7 @@ mod tests {
             response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
                 .expect("fixture response contains tools"),
             retained_input_tokens: None,
+            retained_output_tokens: None,
         }
     }
 
@@ -4825,6 +4826,7 @@ mod tests {
             response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
                 .expect("fixture response contains tools"),
             retained_input_tokens: None,
+            retained_output_tokens: None,
         }
     }
 
@@ -5087,6 +5089,7 @@ mod tests {
         let observation = ModelCallTerminalObservation::CompletedWithTools {
             response,
             retained_input_tokens: None,
+            retained_output_tokens: None,
         };
 
         assert_eq!(

@@ -524,6 +524,7 @@ pub fn redact_evidence(
         TerminalEvidence::CompletedWithProviderCompaction {
             completion,
             retained_input_tokens,
+            retained_output_tokens,
         } => match redact_evidence(
             TerminalEvidence::Completed(completion),
             api_key,
@@ -533,6 +534,7 @@ pub fn redact_evidence(
                 TerminalEvidence::CompletedWithProviderCompaction {
                     completion,
                     retained_input_tokens,
+                    retained_output_tokens,
                 }
             }
             failed_closed => failed_closed,
@@ -1570,6 +1572,7 @@ mod tests {
                 usage: TokenUsage::unreported(),
             },
             retained_input_tokens: 12,
+            retained_output_tokens: 4,
         };
 
         let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {

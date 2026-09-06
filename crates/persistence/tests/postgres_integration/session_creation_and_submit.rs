@@ -4841,6 +4841,7 @@ async fn inv089_delegated_executing_tool_batch_charges_its_retained_attachment()
                 .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
                     response,
                     retained_input_tokens: None,
+                    retained_output_tokens: None,
                 }),
             ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
                 vec![ToolResponsePartIdentity::tool_call(

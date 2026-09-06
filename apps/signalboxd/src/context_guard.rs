@@ -380,7 +380,10 @@ impl ReportedUsageCompaction {
                     reported.input_is_retained(),
                     reported.retained_input_tokens(),
                 ),
-                ReportedOutputRetention::from_retained(reported.output_is_retained()),
+                ReportedOutputRetention::from_retained(
+                    reported.output_is_retained(),
+                    reported.retained_output_tokens(),
+                ),
                 reported.projected_unreported_content_bytes(),
                 u64::from(definition.max_output_tokens()),
                 u64::from(definition.context_window_tokens()),

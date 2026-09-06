@@ -1299,6 +1299,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
                 AssistantResponsePart::Text(assistant_text.clone()),
             ],
             retained_input_tokens: 17,
+            retained_output_tokens: 17,
         },
         ProviderReportedTokenUsage::unreported()
             .with_input_tokens(Some(123))
@@ -1360,12 +1361,17 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         .expect("completed provider compaction reports retained-context semantics");
     assert!(reported.input_is_retained());
     assert_eq!(reported.retained_input_tokens(), Some(17));
-    let retained_input_tokens: Decimal =
-        sqlx::query_scalar("SELECT retained_input_tokens FROM model_call WHERE model_call_id = $1")
-            .bind(call.into_uuid())
-            .fetch_one(&pool)
-            .await?;
+    assert_eq!(reported.retained_output_tokens(), Some(17));
+    let (retained_input_tokens, retained_output_tokens): (Decimal, Decimal) = sqlx::query_as(
+        "SELECT retained_input_tokens, retained_output_tokens
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(retained_input_tokens, Decimal::from(17_u64));
+    assert_eq!(retained_output_tokens, Decimal::from(17_u64));
 
     let durable_shape: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
