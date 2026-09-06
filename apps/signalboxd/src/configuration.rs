@@ -1959,7 +1959,6 @@ impl HubModelConfiguration {
         self.direct_selections.contains(&selection)
     }
 
-    /// Returns the complete watch configuration, or absence when no task starts.
     /// Resolves one configured alias to the immutable definition frozen at
     /// acceptance time.
     pub fn resolve_alias(&self, alias: ModelAlias) -> Option<FrozenAliasDefinition> {
