@@ -29,6 +29,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 mod baseline;
+pub mod github;
 
 use baseline::observation_payload;
 
