@@ -359,6 +359,12 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
     policy.validate()?;
     let node = &snapshot.initial;
     let current = &snapshot.current;
+    let is_draft = node["isDraft"]
+        .as_bool()
+        .ok_or_else(|| Error::Evidence("pull request isDraft must be a boolean".into()))?;
+    let body = node["body"]
+        .as_str()
+        .ok_or_else(|| Error::Evidence("pull request body must be a string".into()))?;
     let policy_identity = serde_json::to_value(policy)?;
     let mut previous = snapshot.previous.clone();
     if previous["policy_identity"] != policy_identity {
@@ -412,14 +418,14 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
     let mut facts = Facts {
         head_oid: head.into(),
         checked_head_oid: node["headRef"]["target"]["oid"].as_str().map(str::to_owned),
-        is_draft: yes(&node["isDraft"]),
+        is_draft,
         review_decision: node["reviewDecision"].as_str().map(str::to_owned),
         check_inventory_stable: stable,
         review_threads: threads,
         quiet_review_head_oids: Vec::new(),
         planning_only: false,
         review_exempt_since_quiet_review: false,
-        body: Some(text(&node["body"]).into()),
+        body: body.into(),
         check_rollup_state: rollup["state"].as_str().map(str::to_owned),
         checks: checks(node).to_vec(),
         mergeable: text(&node["mergeable"]).into(),
@@ -741,7 +747,7 @@ pub fn evaluate(snapshot: &Snapshot, policy: &ConvergencePolicy) -> Result<Evalu
         unresolved_review_threads: facts
             .review_threads
             .iter()
-            .filter(|t| !t.is_resolved && !t.is_escalated)
+            .filter(|t| !t.is_resolved)
             .count(),
         undispositioned_review_threads: facts
             .review_threads

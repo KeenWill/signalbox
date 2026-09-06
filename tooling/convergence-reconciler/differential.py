@@ -102,6 +102,10 @@ class RecordedGitHub(reference.GitHubGraphQL):
 def reference_evaluation(recording):
     initial = assemble(recording["observations"][0])
     current = assemble(recording["observations"][-1])
+    if not isinstance(initial.get("isDraft"), bool):
+        raise RuntimeError("pull request isDraft must be a boolean")
+    if not isinstance(initial.get("body"), str):
+        raise RuntimeError("pull request body must be a string")
     if initial["state"] != current["state"]:
         raise RuntimeError("pull request changed after its convergence snapshot")
     client = RecordedGitHub(recording, current)
@@ -134,6 +138,12 @@ def reference_evaluation(recording):
     client._finalize_check_inventory([pr])
     client.revalidate_for_decision(pr)
     result = reference.evaluate_convergence(pr)
+    # A disposition does not close the provider's review thread.
+    unresolved = sum(not thread["isResolved"] for thread in pr["review_threads"])
+    result["reasons"] = [reason for reason in result["reasons"] if not reason.startswith("unresolved-review-threads:")]
+    if unresolved:
+        result["converged"] = False
+        result["reasons"].append(f"unresolved-review-threads:{unresolved}")
     # The repository-watch contract additionally requires at least one gating check.
     if not any(not reference.is_non_gating_check(check) for check in pr["checks"]):
         result["converged"] = False

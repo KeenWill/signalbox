@@ -45,8 +45,10 @@ configuration shape follows
 [#1588](https://github.com/KeenWill/signalbox/pull/1588). The reference supplies
 the evidence rules; it is not a consumer of this crate. The harness additionally
 applies the [repository-watch contract](../../docs/spec/repo-watch.md) requiring
-at least one gating check. An empty or entirely exempt inventory cannot
-converge. The harness also applies the
+at least one gating check and every review thread to be resolved, including
+escalated threads. An empty or entirely exempt inventory cannot converge. Draft
+status and description must be present with boolean and string types. The
+harness also applies the
 [review-workflow identity contract](../../docs/spec/review-workflows.md): a
 change of open or closed state between observations invalidates the snapshot.
 Policy-bound state and the removal of the comment-only exemption apply to both

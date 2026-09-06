@@ -156,6 +156,69 @@ fn unknown_cli_options_fail_before_policy_or_evidence_io() -> Result<(), Box<dyn
 }
 
 #[test]
+fn draft_and_description_evidence_require_their_declared_types() -> Result<(), Box<dyn Error>> {
+    let policy = policy()?;
+    let recording = Recording::read(&root().join("fixtures/mutations/settled.json"))?;
+    let snapshot = recording.snapshot(&policy)?;
+    let facts = serde_json::to_value(evaluate(&snapshot, &policy)?.facts)?;
+    for (provider_key, facts_key, malformed) in [
+        ("isDraft", "is_draft", json!("false")),
+        ("body", "body", json!({"text": ""})),
+    ] {
+        for value in [Some(Value::Null), Some(malformed), None] {
+            let mut candidate = snapshot.clone();
+            let mut projected = facts.clone();
+            for (object, key) in [
+                (&mut candidate.initial, provider_key),
+                (&mut candidate.current, provider_key),
+                (&mut projected, facts_key),
+            ] {
+                let object = object.as_object_mut().ok_or("evidence must be an object")?;
+                if let Some(value) = &value {
+                    object.insert(key.into(), value.clone());
+                } else {
+                    object.remove(key);
+                }
+            }
+            assert!(
+                evaluate(&candidate, &policy).is_err(),
+                "{provider_key}: {value:?}"
+            );
+            assert!(serde_json::from_value::<signalbox_convergence::Facts>(projected).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn dispositioned_escalation_remains_a_blocker_until_the_thread_closes() -> Result<(), Box<dyn Error>>
+{
+    let policy = policy()?;
+    let recording =
+        Recording::read(&root().join("fixtures/mutations/escalated-open-after-review.json"))?;
+    let result = evaluate(&recording.snapshot(&policy)?, &policy)?;
+    assert!(
+        result.facts.review_threads.iter().any(|thread| {
+            thread.is_dispositioned && thread.is_escalated && !thread.is_resolved
+        })
+    );
+    assert!(!result.converged);
+    assert_eq!(result.unresolved_review_threads, 1);
+    assert!(
+        result
+            .reasons
+            .iter()
+            .any(|reason| reason == "unresolved-review-threads:1")
+    );
+    let mut resolved = result.facts;
+    for thread in &mut resolved.review_threads {
+        thread.is_resolved = true;
+    }
+    assert!(evaluate_facts(&resolved, &policy).is_converged());
+    Ok(())
+}
+
+#[test]
 fn policy_load_rejects_incomplete_reviewer_rules() -> Result<(), Box<dyn Error>> {
     let path = std::env::temp_dir().join(format!("convergence-policy-{}.json", std::process::id()));
     let original = policy()?;

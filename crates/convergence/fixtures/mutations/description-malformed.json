@@ -1,0 +1,18 @@
+{
+  "source": "settled.json",
+  "edge": "body requires its declared provider type",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/body",
+      "value": {
+        "text": ""
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/body",
+      "value": {
+        "text": ""
+      }
+    }
+  ]
+}

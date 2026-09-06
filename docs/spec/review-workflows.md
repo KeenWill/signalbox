@@ -247,15 +247,16 @@ The reviewer-verdict and usage-limit evidence rules belong to
 [tool loop](tool-loop.md).
 
 `signalbox-convergence` evaluates complete GitHub snapshots with an explicit
-reviewer and check policy. Its verdict combines thread dispositions,
-authenticated quiet reviews and exempt head changes, retained review waves,
-settled check inventories, current-head checks, mergeability, base ancestry,
-draft status, and description length. Incomplete pagination or a changed
-pull-request identity during decision revalidation is an error; the predicate
-performs no I/O. Persisted authentication and review waves are bound to the
-complete policy value and requalified when it changes. Exempt head changes are
-rename-only changes and clean base forwards; comment-only changes require a
-fresh quiet review.
+reviewer and check policy. Draft status and description are required typed
+evidence. Its verdict requires every thread to be resolved, including escalated
+threads, and combines thread dispositions, authenticated quiet reviews and
+exempt head changes, retained review waves, settled check inventories,
+current-head checks, mergeability, base ancestry, draft status, and description
+length. Incomplete pagination or a changed pull-request identity during decision
+revalidation is an error; the predicate performs no I/O. Persisted
+authentication and review waves are bound to the complete policy value and
+requalified when it changes. Exempt head changes are rename-only changes and
+clean base forwards; comment-only changes require a fresh quiet review.
 
 ## Planned
 

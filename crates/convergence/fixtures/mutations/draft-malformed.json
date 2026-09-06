@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "isDraft requires its declared provider type",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/isDraft",
+      "value": "false"
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/isDraft",
+      "value": "false"
+    }
+  ]
+}
