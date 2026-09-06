@@ -384,6 +384,68 @@ where
 impl<T> de::DeserializeOwned for WebAttentionStreamEvent where T: for<'de> de::Deserialize<'de> {}
 ```
 
+## WebSessionRates
+
+```rust
+pub struct WebSessionRates {
+    pub sessions: vec::Vec<WebSessionRate>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl<T> dyn_clone::DynClone for WebSessionRates
+where
+    T: clone::Clone,
+{
+    fn __clone_box(&self, _: sealed::Private) -> *mut ();
+}
+impl<T> de::DeserializeOwned for WebSessionRates where T: for<'de> de::Deserialize<'de> {}
+```
+
+## WebSessionRate
+
+```rust
+pub struct WebSessionRate {
+    pub session_id: WebSessionId,
+    pub lifecycle_state: WebAttentionLifecycleState,
+    pub turn_count: WebU64,
+    pub failed_turn_count: WebU64,
+    pub retired_turn_count: WebU64,
+    pub completed_turn_count: WebU64,
+    pub last_failure_sequence: option::Option<WebU64>,
+    pub last_provider_cause: option::Option<WebProviderModelCallFailureCause>,
+    pub goal_disposition: option::Option<WebSessionGoalDisposition>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl<T> dyn_clone::DynClone for WebSessionRate
+where
+    T: clone::Clone,
+{
+    fn __clone_box(&self, _: sealed::Private) -> *mut ();
+}
+impl<T> de::DeserializeOwned for WebSessionRate where T: for<'de> de::Deserialize<'de> {}
+```
+
+## WebSessionGoalDisposition
+
+```rust
+pub enum WebSessionGoalDisposition {
+    SessionClosed,
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl<T> dyn_clone::DynClone for WebSessionGoalDisposition
+where
+    T: clone::Clone,
+{
+    fn __clone_box(&self, _: sealed::Private) -> *mut ();
+}
+impl<T> de::DeserializeOwned for WebSessionGoalDisposition where T: for<'de> de::Deserialize<'de> {}
+```
+
 ## WebSessionCatalogActivity
 
 ```rust

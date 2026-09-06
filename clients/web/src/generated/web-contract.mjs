@@ -3496,6 +3496,141 @@ const schemas = {
     ],
     "title": "WebSessionLiveStreamEvent"
   },
+  "WebSessionRates": {
+    "$defs": {
+      "WebAttentionLifecycleState": {
+        "description": "The durable session state one attention summary projects.",
+        "enum": [
+          "created",
+          "dispatched",
+          "active",
+          "waiting",
+          "recovering",
+          "blocked",
+          "parked",
+          "terminal"
+        ],
+        "type": "string"
+      },
+      "WebProviderModelCallFailureCause": {
+        "description": "Closed provider-neutral failure cause exposed at the browser boundary.",
+        "enum": [
+          "credential_rejected",
+          "permission_denied",
+          "invalid_request",
+          "target_not_found",
+          "request_too_large",
+          "rate_limited",
+          "quota_exhausted",
+          "overloaded",
+          "provider_internal",
+          "unrecognized"
+        ],
+        "type": "string"
+      },
+      "WebSessionGoalDisposition": {
+        "enum": [
+          "session_closed",
+          "commissioned",
+          "blocked",
+          "resumed",
+          "achieved",
+          "user_stopped",
+          "superseded"
+        ],
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebSessionRate": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "failed_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "goal_disposition": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebSessionGoalDisposition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_failure_sequence": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_provider_cause": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebProviderModelCallFailureCause"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lifecycle_state": {
+            "$ref": "#/$defs/WebAttentionLifecycleState"
+          },
+          "retired_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "turn_count": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "session_id",
+          "lifecycle_state",
+          "turn_count",
+          "failed_turn_count",
+          "retired_turn_count",
+          "completed_turn_count"
+        ],
+        "type": "object"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Turn outcomes over a bounded set of listed sessions.",
+    "properties": {
+      "sessions": {
+        "items": {
+          "$ref": "#/$defs/WebSessionRate"
+        },
+        "maxItems": 32,
+        "type": "array"
+      }
+    },
+    "required": [
+      "sessions"
+    ],
+    "title": "WebSessionRates",
+    "type": "object"
+  },
   "WebSessionTimelineDescriptor": {
     "$defs": {
       "WebSessionId": {
@@ -6116,6 +6251,11 @@ export function decodeWebSessionTimelineDescriptor(value) {
 
 export function decodeWebSessionTimelineWindow(value) {
   assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "websessiontimelinewindow");
+  return value;
+}
+
+export function decodeWebSessionRates(value) {
+  assertSchema(schemas.WebSessionRates, schemas.WebSessionRates, value, "websessionrates");
   return value;
 }
 
