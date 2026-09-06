@@ -3,7 +3,7 @@
 use std::{error::Error, fmt};
 
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
-use signalbox_module_repo_watch_v2::github::GitHubClient;
+use signalbox_module_repo_watch_v2::github::{GitHubClient, GitHubClientError};
 
 use crate::{FileCredentialAccess, WatchedRepositoryConfiguration};
 
@@ -28,37 +28,57 @@ impl RepositoryWatchClientLoader {
     }
 
     /// Rereads the credential and returns only an authenticated client handle.
-    pub async fn load(&self) -> Result<GitHubClient, RepositoryWatchCredentialError> {
+    pub async fn load(&self) -> Result<GitHubClient, RepositoryWatchClientLoadError> {
         let credential = self
             .credentials
             .resolve(&self.reference)
             .await
-            .map_err(|_| RepositoryWatchCredentialError)?;
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
         let token = std::str::from_utf8(credential.expose_bytes())
-            .map_err(|_| RepositoryWatchCredentialError)?;
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
         if token.is_empty() {
-            return Err(RepositoryWatchCredentialError);
+            return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
         }
         GitHubClient::try_new("signalbox-repository-watch", token)
-            .map_err(|_| RepositoryWatchCredentialError)
+            .map_err(RepositoryWatchClientLoadError::from_construction)
     }
 }
 
 /// Credential resolution or authenticated-client construction failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RepositoryWatchCredentialError;
+pub enum RepositoryWatchClientLoadError {
+    /// The repository's credential could not be read or admitted as authorization.
+    CredentialUnavailable,
+    /// The authenticated HTTP client could not be constructed.
+    ClientConstructionFailed,
+}
 
-impl fmt::Display for RepositoryWatchCredentialError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("repository-watch client credential unavailable")
+impl RepositoryWatchClientLoadError {
+    fn from_construction(error: GitHubClientError) -> Self {
+        match error {
+            GitHubClientError::InvalidCredential => Self::CredentialUnavailable,
+            _ => Self::ClientConstructionFailed,
+        }
     }
 }
 
-impl Error for RepositoryWatchCredentialError {}
+impl fmt::Display for RepositoryWatchClientLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::CredentialUnavailable => "repository-watch client credential unavailable",
+            Self::ClientConstructionFailed => "repository-watch HTTP client construction failed",
+        })
+    }
+}
+
+impl Error for RepositoryWatchClientLoadError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{FileCredentialAccess, RepositoryWatchClientLoader};
+    use super::{
+        FileCredentialAccess, GitHubClientError, RepositoryWatchClientLoadError,
+        RepositoryWatchClientLoader,
+    };
     use signalbox_model_runtime::CredentialReference;
 
     #[tokio::test]
@@ -75,6 +95,7 @@ mod tests {
         assert!(loader.load().await.is_ok());
         std::fs::write(&path, "invalid\nheader").expect("rotate to invalid token");
         let error = loader.load().await.err().expect("invalid token rejected");
+        assert_eq!(error, RepositoryWatchClientLoadError::CredentialUnavailable);
         assert_eq!(
             error.to_string(),
             "repository-watch client credential unavailable"
@@ -84,6 +105,27 @@ mod tests {
         assert!(loader.load().await.is_err());
         std::fs::write(&path, "replacement-token").expect("rotate to usable token");
         assert!(loader.load().await.is_ok());
+    }
+
+    #[test]
+    fn client_construction_failure_keeps_its_class_without_exposing_transport_details() {
+        let construction_error = reqwest::Client::builder()
+            .user_agent("invalid\nheader")
+            .build()
+            .expect_err("invalid user-agent produces a real client construction error");
+        let error = RepositoryWatchClientLoadError::from_construction(GitHubClientError::Build(
+            construction_error,
+        ));
+
+        assert_eq!(
+            error,
+            RepositoryWatchClientLoadError::ClientConstructionFailed
+        );
+        assert_eq!(
+            error.to_string(),
+            "repository-watch HTTP client construction failed"
+        );
+        assert!(error.source().is_none());
     }
 
     use std::error::Error;

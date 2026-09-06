@@ -134,7 +134,7 @@ pub use process_runtime::{
     ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError,
     shared_snapshot_reader_budget,
 };
-pub use repo_watch_credentials::{RepositoryWatchClientLoader, RepositoryWatchCredentialError};
+pub use repo_watch_credentials::{RepositoryWatchClientLoadError, RepositoryWatchClientLoader};
 pub use session_delegation::{PostgresSessionDelegationPort, PostgresSessionDelegationPortError};
 pub use session_template_configuration::{
     ResolvedSessionTemplate, SessionTemplateConfiguration, SessionTemplateConfigurationError,
