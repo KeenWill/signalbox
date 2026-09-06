@@ -3491,6 +3491,12 @@ async fn load_tool_continuation_headroom_evidence(
     let Some(row) = row else {
         return Err(ModelCallCorruption::Missing("completed tool-producing call").into());
     };
+    let producing_effective_target = ResolvedProviderTarget::naming(
+        ProviderModelIdentity::from_uuid(row.try_get("effective_provider_model_identity_id")?),
+    );
+    if producing_effective_target != current_effective_target {
+        return Ok(None);
+    }
     let decode = |field: &'static str| -> Result<Option<u64>, ModelCallRepositoryError> {
         row.try_get::<Option<Decimal>, _>(field)?
             .map(|value| {
@@ -3523,9 +3529,6 @@ async fn load_tool_continuation_headroom_evidence(
     let mut retained_output_tokens = decode("retained_output_tokens")?;
     let has_provider_compaction = row.try_get::<bool, _>("has_provider_compaction")?;
     let mut input_is_retained: bool = row.try_get("input_is_retained")?;
-    let producing_effective_target = ResolvedProviderTarget::naming(
-        ProviderModelIdentity::from_uuid(row.try_get("effective_provider_model_identity_id")?),
-    );
     if has_provider_compaction
         && (retained_input_tokens.is_none() || retained_output_tokens.is_none())
     {
@@ -3534,12 +3537,9 @@ async fn load_tool_continuation_headroom_evidence(
         )
         .into());
     }
-    if has_provider_compaction
-        && (!limit.replays_provider_compaction()
-            || producing_effective_target != current_effective_target)
-    {
-        // A projection that cannot replay this exact serving target's opaque
-        // block uses the preserved history that aggregate usage measured.
+    if has_provider_compaction && !limit.replays_provider_compaction() {
+        // The disabled projection omits the opaque block and replays the
+        // preserved history that aggregate usage measured.
         retained_input_tokens = None;
         retained_output_tokens = None;
         input_is_retained = true;

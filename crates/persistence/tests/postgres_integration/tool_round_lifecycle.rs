@@ -935,12 +935,12 @@ async fn provider_compaction_releases_tool_continuation_input_headroom()
     Ok(())
 }
 
-/// A restarted continuation cannot reuse retained compaction counts from a
-/// producing call served by the previous fast target. The preserved aggregate
-/// usage remains the conservative headroom baseline after the mapping changes.
+/// A restarted continuation cannot reuse any usage from a producing call
+/// served by the previous fast target. It prepares without a reported-usage
+/// baseline so the next request takes the prospective counting path.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn changed_fast_target_keeps_tool_continuation_aggregate_headroom()
+async fn changed_fast_target_discards_tool_continuation_usage_baseline()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7efa_1900;
@@ -1043,12 +1043,10 @@ async fn changed_fast_target_keeps_tool_continuation_aggregate_headroom()
             |_| panic!("fixture has no pending steering"),
         )
         .await?;
-    let signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(required) =
-        outcome
-    else {
-        panic!("the previous serving target's retained usage cannot admit the continuation");
-    };
-    assert_eq!(required.producing_call(), fixture.call);
+    assert!(matches!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(_)
+    ));
 
     pool.close().await;
     drop(container);
