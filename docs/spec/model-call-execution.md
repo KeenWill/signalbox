@@ -305,16 +305,16 @@ provider at most once. A retry is a new recorded attempt; no code retries a call
 without recording the retry in the database. Before anything has been sent to
 the provider, the daemon may prepare an unsent call again. After a known failure
 with proven non-acceptance, the failure-observation commit may immediately
-prepare a new recorded attempt on the same credential for a rate-limited,
+record a new successor attempt on the same credential for a rate-limited,
 overloaded or provider-internal call while the credential remains admitted and
 below the required finite-positive
 `numeric_bounds.max_same_credential_attempts_per_turn` configuration value. The
 contract fixes no numeric value; the initial call and every same-credential
 successor call count toward the configured bound. The commit stores the retry
-deadline on that successor attempt; only its send waits for the backoff.
-[Credential availability](credential-availability.md) owns the credential-scoped
-durable transient exclusion, its reset deadline, and preparation admission for
-every session.
+deadline on that successor attempt; call preparation and sending both wait for
+the deadline. [Credential availability](credential-availability.md) owns the
+credential-scoped durable transient exclusion, its reset deadline, and
+preparation admission for every session.
 
 When the failure observation commits, the same-credential retry is evaluated
 before the pinned pool action, and that action is not applied while the retry is
