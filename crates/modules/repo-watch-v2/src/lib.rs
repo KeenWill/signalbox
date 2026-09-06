@@ -85,6 +85,15 @@ pub struct PullRequestState<'a> {
     pub observed_at: OffsetDateTime,
 }
 
+/// Complete current provider projection committed with one frontier candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryProjection<'a> {
+    /// Repository-level provider state.
+    pub repository: RepositoryState<'a>,
+    /// Complete current pull-request projection for the repository.
+    pub pull_requests: Vec<PullRequestState<'a>>,
+}
+
 /// Authenticated webhook intake retained until its caller-selected expiry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebhookDelivery<'a> {
@@ -155,6 +164,17 @@ pub enum FrontierEventAdmission {
     ConflictingReuse,
     /// A newer frontier entry already committed for this repository.
     Stale,
+}
+
+/// Result of idempotently releasing one frontier stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrontierReleaseAdmission {
+    /// The stream was removed at this generation.
+    Released { generation: u64 },
+    /// The same release already committed at this generation.
+    Replayed { generation: u64 },
+    /// The stream is absent and the latest frontier mutation was not its release.
+    Absent,
 }
 
 /// Result of activating one configured rule revision.
@@ -391,6 +411,8 @@ pub enum StoreError {
     InvalidFrontierGeneration,
     /// A fact in a frontier commit belongs to another repository.
     EventRepositoryMismatch,
+    /// A pull-request projection belongs to another repository.
+    ProjectionRepositoryMismatch,
     /// The checked rule exposed too many identity fields for the durable inventory.
     InvalidRuleFieldInventory,
     /// Planned commands do not form one complete ordered rule/event batch.
@@ -414,6 +436,9 @@ impl fmt::Display for StoreError {
             Self::EventRepositoryMismatch => {
                 "repository-watch event does not belong to the frontier repository"
             }
+            Self::ProjectionRepositoryMismatch => {
+                "repository-watch projection does not belong to the frontier repository"
+            }
             Self::InvalidRuleFieldInventory => {
                 "repository-watch rule identity-field inventory is too large"
             }
@@ -434,6 +459,7 @@ impl Error for StoreError {
             | Self::InvalidEventRetention
             | Self::InvalidFrontierGeneration
             | Self::EventRepositoryMismatch
+            | Self::ProjectionRepositoryMismatch
             | Self::InvalidRuleFieldInventory
             | Self::InvalidDispatchBatch
             | Self::InvalidRetainedCommand => None,
@@ -457,66 +483,6 @@ impl RepoWatchStore {
     /// Uses a pool already confined to the repository-watch role and schema.
     pub const fn new(module_pool: PgPool) -> Self {
         Self { pool: module_pool }
-    }
-
-    /// Replaces one repository's current provider projection.
-    pub async fn upsert_repository(&self, state: RepositoryState<'_>) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO repository_state
-                (repository, default_branch, default_head_sha, observed_at, updated_at)
-             VALUES ($1, $2, $3, $4, statement_timestamp())
-             ON CONFLICT (repository) DO UPDATE
-             SET default_branch = EXCLUDED.default_branch,
-                 default_head_sha = EXCLUDED.default_head_sha,
-                 observed_at = EXCLUDED.observed_at,
-                 updated_at = statement_timestamp()",
-        )
-        .bind(state.repository.as_str())
-        .bind(state.default_branch.as_str())
-        .bind(state.default_head.as_str())
-        .bind(state.observed_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Replaces one pull request's normalized current provider projection.
-    pub async fn upsert_pull_request(&self, state: PullRequestState<'_>) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO pr_state
-                (repository, pull_request_number, lifecycle, head_sha,
-                 head_repository, head_branch, base_branch, title, body, draft,
-                 author, observed_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                     statement_timestamp())
-             ON CONFLICT (repository, pull_request_number) DO UPDATE
-             SET lifecycle = EXCLUDED.lifecycle,
-                 head_sha = EXCLUDED.head_sha,
-                 head_repository = EXCLUDED.head_repository,
-                 head_branch = EXCLUDED.head_branch,
-                 base_branch = EXCLUDED.base_branch,
-                 title = EXCLUDED.title,
-                 body = EXCLUDED.body,
-                 draft = EXCLUDED.draft,
-                 author = EXCLUDED.author,
-                 observed_at = EXCLUDED.observed_at,
-                 updated_at = statement_timestamp()",
-        )
-        .bind(state.repository.as_str())
-        .bind(Decimal::from(state.number.get()))
-        .bind(state.lifecycle.storage())
-        .bind(state.head.as_str())
-        .bind(state.head_repository.as_str())
-        .bind(state.head_branch.as_str())
-        .bind(state.base_branch.as_str())
-        .bind(state.title.as_str())
-        .bind(state.body.as_str())
-        .bind(state.draft)
-        .bind(state.author.map(RepoWatchAuthorLogin::as_str))
-        .bind(state.observed_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     /// Atomically admits the delivery metadata, body, and pending disposition.
@@ -644,7 +610,7 @@ impl RepoWatchStore {
     /// Atomically commits a complete frontier candidate and its ordered facts.
     pub async fn commit_frontier_candidate(
         &self,
-        repository: &RepositorySlug,
+        projection: &RepositoryProjection<'_>,
         expected_generation: u64,
         frontier: &RepoWatchEventIdentityFrontierV1,
         events: &[RepoWatchEventOccurrenceV1],
@@ -654,13 +620,25 @@ impl RepoWatchStore {
         if retain_until <= recorded_at {
             return Err(StoreError::InvalidEventRetention);
         }
+        let repository_state = &projection.repository;
+        let pull_request_states = projection.pull_requests.as_slice();
+        let repository = repository_state.repository;
+        if pull_request_states
+            .iter()
+            .any(|state| state.repository != repository)
+        {
+            return Err(StoreError::ProjectionRepositoryMismatch);
+        }
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
+        upsert_repository(&mut transaction, repository_state).await?;
+        replace_pull_requests(&mut transaction, repository, pull_request_states).await?;
         let frontier = frontier.entries().collect::<Vec<_>>();
-        let candidate_identity = frontier_candidate_identity(&frontier, events);
+        let candidate_identity =
+            frontier_candidate_identity(repository_state, pull_request_states, &frontier, events);
         let current_generation: Decimal = sqlx::query_scalar(
             "SELECT frontier_generation FROM repository_state
               WHERE repository = $1 FOR UPDATE",
@@ -745,10 +723,11 @@ impl RepoWatchStore {
         .fetch_one(&mut *transaction)
         .await?;
         if unchanged {
-            transaction.rollback().await?;
             return if events.is_empty() {
+                transaction.commit().await?;
                 Ok(FrontierEventAdmission::Unchanged)
             } else {
+                transaction.rollback().await?;
                 Ok(FrontierEventAdmission::ConflictingReuse)
             };
         }
@@ -822,7 +801,7 @@ impl RepoWatchStore {
         &self,
         repository: &RepositorySlug,
         stream_identity: &[u8; 32],
-    ) -> Result<bool, StoreError> {
+    ) -> Result<FrontierReleaseAdmission, StoreError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
             .bind(repository.as_str())
@@ -837,27 +816,50 @@ impl RepoWatchStore {
         .execute(&mut *transaction)
         .await?;
         if deleted.rows_affected() == 0 {
+            let replay: Option<(Decimal, bool)> = sqlx::query_as(
+                "SELECT frontier_generation,
+                        COALESCE(last_frontier_commit_digest = sha256($2), false)
+                   FROM repository_state
+                  WHERE repository = $1
+                  FOR UPDATE",
+            )
+            .bind(repository.as_str())
+            .bind(frontier_release_identity(stream_identity))
+            .fetch_optional(&mut *transaction)
+            .await?;
             transaction.rollback().await?;
-            return Ok(false);
+            return match replay {
+                Some((generation, true)) => Ok(FrontierReleaseAdmission::Replayed {
+                    generation: generation
+                        .to_u64()
+                        .ok_or(StoreError::InvalidFrontierGeneration)?,
+                }),
+                Some((_, false)) | None => Ok(FrontierReleaseAdmission::Absent),
+            };
         }
-        let advanced = sqlx::query(
+        let generation: Option<Decimal> = sqlx::query_scalar(
             "UPDATE repository_state
                 SET frontier_generation = frontier_generation + 1,
                     last_frontier_commit_digest = sha256($3),
                     updated_at = statement_timestamp()
-              WHERE repository = $1 AND frontier_generation < $2",
+              WHERE repository = $1 AND frontier_generation < $2
+              RETURNING frontier_generation",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(u64::MAX))
         .bind(frontier_release_identity(stream_identity))
-        .execute(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await?;
-        if advanced.rows_affected() != 1 {
+        let Some(generation) = generation else {
             transaction.rollback().await?;
             return Err(StoreError::InvalidFrontierGeneration);
-        }
+        };
         transaction.commit().await?;
-        Ok(true)
+        Ok(FrontierReleaseAdmission::Released {
+            generation: generation
+                .to_u64()
+                .ok_or(StoreError::InvalidFrontierGeneration)?,
+        })
     }
 
     /// Activates one checked rule revision without retaining configuration text.
@@ -1025,11 +1027,133 @@ impl RepoWatchStore {
     }
 }
 
+async fn upsert_repository(
+    transaction: &mut Transaction<'_, Postgres>,
+    state: &RepositoryState<'_>,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO repository_state
+            (repository, default_branch, default_head_sha, observed_at, updated_at)
+         VALUES ($1, $2, $3, $4, statement_timestamp())
+         ON CONFLICT (repository) DO UPDATE
+         SET default_branch = EXCLUDED.default_branch,
+             default_head_sha = EXCLUDED.default_head_sha,
+             observed_at = EXCLUDED.observed_at,
+             updated_at = statement_timestamp()",
+    )
+    .bind(state.repository.as_str())
+    .bind(state.default_branch.as_str())
+    .bind(state.default_head.as_str())
+    .bind(state.observed_at)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn replace_pull_requests(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    states: &[PullRequestState<'_>],
+) -> Result<(), StoreError> {
+    let retained_numbers = states
+        .iter()
+        .map(|state| Decimal::from(state.number.get()))
+        .collect::<Vec<_>>();
+    sqlx::query(
+        "DELETE FROM pr_state
+          WHERE repository = $1
+            AND NOT (pull_request_number = ANY($2::numeric[]))",
+    )
+    .bind(repository.as_str())
+    .bind(&retained_numbers)
+    .execute(&mut **transaction)
+    .await?;
+    for state in states {
+        sqlx::query(
+            "INSERT INTO pr_state
+                (repository, pull_request_number, lifecycle, head_sha,
+                 head_repository, head_branch, base_branch, title, body, draft,
+                 author, observed_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                     statement_timestamp())
+             ON CONFLICT (repository, pull_request_number) DO UPDATE
+             SET lifecycle = EXCLUDED.lifecycle,
+                 head_sha = EXCLUDED.head_sha,
+                 head_repository = EXCLUDED.head_repository,
+                 head_branch = EXCLUDED.head_branch,
+                 base_branch = EXCLUDED.base_branch,
+                 title = EXCLUDED.title,
+                 body = EXCLUDED.body,
+                 draft = EXCLUDED.draft,
+                 author = EXCLUDED.author,
+                 observed_at = EXCLUDED.observed_at,
+                 updated_at = statement_timestamp()",
+        )
+        .bind(state.repository.as_str())
+        .bind(Decimal::from(state.number.get()))
+        .bind(state.lifecycle.storage())
+        .bind(state.head.as_str())
+        .bind(state.head_repository.as_str())
+        .bind(state.head_branch.as_str())
+        .bind(state.base_branch.as_str())
+        .bind(state.title.as_str())
+        .bind(state.body.as_str())
+        .bind(state.draft)
+        .bind(state.author.map(RepoWatchAuthorLogin::as_str))
+        .bind(state.observed_at)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
 fn frontier_candidate_identity(
+    repository_state: &RepositoryState<'_>,
+    pull_request_states: &[PullRequestState<'_>],
     frontier: &[signalbox_ownership_seam::RepoWatchEventIdentityFrontierEntryV1],
     events: &[RepoWatchEventOccurrenceV1],
 ) -> Vec<u8> {
     let mut identity = b"signalbox-repo-watch-frontier-commit-v1".to_vec();
+    push_identity_field(
+        &mut identity,
+        repository_state.repository.as_str().as_bytes(),
+    );
+    push_identity_field(
+        &mut identity,
+        repository_state.default_branch.as_str().as_bytes(),
+    );
+    push_identity_field(
+        &mut identity,
+        repository_state.default_head.as_str().as_bytes(),
+    );
+    identity.extend_from_slice(
+        &repository_state
+            .observed_at
+            .unix_timestamp_nanos()
+            .to_be_bytes(),
+    );
+    let mut pull_request_states = pull_request_states.iter().collect::<Vec<_>>();
+    pull_request_states.sort_by_key(|state| state.number);
+    for state in pull_request_states {
+        identity.push(b'P');
+        identity.extend_from_slice(&state.number.get().to_be_bytes());
+        push_identity_field(&mut identity, state.lifecycle.storage().as_bytes());
+        push_identity_field(&mut identity, state.head.as_str().as_bytes());
+        push_identity_field(&mut identity, state.head_repository.as_str().as_bytes());
+        push_identity_field(&mut identity, state.head_branch.as_str().as_bytes());
+        push_identity_field(&mut identity, state.base_branch.as_str().as_bytes());
+        push_identity_field(&mut identity, state.title.as_str().as_bytes());
+        push_identity_field(&mut identity, state.body.as_str().as_bytes());
+        identity.push(u8::from(state.draft));
+        match state.author {
+            Some(author) => {
+                identity.push(1);
+                push_identity_field(&mut identity, author.as_str().as_bytes());
+            }
+            None => identity.push(0),
+        }
+        identity.extend_from_slice(&state.observed_at.unix_timestamp_nanos().to_be_bytes());
+    }
     for entry in frontier {
         identity.push(b'F');
         identity.extend_from_slice(entry.stream_identity().as_slice());
@@ -1047,6 +1171,11 @@ fn frontier_candidate_identity(
         identity.extend_from_slice(occurrence.content_identity().as_bytes());
     }
     identity
+}
+
+fn push_identity_field(identity: &mut Vec<u8>, field: &[u8]) {
+    identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    identity.extend_from_slice(field);
 }
 
 fn frontier_release_identity(stream_identity: &[u8; 32]) -> Vec<u8> {
