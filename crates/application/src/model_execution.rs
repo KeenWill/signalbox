@@ -1786,6 +1786,10 @@ where
     /// invocation reloads it, prepares the opaque capability outside a
     /// transaction, authorizes send while holding the shared attempt gate,
     /// invokes the provider once, and commits its correlated observation.
+    #[allow(
+        clippy::result_large_err,
+        reason = "The error retains the correlated observation inline for retry."
+    )]
     pub async fn execute(
         &mut self,
         mut session: SessionId,
@@ -2231,6 +2235,10 @@ where
             .await
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "The error retains the correlated observation inline for retry."
+    )]
     async fn commit_prepared_failure(
         &mut self,
         session: SessionId,
@@ -2298,6 +2306,10 @@ where
         }
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "The error retains the correlated observation inline for retry."
+    )]
     async fn commit_terminal_observation(
         &mut self,
         session: SessionId,

@@ -2330,6 +2330,10 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
         }
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "Execution retains both reconciliation errors inline."
+    )]
     fn execute_all(
         &self,
         activated: Box<ActivatedTurn>,
@@ -3252,6 +3256,10 @@ impl PostgresScriptedModelExecution {
         }
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "Execution retains both reconciliation errors inline."
+    )]
     fn execute_all(
         &self,
         activated: Box<ActivatedTurn>,

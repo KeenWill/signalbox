@@ -1732,7 +1732,7 @@ fn decode_xml(
         XmlEncoding::Utf16Be | XmlEncoding::Utf16BeBom => false,
         XmlEncoding::Utf8 => return Err(ParseIssue::Malformed),
     };
-    let units = payload.chunks_exact(2).map(|pair| {
+    let units = payload.as_chunks::<2>().0.iter().map(|pair| {
         if little_endian {
             u16::from_le_bytes([pair[0], pair[1]])
         } else {

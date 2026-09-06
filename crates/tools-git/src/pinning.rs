@@ -890,7 +890,7 @@ pub(super) fn parse_pack_index(
         .get(offset_start..offset_end)
         .ok_or(LocalGitFailure::Repository)?;
     let mut large_offsets = 0_usize;
-    for offset in offsets.chunks_exact(4) {
+    for offset in offsets.as_chunks::<4>().0 {
         if read_be_u32(offset, 0)? >> 31 == 1 {
             large_offsets = large_offsets.saturating_add(1);
         }
