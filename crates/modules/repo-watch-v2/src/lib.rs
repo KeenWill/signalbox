@@ -692,26 +692,58 @@ impl RepoWatchStore {
                 Ok(FrontierEventAdmission::Stale)
             };
         }
-        let stored_frontier: Vec<(Vec<u8>, Decimal, Option<Decimal>)> = sqlx::query_as(
-            "SELECT stream_identity, sequence, pull_request_number
-               FROM frontier
-              WHERE repository = $1
-              ORDER BY stream_identity",
+        let stream_identities = frontier
+            .iter()
+            .map(|entry| entry.stream_identity().to_vec())
+            .collect::<Vec<_>>();
+        let sequences = frontier
+            .iter()
+            .map(|entry| Decimal::from(entry.sequence().get()))
+            .collect::<Vec<_>>();
+        let pull_request_numbers = frontier
+            .iter()
+            .map(|entry| {
+                entry
+                    .pull_request_number()
+                    .map(|number| Decimal::from(number.get()))
+            })
+            .collect::<Vec<_>>();
+        let (unchanged, omitted, stale): (bool, bool, bool) = sqlx::query_as(
+            "WITH candidate AS (
+                SELECT *
+                  FROM UNNEST($2::bytea[], $3::numeric[], $4::numeric[])
+                       AS entry(stream_identity, sequence, pull_request_number)
+             ),
+             stored AS (
+                SELECT stream_identity, sequence, pull_request_number
+                  FROM frontier
+                 WHERE repository = $1
+             )
+             SELECT
+                NOT EXISTS (
+                    (SELECT * FROM stored EXCEPT SELECT * FROM candidate)
+                    UNION ALL
+                    (SELECT * FROM candidate EXCEPT SELECT * FROM stored)
+                ),
+                EXISTS (
+                    SELECT 1
+                      FROM stored
+                      LEFT JOIN candidate USING (stream_identity)
+                     WHERE candidate.stream_identity IS NULL
+                ),
+                EXISTS (
+                    SELECT 1
+                      FROM stored
+                      JOIN candidate USING (stream_identity)
+                     WHERE stored.sequence > candidate.sequence
+                )",
         )
         .bind(repository.as_str())
-        .fetch_all(&mut *transaction)
+        .bind(&stream_identities)
+        .bind(&sequences)
+        .bind(&pull_request_numbers)
+        .fetch_one(&mut *transaction)
         .await?;
-        let unchanged = stored_frontier.len() == frontier.len()
-            && stored_frontier.iter().zip(&frontier).all(
-                |((stream_identity, sequence, pull_request_number), entry)| {
-                    stream_identity.as_slice() == entry.stream_identity().as_slice()
-                        && *sequence == Decimal::from(entry.sequence().get())
-                        && *pull_request_number
-                            == entry
-                                .pull_request_number()
-                                .map(|number| Decimal::from(number.get()))
-                },
-            );
         if unchanged {
             transaction.rollback().await?;
             return if events.is_empty() {
@@ -720,24 +752,13 @@ impl RepoWatchStore {
                 Ok(FrontierEventAdmission::ConflictingReuse)
             };
         }
+        if omitted || stale {
+            transaction.rollback().await?;
+            return Ok(FrontierEventAdmission::Stale);
+        }
         let next_generation = expected_generation
             .checked_add(1)
             .ok_or(StoreError::InvalidFrontierGeneration)?;
-        for entry in &frontier {
-            let stale: Option<bool> = sqlx::query_scalar(
-                "SELECT sequence > $3 FROM frontier
-                  WHERE repository = $1 AND stream_identity = $2",
-            )
-            .bind(repository.as_str())
-            .bind(entry.stream_identity().as_slice())
-            .bind(Decimal::from(entry.sequence().get()))
-            .fetch_optional(&mut *transaction)
-            .await?;
-            if stale.unwrap_or(false) {
-                transaction.rollback().await?;
-                return Ok(FrontierEventAdmission::Stale);
-            }
-        }
         let mut admissions = Vec::with_capacity(events.len());
         for occurrence in events {
             if occurrence.event().repository() != repository {
@@ -751,27 +772,27 @@ impl RepoWatchStore {
                 }
             }
         }
-        for entry in frontier {
-            sqlx::query(
-                "INSERT INTO frontier
-                    (repository, stream_identity, sequence, pull_request_number, updated_at)
-                 VALUES ($1, $2, $3, $4, statement_timestamp())
-                 ON CONFLICT (repository, stream_identity) DO UPDATE
-                 SET sequence = EXCLUDED.sequence,
-                     pull_request_number = EXCLUDED.pull_request_number,
-                     updated_at = statement_timestamp()",
-            )
-            .bind(repository.as_str())
-            .bind(entry.stream_identity().as_slice())
-            .bind(Decimal::from(entry.sequence().get()))
-            .bind(
-                entry
-                    .pull_request_number()
-                    .map(|number| Decimal::from(number.get())),
-            )
-            .execute(&mut *transaction)
-            .await?;
-        }
+        sqlx::query(
+            "WITH candidate AS (
+                SELECT *
+                  FROM UNNEST($2::bytea[], $3::numeric[], $4::numeric[])
+                       AS entry(stream_identity, sequence, pull_request_number)
+             )
+             INSERT INTO frontier
+                (repository, stream_identity, sequence, pull_request_number, updated_at)
+             SELECT $1, stream_identity, sequence, pull_request_number, statement_timestamp()
+               FROM candidate
+             ON CONFLICT (repository, stream_identity) DO UPDATE
+             SET sequence = EXCLUDED.sequence,
+                 pull_request_number = EXCLUDED.pull_request_number,
+                 updated_at = statement_timestamp()",
+        )
+        .bind(repository.as_str())
+        .bind(&stream_identities)
+        .bind(&sequences)
+        .bind(&pull_request_numbers)
+        .execute(&mut *transaction)
+        .await?;
         let advanced = sqlx::query(
             "UPDATE repository_state
                 SET frontier_generation = $2,
