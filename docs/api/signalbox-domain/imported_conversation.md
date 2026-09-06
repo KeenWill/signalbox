@@ -2,153 +2,6 @@
 
 # imported_conversation
 
-## ImportedConversationFormat
-
-```rust
-pub enum ImportedConversationFormat {
-    ClaudeCodeSessionJsonlV1,
-    ClaudeCodeSessionJsonlV2,
-    CodexRolloutJsonlV1,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ImportedRawRecordHash
-
-```rust
-pub struct ImportedRawRecordHash(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ImportedRawRecordHash {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
-    pub const fn as_bytes(&self) -> &[u8; 32];
-    pub fn digest(bytes: &[u8]) -> Self;
-}
-```
-
-## ImportedRawRecordConversionDigest
-
-```rust
-pub struct ImportedRawRecordConversionDigest(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ImportedRawRecordConversionDigest {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
-    pub const fn as_bytes(&self) -> &[u8; 32];
-}
-```
-
-## ImportedConversationSourceDigest
-
-```rust
-pub struct ImportedConversationSourceDigest(/* private */);
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl ImportedConversationSourceDigest {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
-    pub const fn as_bytes(&self) -> &[u8; 32];
-}
-```
-
-## ImportedSourceAttestation
-
-```rust
-pub enum ImportedSourceAttestation<Value> {
-    Attested(Value),
-    AttestedAbsent,
-    NotAttested,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ImportedText
-
-```rust
-pub struct ImportedText(/* private */);
-// derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ImportedText {
-    pub fn new(value: string::String) -> Self;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-impl fmt::Debug for ImportedText {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-```
-
-## ImportedJsonNumber
-
-```rust
-pub struct ImportedJsonNumber(/* private */);
-// derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ImportedJsonNumber {
-    pub fn try_new(value: string::String) -> result::Result<Self, ImportedJsonNumberError>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-impl fmt::Debug for ImportedJsonNumber {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-```
-
-## ImportedJsonNumberError
-
-```rust
-pub struct ImportedJsonNumberError {/* private */}
-// derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl ImportedJsonNumberError {
-    pub fn value(&self) -> &str;
-    pub fn into_value(self) -> string::String;
-}
-impl fmt::Debug for ImportedJsonNumberError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl fmt::Display for ImportedJsonNumberError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for ImportedJsonNumberError {}
-```
-
-## ImportedStructuredObjectMember
-
-```rust
-pub struct ImportedStructuredObjectMember {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ImportedStructuredObjectMember {
-    pub fn new(name: ImportedText, value: ImportedStructuredValue) -> Self;
-    pub const fn name(&self) -> &ImportedText;
-    pub const fn value(&self) -> &ImportedStructuredValue;
-}
-```
-
-## ImportedStructuredValue
-
-```rust
-pub enum ImportedStructuredValue {
-    Null,
-    Boolean(bool),
-    Number(ImportedJsonNumber),
-    String(ImportedText),
-    Array(boxed::Box<[ImportedStructuredValue]>),
-    Object(boxed::Box<[ImportedStructuredObjectMember]>),
-}
-impl clone::Clone for ImportedStructuredValue {
-    fn clone(&self) -> Self;
-}
-impl fmt::Debug for ImportedStructuredValue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl cmp::PartialEq for ImportedStructuredValue {
-    fn eq(&self, other: &Self) -> bool;
-}
-impl cmp::Eq for ImportedStructuredValue {}
-impl hash::Hash for ImportedStructuredValue {
-    fn hash<State>(&self, state: &mut State)
-    where
-        State: hash::Hasher;
-}
-impl drop::Drop for ImportedStructuredValue {
-    fn drop(&mut self);
-}
-```
-
 ## ImportedSpeaker
 
 ```rust
@@ -277,6 +130,147 @@ pub enum ImportedTranscriptContent {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
 
+## ImportedConversation
+
+```rust
+pub struct ImportedConversation {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ImportedConversation {
+    pub fn from_converted_records(
+        id: ImportedConversationId,
+        format: ImportedConversationFormat,
+        raw_records: vec::Vec<ImportedRawSourceRecord>,
+        entries: vec::Vec<ImportedTranscriptEntryInput>,
+    ) -> result::Result<Self, ImportedConversationReconstitutionError>;
+    pub const fn id(&self) -> ImportedConversationId;
+    pub const fn format(&self) -> ImportedConversationFormat;
+    pub const fn source_digest(&self) -> ImportedConversationSourceDigest;
+    pub fn raw_records(&self) -> &[ImportedRawSourceRecord];
+    pub fn entries(&self) -> &[ImportedTranscriptEntry];
+    pub fn frontiers(&self) -> impl iterator::Iterator<Item = ImportedTranscriptFrontier> + '_;
+    pub fn frontier_for_entry(
+        &self,
+        entry: ImportedTranscriptEntryId,
+    ) -> option::Option<ImportedTranscriptFrontier>;
+    pub fn prefix(
+        &self,
+        frontier: ImportedTranscriptFrontier,
+    ) -> option::Option<&[ImportedTranscriptEntry]>;
+}
+```
+
+## ImportedConversationDisplayTitle
+
+```rust
+pub struct ImportedConversationDisplayTitle(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ImportedConversationDisplayTitle {
+    pub const MAX_SCALARS: usize;
+    pub fn try_new(
+        value: string::String,
+    ) -> result::Result<Self, ImportedConversationDisplayTitleError>;
+    pub fn derive(conversation: &ImportedConversation) -> option::Option<Self>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+```
+
+## ImportedConversationDisplayTitleError
+
+```rust
+pub enum ImportedConversationDisplayTitleError {
+    Empty,
+    ContainsNul,
+    ContainsLineBreak,
+    ExceedsMaxScalars { scalars: usize },
+    UntrimmedEdgeWhitespace,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl fmt::Display for ImportedConversationDisplayTitleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for ImportedConversationDisplayTitleError {}
+```
+
+## ImportedRawRecordHash
+
+```rust
+pub struct ImportedRawRecordHash(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ImportedRawRecordHash {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+    pub fn digest(bytes: &[u8]) -> Self;
+}
+```
+
+## ImportedRawRecordConversionDigest
+
+```rust
+pub struct ImportedRawRecordConversionDigest(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ImportedRawRecordConversionDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+```
+
+## ImportedConversationSourceDigest
+
+```rust
+pub struct ImportedConversationSourceDigest(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ImportedConversationSourceDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+```
+
+## ImportedTranscriptEntry
+
+```rust
+pub struct ImportedTranscriptEntry {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ImportedTranscriptEntry {
+    pub const fn identity(&self) -> ImportedTranscriptEntryId;
+    pub const fn conversation(&self) -> ImportedConversationId;
+    pub const fn position(&self) -> ImportedTranscriptPosition;
+    pub const fn raw_record_position(&self) -> ImportedRawRecordPosition;
+    pub const fn record_entry_position(&self) -> ImportedRecordEntryPosition;
+    pub const fn source_speaker(&self) -> &ImportedSourceAttestation<ImportedSpeaker>;
+    pub const fn content(&self) -> &ImportedTranscriptContent;
+    pub const fn source(&self) -> &ImportedSourceMetadata;
+}
+```
+
+## ImportedTranscriptFrontier
+
+```rust
+pub struct ImportedTranscriptFrontier {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ImportedTranscriptFrontier {
+    pub const fn from_parts(
+        conversation: ImportedConversationId,
+        through_entry: ImportedTranscriptEntryId,
+        through_position: ImportedTranscriptPosition,
+    ) -> Self;
+    pub const fn conversation(self) -> ImportedConversationId;
+    pub const fn through_entry(self) -> ImportedTranscriptEntryId;
+    pub const fn through_position(self) -> ImportedTranscriptPosition;
+}
+```
+
+## ImportedConversationFormat
+
+```rust
+pub enum ImportedConversationFormat {
+    ClaudeCodeSessionJsonlV1,
+    ClaudeCodeSessionJsonlV2,
+    CodexRolloutJsonlV1,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
 ## ImportedRawRecordPosition
 
 ```rust
@@ -313,108 +307,6 @@ impl ImportedTranscriptPosition {
     pub const fn as_u64(self) -> u64;
     pub const fn first() -> Self;
     pub const fn checked_next(self) -> option::Option<Self>;
-}
-```
-
-## ImportedRawSourceRecord
-
-```rust
-pub struct ImportedRawSourceRecord {/* private */}
-// derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl ImportedRawSourceRecord {
-    pub fn from_converted(bytes: vec::Vec<u8>, normalized: ImportedStructuredValue) -> Self;
-    pub const fn content_hash(&self) -> ImportedRawRecordHash;
-    pub const fn conversion_digest(&self) -> ImportedRawRecordConversionDigest;
-    pub fn bytes(&self) -> &[u8];
-    pub const fn normalized(&self) -> &ImportedStructuredValue;
-}
-impl fmt::Debug for ImportedRawSourceRecord {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-```
-
-## ImportedRawSourceRecordReconstitutionInput
-
-```rust
-pub struct ImportedRawSourceRecordReconstitutionInput {/* private */}
-// derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl ImportedRawSourceRecordReconstitutionInput {
-    pub fn new(
-        position: ImportedRawRecordPosition,
-        stored_hash: ImportedRawRecordHash,
-        stored_conversion_digest: ImportedRawRecordConversionDigest,
-        bytes: vec::Vec<u8>,
-        normalized: ImportedStructuredValue,
-    ) -> Self;
-    pub const fn position(&self) -> ImportedRawRecordPosition;
-    pub const fn stored_hash(&self) -> ImportedRawRecordHash;
-    pub const fn stored_conversion_digest(&self) -> ImportedRawRecordConversionDigest;
-    pub fn bytes(&self) -> &[u8];
-    pub const fn normalized(&self) -> &ImportedStructuredValue;
-}
-impl fmt::Debug for ImportedRawSourceRecordReconstitutionInput {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-```
-
-## ImportedTranscriptEntryInput
-
-```rust
-pub struct ImportedTranscriptEntryInput {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ImportedTranscriptEntryInput {
-    pub const fn new(
-        identity: ImportedTranscriptEntryId,
-        conversation: ImportedConversationId,
-        position: ImportedTranscriptPosition,
-        raw_record_position: ImportedRawRecordPosition,
-        record_entry_position: ImportedRecordEntryPosition,
-        source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
-        content: ImportedTranscriptContent,
-        source: ImportedSourceMetadata,
-    ) -> Self;
-    pub const fn identity(&self) -> ImportedTranscriptEntryId;
-    pub const fn conversation(&self) -> ImportedConversationId;
-    pub const fn position(&self) -> ImportedTranscriptPosition;
-    pub const fn raw_record_position(&self) -> ImportedRawRecordPosition;
-    pub const fn record_entry_position(&self) -> ImportedRecordEntryPosition;
-    pub const fn source_speaker(&self) -> &ImportedSourceAttestation<ImportedSpeaker>;
-    pub const fn content(&self) -> &ImportedTranscriptContent;
-    pub const fn source(&self) -> &ImportedSourceMetadata;
-}
-```
-
-## ImportedTranscriptEntry
-
-```rust
-pub struct ImportedTranscriptEntry {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ImportedTranscriptEntry {
-    pub const fn identity(&self) -> ImportedTranscriptEntryId;
-    pub const fn conversation(&self) -> ImportedConversationId;
-    pub const fn position(&self) -> ImportedTranscriptPosition;
-    pub const fn raw_record_position(&self) -> ImportedRawRecordPosition;
-    pub const fn record_entry_position(&self) -> ImportedRecordEntryPosition;
-    pub const fn source_speaker(&self) -> &ImportedSourceAttestation<ImportedSpeaker>;
-    pub const fn content(&self) -> &ImportedTranscriptContent;
-    pub const fn source(&self) -> &ImportedSourceMetadata;
-}
-```
-
-## ImportedTranscriptFrontier
-
-```rust
-pub struct ImportedTranscriptFrontier {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ImportedTranscriptFrontier {
-    pub const fn from_parts(
-        conversation: ImportedConversationId,
-        through_entry: ImportedTranscriptEntryId,
-        through_position: ImportedTranscriptPosition,
-    ) -> Self;
-    pub const fn conversation(self) -> ImportedConversationId;
-    pub const fn through_entry(self) -> ImportedTranscriptEntryId;
-    pub const fn through_position(self) -> ImportedTranscriptPosition;
 }
 ```
 
@@ -563,66 +455,72 @@ impl ImportedConversationReconstitutionError {
 }
 ```
 
-## ImportedConversation
+## ImportedRawSourceRecord
 
 ```rust
-pub struct ImportedConversation {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ImportedConversation {
-    pub fn from_converted_records(
-        id: ImportedConversationId,
-        format: ImportedConversationFormat,
-        raw_records: vec::Vec<ImportedRawSourceRecord>,
-        entries: vec::Vec<ImportedTranscriptEntryInput>,
-    ) -> result::Result<Self, ImportedConversationReconstitutionError>;
-    pub const fn id(&self) -> ImportedConversationId;
-    pub const fn format(&self) -> ImportedConversationFormat;
-    pub const fn source_digest(&self) -> ImportedConversationSourceDigest;
-    pub fn raw_records(&self) -> &[ImportedRawSourceRecord];
-    pub fn entries(&self) -> &[ImportedTranscriptEntry];
-    pub fn frontiers(&self) -> impl iterator::Iterator<Item = ImportedTranscriptFrontier> + '_;
-    pub fn frontier_for_entry(
-        &self,
-        entry: ImportedTranscriptEntryId,
-    ) -> option::Option<ImportedTranscriptFrontier>;
-    pub fn prefix(
-        &self,
-        frontier: ImportedTranscriptFrontier,
-    ) -> option::Option<&[ImportedTranscriptEntry]>;
+pub struct ImportedRawSourceRecord {/* private */}
+// derives: clone::Clone, cmp::Eq, cmp::PartialEq
+impl ImportedRawSourceRecord {
+    pub fn from_converted(bytes: vec::Vec<u8>, normalized: ImportedStructuredValue) -> Self;
+    pub const fn content_hash(&self) -> ImportedRawRecordHash;
+    pub const fn conversion_digest(&self) -> ImportedRawRecordConversionDigest;
+    pub fn bytes(&self) -> &[u8];
+    pub const fn normalized(&self) -> &ImportedStructuredValue;
 }
-```
-
-## ImportedConversationDisplayTitle
-
-```rust
-pub struct ImportedConversationDisplayTitle(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ImportedConversationDisplayTitle {
-    pub const MAX_SCALARS: usize;
-    pub fn try_new(
-        value: string::String,
-    ) -> result::Result<Self, ImportedConversationDisplayTitleError>;
-    pub fn derive(conversation: &ImportedConversation) -> option::Option<Self>;
-    pub fn as_str(&self) -> &str;
-    pub fn into_string(self) -> string::String;
-}
-```
-
-## ImportedConversationDisplayTitleError
-
-```rust
-pub enum ImportedConversationDisplayTitleError {
-    Empty,
-    ContainsNul,
-    ContainsLineBreak,
-    ExceedsMaxScalars { scalars: usize },
-    UntrimmedEdgeWhitespace,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for ImportedConversationDisplayTitleError {
+impl fmt::Debug for ImportedRawSourceRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ImportedConversationDisplayTitleError {}
+```
+
+## ImportedRawSourceRecordReconstitutionInput
+
+```rust
+pub struct ImportedRawSourceRecordReconstitutionInput {/* private */}
+// derives: clone::Clone, cmp::Eq, cmp::PartialEq
+impl ImportedRawSourceRecordReconstitutionInput {
+    pub fn new(
+        position: ImportedRawRecordPosition,
+        stored_hash: ImportedRawRecordHash,
+        stored_conversion_digest: ImportedRawRecordConversionDigest,
+        bytes: vec::Vec<u8>,
+        normalized: ImportedStructuredValue,
+    ) -> Self;
+    pub const fn position(&self) -> ImportedRawRecordPosition;
+    pub const fn stored_hash(&self) -> ImportedRawRecordHash;
+    pub const fn stored_conversion_digest(&self) -> ImportedRawRecordConversionDigest;
+    pub fn bytes(&self) -> &[u8];
+    pub const fn normalized(&self) -> &ImportedStructuredValue;
+}
+impl fmt::Debug for ImportedRawSourceRecordReconstitutionInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+```
+
+## ImportedTranscriptEntryInput
+
+```rust
+pub struct ImportedTranscriptEntryInput {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ImportedTranscriptEntryInput {
+    pub const fn new(
+        identity: ImportedTranscriptEntryId,
+        conversation: ImportedConversationId,
+        position: ImportedTranscriptPosition,
+        raw_record_position: ImportedRawRecordPosition,
+        record_entry_position: ImportedRecordEntryPosition,
+        source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
+        content: ImportedTranscriptContent,
+        source: ImportedSourceMetadata,
+    ) -> Self;
+    pub const fn identity(&self) -> ImportedTranscriptEntryId;
+    pub const fn conversation(&self) -> ImportedConversationId;
+    pub const fn position(&self) -> ImportedTranscriptPosition;
+    pub const fn raw_record_position(&self) -> ImportedRawRecordPosition;
+    pub const fn record_entry_position(&self) -> ImportedRecordEntryPosition;
+    pub const fn source_speaker(&self) -> &ImportedSourceAttestation<ImportedSpeaker>;
+    pub const fn content(&self) -> &ImportedTranscriptContent;
+    pub const fn source(&self) -> &ImportedSourceMetadata;
+}
 ```
 
 ## ImportedStructuredFieldError
@@ -679,4 +577,106 @@ pub fn imported_string_structured_attestation(
     members: &[ImportedStructuredObjectMember],
     name: &str,
 ) -> result::Result<ImportedSourceAttestation<ImportedStructuredValue>, ImportedStructuredFieldError>;
+```
+
+## ImportedSourceAttestation
+
+```rust
+pub enum ImportedSourceAttestation<Value> {
+    Attested(Value),
+    AttestedAbsent,
+    NotAttested,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ImportedText
+
+```rust
+pub struct ImportedText(/* private */);
+// derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ImportedText {
+    pub fn new(value: string::String) -> Self;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+impl fmt::Debug for ImportedText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+```
+
+## ImportedJsonNumber
+
+```rust
+pub struct ImportedJsonNumber(/* private */);
+// derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ImportedJsonNumber {
+    pub fn try_new(value: string::String) -> result::Result<Self, ImportedJsonNumberError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> string::String;
+}
+impl fmt::Debug for ImportedJsonNumber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+```
+
+## ImportedJsonNumberError
+
+```rust
+pub struct ImportedJsonNumberError {/* private */}
+// derives: clone::Clone, cmp::Eq, cmp::PartialEq
+impl ImportedJsonNumberError {
+    pub fn value(&self) -> &str;
+    pub fn into_value(self) -> string::String;
+}
+impl fmt::Debug for ImportedJsonNumberError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl fmt::Display for ImportedJsonNumberError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for ImportedJsonNumberError {}
+```
+
+## ImportedStructuredObjectMember
+
+```rust
+pub struct ImportedStructuredObjectMember {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ImportedStructuredObjectMember {
+    pub fn new(name: ImportedText, value: ImportedStructuredValue) -> Self;
+    pub const fn name(&self) -> &ImportedText;
+    pub const fn value(&self) -> &ImportedStructuredValue;
+}
+```
+
+## ImportedStructuredValue
+
+```rust
+pub enum ImportedStructuredValue {
+    Null,
+    Boolean(bool),
+    Number(ImportedJsonNumber),
+    String(ImportedText),
+    Array(boxed::Box<[ImportedStructuredValue]>),
+    Object(boxed::Box<[ImportedStructuredObjectMember]>),
+}
+impl clone::Clone for ImportedStructuredValue {
+    fn clone(&self) -> Self;
+}
+impl fmt::Debug for ImportedStructuredValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl cmp::PartialEq for ImportedStructuredValue {
+    fn eq(&self, other: &Self) -> bool;
+}
+impl cmp::Eq for ImportedStructuredValue {}
+impl hash::Hash for ImportedStructuredValue {
+    fn hash<State>(&self, state: &mut State)
+    where
+        State: hash::Hasher;
+}
+impl drop::Drop for ImportedStructuredValue {
+    fn drop(&mut self);
+}
 ```
