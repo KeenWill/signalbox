@@ -476,10 +476,10 @@ mod tests {
         causes
     }
 
-    /// S27: unfinished owned work yields only the exact
+    /// unfinished owned work yields only the exact
     /// fatal-stopped attempt, retaining the same source facts and identity.
     #[test]
-    fn s27_unfinished_work_yields_exact_fatal_stop() {
+    fn unfinished_work_yields_exact_fatal_stop() {
         assert_unfinished_work_yields_exact_fatal_stop(live_running_source());
         assert_unfinished_work_yields_exact_fatal_stop(cancellation_stopped_source());
         assert_unfinished_work_yields_exact_fatal_stop(fatal_stopped_source());
@@ -555,12 +555,12 @@ mod tests {
         );
     }
 
-    /// S07 / S27: a live running source, a pre-existing
+    /// a live running source, a pre-existing
     /// cancellation-only stop, and an existing multi-failure fatal stop all
     /// couple closed work to exact known failure and retain the same fatal
     /// stop as aggregate fallback.
     #[test]
-    fn s07_s27_closed_sources_yield_exact_failure_candidates() {
+    fn closed_sources_yield_exact_failure_candidates() {
         assert_closed_source_yields_exact_failure_candidate(live_running_source());
         assert_closed_source_yields_exact_failure_candidate(cancellation_stopped_source());
         assert_closed_source_yields_exact_failure_candidate(fatal_stopped_source());
@@ -625,12 +625,12 @@ mod tests {
         );
     }
 
-    /// S07 / S27: a live running
+    /// a live running
     /// source, a cancellation-only stop, and an existing multi-failure fatal
     /// stop close as ambiguous while attempt history, marker reason, and
     /// fallback all carry the same exact F and the marker carries exactly U.
     #[test]
-    fn s07_s27_closed_sources_yield_exact_reconciliation_candidates() {
+    fn closed_sources_yield_exact_reconciliation_candidates() {
         assert_closed_source_yields_exact_reconciliation_candidate(live_running_source());
         assert_closed_source_yields_exact_reconciliation_candidate(cancellation_stopped_source());
         assert_closed_source_yields_exact_reconciliation_candidate(fatal_stopped_source());

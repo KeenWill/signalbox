@@ -366,9 +366,9 @@ fn message_request_rejects_carried_content_drift() {
     assert!(DelegationMessageRequest::parse(sending, session_id(1), "drift".into()).is_err());
 }
 
-/// S18: a live completed call seals its own nonempty result.
+/// a live completed call seals its own nonempty result.
 #[test]
-fn s18_live_completed_call_proves_returned_content() {
+fn live_completed_call_proves_returned_content() {
     let expected = content("completed child result");
     let completed = completed_turn_fixture(&[expected.as_str()]);
     let terminal = TerminalChildTurn::from_completed(&completed)
@@ -394,9 +394,9 @@ fn provider_compaction_metadata_does_not_hide_a_delegated_child_result() {
     assert_eq!(outcome.content(), Some(&expected));
 }
 
-/// S18: empty live completion is a typed unavailable result.
+/// empty live completion is a typed unavailable result.
 #[test]
-fn s18_empty_live_completion_produces_unavailable_outcome() {
+fn empty_live_completion_produces_unavailable_outcome() {
     let completed = completed_turn_fixture(&[]);
     let terminal = TerminalChildTurn::from_completed(&completed)
         .expect("empty live completion remains terminal child evidence");
@@ -410,9 +410,9 @@ fn s18_empty_live_completion_produces_unavailable_outcome() {
     );
 }
 
-/// S18: failure evidence can name a delegated-task-origin turn.
+/// failure evidence can name a delegated-task-origin turn.
 #[test]
-fn s18_failed_turn_proves_its_exact_origin_agnostic_identity() {
+fn failed_turn_proves_its_exact_origin_agnostic_identity() {
     let failed = failed_turn_fixture();
     let expected_identity = (failed.session(), failed.turn());
     let terminal = TerminalChildTurn::from_failed(&failed);
@@ -425,9 +425,9 @@ fn s18_failed_turn_proves_its_exact_origin_agnostic_identity() {
     assert_eq!(directly_derived, outcome);
 }
 
-/// S18: cancellation evidence can name a delegated-task-origin turn.
+/// cancellation evidence can name a delegated-task-origin turn.
 #[test]
-fn s18_cancelled_turn_proves_its_exact_origin_agnostic_identity() {
+fn cancelled_turn_proves_its_exact_origin_agnostic_identity() {
     let cancelled = cancelled_turn_fixture();
     let expected_identity = (cancelled.session(), cancelled.turn());
     let terminal = TerminalChildTurn::from_cancelled(&cancelled);
@@ -440,9 +440,9 @@ fn s18_cancelled_turn_proves_its_exact_origin_agnostic_identity() {
     assert_eq!(directly_derived, outcome);
 }
 
-/// S18: oversized aggregate live completion is typed unavailable.
+/// oversized aggregate live completion is typed unavailable.
 #[test]
-fn s18_oversized_live_completion_produces_unavailable_outcome() {
+fn oversized_live_completion_produces_unavailable_outcome() {
     let part = "x".repeat(DelegationContent::MAX_UTF8_BYTES / 2 + 1);
     let completed = completed_turn_fixture(&[part.as_str(), part.as_str()]);
     let terminal = TerminalChildTurn::from_completed(&completed)
@@ -457,9 +457,9 @@ fn s18_oversized_live_completion_produces_unavailable_outcome() {
     );
 }
 
-/// S18: terminal proof authenticates returned content.
+/// terminal proof authenticates returned content.
 #[test]
-fn s18_terminal_proof_rejects_fabricated_content() {
+fn terminal_proof_rejects_fabricated_content() {
     let expected = content("stored result");
     let returned = TerminalChildTurn {
         session: session_id(3),
@@ -475,9 +475,9 @@ fn s18_terminal_proof_rejects_fabricated_content() {
     );
 }
 
-/// S18: child-origin terminal proof cannot select stopped.
+/// child-origin terminal proof cannot select stopped.
 #[test]
-fn s18_terminal_proof_cannot_construct_stopped_outcome() {
+fn terminal_proof_cannot_construct_stopped_outcome() {
     let cancelled = TerminalChildTurn {
         session: session_id(3),
         turn: turn_id(4),
@@ -494,9 +494,9 @@ fn s18_terminal_proof_cannot_construct_stopped_outcome() {
     );
 }
 
-/// S18: parent-alone authority cannot disposition descendants.
+/// parent-alone authority cannot disposition descendants.
 #[test]
-fn s18_parent_alone_cannot_construct_descendant_outcome() {
+fn parent_alone_cannot_construct_descendant_outcome() {
     let authority = parent_termination_authority(DescendantTerminationScope::ParentAlone);
 
     assert_eq!(
@@ -505,9 +505,9 @@ fn s18_parent_alone_cannot_construct_descendant_outcome() {
     );
 }
 
-/// S18: parent-and-descendants authority admits bound policy.
+/// parent-and-descendants authority admits bound policy.
 #[test]
-fn s18_parent_and_descendants_constructs_policy_outcome() {
+fn parent_and_descendants_constructs_policy_outcome() {
     let authority = parent_termination_authority(DescendantTerminationScope::ParentAndDescendants);
     let outcome = DelegationOutcome::from_parent_policy(authority, BoundChildAction::Stop)
         .expect("descendant-scoped authority may apply bound policy");
@@ -521,9 +521,9 @@ fn s18_parent_and_descendants_constructs_policy_outcome() {
     );
 }
 
-/// S18: an already-terminal edge records its evaluating command.
+/// an already-terminal edge records its evaluating command.
 #[test]
-fn s18_already_terminal_edge_has_typed_command_disposition() {
+fn already_terminal_edge_has_typed_command_disposition() {
     let authority = parent_termination_authority(DescendantTerminationScope::ParentAndDescendants);
     let outcome = DelegationOutcome::from_parent_already_terminal(authority)
         .expect("descendant-scoped authority records terminal-edge evaluation");
@@ -538,9 +538,9 @@ fn s18_already_terminal_edge_has_typed_command_disposition() {
     assert_eq!(outcome.provenance().parent_command(), Some(authority));
 }
 
-/// S18: descendant-scoped cancellation selects its exact reason.
+/// descendant-scoped cancellation selects its exact reason.
 #[test]
-fn s18_parent_and_descendants_cancel_constructs_policy_outcome() {
+fn parent_and_descendants_cancel_constructs_policy_outcome() {
     let authority = ParentTerminationAuthority {
         parent: session_id(1),
         source: ParentTerminationCommandSource::Turn { turn: turn_id(2) },
@@ -560,9 +560,9 @@ fn s18_parent_and_descendants_cancel_constructs_policy_outcome() {
     );
 }
 
-/// S18: goal-stop authority names a generation without a turn.
+/// goal-stop authority names a generation without a turn.
 #[test]
-fn s18_goal_termination_authority_never_fabricates_a_turn() {
+fn goal_termination_authority_never_fabricates_a_turn() {
     let generation = GoalGeneration::new(std::num::NonZeroU64::MIN);
     let authority = ParentTerminationAuthority {
         parent: session_id(1),

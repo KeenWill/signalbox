@@ -609,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn s36_prefix_rule_allows_siblings_and_descendants_but_not_ancestors_or_disjoint_paths() {
+    fn prefix_rule_allows_siblings_and_descendants_but_not_ancestors_or_disjoint_paths() {
         let requester = scoped("projects.foo.reviews.pr123");
         let requesting_directory = requester.path().unwrap().parent_directory();
         let refusal = SessionReadScopeDecision::Refused(SessionReadScopeRefusal {
