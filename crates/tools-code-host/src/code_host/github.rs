@@ -19,19 +19,17 @@ use super::repository_result::{
     MAX_OBSERVED_DIRECTORY_ENTRIES, MAX_REPOSITORY_FILE_SCAN_BYTES, is_immediate_repository_child,
 };
 use super::result::{MAX_ENCODED_RESULT_BYTES, absolute_https_url};
-use super::review_slog::{
-    author_class, disposition_class, finding_title,
-};
+use super::review_slog::{author_class, disposition_class, finding_title};
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
     ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, ChildStackState,
     CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCursor, CodeHostNumericBounds,
     CodeHostOperation, CodeHostRepository, CodeHostResult, CodeHostResultCompleteness,
-    CodeHostTransport, CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceReadResult, FilePatchResult, RepositoryDirectoryEntry, RepositoryFileContentFields,
-    RepositoryLineRange, RepositoryListDirectoryResult, RepositoryObjectKind,
-    RepositoryReadFileResult, RerunFailedJobsResult, ReviewDispositionClass,
-    ReviewGateCheckArguments, ReviewThread, ReviewThreadComment,
-    ReviewThreadFields, ReviewThreadInventoryFields,
+    CodeHostTransport, CodeHostTransportFailure, ConvergenceReadResult, ConvergenceStateArguments,
+    FilePatchResult, RepositoryDirectoryEntry, RepositoryFileContentFields, RepositoryLineRange,
+    RepositoryListDirectoryResult, RepositoryObjectKind, RepositoryReadFileResult,
+    RerunFailedJobsResult, ReviewDispositionClass, ReviewGateCheckArguments, ReviewThread,
+    ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
     ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult, StackStateArguments,
     StackStateFields, StackStateResult, ThreadInventoryArguments, ThreadInventoryResult,
     ThreadReplyResult, ThreadResolveResult,
@@ -104,8 +102,6 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!) {
   }
 }
 "#;
-
-
 
 const THREAD_INVENTORY_QUERY: &str = r#"
 query ThreadInventory($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -193,7 +189,8 @@ query ThreadOwnership($thread: ID!) {
 #[derive(Clone, Debug)]
 pub struct GitHubCodeHostTransport {
     convergence_policy: Option<signalbox_convergence::ConvergencePolicy>,
-    convergence_history: std::sync::Arc<tokio::sync::Mutex<std::collections::BTreeMap<String,serde_json::Value>>>,
+    convergence_history:
+        std::sync::Arc<tokio::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
     client: Client,
     rest_base: Url,
     graphql_url: Url,
@@ -251,7 +248,10 @@ impl GitHubCodeHostTransport {
     }
 
     /// Installs the operator's convergence policy for both convergence reads.
-    pub fn with_convergence_policy(mut self, policy: Option<signalbox_convergence::ConvergencePolicy>) -> Self {
+    pub fn with_convergence_policy(
+        mut self,
+        policy: Option<signalbox_convergence::ConvergencePolicy>,
+    ) -> Self {
         self.convergence_policy = policy;
         self
     }
@@ -804,32 +804,73 @@ impl GitHubCodeHostTransport {
         number: CodeHostChangeRequestNumber,
         credential: &CredentialValue,
     ) -> Result<ConvergenceReadResult, CodeHostTransportFailure> {
-        let policy = self.convergence_policy.as_ref().ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let key = format!("{}/{}#{}",repository.owner(),repository.name(),number.get());
-        let previous = self.convergence_history.lock().await.get(&key).cloned().unwrap_or_else(|| serde_json::json!({}));
-        let repository_name = format!("{}/{}",repository.owner(),repository.name());
+        let policy = self
+            .convergence_policy
+            .as_ref()
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        let key = format!(
+            "{}/{}#{}",
+            repository.owner(),
+            repository.name(),
+            number.get()
+        );
+        let previous = self
+            .convergence_history
+            .lock()
+            .await
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let repository_name = format!("{}/{}", repository.owner(), repository.name());
         let mut send = |request| -> signalbox_convergence::fetch::RequestFuture<'_> {
             Box::pin(async move {
                 let result = match request {
-                    signalbox_convergence::fetch::GitHubRequest::GraphQl { query, variables } => self.graphql_read(&query,variables,credential).await,
+                    signalbox_convergence::fetch::GitHubRequest::GraphQl { query, variables } => {
+                        self.graphql_read(&query, variables, credential).await
+                    }
                     signalbox_convergence::fetch::GitHubRequest::Rest { path } => {
-                        let url = self.rest_base.join(&path).map_err(|_|signalbox_convergence::Error::Evidence("invalid GitHub path".into()))?;
-                        match self.send_authenticated(Method::GET,url,None,credential).await {
-                            Ok(response) if response.status() == StatusCode::NOT_FOUND => Ok(serde_json::Value::Null),
-                            Ok(response) => self.json_response(response,StatusCode::OK).await,
+                        let url = self.rest_base.join(&path).map_err(|_| {
+                            signalbox_convergence::Error::Evidence("invalid GitHub path".into())
+                        })?;
+                        match self
+                            .send_authenticated(Method::GET, url, None, credential)
+                            .await
+                        {
+                            Ok(response) if response.status() == StatusCode::NOT_FOUND => {
+                                Ok(serde_json::Value::Null)
+                            }
+                            Ok(response) => self.json_response(response, StatusCode::OK).await,
                             Err(error) => Err(error),
                         }
                     }
                 };
-                result.map_err(|_| signalbox_convergence::Error::Evidence("GitHub convergence request failed".into()))
+                result.map_err(|_| {
+                    signalbox_convergence::Error::Evidence(
+                        "GitHub convergence request failed".into(),
+                    )
+                })
             })
         };
-        let recording = signalbox_convergence::fetch::record_with(&mut send,previous,&repository_name,u64::from(number.get()),policy).await
-            .map_err(|_|CodeHostTransportFailure::InvalidResponse)?;
-        let snapshot = recording.snapshot(policy).map_err(|_|CodeHostTransportFailure::InvalidResponse)?;
-        let evaluation = signalbox_convergence::evaluate(&snapshot,policy).map_err(|_|CodeHostTransportFailure::InvalidResponse)?;
-        self.convergence_history.lock().await.insert(key,evaluation.state.clone());
-        ConvergenceReadResult::try_new(self.bounds,evaluation).ok_or(CodeHostTransportFailure::InvalidResponse)
+        let recording = signalbox_convergence::fetch::record_with(
+            &mut send,
+            previous,
+            &repository_name,
+            u64::from(number.get()),
+            policy,
+        )
+        .await
+        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        let snapshot = recording
+            .snapshot(policy)
+            .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        let evaluation = signalbox_convergence::evaluate(&snapshot, policy)
+            .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        self.convergence_history
+            .lock()
+            .await
+            .insert(key, evaluation.state.clone());
+        ConvergenceReadResult::try_new(self.bounds, evaluation)
+            .ok_or(CodeHostTransportFailure::InvalidResponse)
     }
 
     async fn thread_inventory(
@@ -1124,7 +1165,9 @@ impl GitHubCodeHostTransport {
         arguments: ReviewGateCheckArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
-        self.convergence_state_for(arguments.repository(),arguments.number(),credential).await.map(CodeHostResult::ReviewGateCheck)
+        self.convergence_state_for(arguments.repository(), arguments.number(), credential)
+            .await
+            .map(CodeHostResult::ReviewGateCheck)
     }
 
     async fn compare_behind_by(
@@ -2066,8 +2109,6 @@ fn omitted_optional_u64(
     }
 }
 
-
-
 /// The fixed GitHub client or endpoint could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitHubCodeHostConstructionError;
@@ -2339,7 +2380,10 @@ fn parse_slog_thread(
             comment.and_then(|comment| {
                 Ok((
                     required_string(comment, "body")?,
-                    matches!(required_string(comment, "authorAssociation")?.as_str(), "OWNER" | "MEMBER" | "COLLABORATOR"),
+                    matches!(
+                        required_string(comment, "authorAssociation")?.as_str(),
+                        "OWNER" | "MEMBER" | "COLLABORATOR"
+                    ),
                 ))
             })
         })
@@ -2383,8 +2427,6 @@ fn parse_slog_thread(
         escalated: disposition == ReviewDispositionClass::EscalationMarker,
     })
 }
-
-
 
 fn page(
     connection: &serde_json::Map<String, serde_json::Value>,
@@ -2852,9 +2894,7 @@ fn required_bool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        CodeHostRepository,
-    };
+    use crate::CodeHostRepository;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     const FILE_PATCH_REPOSITORY: &str = "owner/repository";
@@ -2912,10 +2952,6 @@ mod tests {
         CodeHostRepository::try_new(String::from("owner/repository"))
             .expect("fixture repository is admitted")
     }
-
-
-
-
 
     /// REST paths and pagination are derived only from checked typed segments.
     #[test]
@@ -4938,9 +4974,6 @@ mod tests {
             Err(CodeHostTransportFailure::InvalidResponse)
         );
     }
-
-    /// A thread arriving during final stack revalidation invalidates the gate snapshot.
-
 
     /// Disposition-shaped text from an unaffiliated reply cannot satisfy the
     /// parsed inventory protocol.

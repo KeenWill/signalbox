@@ -14,8 +14,6 @@ pub const ESCALATION_MARKER: &str = "Escalated without disposition";
 
 pub(super) use inventory::{author_class, disposition_class, finding_title};
 
-
-
 pub(super) fn stack_into_value(result: StackStateResult) -> serde_json::Value {
     result.into_value()
 }
@@ -23,5 +21,3 @@ pub(super) fn stack_into_value(result: StackStateResult) -> serde_json::Value {
 pub(super) fn inventory_into_value(result: ThreadInventoryResult) -> serde_json::Value {
     result.into_value()
 }
-
-

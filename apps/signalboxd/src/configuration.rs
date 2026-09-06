@@ -1188,9 +1188,12 @@ impl HubModelConfiguration {
             convergence: Option<signalbox_convergence::ConvergencePolicy>,
         }
         let convergence = toml::from_str::<ConvergenceSection>(content)
-            .map_err(|_|HubModelConfigurationError::InvalidDocument)?.convergence;
+            .map_err(|_| HubModelConfigurationError::InvalidDocument)?
+            .convergence;
         if let Some(policy) = &convergence {
-            policy.validate().map_err(|_|HubModelConfigurationError::InvalidDocument)?;
+            policy
+                .validate()
+                .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
         }
         let repository_watch = document
             .get("repository_watch")
@@ -9210,6 +9213,22 @@ context_window_tokens = 200000
             UnknownSessionModel { selection: request }
                 .to_string()
                 .contains(&format!("{request:?}"))
+        );
+    }
+
+    #[test]
+    fn configuration_loads_the_shared_convergence_policy() {
+        let example = include_str!("../../../crates/convergence/examples/repository.toml");
+        let policy = example.replace("[[reviewers]]", "[[convergence.reviewers]]");
+        let configured = format!("{CONFIGURATION}\n[convergence]\n{policy}");
+        let configuration = HubModelConfiguration::parse(&configured)
+            .expect("the shared policy example is accepted under convergence");
+        let parsed = configuration.convergence().expect("the policy is retained");
+        let expected: signalbox_convergence::ConvergencePolicy =
+            toml::from_str(example).expect("the example is a shared convergence policy");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("policy serializes"),
+            serde_json::to_value(expected).expect("policy serializes")
         );
     }
 

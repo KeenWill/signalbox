@@ -172,10 +172,6 @@ impl ThreadInventoryResult {
         })
     }
 
-
-
-
-
     pub(super) fn into_value(self) -> Value {
         json!({
             "next_cursor": self.next_cursor,

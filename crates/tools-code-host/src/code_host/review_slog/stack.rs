@@ -38,10 +38,6 @@ impl ChildStackState {
             })
     }
 
-
-
-
-
     fn into_value(self) -> Value {
         json!({
             "base_commits_not_in_head": self.base_commits_not_in_head,
@@ -133,21 +129,6 @@ impl StackStateResult {
             children_next_cursor: fields.children_next_cursor,
         })
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     pub(super) fn into_value(self) -> Value {
         json!({

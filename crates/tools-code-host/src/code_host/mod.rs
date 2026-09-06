@@ -68,7 +68,7 @@ pub use result::{
     RerunFailedJobsResult, ReviewThread, ReviewThreadComment, ReviewThreadFields,
     ReviewThreadResolution, ReviewThreadsResult, ThreadReplyResult, ThreadResolveResult,
 };
-pub use review_gate_check::{ReviewGateCheckArguments, ReviewGatePurpose};
+pub use review_gate_check::ReviewGateCheckArguments;
 pub use review_slog::{
     ChildStackState, ReviewAuthorClass, ReviewDispositionClass, ReviewThreadInventoryFields,
     ReviewThreadInventoryItem, StackStateFields, StackStateResult, ThreadInventoryResult,
@@ -1788,23 +1788,6 @@ mod tests {
             review_gate_check::NAME,
             expect_test::expect![[r##"
             {
-              "$defs": {
-                "ReviewGatePurpose": {
-                  "description": "The protocol boundary the caller is checking.",
-                  "oneOf": [
-                    {
-                      "const": "request_review_wave",
-                      "description": "A convergence read made while preparing a review wave.",
-                      "type": "string"
-                    },
-                    {
-                      "const": "declare_convergence",
-                      "description": "Whether the change request may be declared converged.",
-                      "type": "string"
-                    }
-                  ]
-                }
-              },
               "additionalProperties": false,
               "properties": {
                 "number": {
@@ -1812,10 +1795,6 @@ mod tests {
                   "maximum": 2147483647,
                   "minimum": 1,
                   "type": "integer"
-                },
-                "purpose": {
-                  "$ref": "#/$defs/ReviewGatePurpose",
-                  "description": "Caller context for the convergence read."
                 },
                 "repository": {
                   "description": "Exact owner/repository spelling.",
@@ -1826,8 +1805,7 @@ mod tests {
               },
               "required": [
                 "repository",
-                "number",
-                "purpose"
+                "number"
               ],
               "type": "object"
             }"##]],
@@ -2141,7 +2119,7 @@ mod tests {
         assert_valid(
             &catalog(),
             review_gate_check::NAME,
-            r#"{"number":17,"purpose":"declare_convergence","repository":"owner/repository"}"#,
+            r#"{"number":17,"repository":"owner/repository"}"#,
         );
     }
 

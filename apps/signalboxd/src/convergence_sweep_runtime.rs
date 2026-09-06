@@ -12,13 +12,15 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, EligibilityNudge,
-    InProcessEligibilityNudge,
-    UuidV7CommissionedDispatchIdGenerator, UuidV7SubmitInputIdGenerator,
+    InProcessEligibilityNudge, UuidV7CommissionedDispatchIdGenerator, UuidV7SubmitInputIdGenerator,
 };
-use signalbox_convergence::{ConvergencePolicy, Evaluation, Verdict, fetch::{GitHubRequest, RequestFuture}};
+use signalbox_convergence::{
+    ConvergencePolicy, Evaluation, Verdict,
+    fetch::{GitHubRequest, RequestFuture},
+};
 use signalbox_domain::{
-    BranchName, CommitSha, DurableCommandId, GoalStatement, PullRequestNumber,
-    RepositorySlug, UserContent,
+    BranchName, CommitSha, DurableCommandId, GoalStatement, PullRequestNumber, RepositorySlug,
+    UserContent,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::{
@@ -467,7 +469,7 @@ impl ConvergenceSweepRuntime {
             .await;
             return;
         };
-        let context = match commission_content(target, &fetched, &convergence) {
+        let context = match commission_content(target, &fetched, convergence) {
             Ok(context) => context,
             Err(()) => {
                 self.record_failure(
@@ -729,47 +731,100 @@ impl ConvergenceSweepRuntime {
         let mut authorization =
             HeaderValue::from_bytes(&authorization).map_err(|_| CensusError::Credential)?;
         authorization.set_sensitive(true);
-        let policy = self.convergence_policy.as_ref().ok_or(CensusError::Shape)?;
-        let key = format!("{}#{}",target.repository.as_str(),target.pull_request.get());
-        let previous = self.convergence_history.lock().await.get(&key).cloned().unwrap_or_else(||json!({}));
+        let mut policy = self.convergence_policy.clone().ok_or(CensusError::Shape)?;
+        if let Some(ceiling) = self.numeric_bounds.connection_pages {
+            policy.page_limit = policy.page_limit.min(ceiling);
+        }
+        let key = format!(
+            "{}#{}",
+            target.repository.as_str(),
+            target.pull_request.get()
+        );
+        let previous = self
+            .convergence_history
+            .lock()
+            .await
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         let mut send = |request| -> RequestFuture<'_> {
             let authorization = &authorization;
             Box::pin(async move {
                 let result = match request {
-                    GitHubRequest::GraphQl { query, variables } => self.graphql(&query,variables,authorization).await,
-                    GitHubRequest::Rest { path } => self.rest(&path,authorization).await,
+                    GitHubRequest::GraphQl { query, variables } => {
+                        self.graphql(&query, variables, authorization).await
+                    }
+                    GitHubRequest::Rest { path } => self.rest(&path, authorization).await,
                 };
-                result.map_err(|_|signalbox_convergence::Error::Evidence("convergence provider request failed".into()))
+                result.map_err(|_| {
+                    signalbox_convergence::Error::Evidence(
+                        "convergence provider request failed".into(),
+                    )
+                })
             })
         };
-        let recording = signalbox_convergence::fetch::record_with(&mut send,previous,target.repository.as_str(),target.pull_request.get(),policy).await.map_err(|_|CensusError::Response)?;
-        let snapshot = recording.snapshot(policy).map_err(|_|CensusError::Shape)?;
-        if snapshot.initial["headRepository"] != snapshot.current["headRepository"] { return Err(CensusError::State); }
-        let evaluation = signalbox_convergence::evaluate(&snapshot,policy).map_err(|_|CensusError::State)?;
+        let recording = signalbox_convergence::fetch::record_with(
+            &mut send,
+            previous,
+            target.repository.as_str(),
+            target.pull_request.get(),
+            &policy,
+        )
+        .await
+        .map_err(|_| CensusError::Response)?;
+        let snapshot = recording
+            .snapshot(&policy)
+            .map_err(|_| CensusError::Shape)?;
+        if snapshot.initial["headRepository"] != snapshot.current["headRepository"] {
+            return Err(CensusError::State);
+        }
+        let evaluation =
+            signalbox_convergence::evaluate(&snapshot, &policy).map_err(|_| CensusError::State)?;
         let node = &snapshot.current;
-        let head_repository = RepositorySlug::try_new(node["headRepository"]["nameWithOwner"].as_str().ok_or(CensusError::Shape)?.to_lowercase()).map_err(|_|CensusError::Shape)?;
-        self.convergence_history.lock().await.insert(key,evaluation.state.clone());
+        let head_repository = RepositorySlug::try_new(
+            node["headRepository"]["nameWithOwner"]
+                .as_str()
+                .ok_or(CensusError::Shape)?
+                .to_lowercase(),
+        )
+        .map_err(|_| CensusError::Shape)?;
+        self.convergence_history
+            .lock()
+            .await
+            .insert(key, evaluation.state.clone());
         Ok(FetchedPullRequest {
-            head_sha: commit_at(node,"headRefOid")?,
-            base_branch: branch_at(node,"baseRefName")?,
-            head_branch: branch_at(node,"headRefName")?,
+            head_sha: commit_at(node, "headRefOid")?,
+            base_branch: branch_at(node, "baseRefName")?,
+            head_branch: branch_at(node, "headRefName")?,
             head_repository,
             evaluation,
         })
     }
 
-    async fn rest(&self, path: &str, authorization: &HeaderValue) -> Result<Value,CensusError> {
-        let mut response = self.client.get(format!("https://api.github.com/{path}"))
-            .header(AUTHORIZATION,authorization.clone()).header(ACCEPT,"application/vnd.github+json")
-            .header(USER_AGENT,USER_AGENT_VALUE).send().await.map_err(|_|CensusError::Request)?;
-        if response.status() == StatusCode::NOT_FOUND { return Ok(Value::Null); }
-        if response.status() != StatusCode::OK { return Err(CensusError::Response); }
+    async fn rest(&self, path: &str, authorization: &HeaderValue) -> Result<Value, CensusError> {
+        let mut response = self
+            .client
+            .get(format!("https://api.github.com/{path}"))
+            .header(AUTHORIZATION, authorization.clone())
+            .header(ACCEPT, "application/vnd.github+json")
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .send()
+            .await
+            .map_err(|_| CensusError::Request)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(Value::Null);
+        }
+        if response.status() != StatusCode::OK {
+            return Err(CensusError::Response);
+        }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_|CensusError::Response)? {
-            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES { return Err(CensusError::Response); }
+        while let Some(chunk) = response.chunk().await.map_err(|_| CensusError::Response)? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(CensusError::Response);
+            }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_|CensusError::Decode)
+        serde_json::from_slice(&bytes).map_err(|_| CensusError::Decode)
     }
 
     async fn graphql(

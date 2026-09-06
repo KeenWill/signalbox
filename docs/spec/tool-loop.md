@@ -453,13 +453,13 @@ it can be passed back as an argument. Every returned URL is one absolute
 credential-free HTTPS location. No code-host result has more than 100 collection
 members or more than 512 KiB of encoded JSON. Every bounded review-log list
 reports whether it is truncated together with its continuation cursor, and a
-verdict never treats a partial evidence page as complete. The code-host convergence-state and review-gate tools return the
-`signalbox-convergence` verdict from one complete snapshot and the daemon's
-`[convergence]` policy. Both review-gate purposes report that same verdict;
-stack and thread-inventory tools remain separate reads. The
-authenticated job-log endpoint is the sole redirect-shaped exchange: after one
-302 the adapter validates the location, pins a wholly public destination set,
-and downloads credential-free. A read transport or server failure is an executor
+verdict never treats a partial evidence page as complete. The code-host
+convergence-state and review-gate tools return the `signalbox-convergence`
+verdict from one complete snapshot and the daemon's `[convergence]` policy.
+Stack and thread-inventory tools remain separate reads. The authenticated
+job-log endpoint is the sole redirect-shaped exchange: after one 302 the adapter
+validates the location, pins a wholly public destination set, and downloads
+credential-free. A read transport or server failure is an executor
 infrastructure failure, while a mutation transport loss, server failure, or
 malformed acknowledgement is commit-ambiguous. `change_request_thread_reply` and
 `change_request_thread_resolve` query thread ownership before they mutate, and a
