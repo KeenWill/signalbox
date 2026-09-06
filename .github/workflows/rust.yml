@@ -167,8 +167,6 @@ jobs:
         run: python3 scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
         run: python3 scripts/test_postgres_integration_suites.py
-      - name: Test the convergence reconciler
-        run: python3 tooling/convergence-reconciler/test_reconcile.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
       - name: Test the lifecycle watchdog
@@ -395,6 +393,8 @@ jobs:
             ' sh "$runner_uid" "$runner_gid" "$runner_home" "$test_command" "$runner_path"
       - name: Test generated browser contract runtime
         run: node --test crates/web-contract/tests/generated_roundtrip.mjs
+      - name: Test the convergence reconciler
+        run: python3 tooling/convergence-reconciler/test_reconcile.py
       # `--all-targets` excludes doctests, so the domain's compile_fail
       # sealing proofs need this separate run.
       - name: Run doctests
