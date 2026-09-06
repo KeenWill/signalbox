@@ -17,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "crates/convergence/fixtures"
 POLICY = ROOT / "crates/convergence/examples/repository.toml"
 
-
 def append_page(connection, page):
     if connection["totalCount"] != page["totalCount"]:
         raise ValueError("connection totalCount changed while paging")
@@ -99,11 +98,24 @@ class RecordedGitHub(reference.GitHubGraphQL):
 def reference_evaluation(recording):
     initial = assemble(recording["observations"][0])
     current = assemble(recording["observations"][-1])
+    if not isinstance(initial.get("isDraft"), bool):
+        raise RuntimeError("pull request isDraft must be a boolean")
+    if not isinstance(initial.get("body"), str):
+        raise RuntimeError("pull request body must be a string")
     if initial["state"] != current["state"]:
         raise RuntimeError("pull request changed after its convergence snapshot")
     client = RecordedGitHub(recording, current)
     pr = reference.normalize_pull_request(initial)
     pr["_persisted_record"] = copy.deepcopy(recording.get("previous", {}))
+    policy = tomllib.loads(POLICY.read_text())
+    if pr["_persisted_record"].get("policy_identity") != policy:
+        for key in (
+            "authenticated_review_head", "authenticated_review_id",
+            "authenticated_review_request", "authenticated_review_body",
+            "authenticated_review_check_inventory", "known_codex_review_ids",
+            "review_wave_ids", "review_wave_base_oid",
+        ):
+            pr["_persisted_record"].pop(key, None)
     pr["review_threads"] = reference.normalize_review_threads(initial["reviewThreads"]["nodes"], pr["author_login"])
     pr["_review_thread_evidence"] = reference.review_thread_signature(pr["review_threads"])
     for thread in pr["review_threads"]:
@@ -122,6 +134,14 @@ def reference_evaluation(recording):
     client._finalize_check_inventory([pr])
     client.revalidate_for_decision(pr)
     result = reference.evaluate_convergence(pr)
+    # A disposition does not close the provider's review thread.
+    unresolved = sum(not thread["isResolved"] for thread in pr["review_threads"])
+    unresolved_reason = f"unresolved-review-threads:{unresolved}"
+    result["reasons"] = [unresolved_reason if reason.startswith("unresolved-review-threads:") else reason for reason in result["reasons"]]
+    if unresolved:
+        result["converged"] = False
+        if unresolved_reason not in result["reasons"]:
+            result["reasons"].append(unresolved_reason)
     # The repository-watch contract additionally requires at least one gating check.
     if not any(not reference.is_non_gating_check(check) for check in pr["checks"]):
         result["converged"] = False
@@ -156,6 +176,8 @@ def main():
     parser.add_argument("--write-expectations", action="store_true")
     parser.add_argument("fixtures", nargs="*", type=Path)
     args = parser.parse_args()
+    if args.write_expectations and args.fixtures:
+        parser.error("--write-expectations requires the complete fixture corpus")
     cases = [path.resolve() for path in args.fixtures] or list(fixtures())
     if not cases:
         parser.error("fixture corpus is empty")
