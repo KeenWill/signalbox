@@ -799,7 +799,7 @@ impl RepoWatchStore {
         let expected = Decimal::from(expected_generation);
         if current_generation != expected {
             let exact_replay: bool = sqlx::query_scalar(
-                "SELECT frontier_generation = $2 + 1
+                "SELECT frontier_generation > $2
                         AND last_frontier_commit_digest = sha256($3)
                    FROM repository_state WHERE repository = $1",
             )
@@ -811,8 +811,8 @@ impl RepoWatchStore {
             transaction.rollback().await?;
             return if exact_replay {
                 Ok(FrontierEventAdmission::Committed {
-                    generation: expected_generation
-                        .checked_add(1)
+                    generation: current_generation
+                        .to_u64()
                         .ok_or(StoreError::InvalidFrontierGeneration)?,
                     events: vec![EventAdmission::Replayed; events.len()].into_boxed_slice(),
                 })
