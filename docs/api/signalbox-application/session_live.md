@@ -119,7 +119,7 @@ pub struct SessionLiveSnapshot {
 ```rust
 pub trait SessionLiveReader {
     type Error;
-    pub fn read_live_snapshot(
+    fn read_live_snapshot(
         &self,
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<

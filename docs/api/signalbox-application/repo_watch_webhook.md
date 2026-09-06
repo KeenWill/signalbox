@@ -226,13 +226,13 @@ pub enum RepoWatchWebhookApplyError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchWebhookApplyError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchWebhookApplyError {
-    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl convert::From<RepoWatchRepositoryStateError> for RepoWatchWebhookApplyError {
-    pub fn from(value: RepoWatchRepositoryStateError) -> Self;
+    fn from(value: RepoWatchRepositoryStateError) -> Self;
 }
 ```
 
@@ -293,7 +293,7 @@ pub enum RepoWatchWebhookMappingError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchWebhookMappingError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchWebhookMappingError {}
 ```

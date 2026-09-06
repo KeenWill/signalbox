@@ -6,7 +6,7 @@
 
 ```rust
 pub trait RepoWatchEventIdGenerator {
-    pub fn next_event_id(&mut self) -> signalbox_domain::RepoWatchEventId;
+    fn next_event_id(&mut self) -> signalbox_domain::RepoWatchEventId;
 }
 ```
 
@@ -14,7 +14,7 @@ pub trait RepoWatchEventIdGenerator {
 
 ```rust
 pub trait RepoWatchTemplateResolver {
-    pub fn resolve_repo_watch_template(
+    fn resolve_repo_watch_template(
         &self,
         name: &session_template::SessionTemplateName,
     ) -> option::Option<RepoWatchResolvedTemplate>;
@@ -26,7 +26,7 @@ pub trait RepoWatchTemplateResolver {
 ```rust
 pub trait RepoWatchDispatchTransaction {
     type Error;
-    pub fn handle_repo_watch_evaluation(
+    fn handle_repo_watch_evaluation(
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
         ids: &mut (impl SubmitInputIdGenerator + marker::Send),
@@ -43,8 +43,8 @@ pub trait RepoWatchDispatchTransaction {
 
 ```rust
 pub trait RepoWatchDispatchIdGenerator {
-    pub fn next_dispatch_id(&mut self) -> signalbox_domain::RepoWatchDispatchId;
-    pub fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
-    pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
+    fn next_dispatch_id(&mut self) -> signalbox_domain::RepoWatchDispatchId;
+    fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
+    fn next_session_id(&mut self) -> signalbox_domain::SessionId;
 }
 ```

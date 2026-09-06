@@ -26,9 +26,9 @@ pub enum CommissionedDispatchFence {
 
 ```rust
 pub trait CommissionedDispatchIdGenerator {
-    pub fn next_dispatch_id(&mut self) -> signalbox_domain::CommissionedDispatchId;
-    pub fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
-    pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
+    fn next_dispatch_id(&mut self) -> signalbox_domain::CommissionedDispatchId;
+    fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
+    fn next_session_id(&mut self) -> signalbox_domain::SessionId;
 }
 ```
 
@@ -38,9 +38,9 @@ pub trait CommissionedDispatchIdGenerator {
 pub struct UuidV7CommissionedDispatchIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl CommissionedDispatchIdGenerator for UuidV7CommissionedDispatchIdGenerator {
-    pub fn next_dispatch_id(&mut self) -> signalbox_domain::CommissionedDispatchId;
-    pub fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
-    pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
+    fn next_dispatch_id(&mut self) -> signalbox_domain::CommissionedDispatchId;
+    fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
+    fn next_session_id(&mut self) -> signalbox_domain::SessionId;
 }
 ```
 
@@ -104,7 +104,7 @@ pub enum CommissionDispatchPreparationError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for CommissionDispatchPreparationError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for CommissionDispatchPreparationError {}
 ```

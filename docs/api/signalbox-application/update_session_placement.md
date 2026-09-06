@@ -22,7 +22,7 @@ impl UpdateSessionPlacementRequest {
 ```rust
 pub trait UpdateSessionPlacementTransaction {
     type Error;
-    pub fn handle(
+    fn handle(
         &mut self,
         command: session_placement::UpdateSessionPlacement,
     ) -> impl future::Future<

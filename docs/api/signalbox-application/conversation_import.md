@@ -6,8 +6,8 @@
 
 ```rust
 pub trait ImportedConversationIdGenerator {
-    pub fn next_conversation_id(&mut self) -> signalbox_domain::ImportedConversationId;
-    pub fn next_entry_id(&mut self) -> signalbox_domain::ImportedTranscriptEntryId;
+    fn next_conversation_id(&mut self) -> signalbox_domain::ImportedConversationId;
+    fn next_entry_id(&mut self) -> signalbox_domain::ImportedTranscriptEntryId;
 }
 ```
 
@@ -17,8 +17,8 @@ pub trait ImportedConversationIdGenerator {
 pub struct UuidV7ImportedConversationIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl ImportedConversationIdGenerator for UuidV7ImportedConversationIdGenerator {
-    pub fn next_conversation_id(&mut self) -> signalbox_domain::ImportedConversationId;
-    pub fn next_entry_id(&mut self) -> signalbox_domain::ImportedTranscriptEntryId;
+    fn next_conversation_id(&mut self) -> signalbox_domain::ImportedConversationId;
+    fn next_entry_id(&mut self) -> signalbox_domain::ImportedTranscriptEntryId;
 }
 ```
 
@@ -27,8 +27,8 @@ impl ImportedConversationIdGenerator for UuidV7ImportedConversationIdGenerator {
 ```rust
 pub trait ImportedConversationConverter {
     type Error;
-    pub fn format(&self) -> imported_conversation::ImportedConversationFormat;
-    pub fn convert<NextEntryId>(
+    fn format(&self) -> imported_conversation::ImportedConversationFormat;
+    fn convert<NextEntryId>(
         &mut self,
         conversation: signalbox_domain::ImportedConversationId,
         source: &[u8],
@@ -75,7 +75,7 @@ pub enum ImportedConversationConversionReport<Failure> {
 ```rust
 pub trait ResilientImportedConversationConverter: ImportedConversationConverter {
     type RecordFailure;
-    pub fn convert_resilient<NextEntryId>(
+    fn convert_resilient<NextEntryId>(
         &mut self,
         conversation: signalbox_domain::ImportedConversationId,
         source: &[u8],
@@ -116,7 +116,7 @@ impl ImportedConversationStoreOutcome {
 ```rust
 pub trait ImportedConversationStore {
     type Error;
-    pub fn resolve_or_insert(
+    fn resolve_or_insert(
         &mut self,
         conversation: imported_conversation::ImportedConversation,
     ) -> impl future::Future<
@@ -195,7 +195,7 @@ where
     ConverterError: fmt::Display,
     StoreError: fmt::Display,
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<ConverterError, StoreError> error::Error
     for ImportConversationError<ConverterError, StoreError>

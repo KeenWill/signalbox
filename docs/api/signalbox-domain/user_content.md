@@ -8,7 +8,7 @@
 pub struct NonEmptyUnicodeText(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
 impl fmt::Debug for NonEmptyUnicodeText {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl NonEmptyUnicodeText {
     pub fn try_new(value: string::String) -> result::Result<Self, NonEmptyUnicodeTextError>;
@@ -34,7 +34,7 @@ pub enum NonEmptyUnicodeTextFailure {
 pub struct NonEmptyUnicodeTextError {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
 impl fmt::Debug for NonEmptyUnicodeTextError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl NonEmptyUnicodeTextError {
     pub const fn failure(&self) -> NonEmptyUnicodeTextFailure;
@@ -111,7 +111,7 @@ impl AttachmentDisplayFilename {
     pub fn as_str(&self) -> &str;
 }
 impl fmt::Debug for AttachmentDisplayFilename {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -134,7 +134,7 @@ pub enum AttachmentDisplayFilenameFailure {
 pub struct AttachmentDisplayFilenameError {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
 impl fmt::Debug for AttachmentDisplayFilenameError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl AttachmentDisplayFilenameError {
     pub const fn failure(&self) -> AttachmentDisplayFilenameFailure;

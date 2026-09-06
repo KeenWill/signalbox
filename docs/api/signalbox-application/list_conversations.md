@@ -102,7 +102,7 @@ impl ConversationListItem {
 ```rust
 pub trait ConversationPageReader {
     type Error;
-    pub fn next_item(
+    fn next_item(
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<
@@ -110,7 +110,7 @@ pub trait ConversationPageReader {
             <Self as ConversationPageReader>::Error,
         >,
     > + marker::Send;
-    pub fn next_after(&self) -> option::Option<ConversationListCursor>;
+    fn next_after(&self) -> option::Option<ConversationListCursor>;
 }
 ```
 
@@ -120,7 +120,7 @@ pub trait ConversationPageReader {
 pub trait ConversationLister {
     type Error;
     type Page: ConversationPageReader<Error = <Self as ConversationLister>::Error>;
-    pub fn open_conversation_page(
+    fn open_conversation_page(
         &self,
         query: ConversationListQuery,
     ) -> impl future::Future<

@@ -28,7 +28,7 @@ pub enum SessionPlacementPathError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for SessionPlacementPathError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SessionPlacementPathError {}
 ```
@@ -69,7 +69,7 @@ pub enum SessionPlacementError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for SessionPlacementError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SessionPlacementError {}
 ```
@@ -151,11 +151,11 @@ impl VersionedSessionPlacement {
 pub struct UpdateSessionPlacement {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl cmp::PartialEq for UpdateSessionPlacement {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for UpdateSessionPlacement {}
 impl hash::Hash for UpdateSessionPlacement {
-    pub fn hash<H: hash::Hasher>(&self, state: &mut H);
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 impl UpdateSessionPlacement {
     pub const fn new(

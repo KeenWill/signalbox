@@ -63,11 +63,11 @@ impl ToolDefinition {
 
 ```rust
 pub trait ToolArgumentValidator: marker::Send + marker::Sync {
-    pub fn validate(
+    fn validate(
         &self,
         arguments: &tool::NormalizedToolArguments,
     ) -> result::Result<(), tool_attempt::ToolExecutionErrorDetail>;
-    pub fn preauthorization(
+    fn preauthorization(
         &self,
         _arguments: &tool::NormalizedToolArguments,
     ) -> result::Result<ToolPreauthorization, tool_attempt::ToolExecutionErrorDetail>;
@@ -80,7 +80,7 @@ where
         + marker::Send
         + marker::Sync,
 {
-    pub fn validate(
+    fn validate(
         &self,
         arguments: &tool::NormalizedToolArguments,
     ) -> result::Result<(), tool_attempt::ToolExecutionErrorDetail>;
@@ -109,7 +109,7 @@ pub enum ToolPreauthorization {
 pub struct CompiledTool {/* private */}
 // derives: clone::Clone
 impl fmt::Debug for CompiledTool {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl CompiledTool {
     pub fn new(definition: ToolDefinition, validator: impl ToolArgumentValidator + 'static)
@@ -139,14 +139,14 @@ impl CompiledToolCatalog {
     ) -> result::Result<Self, DuplicateToolDefinition>;
 }
 impl ToolCatalog for CompiledToolCatalog {
-    pub fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
-    pub fn definition(&self, name: &tool::ToolName) -> option::Option<ToolDefinition>;
-    pub fn validate_arguments(
+    fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
+    fn definition(&self, name: &tool::ToolName) -> option::Option<ToolDefinition>;
+    fn validate_arguments(
         &self,
         name: &tool::ToolName,
         arguments: &tool::NormalizedToolArguments,
     ) -> result::Result<(), ToolCatalogValidationFailure>;
-    pub fn preauthorization(
+    fn preauthorization(
         &self,
         name: &tool::ToolName,
         arguments: &tool::NormalizedToolArguments,
@@ -158,14 +158,14 @@ impl ToolCatalog for CompiledToolCatalog {
 
 ```rust
 pub trait ToolCatalog: marker::Send + marker::Sync {
-    pub fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
-    pub fn definition(&self, name: &tool::ToolName) -> option::Option<ToolDefinition>;
-    pub fn validate_arguments(
+    fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
+    fn definition(&self, name: &tool::ToolName) -> option::Option<ToolDefinition>;
+    fn validate_arguments(
         &self,
         name: &tool::ToolName,
         arguments: &tool::NormalizedToolArguments,
     ) -> result::Result<(), ToolCatalogValidationFailure>;
-    pub fn preauthorization(
+    fn preauthorization(
         &self,
         _name: &tool::ToolName,
         _arguments: &tool::NormalizedToolArguments,
@@ -179,9 +179,9 @@ pub trait ToolCatalog: marker::Send + marker::Sync {
 pub struct NoToolCatalog;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl ToolCatalog for NoToolCatalog {
-    pub fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
-    pub fn definition(&self, _name: &tool::ToolName) -> option::Option<ToolDefinition>;
-    pub fn validate_arguments(
+    fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
+    fn definition(&self, _name: &tool::ToolName) -> option::Option<ToolDefinition>;
+    fn validate_arguments(
         &self,
         _name: &tool::ToolName,
         _arguments: &tool::NormalizedToolArguments,
@@ -282,13 +282,13 @@ pub enum ToolExecutorDisposition {
 ```rust
 pub trait ToolExecutor {
     type Error: ClassifyOperatorFailure;
-    pub fn execute(
+    fn execute(
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> impl future::Future<
         Output = result::Result<CorrelatedToolExecutorEvidence, <Self as ToolExecutor>::Error>,
     > + marker::Send;
-    pub fn execute_with_scheduling(
+    fn execute_with_scheduling(
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> impl future::Future<
@@ -303,7 +303,7 @@ pub trait ToolExecutor {
 
 ```rust
 pub trait ToolApprovalIdGenerator {
-    pub fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
 ```
 
@@ -311,12 +311,12 @@ pub trait ToolApprovalIdGenerator {
 
 ```rust
 pub trait ToolExecutionIdGenerator {
-    pub fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
-    pub fn next_tool_attempt_id(&mut self) -> signalbox_domain::ToolAttemptId;
-    pub fn next_tool_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_tool_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_tool_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
-    pub fn next_tool_turn_id(&mut self) -> signalbox_domain::TurnId;
+    fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_tool_attempt_id(&mut self) -> signalbox_domain::ToolAttemptId;
+    fn next_tool_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_tool_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_tool_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
+    fn next_tool_turn_id(&mut self) -> signalbox_domain::TurnId;
 }
 ```
 
@@ -326,15 +326,15 @@ pub trait ToolExecutionIdGenerator {
 pub struct UuidV7ToolLoopIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl ToolApprovalIdGenerator for UuidV7ToolLoopIdGenerator {
-    pub fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
 impl ToolExecutionIdGenerator for UuidV7ToolLoopIdGenerator {
-    pub fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
-    pub fn next_tool_attempt_id(&mut self) -> signalbox_domain::ToolAttemptId;
-    pub fn next_tool_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_tool_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_tool_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
-    pub fn next_tool_turn_id(&mut self) -> signalbox_domain::TurnId;
+    fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_tool_attempt_id(&mut self) -> signalbox_domain::ToolAttemptId;
+    fn next_tool_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_tool_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_tool_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
+    fn next_tool_turn_id(&mut self) -> signalbox_domain::TurnId;
 }
 ```
 
@@ -388,7 +388,7 @@ where
 ```rust
 pub struct RetainedToolExecutionState {/* private */}
 impl fmt::Debug for RetainedToolExecutionState {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -457,7 +457,7 @@ where
     TransactionError: fmt::Display,
     ExecutorError: fmt::Display,
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<TransactionError, ExecutorError> error::Error
     for ToolExecutionServiceError<TransactionError, ExecutorError>
@@ -465,7 +465,7 @@ where
     TransactionError: error::Error + 'static,
     ExecutorError: error::Error + 'static,
 {
-    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl<TransactionError, ExecutorError> ClassifyOperatorFailure
     for ToolExecutionServiceError<TransactionError, ExecutorError>
@@ -473,8 +473,8 @@ where
     TransactionError: ClassifyOperatorFailure,
     ExecutorError: ClassifyOperatorFailure,
 {
-    pub fn operator_failure_class(&self) -> OperatorFailureClass;
-    pub fn operator_failure_cause_code(&self) -> &'static str;
+    fn operator_failure_class(&self) -> OperatorFailureClass;
+    fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
 

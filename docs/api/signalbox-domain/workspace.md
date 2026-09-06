@@ -16,7 +16,7 @@ pub enum WorkspaceRootPathError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for WorkspaceRootPathError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for WorkspaceRootPathError {}
 ```

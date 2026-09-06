@@ -6,10 +6,10 @@
 
 ```rust
 pub trait DelegationMessageDeliveryProjection {
-    pub fn tool_request(&self) -> signalbox_domain::ToolRequestId;
-    pub fn message(&self) -> signalbox_domain::DelegationMessageId;
-    pub fn direction(&self) -> session_delegation::DelegationMessageDirection;
-    pub fn ordinal(&self) -> session_delegation::DelegationEventOrdinal;
-    pub fn delivery_sequence(&self) -> nonzero::NonZeroU64;
+    fn tool_request(&self) -> signalbox_domain::ToolRequestId;
+    fn message(&self) -> signalbox_domain::DelegationMessageId;
+    fn direction(&self) -> session_delegation::DelegationMessageDirection;
+    fn ordinal(&self) -> session_delegation::DelegationEventOrdinal;
+    fn delivery_sequence(&self) -> nonzero::NonZeroU64;
 }
 ```

@@ -134,7 +134,7 @@ impl SessionConfigurationDefaultsVersion {
 pub struct SessionSystemPrompt(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
 impl fmt::Debug for SessionSystemPrompt {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl SessionSystemPrompt {
     pub fn try_new(value: string::String) -> result::Result<Self, SessionSystemPromptError>;
@@ -159,7 +159,7 @@ pub enum SessionSystemPromptFailure {
 pub struct SessionSystemPromptError {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
 impl fmt::Debug for SessionSystemPromptError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl SessionSystemPromptError {
     pub fn value(&self) -> &str;
@@ -167,7 +167,7 @@ impl SessionSystemPromptError {
     pub fn into_parts(self) -> (string::String, SessionSystemPromptFailure);
 }
 impl fmt::Display for SessionSystemPromptError {
-    pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SessionSystemPromptError {}
 ```
@@ -309,10 +309,10 @@ pub enum OriginModelSettingsError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for OriginModelSettingsError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for OriginModelSettingsError {
-    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 

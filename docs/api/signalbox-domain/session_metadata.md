@@ -123,11 +123,11 @@ impl ReplaceSessionMetadata {
     ) -> PreparedReplaceSessionMetadata;
 }
 impl cmp::PartialEq for ReplaceSessionMetadata {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for ReplaceSessionMetadata {}
 impl hash::Hash for ReplaceSessionMetadata {
-    pub fn hash<H: hash::Hasher>(&self, state: &mut H);
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
 

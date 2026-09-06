@@ -11,7 +11,7 @@ pub enum InvalidDurableCommandId {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for InvalidDurableCommandId {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for InvalidDurableCommandId {}
 ```
@@ -58,7 +58,7 @@ impl CreateSessionRequest {
 
 ```rust
 pub trait SessionIdGenerator {
-    pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
+    fn next_session_id(&mut self) -> signalbox_domain::SessionId;
 }
 ```
 
@@ -68,7 +68,7 @@ pub trait SessionIdGenerator {
 pub struct UuidV7SessionIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl SessionIdGenerator for UuidV7SessionIdGenerator {
-    pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
+    fn next_session_id(&mut self) -> signalbox_domain::SessionId;
 }
 ```
 
@@ -89,7 +89,7 @@ pub enum CreateSessionOutcome {
 ```rust
 pub trait CreateSessionTransaction {
     type Error;
-    pub fn handle(
+    fn handle(
         &mut self,
         prepared: session::PreparedCreateSession,
     ) -> impl future::Future<
@@ -110,7 +110,7 @@ impl<TransactionError> fmt::Display for CreateSessionError<TransactionError>
 where
     TransactionError: fmt::Display,
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<TransactionError> error::Error for CreateSessionError<TransactionError> where
     TransactionError: error::Error + 'static

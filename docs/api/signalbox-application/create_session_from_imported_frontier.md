@@ -27,9 +27,9 @@ impl CreateSessionFromImportedFrontierRequest {
 
 ```rust
 pub trait CreateSessionFromImportedFrontierIdGenerator {
-    pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
-    pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_session_id(&mut self) -> signalbox_domain::SessionId;
+    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
 }
 ```
 
@@ -41,9 +41,9 @@ pub struct UuidV7CreateSessionFromImportedFrontierIdGenerator;
 impl CreateSessionFromImportedFrontierIdGenerator
     for UuidV7CreateSessionFromImportedFrontierIdGenerator
 {
-    pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
-    pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_session_id(&mut self) -> signalbox_domain::SessionId;
+    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
 }
 ```
 
@@ -70,7 +70,7 @@ pub enum CreateSessionFromImportedFrontierOutcome {
 ```rust
 pub trait CreateSessionFromImportedFrontierTransaction {
     type Error;
-    pub fn handle<NextSemanticEntryId>(
+    fn handle<NextSemanticEntryId>(
         &mut self,
         command: session::CreateSessionFromImportedFrontier,
         session: signalbox_domain::SessionId,

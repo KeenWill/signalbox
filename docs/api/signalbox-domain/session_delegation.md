@@ -137,7 +137,7 @@ impl DelegationContentError {
     pub fn into_parts(self) -> (string::String, DelegationContentFailure);
 }
 impl fmt::Display for DelegationContentError {
-    pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for DelegationContentError {}
 ```
@@ -163,10 +163,10 @@ impl DelegationRequestError {
     pub fn into_request(self) -> ToolRequest;
 }
 impl fmt::Display for DelegationRequestError {
-    pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for DelegationRequestError {
-    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 
@@ -539,7 +539,7 @@ impl SessionDelegationReconstitutionError {
     );
 }
 impl fmt::Display for SessionDelegationReconstitutionError {
-    pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SessionDelegationReconstitutionError {}
 ```
@@ -636,7 +636,7 @@ impl DelegationTransitionError {
     pub fn into_rejected(self) -> option::Option<RejectedDelegationTransition>;
 }
 impl fmt::Display for DelegationTransitionError {
-    pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for DelegationTransitionError {}
 ```

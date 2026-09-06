@@ -113,7 +113,7 @@ impl ModelSettingsOverlay {
     pub const fn service_tier(&self) -> SettingOverlay<ServiceTier>;
 }
 impl default::Default for ModelSettingsOverlay {
-    pub fn default() -> Self;
+    fn default() -> Self;
 }
 ```
 
@@ -134,7 +134,7 @@ impl EffectiveModelSettings {
     pub const fn service_tier(&self) -> option::Option<ServiceTier>;
 }
 impl default::Default for EffectiveModelSettings {
-    pub fn default() -> Self;
+    fn default() -> Self;
 }
 ```
 
@@ -184,7 +184,7 @@ impl ValidatedModelSettings {
     pub const fn validated_for(&self) -> option::Option<DirectModelSelection>;
 }
 impl default::Default for ValidatedModelSettings {
-    pub fn default() -> Self;
+    fn default() -> Self;
 }
 ```
 
@@ -293,7 +293,7 @@ pub enum UnsupportedModelSetting {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for UnsupportedModelSetting {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for UnsupportedModelSetting {}
 ```
@@ -423,7 +423,7 @@ pub enum ModelCapabilityCatalogError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ModelCapabilityCatalogError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ModelCapabilityCatalogError {}
 ```

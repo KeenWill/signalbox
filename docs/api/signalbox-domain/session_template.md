@@ -14,7 +14,7 @@ impl SessionTemplateName {
     pub fn into_string(self) -> string::String;
 }
 impl fmt::Debug for SessionTemplateName {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -41,7 +41,7 @@ impl SessionTemplateNameError {
     pub fn into_parts(self) -> (string::String, SessionTemplateNameFailure);
 }
 impl fmt::Display for SessionTemplateNameError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SessionTemplateNameError {}
 ```
@@ -71,7 +71,7 @@ impl SessionTemplateContentDigest {
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
 impl fmt::Debug for SessionTemplateContentDigest {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 

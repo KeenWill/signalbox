@@ -42,11 +42,11 @@ impl ReplaceSessionDefaults {
     ) -> result::Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsPreparationError>;
 }
 impl cmp::PartialEq for ReplaceSessionDefaults {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for ReplaceSessionDefaults {}
 impl hash::Hash for ReplaceSessionDefaults {
-    pub fn hash<H: hash::Hasher>(&self, state: &mut H);
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
 

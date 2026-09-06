@@ -72,7 +72,7 @@ pub enum ReplaceSessionDefaultsOutcome {
 ```rust
 pub trait ReplaceSessionDefaultsTransaction {
     type Error;
-    pub fn handle(
+    fn handle(
         &mut self,
         command: replace_session_defaults::ReplaceSessionDefaults,
         prompt_member: PromptMemberStatement,

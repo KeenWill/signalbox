@@ -72,7 +72,7 @@ pub enum GoalTextError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for GoalTextError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for GoalTextError {}
 ```
@@ -165,7 +165,7 @@ pub enum GoalModelBlockedReasonKind {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl convert::From<GoalModelBlockedReasonKind> for GoalBlockedReasonKind {
-    pub fn from(value: GoalModelBlockedReasonKind) -> Self;
+    fn from(value: GoalModelBlockedReasonKind) -> Self;
 }
 ```
 
@@ -181,7 +181,7 @@ pub enum GoalBlockedReasonKind {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl convert::From<GoalModelBlockedReasonKind> for GoalBlockedReasonKind {
-    pub fn from(value: GoalModelBlockedReasonKind) -> Self;
+    fn from(value: GoalModelBlockedReasonKind) -> Self;
 }
 ```
 
@@ -381,7 +381,7 @@ impl GoalTransitionError {
     pub fn into_goal(self) -> Goal;
 }
 impl fmt::Display for GoalTransitionError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for GoalTransitionError {}
 ```
@@ -417,7 +417,7 @@ impl GoalReconstitutionError {
     pub const fn failure(self) -> GoalReconstitutionFailure;
 }
 impl fmt::Display for GoalReconstitutionError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for GoalReconstitutionError {}
 ```

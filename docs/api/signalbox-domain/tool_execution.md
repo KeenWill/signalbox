@@ -111,7 +111,7 @@ pub enum ToolBatchPhase {
 pub struct ToolBatch {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl cmp::PartialEq for ToolBatch {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for ToolBatch {}
 impl ToolBatch {
@@ -281,7 +281,7 @@ impl DelegateToolApprovalTransitionError {
     pub const fn failure(&self) -> DelegateToolApprovalTransitionFailure;
 }
 impl fmt::Display for DelegateToolApprovalTransitionError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for DelegateToolApprovalTransitionError {}
 ```

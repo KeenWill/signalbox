@@ -287,7 +287,7 @@ impl SessionLifecycleTransitionError {
     pub const fn to(&self) -> SessionLifecycleState;
 }
 impl fmt::Display for SessionLifecycleTransitionError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SessionLifecycleTransitionError {}
 ```

@@ -14,7 +14,7 @@ pub enum SubmitInputRequestError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for SubmitInputRequestError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SubmitInputRequestError {}
 ```
@@ -57,12 +57,12 @@ impl SubmitInputRequest {
 
 ```rust
 pub trait SubmitInputIdGenerator {
-    pub fn next_accepted_input_id(&mut self) -> signalbox_domain::AcceptedInputId;
-    pub fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
-    pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_closure_decision_command_id(&mut self) -> signalbox_domain::DurableCommandId;
-    pub fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_accepted_input_id(&mut self) -> signalbox_domain::AcceptedInputId;
+    fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
+    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_closure_decision_command_id(&mut self) -> signalbox_domain::DurableCommandId;
+    fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
 ```
 
@@ -72,12 +72,12 @@ pub trait SubmitInputIdGenerator {
 pub struct UuidV7SubmitInputIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl SubmitInputIdGenerator for UuidV7SubmitInputIdGenerator {
-    pub fn next_accepted_input_id(&mut self) -> signalbox_domain::AcceptedInputId;
-    pub fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
-    pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_closure_decision_command_id(&mut self) -> signalbox_domain::DurableCommandId;
-    pub fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_accepted_input_id(&mut self) -> signalbox_domain::AcceptedInputId;
+    fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
+    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_closure_decision_command_id(&mut self) -> signalbox_domain::DurableCommandId;
+    fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
 ```
 
@@ -98,7 +98,7 @@ pub enum SubmitInputOutcome {
 ```rust
 pub trait SubmitInputTransaction {
     type Error;
-    pub fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
+    fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
         command: submit_input::SubmitInput,
         accepted_input: signalbox_domain::AcceptedInputId,

@@ -58,7 +58,7 @@ pub enum ToolAttemptAuthorizationOutcome {
 ```rust
 pub trait DecideToolRequestTransaction {
     type Error: ClassifyOperatorFailure;
-    pub fn decide<NextAttempt>(
+    fn decide<NextAttempt>(
         &mut self,
         command: tool::DecideToolRequest,
         next_attempt: NextAttempt,
@@ -78,7 +78,7 @@ pub trait DecideToolRequestTransaction {
 ```rust
 pub trait OverrideDeniedToolRequestTransaction {
     type Error: ClassifyOperatorFailure;
-    pub fn override_denied(
+    fn override_denied(
         &mut self,
         command: tool::OverrideDeniedToolRequest,
     ) -> impl future::Future<
@@ -156,7 +156,7 @@ pub enum RetainedToolAttemptObservationStatus {
 ```rust
 pub trait ToolExecutionTransaction {
     type Error: ClassifyOperatorFailure;
-    pub fn load_active_batch(
+    fn load_active_batch(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
@@ -166,14 +166,14 @@ pub trait ToolExecutionTransaction {
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
-    pub fn resume_child_wait(
+    fn resume_child_wait(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         continuation: signalbox_domain::TurnAttemptId,
     ) -> impl future::Future<Output = result::Result<bool, <Self as ToolExecutionTransaction>::Error>>
            + marker::Send;
-    pub fn prepare_next_attempt(
+    fn prepare_next_attempt(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
@@ -185,7 +185,7 @@ pub trait ToolExecutionTransaction {
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
-    pub fn authorize_attempt(
+    fn authorize_attempt(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
@@ -197,7 +197,7 @@ pub trait ToolExecutionTransaction {
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
-    pub fn reread_ambiguous_authorization(
+    fn reread_ambiguous_authorization(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
@@ -208,7 +208,7 @@ pub trait ToolExecutionTransaction {
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
-    pub fn commit_preflight_error(
+    fn commit_preflight_error(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
@@ -220,7 +220,7 @@ pub trait ToolExecutionTransaction {
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
-    pub fn commit_observation(
+    fn commit_observation(
         &mut self,
         observation: tool_attempt::CorrelatedToolAttemptObservation,
     ) -> impl future::Future<
@@ -229,7 +229,7 @@ pub trait ToolExecutionTransaction {
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
-    pub fn reread_observation(
+    fn reread_observation(
         &mut self,
         observation: &tool_attempt::CorrelatedToolAttemptObservation,
     ) -> impl future::Future<
@@ -238,17 +238,17 @@ pub trait ToolExecutionTransaction {
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
-    pub fn reread_durable_completion(
+    fn reread_durable_completion(
         &mut self,
         correlation: tool_attempt::ToolAttemptDispatchCorrelation,
     ) -> impl future::Future<Output = result::Result<bool, <Self as ToolExecutionTransaction>::Error>>
            + marker::Send;
-    pub fn reread_durable_child_wait(
+    fn reread_durable_child_wait(
         &mut self,
         wait: CorrelatedDurableChildWait,
     ) -> impl future::Future<Output = result::Result<bool, <Self as ToolExecutionTransaction>::Error>>
            + marker::Send;
-    pub fn classify_crash_loss<NextTurn>(
+    fn classify_crash_loss<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
@@ -264,7 +264,7 @@ pub trait ToolExecutionTransaction {
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
             + marker::Send;
-    pub fn prepare_continuation<NextSteering>(
+    fn prepare_continuation<NextSteering>(
         &mut self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,

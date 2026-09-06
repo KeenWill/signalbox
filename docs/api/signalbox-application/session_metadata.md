@@ -43,7 +43,7 @@ pub enum ReplaceSessionMetadataOutcome {
 ```rust
 pub trait ReplaceSessionMetadataTransaction {
     type Error;
-    pub fn handle(
+    fn handle(
         &mut self,
         command: session_metadata::ReplaceSessionMetadata,
     ) -> impl future::Future<
@@ -83,7 +83,7 @@ where
 ```rust
 pub trait SessionMetadataReader {
     type Error;
-    pub fn load_session_metadata(
+    fn load_session_metadata(
         &self,
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<
@@ -203,7 +203,7 @@ impl SessionMetadataListItem {
 ```rust
 pub trait SessionMetadataPageReader {
     type Error;
-    pub fn next_item(
+    fn next_item(
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<
@@ -211,7 +211,7 @@ pub trait SessionMetadataPageReader {
             <Self as SessionMetadataPageReader>::Error,
         >,
     > + marker::Send;
-    pub fn next_after_session(&self) -> option::Option<signalbox_domain::SessionId>;
+    fn next_after_session(&self) -> option::Option<signalbox_domain::SessionId>;
 }
 ```
 
@@ -221,7 +221,7 @@ pub trait SessionMetadataPageReader {
 pub trait SessionMetadataLister {
     type Error;
     type Page: SessionMetadataPageReader<Error = <Self as SessionMetadataLister>::Error>;
-    pub fn open_session_metadata_page(
+    fn open_session_metadata_page(
         &self,
         query: SessionMetadataListQuery,
     ) -> impl future::Future<

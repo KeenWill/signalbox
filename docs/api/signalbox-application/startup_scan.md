@@ -6,11 +6,11 @@
 
 ```rust
 pub trait StartupScanIdGenerator {
-    pub fn next_failure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_terminal_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_tool_closure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_tool_closure_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_reclassified_turn_id(
+    fn next_failure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_terminal_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_tool_closure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_tool_closure_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_reclassified_turn_id(
         &mut self,
         accepted_input: signalbox_domain::AcceptedInputId,
     ) -> signalbox_domain::TurnId;
@@ -23,9 +23,9 @@ pub trait StartupScanIdGenerator {
 pub struct UuidV7StartupScanIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl StartupScanIdGenerator for UuidV7StartupScanIdGenerator {
-    pub fn next_failure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_terminal_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_reclassified_turn_id(
+    fn next_failure_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_terminal_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_reclassified_turn_id(
         &mut self,
         _accepted_input: signalbox_domain::AcceptedInputId,
     ) -> signalbox_domain::TurnId;
@@ -62,7 +62,7 @@ pub enum StartupScanSessionOutcome {
 ```rust
 pub trait StartupScanRepository {
     type Error: ClassifyOperatorFailure;
-    pub fn active_sessions(
+    fn active_sessions(
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<
@@ -70,7 +70,7 @@ pub trait StartupScanRepository {
             <Self as StartupScanRepository>::Error,
         >,
     > + marker::Send;
-    pub fn recover<Generator>(
+    fn recover<Generator>(
         &mut self,
         session: signalbox_domain::SessionId,
         identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
@@ -108,20 +108,20 @@ impl<RepositoryError> fmt::Display for StartupScanError<RepositoryError>
 where
     RepositoryError: fmt::Display,
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<RepositoryError> error::Error for StartupScanError<RepositoryError>
 where
     RepositoryError: error::Error + 'static,
 {
-    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl<RepositoryError> ClassifyOperatorFailure for StartupScanError<RepositoryError>
 where
     RepositoryError: ClassifyOperatorFailure,
 {
-    pub fn operator_failure_class(&self) -> OperatorFailureClass;
-    pub fn operator_failure_cause_code(&self) -> &'static str;
+    fn operator_failure_class(&self) -> OperatorFailureClass;
+    fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
 

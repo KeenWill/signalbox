@@ -71,13 +71,13 @@ impl ResolvedContextFrontierSnapshot {
            + '_;
 }
 impl clone::Clone for ResolvedContextFrontierSnapshot {
-    pub fn clone(&self) -> Self;
+    fn clone(&self) -> Self;
 }
 impl fmt::Debug for ResolvedContextFrontierSnapshot {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl cmp::PartialEq for ResolvedContextFrontierSnapshot {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for ResolvedContextFrontierSnapshot {}
 ```
@@ -104,13 +104,13 @@ impl ResolvedContextFrontierReconstitutionInput {
     pub fn reconstitute(self) -> option::Option<ResolvedContextFrontierSnapshot>;
 }
 impl clone::Clone for ResolvedContextFrontierReconstitutionInput {
-    pub fn clone(&self) -> Self;
+    fn clone(&self) -> Self;
 }
 impl fmt::Debug for ResolvedContextFrontierReconstitutionInput {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl cmp::PartialEq for ResolvedContextFrontierReconstitutionInput {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for ResolvedContextFrontierReconstitutionInput {}
 ```

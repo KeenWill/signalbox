@@ -289,7 +289,7 @@ impl ToolDecisionRationaleError {
     pub fn into_value(self) -> string::String;
 }
 impl fmt::Display for ToolDecisionRationaleError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ToolDecisionRationaleError {}
 ```
@@ -336,7 +336,7 @@ impl DelegateToolApprovalError {
     pub const fn recommendation(self) -> DelegateApprovalRecommendation;
 }
 impl fmt::Display for DelegateToolApprovalError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for DelegateToolApprovalError {}
 ```
@@ -446,7 +446,7 @@ impl ToolApprovalResolutionReconstitutionError {
     pub fn into_input(self) -> ToolApprovalResolutionReconstitutionInput;
 }
 impl fmt::Display for ToolApprovalResolutionReconstitutionError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ToolApprovalResolutionReconstitutionError {}
 ```
@@ -500,11 +500,11 @@ impl DecideToolRequest {
     pub const fn prepare_not_earliest(self, earliest: ToolRequestId) -> PreparedDecideToolRequest;
 }
 impl cmp::PartialEq for DecideToolRequest {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for DecideToolRequest {}
 impl hash::Hash for DecideToolRequest {
-    pub fn hash<H: hash::Hasher>(&self, state: &mut H);
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
 
@@ -636,11 +636,11 @@ impl OverrideDeniedToolRequest {
     pub const fn prepare_already_overridden(self) -> PreparedOverrideDeniedToolRequest;
 }
 impl cmp::PartialEq for OverrideDeniedToolRequest {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for OverrideDeniedToolRequest {}
 impl hash::Hash for OverrideDeniedToolRequest {
-    pub fn hash<H: hash::Hasher>(&self, state: &mut H);
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
 

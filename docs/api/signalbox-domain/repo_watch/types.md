@@ -16,7 +16,7 @@ pub enum RepoWatchTextError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchTextError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchTextError {}
 ```
@@ -204,14 +204,14 @@ impl RepoWatchWorkflowRunAttempt {
 pub struct RepoWatchPattern {/* private */}
 // derives: clone::Clone
 impl fmt::Debug for RepoWatchPattern {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl cmp::PartialEq for RepoWatchPattern {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for RepoWatchPattern {}
 impl hash::Hash for RepoWatchPattern {
-    pub fn hash<H: hash::Hasher>(&self, state: &mut H);
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 impl RepoWatchPattern {
     pub const MAX_UTF8_BYTES: usize;
@@ -268,7 +268,7 @@ pub enum ChecksOutcome {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl convert::From<ChecksOutcome> for CheckConclusion {
-    pub fn from(value: ChecksOutcome) -> Self;
+    fn from(value: ChecksOutcome) -> Self;
 }
 ```
 
@@ -288,7 +288,7 @@ pub enum CheckConclusion {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl convert::From<ChecksOutcome> for CheckConclusion {
-    pub fn from(value: ChecksOutcome) -> Self;
+    fn from(value: ChecksOutcome) -> Self;
 }
 ```
 
@@ -481,7 +481,7 @@ pub enum RepoWatchEventConstructionError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchEventConstructionError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchEventConstructionError {}
 ```
@@ -572,7 +572,7 @@ pub enum RepoWatchDispatchContextShape {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl fmt::Display for RepoWatchDispatchContextShape {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -600,7 +600,7 @@ pub enum RepoWatchTemplateContextDeclarationError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchTemplateContextDeclarationError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchTemplateContextDeclarationError {}
 ```
@@ -660,7 +660,7 @@ pub enum RepoWatchDispatchContextError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchDispatchContextError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchDispatchContextError {}
 ```
@@ -711,7 +711,7 @@ impl RepoWatchRuleContentDigest {
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
 impl fmt::Debug for RepoWatchRuleContentDigest {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -751,7 +751,7 @@ impl RepoWatchRuleIdentityFieldDigest {
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
 impl fmt::Debug for RepoWatchRuleIdentityFieldDigest {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 

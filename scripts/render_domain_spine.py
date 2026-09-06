@@ -272,9 +272,9 @@ class Renderer:
         generics = body.get('generics', {'params': [], 'where_predicates': []})
         generic_name = name + self.params(generics['params'])
         where = self.where(generics)
-        prefix = '' if associated and kind != 'function' else 'pub '
+        prefix = '' if associated else 'pub '
         if kind == 'function':
-            return 'pub ' + self.modifiers(body['header']) + 'fn ' + generic_name + self.signature(body['sig']) + where + ';'
+            return prefix + self.modifiers(body['header']) + 'fn ' + generic_name + self.signature(body['sig']) + where + ';'
         if kind == 'struct':
             shape = self.shape(body['kind'], public=True)
             if isinstance(body['kind'], dict) and 'tuple' in body['kind']:

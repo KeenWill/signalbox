@@ -8,7 +8,7 @@
 pub struct UuidV7RepoWatchEventIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl RepoWatchEventIdGenerator for UuidV7RepoWatchEventIdGenerator {
-    pub fn next_event_id(&mut self) -> signalbox_domain::RepoWatchEventId;
+    fn next_event_id(&mut self) -> signalbox_domain::RepoWatchEventId;
 }
 ```
 
@@ -66,11 +66,11 @@ pub enum RepoWatchEventIdentityFrontierError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchEventIdentityFrontierError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchEventIdentityFrontierError {}
 impl convert::From<RepoWatchEventIdentityFrontierError> for RepoWatchDifferError {
-    pub fn from(value: RepoWatchEventIdentityFrontierError) -> Self;
+    fn from(value: RepoWatchEventIdentityFrontierError) -> Self;
 }
 ```
 
@@ -120,7 +120,7 @@ impl RepoWatchCheckCompletionGeneration {
 pub struct RepoWatchCheckCompletionGenerationError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchCheckCompletionGenerationError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchCheckCompletionGenerationError {}
 ```
@@ -260,7 +260,7 @@ impl RepoWatchConvergenceAssessment {
 pub struct RepoWatchConvergenceAssessmentError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchConvergenceAssessmentError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchConvergenceAssessmentError {}
 ```
@@ -292,7 +292,7 @@ impl RepoWatchStaleReviewClearanceCandidate {
 pub struct RepoWatchStaleReviewClearanceCandidateError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchStaleReviewClearanceCandidateError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchStaleReviewClearanceCandidateError {}
 ```
@@ -532,11 +532,11 @@ pub enum RepoWatchRepositoryStateError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchRepositoryStateError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchRepositoryStateError {}
 impl convert::From<RepoWatchRepositoryStateError> for RepoWatchWebhookApplyError {
-    pub fn from(value: RepoWatchRepositoryStateError) -> Self;
+    fn from(value: RepoWatchRepositoryStateError) -> Self;
 }
 ```
 
@@ -560,16 +560,16 @@ impl RepoWatchDifferError {
     pub const fn kind(&self) -> RepoWatchDifferFailureKind;
 }
 impl fmt::Display for RepoWatchDifferError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchDifferError {
-    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl convert::From<repo_watch::RepoWatchEventConstructionError> for RepoWatchDifferError {
-    pub fn from(value: repo_watch::RepoWatchEventConstructionError) -> Self;
+    fn from(value: repo_watch::RepoWatchEventConstructionError) -> Self;
 }
 impl convert::From<RepoWatchEventIdentityFrontierError> for RepoWatchDifferError {
-    pub fn from(value: RepoWatchEventIdentityFrontierError) -> Self;
+    fn from(value: RepoWatchEventIdentityFrontierError) -> Self;
 }
 ```
 
@@ -678,17 +678,17 @@ pub enum RepoWatchRuleEvaluationOutcome {
 pub struct UuidV7RepoWatchDispatchIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl RepoWatchDispatchIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
-    pub fn next_dispatch_id(&mut self) -> signalbox_domain::RepoWatchDispatchId;
-    pub fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
-    pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
+    fn next_dispatch_id(&mut self) -> signalbox_domain::RepoWatchDispatchId;
+    fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
+    fn next_session_id(&mut self) -> signalbox_domain::SessionId;
 }
 impl SubmitInputIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
-    pub fn next_accepted_input_id(&mut self) -> signalbox_domain::AcceptedInputId;
-    pub fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
-    pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_closure_decision_command_id(&mut self) -> signalbox_domain::DurableCommandId;
-    pub fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_accepted_input_id(&mut self) -> signalbox_domain::AcceptedInputId;
+    fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
+    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_closure_decision_command_id(&mut self) -> signalbox_domain::DurableCommandId;
+    fn next_closure_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
 }
 ```
 
@@ -704,10 +704,10 @@ pub enum RepoWatchDispatchPreparationError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchDispatchPreparationError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchDispatchPreparationError {
-    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 
@@ -750,7 +750,7 @@ impl<TransactionError> fmt::Display for RepoWatchDispatchServiceError<Transactio
 where
     TransactionError: fmt::Display,
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<TransactionError> error::Error for RepoWatchDispatchServiceError<TransactionError> where
     TransactionError: error::Error + 'static

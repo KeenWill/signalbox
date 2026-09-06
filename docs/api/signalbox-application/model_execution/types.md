@@ -36,7 +36,7 @@ impl ModelUserContent {
     pub fn single_text(&self) -> option::Option<&user_content::NonEmptyUnicodeText>;
 }
 impl cmp::PartialEq<user_content::UserContent> for ModelUserContent {
-    pub fn eq(&self, other: &user_content::UserContent) -> bool;
+    fn eq(&self, other: &user_content::UserContent) -> bool;
 }
 ```
 
@@ -49,7 +49,7 @@ impl ModelAttachmentStub {
     pub fn as_str(&self) -> &str;
 }
 impl fmt::Debug for ModelAttachmentStub {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -202,11 +202,11 @@ pub enum ModelFrontierRenderingError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ModelFrontierRenderingError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ModelFrontierRenderingError {}
 impl ClassifyOperatorFailure for ModelFrontierRenderingError {
-    pub fn operator_failure_class(&self) -> OperatorFailureClass;
+    fn operator_failure_class(&self) -> OperatorFailureClass;
 }
 ```
 
@@ -352,12 +352,12 @@ pub enum ModelCallInputTokenCount {
 pub struct UuidV7ModelCallExecutionIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl ModelCallExecutionIdGenerator for UuidV7ModelCallExecutionIdGenerator {
-    pub fn next_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
-    pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId;
-    pub fn next_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
-    pub fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
+    fn next_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
+    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId;
+    fn next_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
 }
 ```
 
@@ -368,7 +368,7 @@ pub struct InProcessAttemptDispatchGate {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default
 impl AttemptDispatchGate for InProcessAttemptDispatchGate {
     type Permit = InProcessAttemptDispatchPermit;
-    pub fn acquire(
+    fn acquire(
         &self,
         attempt: signalbox_domain::TurnAttemptId,
     ) -> impl future::Future<Output = <Self as AttemptDispatchGate>::Permit> + marker::Send;
@@ -445,7 +445,7 @@ where
     ProviderError: fmt::Display,
     ObservationError: fmt::Display,
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> error::Error
     for ModelCallExecutionError<
@@ -479,8 +479,8 @@ where
     ProviderError: ClassifyOperatorFailure,
     ObservationError: ClassifyOperatorFailure,
 {
-    pub fn operator_failure_class(&self) -> OperatorFailureClass;
-    pub fn operator_failure_cause_code(&self) -> &'static str;
+    fn operator_failure_class(&self) -> OperatorFailureClass;
+    fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
 
@@ -631,11 +631,11 @@ pub enum ScriptedModelCallError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ScriptedModelCallError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ScriptedModelCallError {}
 impl ClassifyOperatorFailure for ScriptedModelCallError {
-    pub fn operator_failure_class(&self) -> OperatorFailureClass;
+    fn operator_failure_class(&self) -> OperatorFailureClass;
 }
 ```
 
@@ -662,7 +662,7 @@ impl ScriptedModelCallProvider {
 impl ModelCallProvider for ScriptedModelCallProvider {
     type Capability = ScriptedModelCallCapability;
     type Error = ScriptedModelCallError;
-    pub fn prepare_capability<Cancellation>(
+    fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
         cancellation: Cancellation,
@@ -674,7 +674,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
     > + marker::Send
     where
         Cancellation: future::Future<Output = ()> + marker::Send + 'static;
-    pub fn invoke<AcceptancePossible, Cancellation>(
+    fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
         authorized: model_execution::AuthorizedModelCall,
         capability: <Self as ModelCallProvider>::Capability,

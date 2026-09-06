@@ -7,7 +7,7 @@
 ```rust
 pub trait SessionReader {
     type Error;
-    pub fn load_session(
+    fn load_session(
         &self,
         session_id: signalbox_domain::SessionId,
     ) -> impl future::Future<

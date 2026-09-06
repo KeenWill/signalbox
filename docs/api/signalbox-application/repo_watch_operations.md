@@ -471,7 +471,7 @@ pub struct RepoWatchActivityPage {
 ```rust
 pub trait RepoWatchOperationsReader {
     type Error;
-    pub fn repository_statuses(
+    fn repository_statuses(
         &self,
         after: option::Option<repo_watch::RepositorySlug>,
     ) -> impl future::Future<
@@ -480,7 +480,7 @@ pub trait RepoWatchOperationsReader {
             <Self as RepoWatchOperationsReader>::Error,
         >,
     > + marker::Send;
-    pub fn pull_requests(
+    fn pull_requests(
         &self,
         repository: repo_watch::RepositorySlug,
         after: option::Option<repo_watch::PullRequestNumber>,
@@ -490,7 +490,7 @@ pub trait RepoWatchOperationsReader {
             <Self as RepoWatchOperationsReader>::Error,
         >,
     > + marker::Send;
-    pub fn work(
+    fn work(
         &self,
         repository: repo_watch::RepositorySlug,
         held_after: RepoWatchPagePosition<RepoWatchHeldCursor>,
@@ -498,7 +498,7 @@ pub trait RepoWatchOperationsReader {
     ) -> impl future::Future<
         Output = result::Result<RepoWatchWorkPage, <Self as RepoWatchOperationsReader>::Error>,
     > + marker::Send;
-    pub fn pull_request_sessions(
+    fn pull_request_sessions(
         &self,
         repository: repo_watch::RepositorySlug,
         pull_request: repo_watch::PullRequestNumber,
@@ -509,7 +509,7 @@ pub trait RepoWatchOperationsReader {
             <Self as RepoWatchOperationsReader>::Error,
         >,
     > + marker::Send;
-    pub fn activity(
+    fn activity(
         &self,
         repository: repo_watch::RepositorySlug,
         events_before: RepoWatchPagePosition<RepoWatchEventCursor>,

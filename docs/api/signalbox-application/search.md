@@ -48,7 +48,7 @@ pub enum SearchTextError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for SearchTextError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SearchTextError {}
 ```
@@ -89,7 +89,7 @@ pub enum SearchScope {
 pub struct SearchPageLimitError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for SearchPageLimitError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SearchPageLimitError {}
 ```
@@ -167,7 +167,7 @@ pub enum SearchProjectionTextError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for SearchProjectionTextError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for SearchProjectionTextError {}
 ```
@@ -212,7 +212,7 @@ pub struct SearchArtifactProjection {
 ```rust
 pub trait SearchProjectionWriter {
     type Error;
-    pub fn publish(
+    fn publish(
         &self,
         projection: SearchArtifactProjection,
     ) -> impl future::Future<Output = result::Result<(), <Self as SearchProjectionWriter>::Error>>
@@ -298,7 +298,7 @@ pub struct SearchPage {
 ```rust
 pub trait SearchReader {
     type Error;
-    pub fn search(
+    fn search(
         &self,
         query: SearchQuery,
     ) -> impl future::Future<Output = result::Result<SearchPage, <Self as SearchReader>::Error>>

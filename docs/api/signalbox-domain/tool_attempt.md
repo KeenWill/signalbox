@@ -259,7 +259,7 @@ impl CurrentToolAttempt {
 pub struct AuthorizedToolAttempt {/* private */}
 // derives: fmt::Debug
 impl cmp::PartialEq for AuthorizedToolAttempt {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for AuthorizedToolAttempt {}
 impl AuthorizedToolAttempt {

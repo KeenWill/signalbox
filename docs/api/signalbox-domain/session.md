@@ -112,11 +112,11 @@ impl CreateSession {
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
 }
 impl cmp::PartialEq for CreateSession {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for CreateSession {}
 impl hash::Hash for CreateSession {
-    pub fn hash<H: hash::Hasher>(&self, state: &mut H);
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 impl CreateSession {
     pub fn prepare(
@@ -160,11 +160,11 @@ impl CreateSessionFromImportedFrontier {
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
 }
 impl cmp::PartialEq for CreateSessionFromImportedFrontier {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for CreateSessionFromImportedFrontier {}
 impl hash::Hash for CreateSessionFromImportedFrontier {
-    pub fn hash<H: hash::Hasher>(&self, state: &mut H);
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
 

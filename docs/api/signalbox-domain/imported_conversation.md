@@ -69,7 +69,7 @@ impl ImportedText {
     pub fn into_string(self) -> string::String;
 }
 impl fmt::Debug for ImportedText {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -84,7 +84,7 @@ impl ImportedJsonNumber {
     pub fn into_string(self) -> string::String;
 }
 impl fmt::Debug for ImportedJsonNumber {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -98,10 +98,10 @@ impl ImportedJsonNumberError {
     pub fn into_value(self) -> string::String;
 }
 impl fmt::Debug for ImportedJsonNumberError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl fmt::Display for ImportedJsonNumberError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ImportedJsonNumberError {}
 ```
@@ -130,22 +130,22 @@ pub enum ImportedStructuredValue {
     Object(boxed::Box<[ImportedStructuredObjectMember]>),
 }
 impl clone::Clone for ImportedStructuredValue {
-    pub fn clone(&self) -> Self;
+    fn clone(&self) -> Self;
 }
 impl fmt::Debug for ImportedStructuredValue {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl cmp::PartialEq for ImportedStructuredValue {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for ImportedStructuredValue {}
 impl hash::Hash for ImportedStructuredValue {
-    pub fn hash<State>(&self, state: &mut State)
+    fn hash<State>(&self, state: &mut State)
     where
         State: hash::Hasher;
 }
 impl drop::Drop for ImportedStructuredValue {
-    pub fn drop(&mut self);
+    fn drop(&mut self);
 }
 ```
 
@@ -329,7 +329,7 @@ impl ImportedRawSourceRecord {
     pub const fn normalized(&self) -> &ImportedStructuredValue;
 }
 impl fmt::Debug for ImportedRawSourceRecord {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -353,7 +353,7 @@ impl ImportedRawSourceRecordReconstitutionInput {
     pub const fn normalized(&self) -> &ImportedStructuredValue;
 }
 impl fmt::Debug for ImportedRawSourceRecordReconstitutionInput {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -620,7 +620,7 @@ pub enum ImportedConversationDisplayTitleError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ImportedConversationDisplayTitleError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ImportedConversationDisplayTitleError {}
 ```
@@ -631,7 +631,7 @@ impl error::Error for ImportedConversationDisplayTitleError {}
 pub struct ImportedStructuredFieldError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ImportedStructuredFieldError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ImportedStructuredFieldError {}
 ```

@@ -144,7 +144,7 @@ pub enum ReviewWorkflowCommandOutcome {
 ```rust
 pub trait ReviewWorkflowTransaction {
     type Error;
-    pub fn handle(
+    fn handle(
         &mut self,
         command: ReviewWorkflowCommand,
     ) -> impl future::Future<
@@ -180,7 +180,7 @@ impl<Transaction: ReviewWorkflowTransaction> ReviewWorkflowCommandService<Transa
 ```rust
 pub trait ReviewWorkflowReader {
     type Error;
-    pub fn load_target(
+    fn load_target(
         &self,
         target: signalbox_domain::ReviewTargetId,
     ) -> impl future::Future<
@@ -189,7 +189,7 @@ pub trait ReviewWorkflowReader {
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
-    pub fn load_run(
+    fn load_run(
         &self,
         run: signalbox_domain::ReviewRunId,
     ) -> impl future::Future<
@@ -198,7 +198,7 @@ pub trait ReviewWorkflowReader {
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
-    pub fn load_run_with_pass(
+    fn load_run_with_pass(
         &self,
         run: signalbox_domain::ReviewRunId,
     ) -> impl future::Future<
@@ -210,7 +210,7 @@ pub trait ReviewWorkflowReader {
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
-    pub fn load_pass(
+    fn load_pass(
         &self,
         pass: signalbox_domain::ReviewPassId,
     ) -> impl future::Future<
@@ -219,7 +219,7 @@ pub trait ReviewWorkflowReader {
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
-    pub fn load_finding(
+    fn load_finding(
         &self,
         finding: signalbox_domain::ReviewFindingId,
     ) -> impl future::Future<
@@ -228,7 +228,7 @@ pub trait ReviewWorkflowReader {
             <Self as ReviewWorkflowReader>::Error,
         >,
     > + marker::Send;
-    pub fn list_findings(
+    fn list_findings(
         &self,
         run: signalbox_domain::ReviewRunId,
     ) -> impl future::Future<

@@ -110,17 +110,17 @@ impl InstructionSourcePath {
     pub fn relative_path(&self) -> string::String;
 }
 impl cmp::PartialEq for InstructionSourcePath {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for InstructionSourcePath {}
 impl cmp::PartialOrd for InstructionSourcePath {
-    pub fn partial_cmp(&self, other: &Self) -> option::Option<cmp::Ordering>;
+    fn partial_cmp(&self, other: &Self) -> option::Option<cmp::Ordering>;
 }
 impl cmp::Ord for InstructionSourcePath {
-    pub fn cmp(&self, other: &Self) -> cmp::Ordering;
+    fn cmp(&self, other: &Self) -> cmp::Ordering;
 }
 impl hash::Hash for InstructionSourcePath {
-    pub fn hash<State: hash::Hasher>(&self, state: &mut State);
+    fn hash<State: hash::Hasher>(&self, state: &mut State);
 }
 ```
 
@@ -136,7 +136,7 @@ pub enum InstructionPathError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for InstructionPathError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for InstructionPathError {}
 ```
@@ -196,7 +196,7 @@ pub enum InstructionSkillMetadataError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for InstructionSkillMetadataError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for InstructionSkillMetadataError {}
 ```

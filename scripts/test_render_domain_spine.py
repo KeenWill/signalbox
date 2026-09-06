@@ -110,7 +110,7 @@ impl Record {
     pub fn new(value: T) -> Self;
 }
 impl Read for Record {
-    pub fn read(&self) -> T;
+    fn read(&self) -> T;
     type Output = T;
 }
 ```''')
@@ -196,7 +196,7 @@ impl Read for Record {
         renderer = Renderer(fixture())
         self.assertEqual(renderer.declaration(renderer.item(15)), '''pub trait Read {
     type Output;
-    pub fn read() -> <Self as Read>::Output;
+    fn read() -> <Self as Read>::Output;
 }''')
 
     def test_derived_only_type_has_one_derive_line_and_no_blanket_noise(self):

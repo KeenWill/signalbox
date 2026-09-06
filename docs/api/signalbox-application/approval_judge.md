@@ -105,10 +105,10 @@ impl ApprovalJudgeCompletionIdentities {
 
 ```rust
 pub trait ApprovalJudgeAuthorization {
-    pub fn request(&self) -> &tool::ToolRequest;
-    pub fn call(&self) -> signalbox_domain::ModelCallId;
-    pub fn selection(&self) -> configuration::DirectModelSelection;
-    pub fn target(&self) -> model_call::ResolvedProviderTarget;
-    pub fn credential_reference(&self) -> &str;
+    fn request(&self) -> &tool::ToolRequest;
+    fn call(&self) -> signalbox_domain::ModelCallId;
+    fn selection(&self) -> configuration::DirectModelSelection;
+    fn target(&self) -> model_call::ResolvedProviderTarget;
+    fn credential_reference(&self) -> &str;
 }
 ```

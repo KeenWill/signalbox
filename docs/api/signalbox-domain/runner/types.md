@@ -368,7 +368,7 @@ pub enum RunnerEnrollmentState {
 pub struct RunnerEnrollment {/* private */}
 // derives: fmt::Debug
 impl cmp::PartialEq for RunnerEnrollment {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for RunnerEnrollment {}
 impl RunnerEnrollment {
@@ -439,7 +439,7 @@ pub struct RunnerEnrollmentReconstitutionInput {
 pub struct ValidatedRunnerRegistration {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl cmp::PartialEq for ValidatedRunnerRegistration {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for ValidatedRunnerRegistration {}
 impl ValidatedRunnerRegistration {
@@ -685,7 +685,7 @@ impl RunnerClaimedAttemptReplacement {
 pub struct RunnerLeaseRetryAuthority {/* private */}
 // derives: fmt::Debug
 impl cmp::PartialEq for RunnerLeaseRetryAuthority {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for RunnerLeaseRetryAuthority {}
 impl RunnerLeaseRetryAuthority {

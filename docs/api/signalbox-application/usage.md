@@ -36,7 +36,7 @@ pub enum UsageCredentialProfileLabelError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for UsageCredentialProfileLabelError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for UsageCredentialProfileLabelError {}
 ```
@@ -61,7 +61,7 @@ pub struct UsageTimestampError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for UsageTimestampError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for UsageTimestampError {}
 ```
@@ -86,7 +86,7 @@ pub struct UsageTimeRangeError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for UsageTimeRangeError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for UsageTimeRangeError {}
 ```
@@ -251,7 +251,7 @@ pub struct UsageCallPageLimitError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for UsageCallPageLimitError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for UsageCallPageLimitError {}
 ```
@@ -341,7 +341,7 @@ pub enum UsageCallPageError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for UsageCallPageError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for UsageCallPageError {}
 ```
@@ -443,7 +443,7 @@ pub enum UsageAggregateGroupError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for UsageAggregateGroupError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for UsageAggregateGroupError {}
 ```
@@ -457,7 +457,7 @@ pub enum UsageAggregateReportError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for UsageAggregateReportError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for UsageAggregateReportError {}
 ```
@@ -482,13 +482,13 @@ impl UsageAggregateReport {
 ```rust
 pub trait UsageReader {
     type Error;
-    pub fn aggregate(
+    fn aggregate(
         &self,
         query: UsageQuery,
     ) -> impl future::Future<
         Output = result::Result<UsageAggregateReport, <Self as UsageReader>::Error>,
     > + marker::Send;
-    pub fn calls(
+    fn calls(
         &self,
         query: UsageCallQuery,
     ) -> impl future::Future<Output = result::Result<UsageCallPage, <Self as UsageReader>::Error>>

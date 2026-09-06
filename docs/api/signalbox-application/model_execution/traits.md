@@ -7,7 +7,7 @@
 ```rust
 pub trait PrepareModelCallTransaction {
     type Error: ClassifyOperatorFailure;
-    pub fn prepare<NextSteeringIdentities>(
+    fn prepare<NextSteeringIdentities>(
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
@@ -35,7 +35,7 @@ pub trait PrepareModelCallTransaction {
 ```rust
 pub trait FailPreparedModelCallTransaction {
     type Error: ClassifyOperatorFailure;
-    pub fn fail_prepared<NextTurn>(
+    fn fail_prepared<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
@@ -52,7 +52,7 @@ pub trait FailPreparedModelCallTransaction {
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
             + marker::Send;
-    pub fn reread_failure(
+    fn reread_failure(
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
@@ -71,7 +71,7 @@ pub trait FailPreparedModelCallTransaction {
 ```rust
 pub trait AuthorizeModelCallTransaction {
     type Error: ClassifyOperatorFailure;
-    pub fn authorize(
+    fn authorize(
         &mut self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
@@ -81,7 +81,7 @@ pub trait AuthorizeModelCallTransaction {
             <Self as AuthorizeModelCallTransaction>::Error,
         >,
     > + marker::Send;
-    pub fn reread_after_ambiguous_commit(
+    fn reread_after_ambiguous_commit(
         &mut self,
         session: signalbox_domain::SessionId,
         prepared: &model_execution::PreparedModelCallRequest,
@@ -91,7 +91,7 @@ pub trait AuthorizeModelCallTransaction {
             <Self as AuthorizeModelCallTransaction>::Error,
         >,
     > + marker::Send;
-    pub fn cancellation_signal(
+    fn cancellation_signal(
         &self,
         session: signalbox_domain::SessionId,
         call: signalbox_domain::ModelCallId,
@@ -104,7 +104,7 @@ pub trait AuthorizeModelCallTransaction {
 ```rust
 pub trait CommitModelCallObservationTransaction {
     type Error: ClassifyOperatorFailure;
-    pub fn commit_observation<NextTurn>(
+    fn commit_observation<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,
         observation: model_execution::CorrelatedModelCallTerminalObservation,
@@ -119,7 +119,7 @@ pub trait CommitModelCallObservationTransaction {
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
             + marker::Send;
-    pub fn reread_observation(
+    fn reread_observation(
         &mut self,
         session: signalbox_domain::SessionId,
         observation: &model_execution::CorrelatedModelCallTerminalObservation,
@@ -137,7 +137,7 @@ pub trait CommitModelCallObservationTransaction {
 ```rust
 pub trait ModelCallInputTokenCounter {
     type Error: ClassifyOperatorFailure;
-    pub fn count_input_tokens<Cancellation>(
+    fn count_input_tokens<Cancellation>(
         &self,
         operation: PreparedModelOperation,
         cancellation: Cancellation,
@@ -158,7 +158,7 @@ pub trait ModelCallInputTokenCounter {
 pub trait ModelCallProvider {
     type Capability;
     type Error: ClassifyOperatorFailure;
-    pub fn prepare_capability<Cancellation>(
+    fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
         cancellation: Cancellation,
@@ -170,7 +170,7 @@ pub trait ModelCallProvider {
     > + marker::Send
     where
         Cancellation: future::Future<Output = ()> + marker::Send + 'static;
-    pub fn invoke<AcceptancePossible, Cancellation>(
+    fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
         authorized: model_execution::AuthorizedModelCall,
         capability: <Self as ModelCallProvider>::Capability,
@@ -192,12 +192,12 @@ pub trait ModelCallProvider {
 
 ```rust
 pub trait ModelCallExecutionIdGenerator {
-    pub fn next_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
-    pub fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
-    pub fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId;
-    pub fn next_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
-    pub fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
+    fn next_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
+    fn next_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId;
+    fn next_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
 }
 ```
 
@@ -206,7 +206,7 @@ pub trait ModelCallExecutionIdGenerator {
 ```rust
 pub trait AttemptDispatchGate {
     type Permit: marker::Send;
-    pub fn acquire(
+    fn acquire(
         &self,
         attempt: signalbox_domain::TurnAttemptId,
     ) -> impl future::Future<Output = <Self as AttemptDispatchGate>::Permit> + marker::Send;

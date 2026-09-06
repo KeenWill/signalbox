@@ -142,7 +142,7 @@ pub enum AttentionQueryError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for AttentionQueryError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for AttentionQueryError {}
 ```
@@ -271,13 +271,13 @@ pub enum AttentionChanges {
 ```rust
 pub trait AttentionReader {
     type Error;
-    pub fn snapshot(
+    fn snapshot(
         &self,
         query: AttentionQuery,
     ) -> impl future::Future<
         Output = result::Result<AttentionSnapshot, <Self as AttentionReader>::Error>,
     > + marker::Send;
-    pub fn changes_after(
+    fn changes_after(
         &self,
         cursor: AttentionCursor,
     ) -> impl future::Future<

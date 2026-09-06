@@ -76,11 +76,11 @@ impl SubmitInput {
     ) -> result::Result<PreparedSubmitInput, SubmitInputPreparationError>;
 }
 impl cmp::PartialEq for SubmitInput {
-    pub fn eq(&self, other: &Self) -> bool;
+    fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for SubmitInput {}
 impl hash::Hash for SubmitInput {
-    pub fn hash<H: hash::Hasher>(&self, state: &mut H);
+    fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 ```
 

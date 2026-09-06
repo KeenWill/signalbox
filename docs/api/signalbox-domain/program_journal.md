@@ -303,7 +303,7 @@ pub enum ProgramJournalError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ProgramJournalError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ProgramJournalError {}
 ```
@@ -342,7 +342,7 @@ impl NondeterminismError {
     pub fn into_fault(self) -> ProgramFault;
 }
 impl fmt::Display for NondeterminismError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for NondeterminismError {}
 ```

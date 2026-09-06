@@ -13,11 +13,11 @@ impl BlobDigest {
     pub fn digest(bytes: &[u8]) -> Self;
 }
 impl fmt::Display for BlobDigest {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl traits::FromStr for BlobDigest {
     type Err = BlobDigestParseError;
-    pub fn from_str(value: &str) -> result::Result<Self, <Self as traits::FromStr>::Err>;
+    fn from_str(value: &str) -> result::Result<Self, <Self as traits::FromStr>::Err>;
 }
 ```
 
@@ -31,7 +31,7 @@ pub enum BlobDigestParseFailure {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for BlobDigestParseFailure {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 ```
 
@@ -45,7 +45,7 @@ impl BlobDigestParseError {
     pub const fn failure(&self) -> BlobDigestParseFailure;
 }
 impl fmt::Display for BlobDigestParseError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for BlobDigestParseError {}
 ```
@@ -91,7 +91,7 @@ pub enum BlobTransformationError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for BlobTransformationError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for BlobTransformationError {}
 ```
@@ -162,7 +162,7 @@ pub enum BlobDerivationError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for BlobDerivationError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for BlobDerivationError {}
 ```

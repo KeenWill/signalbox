@@ -77,21 +77,21 @@ where
     Error: ClassifyOperatorFailure + clone::Clone + marker::Send,
 {
     type Error = Error;
-    pub async fn resume_child_wait(
+    async fn resume_child_wait(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::TurnAttemptId,
     ) -> result::Result<bool, <Self as ToolExecutionTransaction>::Error>;
-    pub async fn reread_durable_child_wait(
+    async fn reread_durable_child_wait(
         &mut self,
         _wait: CorrelatedDurableChildWait,
     ) -> result::Result<bool, <Self as ToolExecutionTransaction>::Error>;
-    pub async fn reread_durable_completion(
+    async fn reread_durable_completion(
         &mut self,
         _correlation: tool_attempt::ToolAttemptDispatchCorrelation,
     ) -> result::Result<bool, <Self as ToolExecutionTransaction>::Error>;
-    pub async fn load_active_batch(
+    async fn load_active_batch(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
@@ -99,7 +99,7 @@ where
         option::Option<tool_execution::ToolBatch>,
         <Self as ToolExecutionTransaction>::Error,
     >;
-    pub async fn prepare_next_attempt(
+    async fn prepare_next_attempt(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
@@ -109,38 +109,38 @@ where
         option::Option<tool_attempt::CurrentToolAttempt>,
         <Self as ToolExecutionTransaction>::Error,
     >;
-    pub async fn authorize_attempt(
+    async fn authorize_attempt(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         attempt: signalbox_domain::ToolAttemptId,
         _preauthorization: ToolPreauthorization,
     ) -> result::Result<ToolAttemptAuthorizationOutcome, <Self as ToolExecutionTransaction>::Error>;
-    pub async fn reread_ambiguous_authorization(
+    async fn reread_ambiguous_authorization(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::ToolAttemptId,
     ) -> result::Result<ToolAttemptAuthorizationStatus, <Self as ToolExecutionTransaction>::Error>;
-    pub async fn commit_preflight_error(
+    async fn commit_preflight_error(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
         _attempt: signalbox_domain::ToolAttemptId,
         _error: tool_attempt::ToolExecutionError,
     ) -> result::Result<tool_attempt::EndedToolAttempt, <Self as ToolExecutionTransaction>::Error>;
-    pub async fn commit_observation(
+    async fn commit_observation(
         &mut self,
         observation: tool_attempt::CorrelatedToolAttemptObservation,
     ) -> result::Result<tool_attempt::EndedToolAttempt, <Self as ToolExecutionTransaction>::Error>;
-    pub async fn reread_observation(
+    async fn reread_observation(
         &mut self,
         _observation: &tool_attempt::CorrelatedToolAttemptObservation,
     ) -> result::Result<
         RetainedToolAttemptObservationStatus,
         <Self as ToolExecutionTransaction>::Error,
     >;
-    pub async fn classify_crash_loss<NextTurn>(
+    async fn classify_crash_loss<NextTurn>(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
@@ -154,7 +154,7 @@ where
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
             + marker::Send;
-    pub async fn prepare_continuation<NextSteering>(
+    async fn prepare_continuation<NextSteering>(
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
@@ -185,11 +185,11 @@ where
     Executor: ToolExecutor + marker::Send,
 {
     type Error = <Executor as ToolExecutor>::Error;
-    pub async fn execute(
+    async fn execute(
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> result::Result<CorrelatedToolExecutorEvidence, <Self as ToolExecutor>::Error>;
-    pub async fn execute_with_scheduling(
+    async fn execute_with_scheduling(
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> result::Result<ToolExecutorDisposition, <Self as ToolExecutor>::Error>

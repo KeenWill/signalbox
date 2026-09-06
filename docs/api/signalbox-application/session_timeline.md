@@ -77,7 +77,7 @@ pub enum TimelineWindowLimitError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for TimelineWindowLimitError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for TimelineWindowLimitError {}
 ```
@@ -218,7 +218,7 @@ pub enum TimelineDetailLimitError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for TimelineDetailLimitError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for TimelineDetailLimitError {}
 ```
@@ -412,7 +412,7 @@ pub struct SessionTimelineDetailPage {
 ```rust
 pub trait SessionTimelineReader {
     type Error;
-    pub fn read_descriptor(
+    fn read_descriptor(
         &self,
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<
@@ -421,7 +421,7 @@ pub trait SessionTimelineReader {
             <Self as SessionTimelineReader>::Error,
         >,
     > + marker::Send;
-    pub fn read_window(
+    fn read_window(
         &self,
         session: signalbox_domain::SessionId,
         anchor: TimelineWindowAnchor,
@@ -432,7 +432,7 @@ pub trait SessionTimelineReader {
             <Self as SessionTimelineReader>::Error,
         >,
     > + marker::Send;
-    pub fn read_item_details(
+    fn read_item_details(
         &self,
         session: signalbox_domain::SessionId,
         address: TimelineAddress,
@@ -444,7 +444,7 @@ pub trait SessionTimelineReader {
             <Self as SessionTimelineReader>::Error,
         >,
     > + marker::Send;
-    pub fn read_turn_details(
+    fn read_turn_details(
         &self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
@@ -456,7 +456,7 @@ pub trait SessionTimelineReader {
             <Self as SessionTimelineReader>::Error,
         >,
     > + marker::Send;
-    pub fn read_region_details(
+    fn read_region_details(
         &self,
         session: signalbox_domain::SessionId,
         first: TimelineAddress,

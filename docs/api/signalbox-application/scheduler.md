@@ -28,7 +28,7 @@ impl SchedulerPassOccupancyBound {
 pub struct InvalidSchedulerPassOccupancyBound;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for InvalidSchedulerPassOccupancyBound {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for InvalidSchedulerPassOccupancyBound {}
 ```
@@ -49,7 +49,7 @@ impl SchedulerOldestInFlightPass {
 
 ```rust
 pub trait SchedulerOccupancyObserver: marker::Send + marker::Sync + 'static {
-    pub fn observe(&self, occupancy: usize, oldest: option::Option<SchedulerOldestInFlightPass>);
+    fn observe(&self, occupancy: usize, oldest: option::Option<SchedulerOldestInFlightPass>);
 }
 ```
 
@@ -57,7 +57,7 @@ pub trait SchedulerOccupancyObserver: marker::Send + marker::Sync + 'static {
 
 ```rust
 pub trait SchedulerPassExpiryHandler: fmt::Debug + marker::Send + marker::Sync + 'static {
-    pub fn occupancy_expired(&self, session: signalbox_domain::SessionId);
+    fn occupancy_expired(&self, session: signalbox_domain::SessionId);
 }
 ```
 
@@ -80,7 +80,7 @@ impl ReconciliationSweepInterval {
 pub struct InvalidReconciliationSweepInterval;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for InvalidReconciliationSweepInterval {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for InvalidReconciliationSweepInterval {}
 ```
@@ -101,11 +101,9 @@ pub enum EligibilityNudgeOutcome {
 
 ```rust
 pub trait EligibilityNudge {
-    pub fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
-    pub fn nudge_dispatch_start(
-        &self,
-        session: signalbox_domain::SessionId,
-    ) -> EligibilityNudgeOutcome;
+    fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
+    fn nudge_dispatch_start(&self, session: signalbox_domain::SessionId)
+        -> EligibilityNudgeOutcome;
 }
 ```
 
@@ -114,7 +112,7 @@ pub trait EligibilityNudge {
 ```rust
 pub trait EligibilitySweep {
     type Error;
-    pub fn find_sessions(
+    fn find_sessions(
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<EligibilitySweepBatch, <Self as EligibilitySweep>::Error>,
@@ -151,7 +149,7 @@ impl EligibilitySweepBatch {
 ```rust
 pub trait EligibilityWorkSource {
     type Error;
-    pub fn next(
+    fn next(
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<
@@ -159,10 +157,10 @@ pub trait EligibilityWorkSource {
             <Self as EligibilityWorkSource>::Error,
         >,
     > + marker::Send;
-    pub fn take_returned_dispatch_start(&mut self, _session: signalbox_domain::SessionId) -> bool;
-    pub fn take_returned_unmonitored(&mut self, _session: signalbox_domain::SessionId) -> bool;
-    pub fn take_pending_dispatch_start(&mut self) -> option::Option<signalbox_domain::SessionId>;
-    pub fn next_pending_dispatch_start(
+    fn take_returned_dispatch_start(&mut self, _session: signalbox_domain::SessionId) -> bool;
+    fn take_returned_unmonitored(&mut self, _session: signalbox_domain::SessionId) -> bool;
+    fn take_pending_dispatch_start(&mut self) -> option::Option<signalbox_domain::SessionId>;
+    fn next_pending_dispatch_start(
         &mut self,
     ) -> impl future::Future<
         Output = result::Result<
@@ -178,20 +176,19 @@ pub trait EligibilityWorkSource {
 ```rust
 pub trait EligibilityPass {
     type Error;
-    pub fn failure_stage(_error: &<Self as EligibilityPass>::Error) -> &'static str;
-    pub fn failure_turn(
+    fn failure_stage(_error: &<Self as EligibilityPass>::Error) -> &'static str;
+    fn failure_turn(
         _error: &<Self as EligibilityPass>::Error,
     ) -> option::Option<signalbox_domain::TurnId>;
-    pub fn occupancy_expiry_handler(
-        &self,
-    ) -> option::Option<sync::Arc<dyn SchedulerPassExpiryHandler>>;
-    pub fn run(
+    fn occupancy_expiry_handler(&self)
+        -> option::Option<sync::Arc<dyn SchedulerPassExpiryHandler>>;
+    fn run(
         &mut self,
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
            + 'static;
-    pub fn run_dispatch_start(
+    fn run_dispatch_start(
         &mut self,
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
@@ -205,13 +202,13 @@ pub trait EligibilityPass {
 ```rust
 pub trait GoalPassDisposition: clone::Clone + marker::Send + 'static {
     type Error: marker::Send + 'static;
-    pub fn reconcile_success(
+    fn reconcile_success(
         &self,
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<Output = result::Result<(), <Self as GoalPassDisposition>::Error>>
            + marker::Send
            + 'static;
-    pub fn block_execution_failure(
+    fn block_execution_failure(
         &self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
@@ -237,14 +234,14 @@ where
     PassError: fmt::Display,
     GoalError: fmt::Display,
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<PassError, GoalError> error::Error for GoalAwareEligibilityPassError<PassError, GoalError>
 where
     PassError: error::Error + 'static,
     GoalError: error::Error + 'static,
 {
-    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl<PassError, GoalError> ClassifyOperatorFailure
     for GoalAwareEligibilityPassError<PassError, GoalError>
@@ -252,8 +249,8 @@ where
     PassError: ClassifyOperatorFailure,
     GoalError: ClassifyOperatorFailure,
 {
-    pub fn operator_failure_class(&self) -> OperatorFailureClass;
-    pub fn operator_failure_cause_code(&self) -> &'static str;
+    fn operator_failure_class(&self) -> OperatorFailureClass;
+    fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
 
@@ -276,20 +273,19 @@ where
         <Pass as EligibilityPass>::Error,
         <Disposition as GoalPassDisposition>::Error,
     >;
-    pub fn failure_stage(error: &<Self as EligibilityPass>::Error) -> &'static str;
-    pub fn failure_turn(
+    fn failure_stage(error: &<Self as EligibilityPass>::Error) -> &'static str;
+    fn failure_turn(
         error: &<Self as EligibilityPass>::Error,
     ) -> option::Option<signalbox_domain::TurnId>;
-    pub fn occupancy_expiry_handler(
-        &self,
-    ) -> option::Option<sync::Arc<dyn SchedulerPassExpiryHandler>>;
-    pub fn run(
+    fn occupancy_expiry_handler(&self)
+        -> option::Option<sync::Arc<dyn SchedulerPassExpiryHandler>>;
+    fn run(
         &mut self,
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
            + marker::Send
            + 'static;
-    pub fn run_dispatch_start(
+    fn run_dispatch_start(
         &mut self,
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<Output = result::Result<(), <Self as EligibilityPass>::Error>>
@@ -304,11 +300,9 @@ where
 pub struct InProcessEligibilityNudge {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl EligibilityNudge for InProcessEligibilityNudge {
-    pub fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
-    pub fn nudge_dispatch_start(
-        &self,
-        session: signalbox_domain::SessionId,
-    ) -> EligibilityNudgeOutcome;
+    fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
+    fn nudge_dispatch_start(&self, session: signalbox_domain::SessionId)
+        -> EligibilityNudgeOutcome;
 }
 ```
 
@@ -322,13 +316,13 @@ impl<Sweep> fmt::Debug for InProcessEligibilityWorkSource<Sweep>
 where
     Sweep: EligibilitySweep + fmt::Debug,
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<Sweep> drop::Drop for InProcessEligibilityWorkSource<Sweep>
 where
     Sweep: EligibilitySweep,
 {
-    pub fn drop(&mut self);
+    fn drop(&mut self);
 }
 impl<Sweep> InProcessEligibilityWorkSource<Sweep>
 where
@@ -350,13 +344,13 @@ where
     Sweep: EligibilitySweep + marker::Send + 'static,
 {
     type Error = <Sweep as EligibilitySweep>::Error;
-    pub async fn next(
+    async fn next(
         &mut self,
     ) -> result::Result<signalbox_domain::SessionId, <Self as EligibilityWorkSource>::Error>;
-    pub fn take_returned_unmonitored(&mut self, session: signalbox_domain::SessionId) -> bool;
-    pub fn take_returned_dispatch_start(&mut self, session: signalbox_domain::SessionId) -> bool;
-    pub fn take_pending_dispatch_start(&mut self) -> option::Option<signalbox_domain::SessionId>;
-    pub async fn next_pending_dispatch_start(
+    fn take_returned_unmonitored(&mut self, session: signalbox_domain::SessionId) -> bool;
+    fn take_returned_dispatch_start(&mut self, session: signalbox_domain::SessionId) -> bool;
+    fn take_pending_dispatch_start(&mut self) -> option::Option<signalbox_domain::SessionId>;
+    async fn next_pending_dispatch_start(
         &mut self,
     ) -> result::Result<signalbox_domain::SessionId, <Self as EligibilityWorkSource>::Error>;
 }

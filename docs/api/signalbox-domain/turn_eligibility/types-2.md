@@ -173,7 +173,7 @@ impl ActivatedAcceptedInputTurn {
     pub fn consumed_steering(&self) -> &[ConsumedSteeringInput];
 }
 impl convert::From<ActivatedAcceptedInputTurn> for ActivatedTurn {
-    pub fn from(value: ActivatedAcceptedInputTurn) -> Self;
+    fn from(value: ActivatedAcceptedInputTurn) -> Self;
 }
 ```
 
@@ -205,7 +205,7 @@ impl ActivatedDelegatedTurn {
     pub fn consumed_steering(&self) -> &[ConsumedSteeringInput];
 }
 impl convert::From<ActivatedDelegatedTurn> for ActivatedTurn {
-    pub fn from(value: ActivatedDelegatedTurn) -> Self;
+    fn from(value: ActivatedDelegatedTurn) -> Self;
 }
 ```
 
@@ -218,10 +218,10 @@ pub enum ActivatedTurn {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl convert::From<ActivatedAcceptedInputTurn> for ActivatedTurn {
-    pub fn from(value: ActivatedAcceptedInputTurn) -> Self;
+    fn from(value: ActivatedAcceptedInputTurn) -> Self;
 }
 impl convert::From<ActivatedDelegatedTurn> for ActivatedTurn {
-    pub fn from(value: ActivatedDelegatedTurn) -> Self;
+    fn from(value: ActivatedDelegatedTurn) -> Self;
 }
 impl ActivatedTurn {
     pub const fn accepted_input(&self) -> option::Option<&AcceptedInputLifecycle>;
@@ -343,7 +343,7 @@ impl PreparedDelegatedTurnActivation {
     )>;
 }
 impl convert::From<PreparedDelegatedTurnActivation> for PreparedTurnActivation {
-    pub fn from(value: PreparedDelegatedTurnActivation) -> Self;
+    fn from(value: PreparedDelegatedTurnActivation) -> Self;
 }
 ```
 
@@ -356,10 +356,10 @@ pub enum PreparedTurnActivation {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl convert::From<PreparedAcceptedInputTurnActivation> for PreparedTurnActivation {
-    pub fn from(value: PreparedAcceptedInputTurnActivation) -> Self;
+    fn from(value: PreparedAcceptedInputTurnActivation) -> Self;
 }
 impl convert::From<PreparedDelegatedTurnActivation> for PreparedTurnActivation {
-    pub fn from(value: PreparedDelegatedTurnActivation) -> Self;
+    fn from(value: PreparedDelegatedTurnActivation) -> Self;
 }
 impl PreparedTurnActivation {
     pub fn turn(&self) -> ActivatedTurn;
@@ -374,7 +374,7 @@ impl PreparedTurnActivation {
 pub struct PreparedAcceptedInputTurnActivation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl convert::From<PreparedAcceptedInputTurnActivation> for PreparedTurnActivation {
-    pub fn from(value: PreparedAcceptedInputTurnActivation) -> Self;
+    fn from(value: PreparedAcceptedInputTurnActivation) -> Self;
 }
 impl PreparedAcceptedInputTurnActivation {
     pub const fn turn(&self) -> &ActivatedAcceptedInputTurn;

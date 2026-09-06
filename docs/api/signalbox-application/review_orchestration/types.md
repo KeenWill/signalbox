@@ -90,7 +90,7 @@ pub enum ReviewOrchestrationAttemptError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewOrchestrationAttemptError {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ReviewOrchestrationAttemptError {}
 ```
@@ -162,7 +162,7 @@ pub enum ReviewImportEvidenceFailure {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewImportEvidenceFailure {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ReviewImportEvidenceFailure {}
 ```
@@ -275,7 +275,7 @@ pub enum ReviewFanoutBarrierFailure {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewFanoutBarrierFailure {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ReviewFanoutBarrierFailure {}
 ```
@@ -358,7 +358,7 @@ pub enum ReviewJudgmentPlanFailure {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewJudgmentPlanFailure {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ReviewJudgmentPlanFailure {}
 ```
@@ -430,7 +430,7 @@ pub enum ReviewJudgmentEffectEvidenceFailure {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewJudgmentEffectEvidenceFailure {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ReviewJudgmentEffectEvidenceFailure {}
 ```
@@ -535,7 +535,7 @@ pub enum ReviewTerminalBarrierFailure {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ReviewTerminalBarrierFailure {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ReviewTerminalBarrierFailure {}
 ```
@@ -582,7 +582,7 @@ pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
 impl<StoreError, RunnerError> fmt::Display
     for ReviewOrchestrationServiceError<StoreError, RunnerError>
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<StoreError, RunnerError> error::Error
     for ReviewOrchestrationServiceError<StoreError, RunnerError>
@@ -590,7 +590,7 @@ where
     StoreError: error::Error + 'static,
     RunnerError: error::Error + 'static,
 {
-    pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
 

@@ -6,7 +6,7 @@
 
 ```rust
 pub trait BlobDerivationIdGenerator {
-    pub fn next_blob_derivation_id(&mut self) -> signalbox_domain::BlobDerivationId;
+    fn next_blob_derivation_id(&mut self) -> signalbox_domain::BlobDerivationId;
 }
 ```
 
@@ -16,7 +16,7 @@ pub trait BlobDerivationIdGenerator {
 pub struct UuidV7BlobDerivationIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl BlobDerivationIdGenerator for UuidV7BlobDerivationIdGenerator {
-    pub fn next_blob_derivation_id(&mut self) -> signalbox_domain::BlobDerivationId;
+    fn next_blob_derivation_id(&mut self) -> signalbox_domain::BlobDerivationId;
 }
 ```
 
@@ -25,7 +25,7 @@ impl BlobDerivationIdGenerator for UuidV7BlobDerivationIdGenerator {
 ```rust
 pub trait BlobDerivationStore {
     type Error;
-    pub fn find_deterministic(
+    fn find_deterministic(
         &self,
         key: blob::DeterministicBlobDerivationKey,
     ) -> impl future::Future<
@@ -34,7 +34,7 @@ pub trait BlobDerivationStore {
             <Self as BlobDerivationStore>::Error,
         >,
     > + marker::Send;
-    pub fn record_deterministic(
+    fn record_deterministic(
         &self,
         key: blob::DeterministicBlobDerivationKey,
         derivation: blob::BlobDerivation,
@@ -59,7 +59,7 @@ pub enum BlobDerivationRecordOutcome {
 ```rust
 pub trait DeterministicBlobProducer {
     type Error;
-    pub fn produce(
+    fn produce(
         &mut self,
         inputs: &[blob::BlobDigest],
         transformation: &blob::BlobTransformation,
@@ -69,7 +69,7 @@ pub trait DeterministicBlobProducer {
             <Self as DeterministicBlobProducer>::Error,
         >,
     > + marker::Send;
-    pub fn outputs_retrievable(
+    fn outputs_retrievable(
         &mut self,
         outputs: &[blob::BlobDigest],
     ) -> impl future::Future<Output = result::Result<bool, <Self as DeterministicBlobProducer>::Error>>
@@ -117,7 +117,7 @@ pub enum BlobDerivationServiceError<StoreError, ProducerError> {
 impl<StoreError: fmt::Display, ProducerError: fmt::Display> fmt::Display
     for BlobDerivationServiceError<StoreError, ProducerError>
 {
-    pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl<StoreError: error::Error + 'static, ProducerError: error::Error + 'static> error::Error
     for BlobDerivationServiceError<StoreError, ProducerError>
