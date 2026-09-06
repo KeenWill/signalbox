@@ -221,32 +221,70 @@ fn format_literal(
             }
         }
         let split = placeholder.find(':').unwrap_or(placeholder.len());
-        let key = &placeholder[..split];
-        let field = fields.iter().find(|field| {
-            field.binding == key
-                || (!positional
-                    && match &field.member {
-                        Member::Unnamed(index) => key == index.index.to_string(),
-                        Member::Named(name) => name == key,
-                    })
-        });
-        if let Some(field) = field {
-            text.push_str(&field.binding.to_string());
-            text.push_str(&placeholder[split..]);
-            if !captures.contains(&field.binding) {
-                captures.push(field.binding.clone());
+        text.push_str(&capture(
+            &placeholder[..split],
+            fields,
+            positional,
+            &mut captures,
+        ));
+        let specification = &placeholder[split..];
+        let mut start = 0;
+        for (end, ch) in specification.char_indices() {
+            if ch != '$' {
+                continue;
             }
-        } else {
-            text.push_str(&placeholder);
+            let key_start = specification[..end]
+                .char_indices()
+                .rfind(|(_, ch)| !ch.is_alphanumeric() && *ch != '_')
+                .map_or(0, |(index, ch)| index + ch.len_utf8());
+            let key = &specification[key_start..end];
+            // A zero-padding flag precedes a named width without a separator.
+            let key_start = if key.starts_with('0')
+                && key[1..].starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+            {
+                key_start + 1
+            } else {
+                key_start
+            };
+            text.push_str(&specification[start..key_start]);
+            text.push_str(&capture(
+                &specification[key_start..end],
+                fields,
+                positional,
+                &mut captures,
+            ));
+            text.push('$');
+            start = end + 1;
         }
+        text.push_str(&specification[start..]);
     }
     (LitStr::new(&text, literal.span()), captures)
+}
+
+fn capture(key: &str, fields: &[Field<'_>], positional: bool, captures: &mut Vec<Ident>) -> String {
+    let field = fields.iter().find(|field| {
+        field.binding == key
+            || (!positional
+                && match &field.member {
+                    Member::Unnamed(index) => key == index.index.to_string(),
+                    Member::Named(name) => name == key,
+                })
+    });
+    if let Some(field) = field {
+        if !captures.contains(&field.binding) {
+            captures.push(field.binding.clone());
+        }
+        field.binding.to_string()
+    } else {
+        key.to_owned()
+    }
 }
 
 fn display(
     attrs: &[Attribute],
     fields: &[Field<'_>],
     owner: &TokenStream,
+    formatter: &Ident,
 ) -> syn::Result<TokenStream> {
     let attr = attrs
         .iter()
@@ -263,7 +301,7 @@ fn display(
             .filter(|_| fields.len() == 1)
             .ok_or_else(|| syn::Error::new_spanned(attr, "transparent requires one field"))?;
         let binding = &field.binding;
-        return Ok(quote!(::std::fmt::Display::fmt(#binding, formatter)));
+        return Ok(quote!(::std::fmt::Display::fmt(#binding, #formatter)));
     }
     let Expr::Lit(syn::ExprLit {
         lit: Lit::Str(literal),
@@ -278,7 +316,24 @@ fn display(
     let mut arguments = args.map(|arg| quote!(#arg)).collect::<Vec<_>>();
     let (literal, captures) = format_literal(&literal, fields, !arguments.is_empty());
     arguments.extend(captures.iter().map(|binding| quote!(#binding = #binding)));
-    Ok(quote!(::std::write!(formatter, #literal #(, #arguments)*)))
+    Ok(quote!(::std::write!(#formatter, #literal #(, #arguments)*)))
+}
+
+fn boxed_trait_object(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    segment.ident == "Box"
+        && matches!(
+            arguments.args.first(),
+            Some(syn::GenericArgument::Type(syn::Type::TraitObject(_)))
+        )
 }
 
 fn target<'a>(
@@ -345,6 +400,16 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             .any(|(attrs, _, _, _)| attrs.iter().any(|a| a.path().is_ident("operator")))
             && matches!(input.data, Data::Enum(_));
     let mut displays = Vec::new();
+    let mut names = BTreeSet::new();
+    identifiers(quote!(#input), &mut names);
+    let mut formatter_name = "__signalbox_formatter".to_owned();
+    while names
+        .iter()
+        .any(|name| name.trim_start_matches("r#") == formatter_name)
+    {
+        formatter_name.push('_');
+    }
+    let formatter = Ident::new(&formatter_name, name.span());
     let mut sources = Vec::new();
     let mut classes = Vec::new();
     let mut codes = Vec::new();
@@ -354,7 +419,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             &prefix,
             shape,
             &fields,
-            display(attrs, &fields, &owner)?,
+            display(attrs, &fields, &owner, &formatter)?,
         ));
         let source_fields = fields
             .iter()
@@ -364,7 +429,11 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             [] => quote!(None),
             [field] => {
                 let binding = &field.binding;
-                quote!(Some(#binding))
+                if boxed_trait_object(&field.field.ty) {
+                    quote!(Some(#binding.as_ref()))
+                } else {
+                    quote!(Some(#binding))
+                }
             }
             _ => {
                 return Err(syn::Error::new_spanned(
@@ -411,7 +480,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let (display_impl, _, display_where) = display_generics.split_for_impl();
     let mut output = quote! {
         impl #display_impl ::std::fmt::Display for #name #ty_generics #display_where {
-            fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            fn fmt(&self, #formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 match self { #(#displays),* }
             }
         }
