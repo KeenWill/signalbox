@@ -171,6 +171,8 @@ pub enum FrontierReleaseAdmission {
     Replayed { generation: u64 },
     /// The stream is absent and the latest frontier mutation was not its release.
     Absent,
+    /// The repository frontier advanced after the caller observed it.
+    Stale,
 }
 
 /// Result of activating one configured rule revision.
@@ -596,6 +598,7 @@ impl RepoWatchStore {
     pub async fn release_frontier(
         &self,
         repository: &RepositorySlug,
+        expected_generation: u64,
         stream_identity: &[u8; 32],
     ) -> Result<FrontierReleaseAdmission, StoreError> {
         let mut transaction = self.pool.begin().await?;
@@ -603,6 +606,35 @@ impl RepoWatchStore {
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
+        let current: Option<(Decimal, bool)> = sqlx::query_as(
+            "SELECT frontier_generation,
+                    COALESCE(last_frontier_commit_digest = sha256($2), false)
+               FROM repository_state
+              WHERE repository = $1
+              FOR UPDATE",
+        )
+        .bind(repository.as_str())
+        .bind(frontier_release_identity(stream_identity))
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((current_generation, same_release)) = current else {
+            transaction.rollback().await?;
+            return Ok(FrontierReleaseAdmission::Absent);
+        };
+        let current_generation = current_generation
+            .to_u64()
+            .ok_or(StoreError::InvalidFrontierGeneration)?;
+        if current_generation != expected_generation {
+            transaction.rollback().await?;
+            return if expected_generation.checked_add(1) == Some(current_generation) && same_release
+            {
+                Ok(FrontierReleaseAdmission::Replayed {
+                    generation: current_generation,
+                })
+            } else {
+                Ok(FrontierReleaseAdmission::Stale)
+            };
+        }
         let deleted = sqlx::query(
             "DELETE FROM frontier
               WHERE repository = $1 AND stream_identity = $2",
@@ -612,49 +644,32 @@ impl RepoWatchStore {
         .execute(&mut *transaction)
         .await?;
         if deleted.rows_affected() == 0 {
-            let replay: Option<(Decimal, bool)> = sqlx::query_as(
-                "SELECT frontier_generation,
-                        COALESCE(last_frontier_commit_digest = sha256($2), false)
-                   FROM repository_state
-                  WHERE repository = $1
-                  FOR UPDATE",
-            )
-            .bind(repository.as_str())
-            .bind(frontier_release_identity(stream_identity))
-            .fetch_optional(&mut *transaction)
-            .await?;
             transaction.rollback().await?;
-            return match replay {
-                Some((generation, true)) => Ok(FrontierReleaseAdmission::Replayed {
-                    generation: generation
-                        .to_u64()
-                        .ok_or(StoreError::InvalidFrontierGeneration)?,
-                }),
-                Some((_, false)) | None => Ok(FrontierReleaseAdmission::Absent),
-            };
+            return Ok(FrontierReleaseAdmission::Absent);
         }
-        let generation: Option<Decimal> = sqlx::query_scalar(
+        let next_generation = expected_generation
+            .checked_add(1)
+            .ok_or(StoreError::InvalidFrontierGeneration)?;
+        let advanced = sqlx::query(
             "UPDATE repository_state
-                SET frontier_generation = frontier_generation + 1,
+                SET frontier_generation = $2,
                     last_frontier_commit_digest = sha256($3),
                     updated_at = statement_timestamp()
-              WHERE repository = $1 AND frontier_generation < $2
-              RETURNING frontier_generation",
+              WHERE repository = $1 AND frontier_generation = $4",
         )
         .bind(repository.as_str())
-        .bind(Decimal::from(u64::MAX))
+        .bind(Decimal::from(next_generation))
         .bind(frontier_release_identity(stream_identity))
-        .fetch_optional(&mut *transaction)
+        .bind(Decimal::from(expected_generation))
+        .execute(&mut *transaction)
         .await?;
-        let Some(generation) = generation else {
+        if advanced.rows_affected() != 1 {
             transaction.rollback().await?;
             return Err(StoreError::InvalidFrontierGeneration);
-        };
+        }
         transaction.commit().await?;
         Ok(FrontierReleaseAdmission::Released {
-            generation: generation
-                .to_u64()
-                .ok_or(StoreError::InvalidFrontierGeneration)?,
+            generation: next_generation,
         })
     }
 
