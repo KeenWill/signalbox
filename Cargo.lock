@@ -4278,6 +4278,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-convergence"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "flate2",
+ "futures-executor",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "signalbox-conversation-import-claude-code"
 version = "0.0.0"
 dependencies = [
@@ -4598,6 +4613,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-module-repo-watch-v2"
+version = "0.0.0"
+dependencies = [
+ "rust_decimal",
+ "sha2 0.11.0",
+ "signalbox-ownership-seam",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
+name = "signalbox-ownership-seam"
+version = "0.0.0"
+dependencies = [
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-persistence",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-persistence"
 version = "0.0.0"
 dependencies = [
@@ -4629,7 +4666,6 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
- "signalbox-blob-store",
  "signalbox-domain",
  "uuid",
 ]
@@ -4738,6 +4774,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-convergence",
  "signalbox-domain",
  "signalbox-egress-transport",
  "signalbox-model-runtime",
@@ -4955,6 +4992,7 @@ dependencies = [
  "signalbox-blob-store",
  "signalbox-blob-store-filesystem",
  "signalbox-blob-store-s3",
+ "signalbox-convergence",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
  "signalbox-domain",
@@ -4964,6 +5002,8 @@ dependencies = [
  "signalbox-model-runtime-claude-cli",
  "signalbox-model-runtime-codex-cli",
  "signalbox-model-runtime-openai",
+ "signalbox-module-repo-watch-v2",
+ "signalbox-ownership-seam",
  "signalbox-persistence",
  "signalbox-process-protocol",
  "signalbox-runner-wire",
@@ -4985,6 +5025,7 @@ dependencies = [
  "tempfile",
  "testcontainers-modules",
  "tokio",
+ "toml",
  "toml_edit",
  "tonic",
  "tower",

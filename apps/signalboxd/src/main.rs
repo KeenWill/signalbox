@@ -1719,13 +1719,14 @@ async fn run_hub(
                 SanitizedStartupCause::Static(openai_construction_cause(&error)),
             )
         })?;
-    let code_host_transport =
-        GitHubCodeHostTransport::try_new(code_host_numeric_bounds).map_err(|_| {
+    let code_host_transport = GitHubCodeHostTransport::try_new(code_host_numeric_bounds)
+        .map_err(|_| {
             erase_startup_cause(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("github_transport_construction_failed"),
             )
-        })?;
+        })?
+        .with_convergence_policy(model_configuration.convergence().cloned());
     let runtime_models = model_configuration.runtime_model_catalog();
     let compaction_runtime = ConfiguredModelRuntime::new(
         compaction_anthropic,

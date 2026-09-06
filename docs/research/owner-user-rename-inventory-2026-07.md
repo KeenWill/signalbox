@@ -59,7 +59,6 @@ Zeroes are explicit so the category totals can be checked mechanically.
 | `docs/decisions.md`             |       0 |       0 |         0 |     309 |      0 |       309 |
 | `docs/domain-spine.md`          |       8 |       0 |         8 |       0 |      1 |        17 |
 | `docs/glossary.md`              |       2 |       0 |         6 |       0 |      0 |         8 |
-| `docs/invariants.md`            |       6 |       0 |         8 |       0 |      0 |        14 |
 | `docs/open-questions.md`        |       7 |       0 |        21 |       0 |      0 |        28 |
 | `docs/research`                 |       0 |       0 |        40 |       0 |      9 |        49 |
 | `docs/scenarios.md`             |      13 |       0 |        58 |       0 |      0 |        71 |
@@ -256,9 +255,9 @@ This is execution ordering only; the rulings in section 6 come first.
 2. Add the bottom-of-stack specification diff that describes the behavior the
    stack implements. Set the protocol and storage transition scope from the
    recorded rulings; do not prestate an unimplemented transition on `main`.
-3. Rename the domain public vocabulary and update `docs/domain-spine.md` in the
-   same change. Let compiler failures enumerate application, persistence, hub,
-   and test call sites.
+3. Rename the domain public vocabulary and regenerate `docs/api/` in the same
+   change. Let compiler failures enumerate application, persistence, hub, and
+   test call sites.
 4. Rename application and composition mappings, then repair co-located unit
    tests, fixture accessors, error prose, and snapshots without touching
    technical ownership.
@@ -459,7 +458,6 @@ of the search corpus.
 | `docs/decisions.md`                                                        |   — |   — |   — | 309 |   — |   309 |
 | `docs/domain-spine.md`                                                     |   8 |   — |   8 |   — |   1 |    17 |
 | `docs/glossary.md`                                                         |   2 |   — |   6 |   — |   — |     8 |
-| `docs/invariants.md`                                                       |   6 |   — |   8 |   — |   — |    14 |
 | `docs/open-questions.md`                                                   |   7 |   — |  21 |   — |   — |    28 |
 | `docs/research/codex-cli-subscription-protocol.md`                         |   — |   — |   5 |   — |   2 |     7 |
 | `docs/research/runtime-adapter-conformance.md`                             |   — |   — |  25 |   — |   — |    25 |

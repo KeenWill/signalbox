@@ -1735,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_claude_code_converter_versions_have_distinct_storage_mappings() {
+    fn s28_claude_code_converter_versions_have_distinct_storage_mappings() {
         assert_eq!(
             encode_format(ImportedConversationFormat::ClaudeCodeSessionJsonlV1),
             (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE)
@@ -1757,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_codex_rollout_converter_has_distinct_storage_mapping() {
+    fn s28_codex_rollout_converter_has_distinct_storage_mapping() {
         assert_eq!(
             encode_format(ImportedConversationFormat::CodexRolloutJsonlV1),
             (CODEX_FORMAT, CODEX_VERSION_ONE)
@@ -1769,10 +1769,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: shared raw-blob keys are emitted in one deterministic
+    /// S28: shared raw-blob keys are emitted in one deterministic
     /// acquisition order independent of physical transcript order.
     #[test]
-    fn s28_inv038_raw_blob_acquisition_is_content_hash_ordered() {
+    fn s28_raw_blob_acquisition_is_content_hash_ordered() {
         let larger = encoded_raw(2);
         let smaller = encoded_raw(1);
         let raws = [larger, smaller];
@@ -1809,10 +1809,10 @@ mod tests {
         assert_eq!(super::total_expected_bytes([expected, expected]), Ok(6));
     }
 
-    /// S28 / INV-001 / INV-038: globally unique entry keys are emitted in one
+    /// S28: globally unique entry keys are emitted in one
     /// deterministic acquisition order independent of transcript order.
     #[test]
-    fn s28_inv001_inv038_entry_acquisition_is_identity_ordered() {
+    fn s28_entry_acquisition_is_identity_ordered() {
         let larger = encoded_entry(2);
         let smaller = encoded_entry(1);
         let entries = [larger, smaller];

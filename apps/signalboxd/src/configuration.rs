@@ -1039,6 +1039,7 @@ pub struct HubModelConfiguration {
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     approval_judge_selection: Option<DirectModelSelection>,
+    convergence: Option<signalbox_convergence::ConvergencePolicy>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
     workspace_instructions: WorkspaceInstructionConfiguration,
@@ -1084,6 +1085,7 @@ impl HubModelConfiguration {
                 "git_identity",
                 "tool_approval_postures",
                 "approval_judge",
+                "convergence",
                 "repository_watch",
                 "blob_storage",
                 "workspace_instructions",
@@ -1175,6 +1177,18 @@ impl HubModelConfiguration {
         let tool_approval_postures =
             parse_tool_approval_postures(document.get("tool_approval_postures"))?;
         let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
+        #[derive(serde::Deserialize)]
+        struct ConvergenceSection {
+            convergence: Option<signalbox_convergence::ConvergencePolicy>,
+        }
+        let convergence = toml::from_str::<ConvergenceSection>(content)
+            .map_err(|_| HubModelConfigurationError::InvalidDocument)?
+            .convergence;
+        if let Some(policy) = &convergence {
+            policy
+                .validate()
+                .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
+        }
         let repository_watch = document
             .get("repository_watch")
             .map(|item| parse_repository_watch_configuration(item, &numeric_bounds))
@@ -1761,6 +1775,7 @@ impl HubModelConfiguration {
             daemon_tools,
             tool_approval_postures,
             approval_judge_selection,
+            convergence,
             repository_watch,
             blob_storage,
             workspace_instructions,
@@ -2283,6 +2298,11 @@ impl HubModelConfiguration {
     /// Reports whether the configuration contains one direct selection key.
     pub fn contains_selection(&self, selection: DirectModelSelection) -> bool {
         self.direct_selections.contains(&selection)
+    }
+
+    /// Shared pull-request convergence policy for the daemon and code-host tools.
+    pub const fn convergence(&self) -> Option<&signalbox_convergence::ConvergencePolicy> {
+        self.convergence.as_ref()
     }
 
     /// Returns the complete watch configuration, or absence when no task starts.
@@ -9268,6 +9288,55 @@ context_window_tokens = 200000
     }
 
     #[test]
+    fn configuration_loads_the_shared_convergence_policy() {
+        let example = include_str!("../../../crates/convergence/examples/repository.toml");
+        let policy = example.replace("[[reviewers]]", "[[convergence.reviewers]]");
+        let configured = format!("{CONFIGURATION}\n[convergence]\n{policy}");
+        let configuration = HubModelConfiguration::parse(&configured)
+            .expect("the shared policy example is accepted under convergence");
+        let parsed = configuration.convergence().expect("the policy is retained");
+        let expected: signalbox_convergence::ConvergencePolicy =
+            toml::from_str(example).expect("the example is a shared convergence policy");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("policy serializes"),
+            serde_json::to_value(expected).expect("policy serializes")
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_empty_normalized_convergence_reviewers() {
+        let example = include_str!("../../../crates/convergence/examples/repository.toml");
+        for login in ["", " ", "[bot]", "[BOT]"] {
+            let mut policy: toml::Value =
+                toml::from_str(example).expect("the example is valid TOML");
+            policy["reviewers"][0]["login"] = toml::Value::String(login.into());
+            let policy = toml::to_string(&policy)
+                .expect("policy serializes")
+                .replace("[[reviewers]]", "[[convergence.reviewers]]");
+            let configured = format!("{CONFIGURATION}\n[convergence]\n{policy}");
+            assert!(
+                HubModelConfiguration::parse(&configured).is_err(),
+                "a reviewer must have an identity after bot normalization"
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_rejects_unknown_convergence_policy_fields() {
+        let example = include_str!("../../../crates/convergence/examples/repository.toml");
+        let policy = example.replace("[[reviewers]]", "[[convergence.reviewers]]");
+        for configured in [
+            format!("{CONFIGURATION}\n[convergence]\nobsolete = true\n{policy}"),
+            format!("{CONFIGURATION}\n[convergence]\n{policy}\nobsolete = true"),
+        ] {
+            assert_eq!(
+                HubModelConfiguration::parse(&configured).err(),
+                Some(HubModelConfigurationError::InvalidDocument)
+            );
+        }
+    }
+
+    #[test]
     fn configuration_rejects_unknown_fields_and_dangling_aliases() {
         assert_eq!(
             HubModelConfiguration::parse(&CONFIGURATION.replace(
@@ -9573,10 +9642,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: every explicit lower layer is validated even when a
+    /// S37: every explicit lower layer is validated even when a
     /// higher-precedence layer masks it in the effective configuration.
     #[test]
-    fn s37_inv051_configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
+    fn s37_configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
         let profile_configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9599,10 +9668,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: an explicit unsupported selected-profile value is
+    /// S37: an explicit unsupported selected-profile value is
     /// rejected even when the global layer is valid.
     #[test]
-    fn s37_inv051_configuration_rejects_an_unsupported_selected_profile_value() {
+    fn s37_configuration_rejects_an_unsupported_selected_profile_value() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9619,10 +9688,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: a selected profile cannot combine individually
+    /// S37: a selected profile cannot combine individually
     /// supported controls that its adapter cannot enforce together.
     #[test]
-    fn s37_inv051_configuration_rejects_an_adapter_incompatible_selected_profile() {
+    fn s37_configuration_rejects_an_adapter_incompatible_selected_profile() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9639,10 +9708,10 @@ extra = true"#,
         );
     }
 
-    /// S37 / INV-051: an adapter-incompatible global combination remains
+    /// S37: an adapter-incompatible global combination remains
     /// invalid when a selected profile masks it with a supported combination.
     #[test]
-    fn s37_inv051_configuration_rejects_a_masked_adapter_incompatible_global_layer() {
+    fn s37_configuration_rejects_a_masked_adapter_incompatible_global_layer() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9732,7 +9801,7 @@ context_window_tokens = 200000
         assert_eq!(serving_credential.credential_reference(), fast_profile);
     }
 
-    /// INV-035: credential references stay scoped while paths and values stay
+    /// credential references stay scoped while paths and values stay
     /// out of errors and debug output.
     #[tokio::test]
     async fn file_credentials_are_reference_scoped_and_paths_are_redacted() {
@@ -9763,11 +9832,11 @@ context_window_tokens = 200000
         assert!(!format!("{source:?}").contains("definitely"));
     }
 
-    /// INV-035: each operation preparation observes the file as it exists at
+    /// each operation preparation observes the file as it exists at
     /// that request, so atomic deployment replacement rotates the key without
     /// caching secret bytes in hub composition.
     #[tokio::test]
-    async fn inv035_file_credentials_are_reread_for_rotation() {
+    async fn file_credentials_are_reread_for_rotation() {
         let path = std::env::temp_dir().join(format!("signalbox-credential-{}", Uuid::now_v7()));
         std::fs::write(&path, b"first-test-value").expect("fixture file is writable");
         let source = FileCredentialAccess::new(
@@ -9797,10 +9866,10 @@ context_window_tokens = 200000
         std::fs::remove_file(path).expect("fixture file is removable");
     }
 
-    /// INV-035: a historical session pin can resolve any declared file
+    /// a historical session pin can resolve any declared file
     /// profile, not only the member currently preferred by a pool.
     #[tokio::test]
-    async fn inv035_file_credential_catalog_resolves_each_declared_profile() {
+    async fn file_credential_catalog_resolves_each_declared_profile() {
         let directory = tempfile::tempdir().expect("fixture directory is available");
         let primary_path = directory.path().join("primary");
         let historical_path = directory.path().join("historical");

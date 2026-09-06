@@ -3,7 +3,7 @@
 These scenarios test architectural boundaries; quoted commands and state names
 are descriptive pseudocode, not final APIs. “Durable commands” means user intent
 the daemon must commit before acknowledging, not a prescribed event-sourcing
-design. Invariant identifiers link to [the catalog](invariants.md).
+design.
 
 The scenarios are frozen design fixtures. New or changed normative behavior
 belongs in the record that owns it (the owning [spec page](spec/README.md) or
@@ -12,9 +12,7 @@ alongside the maintainer-accepted change that motivates it, and a change
 introducing a new lifecycle edge adds or amends its scenario fixture in the same
 change. Test coverage is recorded outside this document: tests name the scenario
 identifiers they enforce under the rules in [AGENTS.md](../AGENTS.md) and
-[testing-style.md](agents/testing-style.md). The
-[invariant test index](invariants.md) is generated separately from corresponding
-INV-tagged test names and attached doc comments.
+[testing-style.md](agents/testing-style.md).
 
 ## S01 — Create a new interactive session
 
@@ -48,7 +46,6 @@ INV-tagged test names and attached doc comments.
   client prints a generated command identity before I/O and accepts it again; an
   ambiguous submit is retried with that identity and the same caller-observed
   defaults version rather than silently becoming new work.
-- **Required invariants:** INV-001, INV-003, INV-007, INV-008, INV-012.
 - **Remaining questions:** Authenticated remote and browser clients remain
   [open](open-questions.md#protocols-and-persistence); the user-global
   idempotency scope, the typed relational command representation, and actor
@@ -96,7 +93,6 @@ INV-tagged test names and attached doc comments.
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
   No partial draft becomes final content. A later authorized call must retain
   steering already committed to turn history.
-- **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
 - **Remaining questions:** Whether a future known-failure retry command is
   introduced, streaming checkpoints, transient provider-delta relay, browser
   transport, rich assistant content, provider/client rendering, and transient
@@ -123,7 +119,6 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Work eventually continues, fails explicitly, is
   canceled, or requests reconciliation; it never silently vanishes. Duplicate
   recovery scans do not create duplicate turns.
-- **Required invariants:** INV-007–INV-012, INV-034.
 - **Remaining questions:** Scheduler sweep tuning and the optional scheduler
   safeguards listed as open edges in
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
@@ -204,7 +199,6 @@ INV-tagged test names and attached doc comments.
   Resolving evidence that commits first makes the decision stale; any later
   prior-call outcome remains audit/reconciliation evidence only. The
   accepted-risk marker remains visible.
-- **Required invariants:** INV-004, INV-009, INV-014–INV-018, INV-032, INV-034.
 - **Remaining questions:** Whether provider request identifiers make the outcome
   knowable and how any request-status polling participates in recovery.
 
@@ -225,7 +219,6 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Version one performs no automatic retry, even for an
   effect-free operation. A late result is stale and cannot overwrite terminal
   evidence.
-- **Required invariants:** INV-011, INV-021, INV-024–INV-026, INV-034.
 - **Remaining questions:** Future explicit retry commands, runner evidence,
   output deduplication, and remote fencing representation.
 
@@ -254,8 +247,6 @@ INV-tagged test names and attached doc comments.
   undid the effect. Version one has no writer for resolving evidence or
   accepted-risk continuation; the parked wait retains its slot until an applied
   interrupt terminalizes it.
-- **Required invariants:** INV-009, INV-019, INV-021, INV-025, INV-026, INV-029,
-  INV-034.
 - **Remaining questions:** Reconciliation workflow, idempotency-key support, who
   may record separate resolving evidence for terminal ambiguity, and which tool
   effects permit accepted-risk continuation.
@@ -314,7 +305,6 @@ INV-tagged test names and attached doc comments.
   interrupt successor by original acceptance order. No queued successor has
   fixed a direct predecessor yet, so each later frontier includes every inserted
   turn.
-- **Required invariants:** INV-007–INV-009, INV-012, INV-025, INV-028, INV-029.
 - **Remaining questions:** Provider/tool-specific cancellation evidence remains
   open. Delegated-child propagation follows the explicit relationship policy and
   user-selected scope owned by
@@ -351,7 +341,6 @@ INV-tagged test names and attached doc comments.
   facts; it does not invent a request or reread session defaults. Any
   interrupt-created successor is first; later work follows original acceptance
   order.
-- **Required invariants:** INV-007–INV-009, INV-015, INV-016, INV-028, INV-034.
 - **Remaining questions:** Future safe-point kinds and client rendering of
   reclassification. Version one does not let tool or orchestration steps consume
   steering directly.
@@ -379,7 +368,6 @@ INV-tagged test names and attached doc comments.
   predecessor so none of those outcomes is omitted. If B itself cannot execute,
   it fixes that same complete frontier before failing, so later C cannot omit B
   or any inserted work.
-- **Required invariants:** INV-007–INV-010, INV-012, INV-028.
 - **Remaining questions:** Queue admission/resource limits and the semantic
   rendering of outcome markers. Editing, cancellation, reordering,
   delivery-policy change, and configuration change remain explicitly unsupported
@@ -407,8 +395,6 @@ INV-tagged test names and attached doc comments.
   approval, an authorized request remains a blocking logical dependency while
   runner scheduling is delayed; orchestration cannot consume steering or prepare
   a later model call until the request has a durable outcome.
-- **Required invariants:** INV-009, INV-010, INV-012, INV-019, INV-020, INV-024,
-  INV-027.
 - **Remaining questions:** Approval expiry, per-tool session overrides and
   high-risk guardrails, material constraints, and automated-judge mechanics.
 
@@ -435,7 +421,6 @@ INV-tagged test names and attached doc comments.
   execution; it does not invent a second cancellation authority or treat an
   interrupt as an approval decision. The composition does not promise that an
   interrupt submitted after execution opens prevents already-eligible work.
-- **Required invariants:** INV-009, INV-012, INV-019, INV-020, INV-027.
 - **Remaining questions:** Whether future reconsideration creates a new request.
   Baseline continuation in a new turn attempt is decided by
   [tool-loop](spec/tool-loop.md).
@@ -457,7 +442,6 @@ INV-tagged test names and attached doc comments.
   fencing; runner retries delivery until acknowledged.
 - **Failure behavior:** A stale success cannot overwrite a newer failure,
   result, cancellation, or reconciliation state.
-- **Required invariants:** INV-011, INV-012, INV-021, INV-043.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
   result acknowledgement, compatibility, and subscriber observation remain
   [open](open-questions.md#scheduling-and-runners): the retired protocol designs
@@ -482,7 +466,6 @@ INV-tagged test names and attached doc comments.
   effective ambient boundary, and the system never labels this runner isolated
   on the strength of that claim. Loss or side effects follow the same ambiguity
   rules, potentially with stricter confirmation.
-- **Required invariants:** INV-019, INV-024–INV-026.
 - **Remaining questions:** Required warnings, policy differences,
   verification/attestation, and minimum sandbox requirements for other profiles.
 
@@ -503,7 +486,6 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** A missing or insufficiently evidenced property fails
   restricted placement explicitly. A “restricted” label or runner declaration
   alone cannot justify a stronger execution guarantee.
-- **Required invariants:** INV-021–INV-024.
 - **Remaining questions:** Capability schema, attestation, minimum profiles,
   resource limits, and whether constraints can change during a connection.
 
@@ -527,7 +509,6 @@ INV-tagged test names and attached doc comments.
   distinction; central placement does not imply safe automatic retry. A session
   whose derived workspace cannot be composed receives a known tool failure and
   is never redirected to another session's root.
-- **Required invariants:** INV-019, INV-024–INV-027, INV-035.
 - **Remaining questions:** Credential scoping, isolation between a daemon-local
   adapter and the credentials it holds, and whether centrally hosted MCP is one
   adapter type.
@@ -547,7 +528,6 @@ INV-tagged test names and attached doc comments.
   executor acts; Postgres stores authoritative state.
 - **Failure behavior:** Runner unavailability is visible and does not silently
   move locality-sensitive work. Stale results fail fencing.
-- **Required invariants:** INV-011, INV-019, INV-021–INV-026, INV-042–INV-044.
 - **Remaining questions:** Durable lease/affinity orchestration, result-size
   handling, and local MCP capability discovery.
 
@@ -571,7 +551,6 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Invalid or inaccessible frontier fails before creation.
   Retrying creation is idempotent. Later source archival does not erase fork
   identity.
-- **Required invariants:** INV-001, INV-003, INV-009, INV-012, INV-030.
 - **Remaining questions:** Deletion/retention, selectable transcript-frontier
   boundaries, multiple ancestry sources, and merge semantics (not initially
   required). Copy, reference, and shared-prefix storage are permitted
@@ -602,7 +581,6 @@ INV-tagged test names and attached doc comments.
   and undelivered result. Child failure, stop, or cancellation is delivered as a
   typed outcome. A detached result remains durable after parent termination, as
   owned by [session delegation](spec/sessions-and-transcript.md).
-- **Required invariants:** INV-003, INV-010, INV-034.
 - **Remaining questions:** Multi-source or merged transcript ancestry remains
   separate and unchanged.
 
@@ -625,7 +603,6 @@ INV-tagged test names and attached doc comments.
   spawn, parent-event, and command provenance. Already-issued effects are not
   undone and ambiguous effects remain reconcilable under the
   [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#boundary-contracts).
-- **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-034.
 - **Remaining questions:** Ordinary archive remains independently non-cascading;
   destructive retention remains separate later scope.
 
@@ -657,7 +634,6 @@ INV-tagged test names and attached doc comments.
   after turn terminality, including atomic refusal. Historical provenance does
   not claim which hidden physical backend executed the call when the provider
   does not reveal it.
-- **Required invariants:** INV-008, INV-014.
 - **Remaining questions:** Alias administration, visibility, and whether a
   future frozen alias policy may include fallback. Acceptance-time definition
   freezing and pre-call target resolution are decided in
@@ -702,7 +678,6 @@ INV-tagged test names and attached doc comments.
   create a separate call with its own exact target; it cannot legitimize
   substitution on this call. Absent provider evidence, Signalbox does not claim
   knowledge of the hidden physical backend.
-- **Required invariants:** INV-014, INV-015, INV-018.
 - **Remaining questions:** Provider identifier normalization and reproducibility
   claims beyond observable model identity remain open
   ([model fallback and provenance](open-questions.md#model-fallback-and-provenance));
@@ -755,7 +730,6 @@ INV-tagged test names and attached doc comments.
   accepted timing-sensitive mismatch failure rule
   ([model-call-execution](spec/model-call-execution.md)) and is never an allowed
   substitution.
-- **Required invariants:** INV-014, INV-018.
 - **Remaining questions:** Transient client presentation of successor selection
   and whether a future pool may cross adapter kinds.
 
@@ -797,7 +771,6 @@ INV-tagged test names and attached doc comments.
   Mismatch first learned after a valid atomically refused turn adds
   reconciliation evidence without rewriting that disposition or committed
   refusal.
-- **Required invariants:** INV-014, INV-018, INV-032.
 - **Remaining questions:** Refusal taxonomy, user-facing remediation, and
   whether any explicit fallback is ever allowed. Provider-identity normalization
   remains open
@@ -828,7 +801,6 @@ INV-tagged test names and attached doc comments.
   transcripts arrive as validated bounded frames; a partial sequence is never
   authoritative. Final durable content replaces any draft
   ([process protocol](spec/process-protocol.md)).
-- **Required invariants:** INV-005, INV-012, INV-032, INV-033.
 - **Remaining questions:** Transient updates, retention, later compatibility,
   and browser transport remain
   [open](open-questions.md#protocols-and-persistence).
@@ -848,7 +820,6 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Restart preserves archive status. Archiving never
   cancels, pauses, rejects, or rewrites work and never cascades to another
   session. A missing session is a durable typed rejection.
-- **Required invariants:** INV-005, INV-012, INV-013.
 - **Remaining questions:** Destructive retention and purge are separate later
   scope under
   [session organization and retention](open-questions.md#session-organization-visibility-and-retention),
@@ -875,8 +846,6 @@ INV-tagged test names and attached doc comments.
   at most one regeneration turn. A changed model or any changed
   effective-configuration field belongs to that new turn and is never disguised
   as recovery of the original.
-- **Required invariants:** INV-001, INV-004, INV-006, INV-008, INV-012, INV-014,
-  INV-015.
 - **Remaining questions:** A future regeneration decision must decide command
   acceptance, FIFO interaction, exact historical source frontier, configuration
   freeze, and alternative-answer presentation before implementation.
@@ -917,7 +886,6 @@ INV-tagged test names and attached doc comments.
   synthetic stop phase or a second terminal result. Late cleanup or operation
   evidence remains audit/reconciliation evidence and cannot authorize new
   effects or rewrite the terminal turn.
-- **Required invariants:** INV-006, INV-009, INV-014, INV-025, INV-026, INV-034.
 - **Remaining questions:** Provider-target identity evidence and trust, exact
   cancellation delivery and acknowledgement mechanics, the execution strategy
   that could produce independently issued provider and tool operations, and
@@ -952,8 +920,6 @@ INV-tagged test names and attached doc comments.
   whole conversion. Import, missing-target, replay, and rendering follow the
   same owning specifications linked above; transactional storage, crash, and
   outbox behavior follow [persistence protocol](spec/persistence-protocol.md).
-- **Required invariants:** INV-001, INV-002, INV-003, INV-005, INV-007, INV-009,
-  INV-012, INV-014, INV-015, INV-026, INV-032, INV-038, INV-039.
 - **Remaining questions:** Additional source converters, import discovery and
   bulk policy, rich non-text model rendering, client presentation, and retention
   are outside this scenario. Real-content validation remains opt-in, local, and
@@ -986,8 +952,6 @@ INV-tagged test names and attached doc comments.
   pending external reservation does not prove absence of an external effect and
   is not retried automatically. No transcript content or general-purpose
   artifact is copied into workflow rows.
-- **Required invariants:** INV-001, INV-002, INV-007, INV-025, INV-026, INV-040,
-  INV-041.
 - **Remaining questions:** Application commands, scheduling, prompts,
   automation, repair, and stack propagation remain in
   [review-workflow orchestration](open-questions.md#destination-features-target-model);
@@ -1018,8 +982,6 @@ INV-tagged test names and attached doc comments.
   claims, selector mismatch, unavailable credential profile, missing workspace
   capability, or a second ordinary runner fails explicitly without changing
   placement. Hardware or network changes never derive a new identity implicitly.
-- **Required invariants:** INV-001, INV-002, INV-024, INV-035, INV-042, INV-044,
-  INV-045.
 - **Remaining questions:** Authentication exchange, store transactions,
   streaming transport, application session creation, and client presentation
   remain under
@@ -1050,8 +1012,6 @@ INV-tagged test names and attached doc comments.
   duplicate completion, or exhausted generation fails closed. Side-effecting
   loss follows the existing ambiguity and reconciliation law and is never
   converted to ordinary tool output or silently dispatched again.
-- **Required invariants:** INV-004, INV-006, INV-011, INV-021, INV-024–INV-026,
-  INV-034, INV-043.
 - **Remaining questions:** Store schema and transactions, exact reconnect
   inventory, transport framing, heartbeat, and stale-evidence retention remain
   in [runner transport](open-questions.md#protocols-and-persistence).
@@ -1085,8 +1045,6 @@ INV-tagged test names and attached doc comments.
   missing workspace capability, or attempt to reactivate a revoked grant fails
   unchanged. Revocation gates later lease creation but does not yank or rewrite
   an already offered lease.
-- **Required invariants:** INV-005, INV-008, INV-024–INV-026, INV-035, INV-036,
-  INV-042, INV-044, INV-045.
 - **Remaining questions:** User command shape, atomic store boundaries, exact
   injected semantic content, cleanup recovery, and recovery when no eligible
   replacement exists remain under
@@ -1114,7 +1072,6 @@ INV-tagged test names and attached doc comments.
 - **Failure behavior:** Missing session, stale or exhausted epoch, conflicting
   command reuse, unknown catalog selection, and commit ambiguity retain their
   distinct typed outcomes. Exact replay returns the first recorded result.
-- **Required invariants:** INV-008, INV-012, INV-014, INV-015, INV-033, INV-046.
 - **Remaining questions:** Richer client model discovery and non-Anthropic
   daemon composition remain outside this scenario.
 
@@ -1140,7 +1097,6 @@ INV-tagged test names and attached doc comments.
   member fails before any command identity is claimed. Stale epochs, conflicting
   reuse, unknown catalog selections, and commit ambiguity retain their S33
   outcomes.
-- **Required invariants:** INV-008, INV-012, INV-033, INV-046.
 - **Remaining questions:** Prompt composition from base, per-use-case, and
   instruction-file contributions remains an open configuration-category
   capability.
@@ -1169,7 +1125,6 @@ INV-tagged test names and attached doc comments.
   files, invalid paths or prompts, duplicate names, unknown model selections,
   and malformed or unknown config fields are precise typed startup errors.
   Conflicting command reuse and commit ambiguity retain S01 behavior.
-- **Required invariants:** INV-002, INV-008, INV-012, INV-033, INV-046, INV-047.
 - **Remaining questions:** Durable template objects, CRUD, and agent authoring
   tools are owned by
   [template storage and authoring surfaces](open-questions.md#template-storage-and-authoring);
@@ -1198,7 +1153,6 @@ INV-tagged test names and attached doc comments.
   before command handling. Stale updates are authoritative typed rejections.
   Ancestor, pathless-target, and disjoint scoped reads are typed refusals rather
   than empty successful results.
-- **Required invariants:** INV-008, INV-012, INV-050.
 - **Remaining questions:** None.
 
 ## S37 — Change model and session settings
@@ -1230,8 +1184,6 @@ INV-tagged test names and attached doc comments.
   adapter-specific combinations remain distinct typed invalid requests. Missing
   or contradictory capability declarations reject configuration. A provider
   CLI's silent clamp, open effort string, or dropped tier is never validation.
-- **Required invariants:** INV-008, INV-012, INV-014, INV-051, INV-052, INV-053,
-  INV-054.
 - **Remaining questions:** Context compaction and the other settings listed
   under [configuration categories](open-questions.md#configuration-categories)
   remain outside this scenario.
@@ -1243,4 +1195,4 @@ lifecycle. Fallback, capability vocabulary, safety policy, queue management,
 archive behavior, and other protocol choices remain open; the delegation
 command, result, message, and descendant-scope protocols are committed by S18
 and S19. A decision that changes a lifecycle should update the affected
-scenarios and cite the invariant changes it requires.
+scenarios and their enforcement.

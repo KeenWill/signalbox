@@ -13,6 +13,15 @@ repositories are watched, and without a repository-watch section the subsystem
 does not start. The configuration section (`RepositoryWatchConfiguration`) and
 the example TOML own the shape of what an operator writes.
 
+The v2 implementation is a compiled-in ownership module behind the ownership
+seam. Its PostgreSQL role owns only the `mod_repo_watch` schema and has no core
+table privileges. Mutable `repository_state` and normalized `pr_state` rows are
+rebuildable projections. Authenticated webhook metadata, exact body bytes, and
+processing disposition share one caller-supplied expiry and are releasable
+together after that boundary. The module's own core-event cursor records which
+lifecycle effects have committed. No v2 command worker is started, so v2
+dispatch remains off until an owner-approved code change enables it.
+
 Two transports feed one fact store. Polling sends conditional requests from one
 independent task per configured repository at that repository's interval; the
 conditional-request cache starts empty on every daemon start, so the first poll
@@ -108,14 +117,14 @@ dispatch, obligation, webhook, and commissioned records.
 
 The convergence sweep is a periodic pass that runs beside repository watch.
 Repository watch owns event-driven dispatch; the sweep supplies liveness for
-watched pull requests whose provider events stopped arriving. It owns its
-convergence predicate, its fenced commission, its durable retry and park
-records, and its configuration throttle. It is opt-in twice:
+watched pull requests whose provider events stopped arriving. It uses
+`signalbox-convergence` for its predicate and owns its fenced commission,
+durable retry and park records, and configuration throttle. It is opt-in twice:
 `[repository_watch.convergence_sweep]` supplies one review-response session
 template and the timing policy, and each repository lists its
-`convergence_pull_requests`. A census snapshot is converged exactly when no
-review thread is unresolved, the status rollup belongs to the current head,
-every gating check is green, and mergeability is `mergeable`.
+`convergence_pull_requests`. The `[convergence]` policy supplies the shared
+predicate described in [review workflows](review-workflows.md). The sweep
+evaluates one revalidated snapshot and uses that verdict for its decision.
 
 ## Design decisions
 
