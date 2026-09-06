@@ -383,6 +383,7 @@ mod transcript;
 use transcript::*;
 mod protocol;
 pub use protocol::ProcessRuntimeError;
+pub(crate) use protocol::interrupt_for_committed_closure;
 use protocol::*;
 #[cfg(test)]
 include!("tests.rs");
