@@ -12,20 +12,10 @@ use super::{
 };
 
 /// Registry declaration effect posture: read-only, `Auto`, and
-/// `ExternalEffect` because its pure composition reads fresh GitHub evidence.
+/// `ExternalEffect` because it reads fresh GitHub evidence.
 pub(super) const NAME: &str = "review_gate_check";
 pub(super) const DESCRIPTION: &str =
-    "Composes convergence, stack, and thread evidence into a deterministic review-protocol gate.";
-
-/// The protocol boundary the caller is checking.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewGatePurpose {
-    /// Whether a new external review wave may be requested.
-    RequestReviewWave,
-    /// Whether the change request may be declared converged.
-    DeclareConvergence,
-}
+    "Reports the shared convergence verdict from one complete GitHub snapshot.";
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -34,8 +24,6 @@ pub struct ReviewGateCheckArguments {
     repository: CodeHostRepository,
     /// Change-request number.
     number: CodeHostChangeRequestNumber,
-    /// Protocol boundary to evaluate.
-    purpose: ReviewGatePurpose,
 }
 
 pub(super) struct Contract;
@@ -55,11 +43,6 @@ impl ReviewGateCheckArguments {
     /// Returns the change-request number.
     pub const fn number(&self) -> CodeHostChangeRequestNumber {
         self.number
-    }
-
-    /// Returns the review-protocol boundary to evaluate.
-    pub const fn purpose(&self) -> ReviewGatePurpose {
-        self.purpose
     }
 }
 

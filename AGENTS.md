@@ -7,9 +7,8 @@ owner-approved plans. Do not add speculative product behavior.
 
 - Cross-crate and wire contracts: `docs/spec/`. `docs/spec/README.md` states the
   page conventions.
-- Public API of the domain and application crates: `docs/domain-spine.md`,
-  checked by CI against source.
-- Invariants: INV-tagged tests. `docs/invariants.md` is their generated index.
+- Public API of the crates listed in `docs/api/crates.toml`: generated Markdown
+  under `docs/api/`, checked by CI against rustdoc JSON.
 - Committed but unbuilt design: `docs/design/`; undecided items:
   `docs/open-questions.md`.
 - Test style: `docs/agents/testing-style.md`. Literal-provenance and label rules
@@ -82,8 +81,10 @@ owner's private repositories may be named as provenance, not cited as rules.
   conflict in practice, report the conflict instead of resolving it silently.
 - Fix every defect you introduce. A pre-existing defect outside the assigned
   change is recorded, not fixed.
-- A change to a public item in the domain or application crates updates
-  `docs/domain-spine.md` in the same pull request.
+- A change to a public item in a crate listed in `docs/api/crates.toml`
+  regenerates `docs/api/` with
+  `devenv shell -- python3 scripts/render_domain_spine.py` in the same pull
+  request.
 - A change to behavior a `docs/spec/` page describes updates that page in the
   same pull request. In a stack, the bottom spec diff covers the behavior its
   children implement; a child adds a spec edit only for behavior the bottom diff
@@ -97,11 +98,7 @@ owner's private repositories may be named as provenance, not cited as rules.
   rationale.
 - Keep domain types distinct from storage records, protocol messages, and
   framework types.
-- Name tests for the scenario and invariant they enforce when the connection is
-  meaningful (`S12_INV011_rejects_stale_generation`). A test that enforces an
-  accepted invariant carries the INV tag in its name or doc comment; regenerate
-  the index with `python3 scripts/generate_invariants.py --write` in the same
-  change.
+- Name tests for the behavior they enforce.
 - Update directly affected documentation in the implementing pull request. Do
   not reword, restructure, or reformat unrelated text.
 - Do not add `Co-Authored-By`, session, or URL trailers to commits or
@@ -142,19 +139,16 @@ both.
 Documentation bar:
 
 ```bash
-python3 scripts/generate_invariants.py --check
-python3 scripts/check_domain_spine.py
-python3 scripts/test_check_domain_spine.py
+python3 scripts/render_domain_spine.py
+git diff --exit-code -- docs/api
+python3 scripts/test_render_domain_spine.py
+python3 scripts/test_domain_spine_digest.py
 python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
 python3 scripts/check_migration_versions.py
 python3 scripts/test_check_migration_versions.py
-python3 scripts/check_numeric_bounds.py
-python3 scripts/test_check_numeric_bounds.py
-python3 scripts/check_panic_gate.py
-python3 scripts/test_check_panic_gate.py
-python3 scripts/check_style_rules.py
-python3 scripts/test_check_style_rules.py
+python3 scripts/check_ownership_seam.py
+python3 scripts/test_check_ownership_seam.py
 python3 scripts/test_postgres_integration_suites.py
 mdformat --check *.md docs/
 git diff --check

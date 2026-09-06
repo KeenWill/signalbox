@@ -3,10 +3,7 @@
 use std::{env, error::Error, fs, io};
 
 use serde::Deserialize;
-use signalbox_approval_judge_eval::{
-    ApprovalDisposition, CORPUS_FORMAT_VERSION, CorpusStore, DiskCorpusStore, request_fingerprint,
-    score_corpus,
-};
+use signalbox_approval_judge_eval::{ApprovalDisposition, load_corpus, score_corpus};
 use signalbox_domain::{
     DirectModelSelection, ModelCallId, ProviderModelIdentity, ResolvedProviderTarget,
 };
@@ -33,15 +30,12 @@ const OFFLINE_CONTEXT_WINDOW_TOKENS: u32 = 4_096;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OfflineResponseFile {
-    format_version: u32,
     responses: Vec<OfflineResponse>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OfflineResponse {
-    case_id: String,
-    request_fingerprint: String,
     disposition: ApprovalDisposition,
     rationale: String,
 }
@@ -49,18 +43,13 @@ struct OfflineResponse {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
-    let manifest_path = arguments.next().ok_or_else(usage_error)?;
+    let corpus_path = arguments.next().ok_or_else(usage_error)?;
     let responses_path = arguments.next().ok_or_else(usage_error)?;
     if arguments.next().is_some() {
         return Err(usage_error().into());
     }
 
-    let store = DiskCorpusStore::open(manifest_path)?;
-    let registrations = store.enumerate().await?;
-    let registration = registrations
-        .first()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "disk corpus store is empty"))?;
-    let corpus = store.load(registration.key()).await?;
+    let corpus = load_corpus(corpus_path)?;
     let response_bytes = fs::read(&responses_path).map_err(|source| {
         io::Error::new(
             source.kind(),
@@ -74,8 +63,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 format!("offline responses {responses_path} are not valid response JSON: {source}"),
             )
         })?;
-    validate_responses(&corpus, &responses)?;
-
+    if responses.responses.len() != corpus.cases.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "offline response count {} differs from corpus case count {}",
+                responses.responses.len(),
+                corpus.cases.len(),
+            ),
+        )
+        .into());
+    }
     let scripts = responses.responses.iter().map(response_script);
     let (model, binding) = offline_model(scripts)?;
     let scorecard = score_corpus(&model, &binding, &corpus).await?;
@@ -86,58 +84,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 fn usage_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: signalbox-approval-judge-eval <corpus-manifest.json> <offline-responses.json>",
+        "usage: signalbox-approval-judge-eval <corpus.json> <offline-responses.json>",
     )
-}
-
-fn validate_responses(
-    corpus: &signalbox_approval_judge_eval::ApprovalJudgeCorpus,
-    responses: &OfflineResponseFile,
-) -> Result<(), io::Error> {
-    if responses.format_version != CORPUS_FORMAT_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "offline response format version {} is unsupported; expected {}",
-                responses.format_version, CORPUS_FORMAT_VERSION
-            ),
-        ));
-    }
-    if responses.responses.len() != corpus.cases.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "offline response count {} does not match corpus case count {}",
-                responses.responses.len(),
-                corpus.cases.len()
-            ),
-        ));
-    }
-    for (case, response) in corpus.cases.iter().zip(&responses.responses) {
-        if case.id != response.case_id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "offline response case {} does not match corpus case {} at the same position",
-                    response.case_id, case.id
-                ),
-            ));
-        }
-        // A stable id is not enough: the recorded decision answers one exact
-        // rendered request, so a response also names the fingerprint of the
-        // request context it was recorded against.
-        let expected_fingerprint = request_fingerprint(case);
-        if response.request_fingerprint != expected_fingerprint {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "offline response for case {} was recorded against a different request context (fingerprint {} does not match {})",
-                    case.id, response.request_fingerprint, expected_fingerprint
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn offline_model(

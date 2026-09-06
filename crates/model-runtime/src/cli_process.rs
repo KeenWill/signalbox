@@ -10,8 +10,7 @@ use tokio::process::{Child, Command};
 
 use crate::{
     CancellationSignal, LossCause, Observation, ObservationFact, ObservationSink,
-    ProvenUnsentEvidence, ProviderErrorKind, REDACTED, RedactingSink, TerminalEvidence,
-    TransportFacts, UnsentCause,
+    ProvenUnsentEvidence, REDACTED, RedactingSink, TerminalEvidence, TransportFacts, UnsentCause,
 };
 
 const TRUNCATION_SUFFIX: &str = "… [truncated]";
@@ -256,13 +255,11 @@ pub trait CliSession<C>: Sized {
         cause: LossCause,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
-    /// Collapses raw non-successful-exit material to a closed kind.
-    fn classify_provider_error_after_exit(classification: &str) -> ProviderErrorKind;
-    /// Produces a provider failure from sanitized material and its closed kind.
+    /// Produces a provider failure from sanitized evidence and bounded raw exit material.
     fn provider_error_after_exit(
         self,
         message: &str,
-        kind: ProviderErrorKind,
+        classification: &str,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
 }
@@ -967,8 +964,8 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             };
             // Evidence is built before the sink flushes so the failure
             // message still sees the held cross-fragment redaction state.
-            let kind = D::classify_provider_error_after_exit(&classification);
-            let evidence = decoder.provider_error_after_exit(&message, kind, &mut redacting_sink);
+            let evidence =
+                decoder.provider_error_after_exit(&message, &classification, &mut redacting_sink);
             redacting_sink.finish();
             evidence
         }
@@ -1073,7 +1070,7 @@ const PROXY_URL_VARIABLES: &[&str] = &[
 /// that embeds userinfo — such a credential would transit to the child verbatim
 /// and a CLI that reflects its proxy configuration would hand the password to
 /// output the adapter can only shape-redact, and `redact_text` has no
-/// proxy-userinfo rule (INV-035) — and a `HOME`/`CODEX_HOME` the parent cannot
+/// proxy-userinfo rule — and a `HOME`/`CODEX_HOME` the parent cannot
 /// resolve to an absolute directory, which would point the child's credential
 /// store somewhere under its working directory and select an unintended ambient
 /// login (see [`absolute_credential_home`]). Both must never reach the child.
@@ -1791,8 +1788,8 @@ mod tests {
         sanitized_stderr, validated_environment_overrides,
     };
     use crate::{
-        BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, ProviderErrorKind,
-        REDACTED, RedactingSink, TerminalEvidence, TokenUsage, ToolCallsAtLoss, UnsentCause,
+        BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, REDACTED,
+        RedactingSink, TerminalEvidence, TokenUsage, ToolCallsAtLoss, UnsentCause,
     };
 
     const TEST_ENVIRONMENT: &[CliEnvironmentVariable] = &[
@@ -1865,14 +1862,10 @@ mod tests {
             unused_terminal_evidence()
         }
 
-        fn classify_provider_error_after_exit(_classification: &str) -> ProviderErrorKind {
-            ProviderErrorKind::Unrecognized
-        }
-
         fn provider_error_after_exit(
             self,
             _message: &str,
-            _kind: ProviderErrorKind,
+            _classification: &str,
             _sink: &mut RedactingSink<'_, u8>,
         ) -> TerminalEvidence {
             unused_terminal_evidence()
@@ -1964,14 +1957,10 @@ mod tests {
             unused_terminal_evidence()
         }
 
-        fn classify_provider_error_after_exit(_classification: &str) -> ProviderErrorKind {
-            ProviderErrorKind::Unrecognized
-        }
-
         fn provider_error_after_exit(
             self,
             _message: &str,
-            _kind: ProviderErrorKind,
+            _classification: &str,
             _sink: &mut RedactingSink<'_, u8>,
         ) -> TerminalEvidence {
             unused_terminal_evidence()

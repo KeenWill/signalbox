@@ -194,7 +194,9 @@ referenced status, and the subject transition; no event-history snapshot decides
 them independently. An external-link transition locks the reservation and then
 any associated finding before loading its multi-statement projection. The lock
 protocol these orders extend belongs to
-[persistence protocol](persistence-protocol.md).
+[persistence protocol](persistence-protocol.md). A finding-reference edge that
+closes a direct or transitive cycle in a target's complete finding graph is
+corruption.
 
 One orchestration attempt names one immutable target, one frozen policy, one
 ordered concern-set version, and the exact template digests its passes use.
@@ -243,8 +245,32 @@ The orchestration loaders derive the current stage only from durable records;
 missing ancestry, an unknown closed value, a noncanonical count, or
 contradictory evidence is corruption and never an inferred result.
 
-The reviewer-verdict and usage-limit evidence rules belong to
-[tool loop](tool-loop.md).
+`signalbox-convergence` evaluates complete GitHub snapshots with an explicit
+reviewer and check policy. Its verdict combines thread dispositions,
+authenticated quiet reviews and exempt head changes, retained review waves,
+settled check inventories, current-head checks, mergeability, base ancestry,
+draft status, and description length according to explicit policy. Disposition
+grammars, informational classes and acknowledgements, the planning marker, and
+draft handling are policy fields; the description word limit is optional and
+absent by default. Repository values live in the crate policy example, whose
+fixing-revision grammar is
+`` (?i)^fixed in (?:commits?\s+)?`?([0-9a-f]{7,40})`? ``. Every recorded
+observation ends with a complete identity query. A later authenticated body
+finding invalidates an earlier quiet review on the same head. An escalation
+reply must follow the reviewer's latest edit. Incomplete pagination or a changed
+pull-request identity during decision revalidation is an error; the predicate
+performs no I/O. Persisted authentication and review waves are bound to the
+complete policy value and requalified when it changes. Exempt head changes are
+rename-only changes and clean base forwards; comment-only changes require a
+fresh quiet review. The crate's `reconcile` subcommand runs candidate selection,
+in-process fetch and evaluation, the dispatch fence, and repository-bound
+cool-off state. State decoding requires version 2 and all record fields, rejects
+unknown fields, and performs no migration. It syncs the state file and parent
+directory before starting a dispatch child; every ambiguous outcome retains the
+fence. Operator commands run as argv in their own process groups; timeout kills
+the group and reaps the child. `SIGINT` stops the loop. Reconciliation requires
+a configured policy path and an explicit state path when neither
+`XDG_STATE_HOME` nor `HOME` supplies a default.
 
 ## Planned
 

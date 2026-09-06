@@ -8,8 +8,9 @@ use std::collections::VecDeque;
 use crate::{
     AssistantPart, CompletionFinish, CredentialValue, ExchangeFacts, FinishReason, LossCause,
     NativeErrorFacts, Observation, ObservationFact, ObservationSink, ProvenUnsentEvidence,
-    ProviderMessageId, ProviderReportedModel, ProviderRequestId, StreamInterruption,
-    TerminalEvidence, ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
+    ProviderRequestId, StreamInterruption, TerminalEvidence, ToolCallId, ToolCallProposal,
+    ToolName, TransportFacts, UnsentCause,
 };
 
 const NATIVE_MESSAGE_TRUNCATION_SUFFIX: &str = " … [truncated]";
@@ -520,7 +521,41 @@ pub fn redact_evidence(
             };
             TerminalEvidence::BoundaryLoss(loss)
         }
+        TerminalEvidence::CompletedWithProviderCompaction {
+            completion,
+            retained_input_tokens,
+            retained_output_tokens,
+        } => match redact_evidence(
+            TerminalEvidence::Completed(completion),
+            api_key,
+            native_message_limit,
+        ) {
+            TerminalEvidence::Completed(completion) => {
+                TerminalEvidence::CompletedWithProviderCompaction {
+                    completion,
+                    retained_input_tokens,
+                    retained_output_tokens,
+                }
+            }
+            failed_closed => failed_closed,
+        },
         TerminalEvidence::Completed(mut completion) => {
+            if provider_compaction_contains_credential(&completion.content, api_key) {
+                return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    exchange: redact_exchange(completion.exchange, api_key),
+                    reported_model: completion.reported_model.map(|model| {
+                        ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
+                    }),
+                    kind: ProviderErrorKind::Unrecognized,
+                    non_acceptance_proven: false,
+                    native: NativeErrorFacts {
+                        error_token: Some("credential_in_provider_compaction".to_string()),
+                        error_code: None,
+                        message: None,
+                    },
+                    usage: completion.usage,
+                });
+            }
             completion.exchange = redact_exchange(completion.exchange, api_key);
             completion.message_id = completion
                 .message_id
@@ -537,6 +572,22 @@ pub fn redact_evidence(
             TerminalEvidence::Completed(completion)
         }
         TerminalEvidence::Refused(mut refusal) => {
+            if provider_compaction_contains_credential(&refusal.content, api_key) {
+                return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    exchange: redact_exchange(refusal.exchange, api_key),
+                    reported_model: refusal.reported_model.map(|model| {
+                        ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
+                    }),
+                    kind: ProviderErrorKind::Unrecognized,
+                    non_acceptance_proven: false,
+                    native: NativeErrorFacts {
+                        error_token: Some("credential_in_provider_compaction".to_string()),
+                        error_code: None,
+                        message: None,
+                    },
+                    usage: refusal.usage,
+                });
+            }
             refusal.exchange = redact_exchange(refusal.exchange, api_key);
             refusal.message_id = refusal
                 .message_id
@@ -551,6 +602,166 @@ pub fn redact_evidence(
                 .collect();
             TerminalEvidence::Refused(refusal)
         }
+    }
+}
+
+fn provider_compaction_contains_credential(
+    content: &[AssistantPart],
+    credential: &CredentialValue,
+) -> bool {
+    let key = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    if key.is_empty()
+        || !content
+            .iter()
+            .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. }))
+    {
+        return false;
+    }
+    let mut matcher = CredentialBoundaryMatcher::new(key);
+    content.iter().any(|part| {
+        if let AssistantPart::ProviderCompaction { block_json } = part
+            && (block_json.contains(key) || json_escapes_decode_to_credential(block_json, key))
+        {
+            return true;
+        }
+        inspect_durable_assistant_part_fields(part, &mut |value, provider_compaction| {
+            matcher.inspect(value, provider_compaction)
+        })
+    })
+}
+
+fn inspect_provider_compaction_fields(
+    block_json: &str,
+    inspect: &mut impl FnMut(&str) -> bool,
+) -> bool {
+    let Ok(block) = serde_json::from_str::<serde_json::Value>(block_json) else {
+        return false;
+    };
+    ["content", "encrypted_content"]
+        .into_iter()
+        .filter_map(|field| block.get(field).and_then(serde_json::Value::as_str))
+        .any(inspect)
+}
+
+struct CredentialBoundaryMatcher<'a> {
+    credential: &'a str,
+    // Every state is a viable credential-prefix tail plus whether that tail
+    // has consumed provider-compaction material. Keeping prior states lets an
+    // unrelated structured field be skipped without retaining its contents.
+    states: Vec<(usize, bool)>,
+}
+
+impl<'a> CredentialBoundaryMatcher<'a> {
+    fn new(credential: &'a str) -> Self {
+        Self {
+            credential,
+            states: vec![(0, false)],
+        }
+    }
+
+    fn inspect(&mut self, fragment: &str, provider_compaction: bool) -> bool {
+        let prior_states = self.states.clone();
+        for (prior_length, prior_used_compaction) in prior_states {
+            if prior_length > 0
+                && fragment.starts_with(&self.credential[prior_length..])
+                && (prior_used_compaction || provider_compaction)
+            {
+                return true;
+            }
+            let prefix = &self.credential[..prior_length];
+            let mut fragment_start = fragment.len().saturating_sub(self.credential.len());
+            while !fragment.is_char_boundary(fragment_start) {
+                fragment_start += 1;
+            }
+            let fragment_tail = &fragment[fragment_start..];
+            let mut candidate = String::with_capacity(prefix.len() + fragment_tail.len());
+            candidate.push_str(prefix);
+            candidate.push_str(fragment_tail);
+            let field_boundary = prefix.len();
+
+            let next_length = self
+                .credential
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(self.credential.len()))
+                .rev()
+                .find(|length| candidate.ends_with(&self.credential[..*length]))
+                .unwrap_or(0);
+            let match_start = candidate.len() - next_length;
+            let used_compaction = (match_start < field_boundary && prior_used_compaction)
+                || (candidate.len() > field_boundary && provider_compaction);
+            if next_length == self.credential.len() && used_compaction {
+                return true;
+            }
+            if next_length == 0 || next_length == self.credential.len() {
+                continue;
+            }
+            let next = (next_length, used_compaction);
+            if !self.states.contains(&next) {
+                self.states.push(next);
+            }
+        }
+        false
+    }
+}
+
+fn inspect_json_value_strings(
+    value: &serde_json::Value,
+    inspect: &mut impl FnMut(&str) -> bool,
+) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            entries
+                .into_iter()
+                .any(|(key, value)| inspect(key) || inspect_json_value_strings(value, inspect))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| inspect_json_value_strings(value, inspect)),
+        serde_json::Value::String(value) => inspect(value),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
+fn inspect_canonical_json_strings(
+    raw: &str,
+    inspect: &mut impl FnMut(&str) -> bool,
+) -> Result<bool, serde_json::Error> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .map(|value| inspect_json_value_strings(&value, inspect))
+}
+
+fn inspect_durable_assistant_part_fields(
+    part: &AssistantPart,
+    inspect: &mut impl FnMut(&str, bool) -> bool,
+) -> bool {
+    match part {
+        AssistantPart::Text(text) => inspect(text, false),
+        AssistantPart::Thinking { text, signature } => {
+            inspect(text, false)
+                || signature
+                    .as_deref()
+                    .is_some_and(|signature| inspect(signature, false))
+        }
+        AssistantPart::RedactedThinking { data } => inspect(data, false),
+        AssistantPart::ProviderCompaction { block_json } => {
+            inspect_provider_compaction_fields(block_json, &mut |value| inspect(value, true))
+        }
+        AssistantPart::ToolCall(proposal) => {
+            inspect(proposal.id.as_str(), false)
+                || inspect(proposal.name.as_str(), false)
+                || match inspect_canonical_json_strings(&proposal.arguments_json, &mut |value| {
+                    inspect(value, false)
+                }) {
+                    Ok(found) => found,
+                    Err(_) => inspect(&decode_json_escapes(&proposal.arguments_json), false),
+                }
+        }
+        AssistantPart::SuppressedToolCall(name) => inspect(name.as_str(), false),
     }
 }
 
@@ -752,6 +963,10 @@ fn redact_json_value(raw: &str, credential: &str) -> Result<String, serde_json::
 }
 
 fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
+    decode_json_escapes(raw).contains(credential)
+}
+
+fn decode_json_escapes(raw: &str) -> String {
     let mut decoded = String::with_capacity(raw.len());
     let mut chars = raw.chars();
     while let Some(character) = chars.next() {
@@ -806,7 +1021,7 @@ fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
             other => decoded.push(other),
         }
     }
-    decoded.contains(credential)
+    decoded
 }
 
 fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> AssistantPart {
@@ -819,6 +1034,11 @@ fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> A
         AssistantPart::RedactedThinking { data } => AssistantPart::RedactedThinking {
             data: redact_bounded_text(data, credential),
         },
+        // Credential-bearing blocks are rejected before this mapper because
+        // replay requires the surviving opaque block byte-for-byte.
+        AssistantPart::ProviderCompaction { block_json } => {
+            AssistantPart::ProviderCompaction { block_json }
+        }
         AssistantPart::ToolCall(proposal) => {
             AssistantPart::ToolCall(redact_tool_proposal(proposal, credential))
         }
@@ -1230,6 +1450,8 @@ mod tests {
                 signature: Some("signature-key_loop".to_string()),
             }],
             usage: TokenUsage::unreported(),
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         });
 
         let TerminalEvidence::Refused(refusal) = redact_evidence(evidence, &key) else {
@@ -1524,6 +1746,431 @@ mod tests {
     }
 
     #[test]
+    fn credential_bearing_provider_compaction_is_rejected_without_rewriting_replay_bytes() {
+        let key = credential("fixture_secret");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![AssistantPart::ProviderCompaction {
+                    block_json:
+                        r#"{"type":"compaction","content":"fixture_secret","encrypted_content":"opaque"}"#
+                            .to_string(),
+                }],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential-bearing opaque replay evidence is rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_provider_compaction_fields_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![AssistantPart::ProviderCompaction {
+                    block_json:
+                        r#"{"type":"compaction","content":"key_","encrypted_content":"loop"}"#
+                            .to_string(),
+                }],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential spanning ordered compaction fields is rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_provider_compaction_and_following_text_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"key_","encrypted_content":"opaque"}"#
+                                .to_string(),
+                    },
+                    AssistantPart::Text("loop tail".to_string()),
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("cross-part credential evidence is rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_provider_compaction_and_multiple_text_parts_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"key_","encrypted_content":"opaque"}"#
+                                .to_string(),
+                    },
+                    AssistantPart::Text("lo".to_string()),
+                    AssistantPart::Text("op tail".to_string()),
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("multi-part credential evidence is rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_compaction_text_and_escaped_tool_arguments_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::ToolUse,
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"key_","encrypted_content":"opaque"}"#
+                                .to_string(),
+                    },
+                    AssistantPart::Text("l".to_string()),
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-1"),
+                        name: ToolName::new("lookup"),
+                        arguments_json: r#"{"value":"\u006fop"}"#.to_string(),
+                    }),
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential crossing decoded tool arguments is rejected");
+        };
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_provider_compaction_and_each_durable_part_is_rejected() {
+        let following_parts = [
+            AssistantPart::Thinking {
+                text: "loop reasoning".to_string(),
+                signature: None,
+            },
+            AssistantPart::Thinking {
+                text: "safe".to_string(),
+                signature: Some("loop-signature".to_string()),
+            },
+            AssistantPart::RedactedThinking {
+                data: "loop-opaque".to_string(),
+            },
+            AssistantPart::ProviderCompaction {
+                block_json: r#"{"type":"compaction","content":"loop","encrypted_content":null}"#
+                    .to_string(),
+            },
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("loop-call"),
+                name: ToolName::new("lookup"),
+                arguments_json: r#"{"value":"safe"}"#.to_string(),
+            }),
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call-1"),
+                name: ToolName::new("loop"),
+                arguments_json: r#"{"value":"safe"}"#.to_string(),
+            }),
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call-1"),
+                name: ToolName::new("lookup"),
+                arguments_json: r#"{"value":"\u006coop"}"#.to_string(),
+            }),
+            AssistantPart::SuppressedToolCall(ToolName::new("loop")),
+        ];
+
+        for following in following_parts {
+            let key = credential("key_loop");
+            let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+                completion: CompletionEvidence {
+                    exchange: ExchangeFacts::default(),
+                    message_id: None,
+                    reported_model: None,
+                    finish: CompletionFinish::ToolUse,
+                    content: vec![
+                        AssistantPart::ProviderCompaction {
+                            block_json: r#"{"type":"compaction","content":"key_","encrypted_content":"opaque"}"#.to_string(),
+                        },
+                        following,
+                    ],
+                    usage: TokenUsage::unreported(),
+                },
+                retained_input_tokens: 12,
+                retained_output_tokens: 4,
+            };
+
+            let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+                panic!("cross-part credential evidence is rejected");
+            };
+            assert_eq!(
+                error.native.error_token.as_deref(),
+                Some("credential_in_provider_compaction")
+            );
+        }
+    }
+
+    #[test]
+    fn credential_spanning_tool_part_and_following_provider_compaction_is_rejected() {
+        let preceding_parts = [
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call-1"),
+                name: ToolName::new("key_"),
+                arguments_json: r#"{"value":"safe"}"#.to_string(),
+            }),
+            AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call-2"),
+                name: ToolName::new("lookup"),
+                arguments_json: r#"{"value":"key_"}"#.to_string(),
+            }),
+        ];
+
+        for preceding in preceding_parts {
+            let key = credential("key_loop");
+            let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+                completion: CompletionEvidence {
+                    exchange: ExchangeFacts::default(),
+                    message_id: None,
+                    reported_model: None,
+                    finish: CompletionFinish::ToolUse,
+                    content: vec![
+                        preceding,
+                        AssistantPart::ProviderCompaction {
+                            block_json: r#"{"type":"compaction","content":"loop summary","encrypted_content":"opaque"}"#.to_string(),
+                        },
+                    ],
+                    usage: TokenUsage::unreported(),
+                },
+                retained_input_tokens: 12,
+                retained_output_tokens: 4,
+            };
+
+            let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+                panic!("credential crossing into compaction evidence is rejected");
+            };
+            assert_eq!(
+                error.native.error_token.as_deref(),
+                Some("credential_in_provider_compaction")
+            );
+        }
+    }
+
+    #[test]
+    fn credential_spanning_canonical_tool_fields_and_compaction_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::ToolUse,
+                content: vec![
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-1"),
+                        name: ToolName::new("lookup"),
+                        arguments_json: r#"{"z":"_","a":"key"}"#.to_string(),
+                    }),
+                    AssistantPart::ProviderCompaction {
+                        block_json: r#"{"type":"compaction","content":"loop summary","encrypted_content":"opaque"}"#.to_string(),
+                    },
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential following canonical tool fields is rejected");
+        };
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_consecutive_compaction_fields_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"key_","encrypted_content":"opaque"}"#
+                                .to_string(),
+                    },
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"lo","encrypted_content":"op"}"#
+                                .to_string(),
+                    },
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential spanning consecutive compaction fields is rejected");
+        };
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_around_provider_compaction_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::ToolUse,
+                content: vec![
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-1"),
+                        name: ToolName::new("key_"),
+                        arguments_json: r#"{"value":"safe"}"#.to_string(),
+                    }),
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"lo","encrypted_content":null}"#
+                                .to_string(),
+                    },
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-2"),
+                        name: ToolName::new("op"),
+                        arguments_json: r#"{"value":"safe"}"#.to_string(),
+                    }),
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential spanning around compaction evidence is rejected");
+        };
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_prefix_spanning_multiple_tool_parts_and_compaction_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::ToolUse,
+                content: vec![
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-1"),
+                        name: ToolName::new("key"),
+                        arguments_json: r#"{"value":"safe"}"#.to_string(),
+                    }),
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-2"),
+                        name: ToolName::new("_"),
+                        arguments_json: r#"{"value":"safe"}"#.to_string(),
+                    }),
+                    AssistantPart::ProviderCompaction {
+                        block_json: r#"{"type":"compaction","content":"loop summary","encrypted_content":"opaque"}"#.to_string(),
+                    },
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential spanning multiple durable parts is rejected");
+        };
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
     fn malformed_tool_arguments_cannot_reconstruct_a_credential_across_parts() {
         let key = credential("key_loop");
         let evidence = TerminalEvidence::Completed(CompletionEvidence {
@@ -1807,11 +2454,11 @@ mod tests {
         assert_eq!(pending, "ke");
     }
 
-    /// INV-035: a credential the provider echoes back with ordinary JSON
+    /// a credential the provider echoes back with ordinary JSON
     /// escapes is caught even when the arrival boundary falls inside the
     /// escape itself, which is where `input_json_delta` is free to split.
     #[test]
-    fn inv_035_simple_escaped_credential_split_mid_escape_is_redacted() {
+    fn simple_escaped_credential_split_mid_escape_is_redacted() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -1895,7 +2542,7 @@ mod tests {
     ///
     /// Deliberately mirrors [`redact_observation_fact`]: production decides
     /// which fields a credential can reach by redacting them, so a field it
-    /// scrubs and this classifier reports as `Absent` is a field no INV-035
+    /// scrubs and this classifier reports as `Absent` is a field no
     /// case would ever inspect — deleting that production redaction would
     /// leave the suite green while the credential is emitted. The two matches
     /// are meant to name the same surface, and only `SendCommenced` and
@@ -2187,11 +2834,9 @@ mod tests {
         }
     }
 
-    /// The reassembly is the only reason the check is stronger than a
-    /// per-observation scan, and a helper carrying logic the INV-035 cases
-    /// depend on is verified rather than assumed: a credential split across
-    /// two deltas leaks recoverably even though neither fragment contains it,
-    /// and the projection those cases use never reconstructs that stream.
+    /// The reassembly check catches a credential split across two deltas even
+    /// though neither fragment contains it. A projection that never
+    /// reconstructs that stream cannot detect the recoverable credential.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
     fn split_credential_on_an_uninspected_stream_is_caught() {
@@ -2362,7 +3007,7 @@ mod tests {
     /// The reconstructed arguments for one tool index, as a reader of the
     /// stream would see them.
     ///
-    /// INV-035 constrains the *content* a consumer reassembles — safe bytes
+    /// The check constrains the *content* a consumer reassembles — safe bytes
     /// preserved, credential absent — not how the scrubber chops it into
     /// deltas. Asserting exact fragment boundaries would fail a
     /// behaviour-preserving change that buffered the safe prefix or coalesced
@@ -2382,7 +3027,7 @@ mod tests {
             .collect()
     }
 
-    /// INV-035: the credential is scrubbed from the facts that carry a single
+    /// the credential is scrubbed from the facts that carry a single
     /// provider-controlled value, not only from the delta streams.
     ///
     /// Each of these is redacted by `redact_observation_fact`, so each is a
@@ -2390,7 +3035,7 @@ mod tests {
     /// carrying the credential, deleting that production redaction would leave
     /// this suite green.
     #[test]
-    fn inv_035_single_value_facts_are_credential_scrubbed() {
+    fn single_value_facts_are_credential_scrubbed() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -2420,8 +3065,8 @@ mod tests {
         // Pinned exactly rather than by credential absence and a count. Those
         // two hold just as well when redaction replaces the *whole* value, so
         // a regression that scrubbed `model-` and `-v1` away with the
-        // credential would satisfy them while losing the safe bytes INV-035
-        // preserves. Comparing the forwarded facts states both halves at once:
+        // credential would satisfy them while losing safe bytes.
+        // Comparing the forwarded facts states both halves at once:
         // the credential is gone, the surrounding bytes and the non-credential
         // `http_status` are untouched, and each variant is still itself.
         assert_eq!(
@@ -2670,7 +3315,7 @@ mod tests {
         assert_eq!(decoded_escapes(r"\ud83d"), "\\ud83d");
     }
 
-    /// INV-035: a disguised credential emitted on a stream the intended-stream
+    /// a disguised credential emitted on a stream the intended-stream
     /// assertion never reconstructs is still caught.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
@@ -2687,7 +3332,7 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: a proposal's provider-controlled id and name are scrubbed
+    /// a proposal's provider-controlled id and name are scrubbed
     /// alongside its arguments, pinned to their exact redacted values.
     ///
     /// `redact_tool_proposal` scrubs all three fields, but the sibling case
@@ -2697,7 +3342,7 @@ mod tests {
     /// than mere absence: replacing a whole field would satisfy an absence
     /// check while discarding the safe bytes around the credential.
     #[test]
-    fn inv_035_proposed_identifiers_and_names_are_credential_scrubbed() {
+    fn proposed_identifiers_and_names_are_credential_scrubbed() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -2725,7 +3370,7 @@ mod tests {
         );
     }
 
-    /// INV-035: a disguised credential in proposed arguments is scrubbed by
+    /// a disguised credential in proposed arguments is scrubbed by
     /// the sink itself, pinned to the exact forwarded proposal.
     ///
     /// Driven through `CredentialRedactingSink` rather than starting from an
@@ -2733,7 +3378,7 @@ mod tests {
     /// the helper works and nothing about the production path, so a regression
     /// in `redact_tool_proposal` would not reach it.
     #[test]
-    fn inv_035_disguised_credential_in_proposed_arguments_is_scrubbed() {
+    fn disguised_credential_in_proposed_arguments_is_scrubbed() {
         let key = credential("fixture/secret");
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
         let mut observed = Vec::new();
@@ -2763,7 +3408,7 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: the sink scrubs a disguised credential from a stream that
+    /// the sink scrubs a disguised credential from a stream that
     /// stops before closing its document, pinned to the exact forwarded value.
     ///
     /// Driven through production rather than from an already-leaked fact: a
@@ -2771,7 +3416,7 @@ mod tests {
     /// nothing about `redact_json_stream_fragment`, so a regression requiring
     /// a complete document before redacting would not reach it.
     #[test]
-    fn inv_035_sink_scrubs_a_disguise_in_an_unfinished_document() {
+    fn sink_scrubs_a_disguise_in_an_unfinished_document() {
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
 
         assert_eq!(
@@ -2780,9 +3425,9 @@ mod tests {
         );
     }
 
-    /// INV-035: the same holds for a token the stream never closed.
+    /// the same holds for a token the stream never closed.
     #[test]
-    fn inv_035_sink_scrubs_a_disguise_in_an_unclosed_token() {
+    fn sink_scrubs_a_disguise_in_an_unclosed_token() {
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
 
         assert_eq!(
@@ -2791,10 +3436,10 @@ mod tests {
         );
     }
 
-    /// INV-035: and for a disguise behind an invalid escape, which production
+    /// and for a disguise behind an invalid escape, which production
     /// redacts through its malformed-fragment path.
     #[test]
-    fn inv_035_sink_scrubs_a_disguise_behind_a_malformed_escape() {
+    fn sink_scrubs_a_disguise_behind_a_malformed_escape() {
         let [_, _, partial, ..] = &REPRESENTATIVE_DISGUISES;
 
         assert_eq!(
@@ -2836,7 +3481,7 @@ mod tests {
         fragment.clone()
     }
 
-    /// INV-035: a disguised credential in a token the stream never closed is
+    /// a disguised credential in a token the stream never closed is
     /// caught, the shape a truncated argument delta actually takes.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
@@ -2853,7 +3498,7 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: an invalid escape ahead of a disguised credential does not
+    /// an invalid escape ahead of a disguised credential does not
     /// hide it.
     #[test]
     #[should_panic(expected = "must not be recoverable")]
@@ -2886,10 +3531,10 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// INV-035: a credential spelled as a surrogate pair survives a boundary
+    /// a credential spelled as a surrogate pair survives a boundary
     /// that falls between the pair's two halves.
     #[test]
-    fn inv_035_surrogate_pair_credential_split_mid_escape_is_redacted() {
+    fn surrogate_pair_credential_split_mid_escape_is_redacted() {
         let key = credential("key\u{1f600}loop");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
@@ -2916,11 +3561,11 @@ mod tests {
         assert_eq!(arguments, r#"{"emoji":"[redacted]"}"#);
     }
 
-    /// INV-035: a held credential prefix ending inside an escape is replaced
+    /// a held credential prefix ending inside an escape is replaced
     /// rather than forwarded when another tool call's arguments arrive, so no
     /// later observation can reassemble it across the fact boundary.
     #[test]
-    fn inv_035_held_partial_escape_is_flushed_closed_before_another_tool_index() {
+    fn held_partial_escape_is_flushed_closed_before_another_tool_index() {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);

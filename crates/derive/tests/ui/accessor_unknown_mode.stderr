@@ -1,0 +1,5 @@
+error: unknown get mode
+ --> tests/ui/accessor_unknown_mode.rs:5:11
+  |
+5 |     #[get(mystery)]
+  |           ^^^^^^^

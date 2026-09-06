@@ -11,16 +11,13 @@ to bound or size a fixture.
 The live-line merge adds one model-exchange policy to the original audit and the
 automatic-resume lifetime ceiling one goal policy; the liveness watchdog's
 single recovery-attempt constant now answers to two configured policies because
-its two consumers need different ceilings. The 128 rows partition as 36 guards,
-8 derived bounds, 70 configuration policies, 10 representation facts, and 4 test
+its two consumers need different ceilings. The 127 rows partition as 36 guards,
+8 derived bounds, 69 configuration policies, 10 representation facts, and 4 test
 fixtures. Source locations are maintained with the implementation slices that
 move or delete declarations.
 
-The numeric-bound gate accepts only structural guards, values mechanically
-derived from guards, representation facts, and test fixtures from this
-classified set. Exact pre-existing daemon and persistence candidates omitted
-from the commissioned audit remain outside the blocking set; any newly named
-bound in either root fails closed.
+The inventory distinguishes structural guards, values mechanically derived from
+guards, representation facts, test fixtures, and deployment configuration.
 
 ## Guards and derived bounds
 
@@ -40,7 +37,7 @@ bound in either root fails closed.
 | `crates/process-protocol/src/lib.rs:121`                       | `MAX_REVIEW_ORCHESTRATION_MEMBERS`          | guard   | A review request exhausting wire-frame memory.                                                  |
 | `crates/process-protocol/src/lib.rs:5902`                      | `MAX_UTF8_BYTES`                            | guard   | Mirrors the domain runner-working-directory wire grammar.                                       |
 | `apps/signalboxd/src/convergence_sweep_runtime.rs:47`          | `MAX_RESPONSE_BYTES`                        | guard   | One buffered provider response exhausting process memory.                                       |
-| `apps/signalboxd/src/convergence_sweep_runtime.rs:57`          | `MAX_CREDENTIAL_BYTES`                      | guard   | Credential input exhausting secret-material memory.                                             |
+| `apps/signalboxd/src/convergence_sweep_runtime.rs:57`          | `MAX_CREDENTIAL_BYTES`                      | guard   | Credential material reaching a provider request past the accepted size.                         |
 | `apps/signalboxd/src/turn_liveness_runtime.rs:108`             | `QUIESCENT_ROTATION_PAGE_CEILING`           | guard   | A non-converging quiescent-rotation scan loop.                                                  |
 | `apps/signalboxd/src/goal_mode.rs:95`                          | `AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES`   | guard   | Retrying forever against a dead database.                                                       |
 | `crates/model-runtime/src/provider_json.rs:11`                 | `PROVIDER_JSON_NESTING_LIMIT`               | guard   | Pathological provider-JSON nesting exhausting the stack.                                        |
@@ -75,7 +72,6 @@ bound in either root fails closed.
 
 | Source                               | Constant                                          | Tier   | Required field replacing the constant                                                |
 | ------------------------------------ | ------------------------------------------------- | ------ | ------------------------------------------------------------------------------------ |
-| `config/signalboxd.example.toml:24`  | `REPOSITORY_RECONCILIATION_QUANTUM`               | config | `numeric_bounds.repository_reconciliation_quantum`                                   |
 | `config/signalboxd.example.toml:26`  | `MAX_CONCURRENT_SNAPSHOT_READERS`                 | config | `numeric_bounds.max_concurrent_snapshot_readers`                                     |
 | `config/signalboxd.example.toml:28`  | `MAX_BLOB_REPLICA_COUNT`                          | config | `numeric_bounds.max_blob_replica_count`                                              |
 | `config/signalboxd.example.toml:30`  | `MAX_SESSION_METADATA_TAGS`                       | config | `numeric_bounds.max_session_metadata_tags`                                           |

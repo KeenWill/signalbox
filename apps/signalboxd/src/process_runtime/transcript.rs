@@ -749,6 +749,29 @@ where
             .await?;
             write_content(writer, version, request_id, *entry_index, content).await
         }
+        ProcessTranscriptEntry::ProviderCompaction {
+            entry_index,
+            source_session,
+            entry,
+            turn,
+            model_call,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::ProviderCompaction {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                        model_call_id: wire_uuid(model_call.into_uuid()),
+                    },
+                },
+            )
+            .await
+        }
         ProcessTranscriptEntry::AssistantToolUse {
             entry_index,
             source_session,

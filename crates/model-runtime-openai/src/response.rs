@@ -341,6 +341,8 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 reported_model,
                 content,
                 usage,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
             })
         }
         Some(finish) => TerminalEvidence::Completed(CompletionEvidence {

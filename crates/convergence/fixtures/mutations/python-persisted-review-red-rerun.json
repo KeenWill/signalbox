@@ -1,0 +1,14 @@
+{
+  "source": "rename-only-head.json",
+  "edge": "persisted review red rerun",
+  "mutations": [
+    {
+      "path": "/observations/0/1/response/data/repository/object/statusCheckRollup/contexts/nodes/0/conclusion",
+      "value": "FAILURE"
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup/contexts/nodes/0/conclusion",
+      "value": "FAILURE"
+    }
+  ]
+}

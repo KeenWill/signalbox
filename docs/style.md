@@ -335,9 +335,9 @@ does not replace those join keys.
 
 A code comment states a constraint, rationale, or contract directly. Process
 artifacts, dates, reviews, and decision-history documents are provenance for git
-history, not authorities cited in source comments. Cite an owning spec by name,
-or an applicable scenario or invariant identifier, without a process-rule or
-section number.
+history, not authorities cited in source comments. Citations name the owning
+spec without a process-rule or section number; test comments may retain existing
+`SNN` grouping labels.
 
 When code defends against a failure the type system cannot express, such as
 stack depth, timing, or resource exhaustion, its comment names the failure the
@@ -370,10 +370,10 @@ it decodes, which makes a missing decoder visible by inspection.
 
 Every public item in the domain and application crates — including enum variants
 and public struct fields — carries a doc comment. `DelegationTransitionFailure`
-and `DelegationTransitionError` in `crates/domain/src/session_delegation.rs` are
-undocumented; document them when next changing that file. `missing_docs` stays
-off until the workspace has no undocumented public items (see mechanical
-enforcement).
+and `DelegationTransitionError` in
+`crates/domain/src/session_delegation/relation.rs` are undocumented; document
+them when next changing that file. `missing_docs` stays off until the workspace
+has no undocumented public items (see mechanical enforcement).
 
 Every arm of a tagged wire decoder in the native client names its complete
 admitted field set, through the shared rejection helper or a hand-written
@@ -403,17 +403,15 @@ the whole workspace passes it at `deny`.
 explicit matching until the workspace's remaining wildcard arms are gone and the
 lint can be enabled at `deny`.
 
-### The style-rule checker
+### Review conventions
 
-`scripts/check_style_rules.py` checks the three conventions below, which a text
-scan can decide without type resolution. It runs in CI as a blocking step. A
-rule is added to it only once the tree has no violations of that rule.
+Review enforces these conventions:
 
-| Rule  | Convention it decides                                             |
-| ----- | ----------------------------------------------------------------- |
-| SR-8  | no production code under `apps/` names a table in SQL             |
-| SR-12 | every clap argument and `ValueEnum` variant carries a doc comment |
-| SR-13 | no proc-macro diagnostic is spanned on the macro call site        |
+| Rule  | Convention                                                    |
+| ----- | ------------------------------------------------------------- |
+| SR-8  | production code under `apps/` does not name a table in SQL    |
+| SR-12 | every clap argument and `ValueEnum` variant has a doc comment |
+| SR-13 | proc-macro diagnostics are not spanned on the macro call site |
 
 The other conventions in this guide are applied by the author when writing the
 change, because the fact they depend on (who owns a bound, whether two helpers

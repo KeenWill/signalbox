@@ -7,7 +7,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    error::Error,
     fmt,
     future::Future,
     num::NonZeroU64,
@@ -47,10 +46,11 @@ use signalbox_domain::{
     ImportedSourceAttestation, ImportedSpeaker, ImportedText, ImportedTranscriptContent,
     ImportedTranscriptEntryId, InitialToolApproval, ModelCallId, ModelCallTerminalIdentities,
     ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest, RecordedUserOverride,
-    RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId,
-    SessionSystemPrompt, StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
+    PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest, ProviderCompactionBlock,
+    RecordedUserOverride, RefusedModelCallTurnIdentities, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
+    SessionConfigurationDefaultsVersion, SessionId, SessionSystemPrompt,
+    StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
     StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
     ToolExecutionError, ToolRequest, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
     ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent, UserContentPart,
@@ -244,6 +244,15 @@ pub enum ModelConversationMessage {
         producing_call: ModelCallId,
         /// Exact assistant-owned text.
         content: AssistantText,
+    },
+    /// One opaque provider-produced compaction block rendered with the assistant role.
+    ProviderCompaction {
+        /// The source-qualified semantic entry being rendered.
+        source: SemanticTranscriptEntryRef,
+        /// The outcome-authoritative call that produced the block.
+        producing_call: ModelCallId,
+        /// The complete provider block retained for exact replay.
+        block: ProviderCompactionBlock,
     },
     /// One durable assistant tool proposal.
     AssistantToolUse {
@@ -513,6 +522,14 @@ fn render_frontier_messages<'a>(
                 producing_call: *producing_call,
                 content: value.clone(),
             }),
+            SemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call,
+                block,
+            } => messages.push(ModelConversationMessage::ProviderCompaction {
+                source,
+                producing_call: *producing_call,
+                block: block.clone(),
+            }),
             SemanticTranscriptEntryPayload::AssistantToolUse {
                 producing_call,
                 request,
@@ -755,6 +772,9 @@ fn projected_frontier_content_bytes<'a>(
             },
             SemanticTranscriptEntryPayload::ContextSummary { value, .. }
             | SemanticTranscriptEntryPayload::AssistantText { value, .. } => value.as_str().len(),
+            SemanticTranscriptEntryPayload::ProviderCompaction { block, .. } => {
+                block.as_json().len()
+            }
             // Identity-only payloads carry no content of their own. Tool
             // payloads name evidence rather than carrying it, and that
             // evidence is summed below.
@@ -948,9 +968,11 @@ impl PreparedModelOperation {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked frontier could not be projected into the current text-only input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelFrontierRenderingError {
+    #[error("model frontier origin content is missing")]
     /// A frontier origin was missing its reconstituted accepted-input content.
     MissingOriginContent {
         /// The source-qualified origin entry.
@@ -958,45 +980,55 @@ pub enum ModelFrontierRenderingError {
         /// The accepted input whose content was absent.
         accepted_input: AcceptedInputId,
     },
+    #[error("model frontier attachment catalog fact is missing")]
     /// A referenced attachment lacked its immutable catalog length fact.
     MissingAttachmentBlobFact {
         /// Global blob identity whose catalog projection was absent.
         digest: BlobDigest,
     },
+    #[error("model frontier attachment stub could not be serialized")]
     /// Canonical attachment metadata could not be serialized.
     AttachmentStubSerialization,
+    #[error("model frontier attachment stub exceeded its byte bound")]
     /// Checked attachment metadata exceeded its derived rendered bound.
     AttachmentStubBoundExceeded,
+    #[error("model frontier tool evidence is duplicated")]
     /// Two storage evidence values claimed the same semantic entry.
     DuplicateToolEvidence {
         /// Duplicated source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier tool evidence is missing or mismatched")]
     /// Reference-only tool history lacks exact correlated durable authority.
     MissingOrMismatchedToolEvidence {
         /// Source-qualified entry whose evidence is absent or cross-wired.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier contains an unrenderable tool result")]
     /// Durable ambiguity cannot be projected as an ordinary model-visible result.
     UnrenderableToolResult {
         /// Source-qualified result entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier tool evidence is not referenced")]
     /// Storage supplied evidence not named by the checked frontier.
     UnexpectedToolEvidence {
         /// Extra source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("context projection entry is missing from its frontier")]
     /// A projection named an entry absent from its complete source frontier.
     MissingProjectedEntry {
         /// The absent source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier delegation delivery is inconsistent")]
     /// A stored delegation wait mode contradicted its delivery position.
     InvalidDelegationDelivery {
         /// Source-qualified delegation-result entry.
         entry: SemanticTranscriptEntryRef,
     },
+    #[error("model frontier retained content exceeds its ceiling")]
     /// The projected frontier content exceeded its retained-content ceiling.
     ///
     /// Raised before any projected content is cloned, so the refusal bounds the
@@ -1007,54 +1039,10 @@ pub enum ModelFrontierRenderingError {
         /// The ceiling in force for this render.
         limit_bytes: usize,
     },
+    #[error("invalid context-compaction projection")]
     /// The complete durable frontier carries malformed summary provenance.
     InvalidContextProjection(ContextFrontierProjectionFailure),
 }
-
-impl fmt::Display for ModelFrontierRenderingError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingOriginContent { .. } => {
-                formatter.write_str("model frontier origin content is missing")
-            }
-            Self::MissingAttachmentBlobFact { .. } => {
-                formatter.write_str("model frontier attachment catalog fact is missing")
-            }
-            Self::AttachmentStubSerialization => {
-                formatter.write_str("model frontier attachment stub could not be serialized")
-            }
-            Self::AttachmentStubBoundExceeded => {
-                formatter.write_str("model frontier attachment stub exceeded its byte bound")
-            }
-            Self::DuplicateToolEvidence { .. } => {
-                formatter.write_str("model frontier tool evidence is duplicated")
-            }
-            Self::MissingOrMismatchedToolEvidence { .. } => {
-                formatter.write_str("model frontier tool evidence is missing or mismatched")
-            }
-            Self::UnrenderableToolResult { .. } => {
-                formatter.write_str("model frontier contains an unrenderable tool result")
-            }
-            Self::UnexpectedToolEvidence { .. } => {
-                formatter.write_str("model frontier tool evidence is not referenced")
-            }
-            Self::MissingProjectedEntry { .. } => {
-                formatter.write_str("context projection entry is missing from its frontier")
-            }
-            Self::InvalidDelegationDelivery { .. } => {
-                formatter.write_str("model frontier delegation delivery is inconsistent")
-            }
-            Self::RetainedFrontierContentLimitExceeded { .. } => {
-                formatter.write_str("model frontier retained content exceeds its ceiling")
-            }
-            Self::InvalidContextProjection(_) => {
-                formatter.write_str("invalid context-compaction projection")
-            }
-        }
-    }
-}
-
-impl Error for ModelFrontierRenderingError {}
 
 impl ClassifyOperatorFailure for ModelFrontierRenderingError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -1299,7 +1287,7 @@ pub enum RetainedModelCallObservationStatus {
 ///
 /// This state prevents a later service invocation or explicit composition
 /// handoff from repeating credential work, losing proof that provider entry
-/// never occurred, or dropping an unchanged terminal observation. INV-014 and
+/// never occurred, or dropping an unchanged terminal observation.
 /// docs/spec/model-call-execution.md requires a linear handoff token: callers
 /// may move it between service `into_parts` and `from_parts` handoffs, but
 /// cannot construct or clone evidence.
@@ -1565,6 +1553,7 @@ pub enum ModelCallExecutionOutcome {
     ObservationAlreadyCommitted(ModelCallId),
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Failure annotated with the exact orchestration stage that failed.
 #[derive(Debug)]
 pub enum ModelCallExecutionError<
@@ -1574,18 +1563,32 @@ pub enum ModelCallExecutionError<
     ProviderError,
     ObservationError,
 > {
+    #[error("model-call prepare stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_prepare")]
     /// The prepare-call transaction failed.
     Prepare(PrepareError),
+    #[error("model-call render stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_render")]
     /// Provider-neutral request rendering failed closed.
     Render(ModelFrontierRenderingError),
+    #[error("model-call capability stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_capability_preparation")]
     /// Credential lookup or capability preparation failed as an operator error.
     CapabilityPreparation(ProviderError),
+    #[error("model-call prepared-failure commit failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_prepared_failure_commit")]
     /// The guarded prepared-call failure transaction failed.
     PreparedFailureCommit(FailureError),
+    #[error("model-call prepared-failure reread failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_prepared_failure_reread")]
     /// Authoritative reread of a retained prepared-call failure failed.
     PreparedFailureReread(FailureError),
+    #[error("model-call authorization stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_authorization")]
     /// Durable send authorization failed.
     Authorization(AuthorizationError),
+    #[error("model-call authorization reread failed: {reread_error}")]
+    #[operator(delegate = reread_error, code = "model_call_authorization_reread")]
     /// Authoritative reread after an ambiguous authorization also failed.
     AuthorizationReread {
         /// The original commit-ambiguous authorization failure.
@@ -1593,10 +1596,16 @@ pub enum ModelCallExecutionError<
         /// The failure to establish whether authorization committed.
         reread_error: AuthorizationError,
     },
+    #[error("model-call authorization reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_authorization_reconciliation")]
     /// A later pass still could not reconcile retained non-consumption proof.
     AuthorizationReconciliation(AuthorizationError),
+    #[error("model-call provider stage failed: {field_0}")]
+    #[operator(delegate = 0, code = "model_call_provider")]
     /// Provider work produced no trustworthy observation.
     Provider(ProviderError),
+    #[error("model-call observation commit failed: {error}")]
+    #[operator(delegate = error, code = "model_call_observation_commit")]
     /// The terminal-observation transaction failed.
     ObservationCommit {
         /// The failed observation transaction or authoritative reread.
@@ -1604,129 +1613,6 @@ pub enum ModelCallExecutionError<
         /// The unchanged provider observation retained for a later pass.
         retained_observation: CorrelatedModelCallTerminalObservation,
     },
-}
-
-impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> fmt::Display
-    for ModelCallExecutionError<
-        PrepareError,
-        FailureError,
-        AuthorizationError,
-        ProviderError,
-        ObservationError,
-    >
-where
-    PrepareError: fmt::Display,
-    FailureError: fmt::Display,
-    AuthorizationError: fmt::Display,
-    ProviderError: fmt::Display,
-    ObservationError: fmt::Display,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Prepare(error) => write!(formatter, "model-call prepare stage failed: {error}"),
-            Self::Render(error) => write!(formatter, "model-call render stage failed: {error}"),
-            Self::CapabilityPreparation(error) => {
-                write!(formatter, "model-call capability stage failed: {error}")
-            }
-            Self::PreparedFailureCommit(error) => {
-                write!(
-                    formatter,
-                    "model-call prepared-failure commit failed: {error}"
-                )
-            }
-            Self::PreparedFailureReread(error) => {
-                write!(
-                    formatter,
-                    "model-call prepared-failure reread failed: {error}"
-                )
-            }
-            Self::Authorization(error) => {
-                write!(formatter, "model-call authorization stage failed: {error}")
-            }
-            Self::AuthorizationReread { reread_error, .. } => {
-                write!(
-                    formatter,
-                    "model-call authorization reread failed: {reread_error}"
-                )
-            }
-            Self::AuthorizationReconciliation(error) => {
-                write!(
-                    formatter,
-                    "model-call authorization reconciliation failed: {error}"
-                )
-            }
-            Self::Provider(error) => write!(formatter, "model-call provider stage failed: {error}"),
-            Self::ObservationCommit { error, .. } => {
-                write!(formatter, "model-call observation commit failed: {error}")
-            }
-        }
-    }
-}
-
-impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> Error
-    for ModelCallExecutionError<
-        PrepareError,
-        FailureError,
-        AuthorizationError,
-        ProviderError,
-        ObservationError,
-    >
-where
-    PrepareError: Error + 'static,
-    FailureError: Error + 'static,
-    AuthorizationError: Error + 'static,
-    ProviderError: Error + 'static,
-    ObservationError: Error + 'static,
-{
-}
-
-impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError>
-    ClassifyOperatorFailure
-    for ModelCallExecutionError<
-        PrepareError,
-        FailureError,
-        AuthorizationError,
-        ProviderError,
-        ObservationError,
-    >
-where
-    PrepareError: ClassifyOperatorFailure,
-    FailureError: ClassifyOperatorFailure,
-    AuthorizationError: ClassifyOperatorFailure,
-    ProviderError: ClassifyOperatorFailure,
-    ObservationError: ClassifyOperatorFailure,
-{
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        match self {
-            Self::Prepare(error) => error.operator_failure_class(),
-            Self::Render(error) => error.operator_failure_class(),
-            Self::CapabilityPreparation(error) | Self::Provider(error) => {
-                error.operator_failure_class()
-            }
-            Self::PreparedFailureCommit(error) | Self::PreparedFailureReread(error) => {
-                error.operator_failure_class()
-            }
-            Self::Authorization(error) => error.operator_failure_class(),
-            Self::AuthorizationReread { reread_error, .. } => reread_error.operator_failure_class(),
-            Self::AuthorizationReconciliation(error) => error.operator_failure_class(),
-            Self::ObservationCommit { error, .. } => error.operator_failure_class(),
-        }
-    }
-
-    fn operator_failure_cause_code(&self) -> &'static str {
-        match self {
-            Self::Prepare(_) => "model_call_prepare",
-            Self::Render(_) => "model_call_render",
-            Self::CapabilityPreparation(_) => "model_call_capability_preparation",
-            Self::PreparedFailureCommit(_) => "model_call_prepared_failure_commit",
-            Self::PreparedFailureReread(_) => "model_call_prepared_failure_reread",
-            Self::Authorization(_) => "model_call_authorization",
-            Self::AuthorizationReread { .. } => "model_call_authorization_reread",
-            Self::AuthorizationReconciliation(_) => "model_call_authorization_reconciliation",
-            Self::Provider(_) => "model_call_provider",
-            Self::ObservationCommit { .. } => "model_call_observation_commit",
-        }
-    }
 }
 
 /// Coordinates one staged model-call execution invocation.
@@ -2523,7 +2409,17 @@ where
                     self.ids.next_context_frontier_id(),
                 ))
             }
-            ModelCallTerminalObservation::CompletedWithTools { response } => {
+            ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
+                let assistant_entries = (0..response.len())
+                    .map(|_| self.ids.next_semantic_entry_id())
+                    .collect();
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    assistant_entries,
+                    self.ids.next_semantic_entry_id(),
+                    self.ids.next_context_frontier_id(),
+                ))
+            }
+            ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
                 let mut approval_index = 0usize;
                 let mut continuing = Vec::with_capacity(response.parts().len());
                 let mut stopped = Vec::with_capacity(response.parts().len());
@@ -2532,6 +2428,11 @@ where
                     match part {
                         AssistantResponsePart::Text(_) => {
                             continuing.push(ToolResponsePartIdentity::text(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ProviderCompaction(_) => {
+                            continuing.push(ToolResponsePartIdentity::provider_compaction(
                                 self.ids.next_semantic_entry_id(),
                             ));
                         }
@@ -2562,6 +2463,11 @@ where
                     match part {
                         AssistantResponsePart::Text(_) => {
                             stopped.push(StoppedToolResponsePartIdentity::text(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ProviderCompaction(_) => {
+                            stopped.push(StoppedToolResponsePartIdentity::provider_compaction(
                                 self.ids.next_semantic_entry_id(),
                             ));
                         }
@@ -2608,6 +2514,17 @@ where
             ModelCallTerminalObservation::Refused => ModelCallTerminalIdentities::Refused(
                 RefusedModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
+            ModelCallTerminalObservation::RefusedWithProviderCompaction {
+                provider_compaction,
+                ..
+            } => ModelCallTerminalIdentities::Refused(
+                RefusedModelCallTurnIdentities::new(self.ids.next_context_frontier_id())
+                    .with_provider_compaction_entries(
+                        (0..provider_compaction.len())
+                            .map(|_| self.ids.next_semantic_entry_id())
+                            .collect(),
+                    ),
+            ),
             ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous(
                 AmbiguousModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
@@ -2631,7 +2548,7 @@ where
         advertised_tools: &[ToolDefinition],
         recorded_user_overrides: &[RecordedUserOverride],
     ) -> Box<[InitialToolApproval]> {
-        let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } = observation else {
             return Box::new([]);
         };
         let mut remaining_overrides: Vec<&RecordedUserOverride> =
@@ -2640,7 +2557,9 @@ where
             .parts()
             .iter()
             .filter_map(|part| match part {
-                AssistantResponsePart::Text(_) => None,
+                AssistantResponsePart::Text(_) | AssistantResponsePart::ProviderCompaction(_) => {
+                    None
+                }
                 AssistantResponsePart::ToolCall(proposal) => {
                     if proposal.is_suppressed() {
                         return Some(InitialToolApproval::RuntimeSafetyDeny);
@@ -2861,33 +2780,23 @@ pub enum ScriptedModelCallStep {
     Return(ModelCallTerminalObservation),
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized failure from the deterministic scripted provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScriptedModelCallError {
+    #[error("scripted model-call actions are exhausted")]
     /// No scripted action remained for a requested capability.
     ScriptExhausted,
+    #[error("scripted model-call capability preparation failed")]
     /// The script explicitly selected a capability-stage operator failure.
     CapabilityOperatorFailure,
+    #[error("scripted model-call interaction failed")]
     /// The script explicitly selected an interaction-stage operator failure.
     InteractionOperatorFailure,
+    #[error("scripted model-call authorization does not match its capability")]
     /// Issued authorization did not match the prepared capability.
     AuthorizationMismatch,
 }
-
-impl fmt::Display for ScriptedModelCallError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ScriptExhausted => "scripted model-call actions are exhausted",
-            Self::CapabilityOperatorFailure => "scripted model-call capability preparation failed",
-            Self::InteractionOperatorFailure => "scripted model-call interaction failed",
-            Self::AuthorizationMismatch => {
-                "scripted model-call authorization does not match its capability"
-            }
-        })
-    }
-}
-
-impl Error for ScriptedModelCallError {}
 
 impl ClassifyOperatorFailure for ScriptedModelCallError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -3069,6 +2978,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::{
         collections::VecDeque,
         io::{self, Write},
@@ -3157,10 +3067,10 @@ mod tests {
             .expect("text-only fixture needs no attachment catalog facts")
     }
 
-    /// S02 / INV-015 / INV-062: ordered attachment content becomes bounded
+    /// ordered attachment content becomes bounded
     /// canonical text stubs with metadata visible and blob bytes absent.
     #[test]
-    fn s02_inv015_inv062_attachment_frontier_renders_ordered_stubs_without_bytes() {
+    fn attachment_frontier_renders_ordered_stubs_without_bytes() {
         let digest = BlobDigest::digest(b"secret blob bytes");
         let filename =
             signalbox_domain::AttachmentDisplayFilename::try_new(String::from("scan\".png"))
@@ -3413,6 +3323,8 @@ mod tests {
         ModelCallTerminalObservation::CompletedWithTools {
             response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
                 .expect("fixture response contains tools"),
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         }
     }
 
@@ -4649,7 +4561,7 @@ mod tests {
     /// The user-selected rendering decision: origin input becomes a user-role
     /// message carrying the semantic entry's source, in frontier order.
     #[test]
-    fn s02_inv015_frontier_rendering_preserves_user_role_order_and_source() {
+    fn frontier_rendering_preserves_user_role_order_and_source() {
         let (request, _) = prepared_fixture();
         let credential_reference = credential_reference();
         let operation = PreparedModelOperation::render(
@@ -4682,11 +4594,11 @@ mod tests {
         );
     }
 
-    /// S34 / INV-046: rendering binds the exact optional frozen-epoch system
+    /// rendering binds the exact optional frozen-epoch system
     /// prompt onto the provider-neutral operation without rewriting it, and
     /// an epoch without a prompt renders none.
     #[test]
-    fn s34_inv046_render_carries_the_frozen_epoch_system_prompt() {
+    fn render_carries_the_frozen_epoch_system_prompt() {
         let (request, _) = prepared_fixture();
         let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
             .expect("fixture prompt is admissible");
@@ -4715,7 +4627,7 @@ mod tests {
     /// The recorded turn-wide availability bound counts validated producing
     /// calls, not requests or inherited tool history.
     #[test]
-    fn s15_automatic_tool_round_bound_counts_current_turn_producing_calls() {
+    fn automatic_tool_round_bound_counts_current_turn_producing_calls() {
         let current_turn = identity(2, TurnId::from_uuid);
         let below_limit_count = 31;
         let below_limit = current_turn_tool_rounds(below_limit_count);
@@ -4780,6 +4692,8 @@ mod tests {
         ModelCallTerminalObservation::CompletedWithTools {
             response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
                 .expect("fixture response contains tools"),
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         }
     }
 
@@ -4831,12 +4745,12 @@ mod tests {
         )
     }
 
-    /// S10 / INV-020: a recorded override substitutes for the judge only on the
+    /// a recorded override substitutes for the judge only on the
     /// exact denied command — a proposal with other arguments still parks for
     /// the judge — and the selected approval carries the override command and
     /// the overridden denial.
     #[test]
-    fn s10_inv020_recorded_override_substitutes_for_the_judge_on_the_exact_command() {
+    fn recorded_override_substitutes_for_the_judge_on_the_exact_command() {
         let recorded = recorded_guarded_override();
         let approvals = guarded_tool_approvals(
             signalbox_domain::ToolApprovalPosture::Delegated,
@@ -4859,10 +4773,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-020: one recorded override pre-approves at most one proposal
+    /// one recorded override pre-approves at most one proposal
     /// per response; a second identical proposal parks for the judge again.
     #[test]
-    fn s10_inv020_recorded_override_is_consumed_at_most_once_per_response() {
+    fn recorded_override_is_consumed_at_most_once_per_response() {
         let recorded = recorded_guarded_override();
         let approvals = guarded_tool_approvals(
             signalbox_domain::ToolApprovalPosture::Delegated,
@@ -4882,10 +4796,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-020: a recorded override substitutes only where the judge
+    /// a recorded override substitutes only where the judge
     /// would decide; a human-frozen selection is never overridden.
     #[test]
-    fn s10_inv020_recorded_override_never_bypasses_a_human_selection() {
+    fn recorded_override_never_bypasses_a_human_selection() {
         let approvals = guarded_tool_approvals(
             signalbox_domain::ToolApprovalPosture::Human,
             vec![guarded_proposal("{}")],
@@ -4895,12 +4809,12 @@ mod tests {
         assert_eq!(approvals.as_ref(), [InitialToolApproval::Human]);
     }
 
-    /// S10 / INV-001 / INV-020: one identity is minted per ordered response
+    /// one identity is minted per ordered response
     /// part/request, approval stays pinned to the advertised catalog snapshot,
     /// mixed auto/confirm policy parks without a continuation attempt, and the
     /// adapter still receives a stopped race closure.
     #[test]
-    fn s10_inv001_inv020_tool_response_candidates_preserve_order_and_policy() {
+    fn tool_response_candidates_preserve_order_and_policy() {
         let schema =
             crate::ToolInputSchema::try_new(String::from(r#"{"properties":{},"type":"object"}"#))
                 .expect("fixture schema is valid");
@@ -5013,10 +4927,10 @@ mod tests {
         );
     }
 
-    /// S10 / INV-020 / INV-035: a credential-suppressed proposal bypasses the
+    /// a credential-suppressed proposal bypasses the
     /// advertised execution policy and receives an automatic safety denial.
     #[test]
-    fn s10_inv020_inv035_suppressed_proposal_forces_runtime_safety_denial() {
+    fn suppressed_proposal_forces_runtime_safety_denial() {
         let service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
@@ -5039,7 +4953,11 @@ mod tests {
             ),
         ])
         .expect("suppressed proposal remains one bounded logical request");
-        let observation = ModelCallTerminalObservation::CompletedWithTools { response };
+        let observation = ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        };
 
         assert_eq!(
             service
@@ -5053,11 +4971,11 @@ mod tests {
             [InitialToolApproval::RuntimeSafetyDeny]
         );
     }
-    /// S28 / INV-038 / INV-039: attested imported text keeps its exact
+    /// attested imported text keeps its exact
     /// source-attested role, semantic source, imported authority, and decoded
     /// text without acquiring a native input or call identity.
     #[test]
-    fn s28_inv038_inv039_frontier_rendering_preserves_imported_text_roles_and_sources() {
+    fn frontier_rendering_preserves_imported_text_roles_and_sources() {
         let imported_user_entry =
             identity(110, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
         let imported_assistant_entry =
@@ -5128,10 +5046,10 @@ mod tests {
         assert_eq!(content.as_str(), exact_assistant.as_str());
     }
 
-    /// S28 / INV-038 / INV-039: typed imported text or speaker absence remains
+    /// typed imported text or speaker absence remains
     /// model-invisible rather than guessing a role or fabricating content.
     #[test]
-    fn s28_inv038_inv039_frontier_rendering_skips_imported_text_with_typed_absence() {
+    fn frontier_rendering_skips_imported_text_with_typed_absence() {
         let projected_session = identity(120, SessionId::from_uuid);
         let imported_entry = identity(121, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
         let exact_text = ImportedText::new(String::from("must remain hidden"));
@@ -5204,11 +5122,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038 / INV-039: the conservative frontier renderer leaves
+    /// the conservative frontier renderer leaves
     /// every imported non-text vocabulary member model-invisible without
     /// removing it from the semantic frontier or inventing native tool facts.
     #[test]
-    fn s28_inv038_inv039_frontier_rendering_skips_every_imported_non_text_variant() {
+    fn frontier_rendering_skips_every_imported_non_text_variant() {
         let projected_session = identity(130, SessionId::from_uuid);
         let imported_entry = identity(131, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
         let speaker = ImportedSourceAttestation::Attested(ImportedSpeaker::User);
@@ -5339,11 +5257,11 @@ mod tests {
         );
     }
 
-    /// S02 / INV-015: mixed semantic content keeps exact role order and
+    /// mixed semantic content keeps exact role order and
     /// source-qualified provenance, including entries created by a different
     /// session; terminal markers do not invent provider-visible messages.
     #[test]
-    fn s02_inv015_frontier_rendering_preserves_mixed_roles_and_inherited_sources() {
+    fn frontier_rendering_preserves_mixed_roles_and_inherited_sources() {
         let inherited_session = identity(90, SessionId::from_uuid);
         let current_session = identity(1, SessionId::from_uuid);
         let inherited_input = identity(91, AcceptedInputId::from_uuid);
@@ -5544,11 +5462,11 @@ mod tests {
         );
     }
 
-    /// S02 / INV-015: durable request, attempt, and denial authority renders
+    /// durable request, attempt, and denial authority renders
     /// reference-only tool semantics into their exact provider-visible roles
     /// without changing source order.
     #[test]
-    fn s02_inv015_frontier_rendering_resolves_exact_tool_roles_in_source_order() {
+    fn frontier_rendering_resolves_exact_tool_roles_in_source_order() {
         let completed_request = model_tool_request(0);
         let denied_request = model_tool_request(1);
         let closed_request = model_tool_request(2);
@@ -5731,10 +5649,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-015: a terminal attempt from another turn cannot supply
+    /// a terminal attempt from another turn cannot supply
     /// authority for a tool-result semantic entry.
     #[test]
-    fn s02_inv015_frontier_rendering_rejects_cross_turn_tool_result_evidence() {
+    fn frontier_rendering_rejects_cross_turn_tool_result_evidence() {
         let request = model_tool_request(0);
         let source = SemanticTranscriptEntryRef::from_source(
             request.session(),
@@ -5780,10 +5698,10 @@ mod tests {
         );
     }
 
-    /// S02 / INV-014: a newly committed Prepared checkpoint ends
+    /// a newly committed Prepared checkpoint ends
     /// the invocation before capability preparation or authorization.
     #[tokio::test]
-    async fn s02_inv014_checkpoint_stops_before_every_later_port() {
+    async fn checkpoint_stops_before_every_later_port() {
         let checkpoint = identity(70, ModelCallId::from_uuid);
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
@@ -5809,10 +5727,10 @@ mod tests {
         assert_eq!(prepare.calls, 1);
     }
 
-    /// S02 / INV-014: a proven fresh-identity collision retries only the
+    /// a proven fresh-identity collision retries only the
     /// rolled-back prepare transaction with fresh candidates.
     #[tokio::test]
-    async fn s02_inv014_prepare_identity_collision_retries_transaction_only() {
+    async fn prepare_identity_collision_retries_transaction_only() {
         let checkpoint = identity(71, ModelCallId::from_uuid);
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
@@ -5842,10 +5760,10 @@ mod tests {
         assert_eq!(prepare.calls, 2);
     }
 
-    /// INV-037: durable cancellation during capability preparation is
+    /// durable cancellation during capability preparation is
     /// authoritative no-work, not a local capability failure to terminalize.
     #[tokio::test]
-    async fn inv037_capability_preparation_cancellation_stops_without_failure_commit() {
+    async fn capability_preparation_cancellation_stops_without_failure_commit() {
         let (request, _) = prepared_fixture();
         let session = request.session();
         let mut service = ModelCallExecutionService::new(
@@ -5922,11 +5840,11 @@ mod tests {
         );
     }
 
-    /// S34 / INV-046: the execution loop presents the prepare transaction's
+    /// the execution loop presents the prepare transaction's
     /// exact frozen-epoch system prompt to the provider port with the
     /// capability operation; a promptless epoch presents none.
     #[tokio::test]
-    async fn s34_inv046_prepared_capability_receives_the_frozen_epoch_system_prompt() {
+    async fn prepared_capability_receives_the_frozen_epoch_system_prompt() {
         let (request, _) = prepared_fixture();
         let session = request.session();
         let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
@@ -6148,11 +6066,11 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// INV-062: a typed attachment failure terminalizes the prepared call
+    /// a typed attachment failure terminalizes the prepared call
     /// before durable send authorization or provider interaction, and the
     /// exact attachment evidence reaches the guarded failure transaction.
     #[tokio::test]
-    async fn inv062_attachment_failure_closes_before_durable_authorization() {
+    async fn attachment_failure_closes_before_durable_authorization() {
         let (request, _) = prepared_fixture();
         let session = request.session();
         let failed = failed_turn_fixture();
@@ -6197,10 +6115,10 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// INV-062: unavailable attachment verification leaves the exact call
+    /// unavailable attachment verification leaves the exact call
     /// prepared without durable failure or send authorization.
     #[tokio::test]
-    async fn inv062_attachment_unavailable_leaves_prepared_without_authorization() {
+    async fn attachment_unavailable_leaves_prepared_without_authorization() {
         let (request, _) = prepared_fixture();
         let session = request.session();
         let mut service = ModelCallExecutionService::new(
@@ -6309,12 +6227,12 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// S15 / INV-071: a turn that reaches the automatic tool-round limit closes
+    /// a turn that reaches the automatic tool-round limit closes
     /// with its distinct terminal reason before provider entry. This prevents
     /// a runaway paid provider loop without misreporting saturation as a
     /// capability failure.
     #[tokio::test]
-    async fn s15_inv071_tool_round_limit_fires_before_provider_entry() {
+    async fn tool_round_limit_fires_before_provider_entry() {
         const CONFIGURED_TOOL_ROUND_LIMIT: usize = 7;
         let (request, tool_entries, failed) =
             tool_round_saturated_fixture(CONFIGURED_TOOL_ROUND_LIMIT);
@@ -6358,7 +6276,7 @@ mod tests {
             captured
                 .text()
                 .contains("terminal_outcome=\"tool_round_limit_reached\""),
-            "the service terminalization must expose the INV-071 label"
+            "the service terminalization must expose the tool_round_limit_reached label"
         );
         let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
@@ -6399,6 +6317,7 @@ mod tests {
             let bytes = match message {
                 ModelConversationMessage::ContextSummary { content, .. }
                 | ModelConversationMessage::Assistant { content, .. } => content.as_str().len(),
+                ModelConversationMessage::ProviderCompaction { block, .. } => block.as_json().len(),
                 // Mirrors `user_content_text_bytes`: attachment stubs carry a
                 // fixed-width digest and bounded declarations held under
                 // `MAX_RENDERED_ATTACHMENT_STUB_BYTES`, so they sit outside the
@@ -6865,12 +6784,12 @@ mod tests {
         );
     }
 
-    /// S15 / INV-071: a turn whose retained tool content exceeds its ceiling
+    /// a turn whose retained tool content exceeds its ceiling
     /// closes through the same pre-send terminal contract as round saturation
     /// and never enters the provider. The round ceiling alone bounds latency and
     /// spend but not retained memory, which is what this bound supplies.
     #[tokio::test]
-    async fn s15_inv071_retained_frontier_content_limit_fires_before_provider_entry() {
+    async fn retained_frontier_content_limit_fires_before_provider_entry() {
         // Two rounds and no configured round ceiling at all, so only the
         // retained-content bound can explain the closure.
         let (request, tool_entries, failed) = tool_round_saturated_fixture(2);
@@ -6916,7 +6835,7 @@ mod tests {
         );
         assert!(
             telemetry.contains("terminal_outcome=\"tool_round_limit_reached\""),
-            "the service terminalization must expose the INV-071 label"
+            "the service terminalization must expose the tool_round_limit_reached label"
         );
         let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
@@ -6942,11 +6861,11 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// INV-071: an ambiguous tool-round-limit closure retains its exact cause,
+    /// an ambiguous tool-round-limit closure retains its exact cause,
     /// then an authoritative reread maps the landed closure to the distinct
     /// already-committed outcome without entering the provider.
     #[tokio::test]
-    async fn inv071_tool_round_limit_ambiguous_commit_round_trips_retained_cause() {
+    async fn tool_round_limit_ambiguous_commit_round_trips_retained_cause() {
         const CONFIGURED_TOOL_ROUND_LIMIT: usize = 5;
         let (request, tool_entries, _) = tool_round_saturated_fixture(CONFIGURED_TOOL_ROUND_LIMIT);
         let session = request.session();
@@ -7005,11 +6924,11 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// INV-037: if an interrupt wins after capability preparation reported a
+    /// if an interrupt wins after capability preparation reported a
     /// known failure, the retained reread accepts the durable cancellation as
     /// authoritative no-work rather than retrying failure closure forever.
     #[tokio::test]
-    async fn inv037_capability_failure_race_rereads_cancellation_as_no_work() {
+    async fn capability_failure_race_rereads_cancellation_as_no_work() {
         let (request, _) = prepared_fixture();
         let session = request.session();
         let mut service = ModelCallExecutionService::new(
@@ -7220,11 +7139,11 @@ mod tests {
         assert_eq!(provider.interaction_count(), 1);
     }
 
-    /// S02 / INV-014 / INV-034: a non-collision observation failure retains
+    /// a non-collision observation failure retains
     /// the exact result; later passes authoritatively resubmit it unchanged
     /// while absent and stop once the original commit is observed.
     #[tokio::test]
-    async fn s02_inv014_inv034_failed_observation_commit_is_retained_and_reread() {
+    async fn failed_observation_commit_is_retained_and_reread() {
         let (request, authorized) = prepared_fixture();
         let call = authorized.call().id();
         let session = authorized.session();
@@ -7304,12 +7223,12 @@ mod tests {
         assert_eq!(provider.interaction_count(), 1);
     }
 
-    /// S02 / INV-014 / INV-034: when authorization acknowledgement is lost,
+    /// when authorization acknowledgement is lost,
     /// the still-owned capability proves `invoke` was never entered. An
     /// authoritative InFlight reread becomes a correlated known-failure
     /// observation without any provider interaction.
     #[tokio::test]
-    async fn s02_inv014_inv034_ambiguous_authorization_classifies_unconsumed_in_flight() {
+    async fn ambiguous_authorization_classifies_unconsumed_in_flight() {
         let (request, authorized) = prepared_fixture();
         let call = authorized.call().id();
         let session = authorized.session();
@@ -7373,11 +7292,11 @@ mod tests {
         assert_eq!(provider.interaction_count(), 0);
     }
 
-    /// INV-014 / INV-037: an ambiguous authorization reread accepts a complete
+    /// an ambiguous authorization reread accepts a complete
     /// concurrent direct cancellation of the exact unsent call as
     /// authoritative no-work without entering the provider.
     #[tokio::test]
-    async fn inv014_inv037_ambiguous_authorization_accepts_terminal_cancellation() {
+    async fn ambiguous_authorization_accepts_terminal_cancellation() {
         let (request, _) = prepared_fixture();
         let session = request.session();
         let mut service = ModelCallExecutionService::new(
@@ -7545,11 +7464,11 @@ mod tests {
         ));
     }
 
-    /// INV-014: when an ambiguous authorization is proven to have rolled
+    /// when an ambiguous authorization is proven to have rolled
     /// back to Prepared, the unconsumed scripted interaction action can
     /// prepare again and still produces exactly one physical interaction.
     #[tokio::test]
-    async fn s02_inv014_authorization_rollback_reprepares_one_scripted_interaction_action() {
+    async fn authorization_rollback_reprepares_one_scripted_interaction_action() {
         let (request, authorized) = prepared_fixture();
         let session = request.session();
         let mut service = ModelCallExecutionService::new(
@@ -7609,11 +7528,11 @@ mod tests {
         assert_eq!(provider.remaining_step_count(), 0);
     }
 
-    /// S02 / INV-009 / INV-014: the attempt gate transfers into the provider
+    /// the attempt gate transfers into the provider
     /// interaction and is released at its acceptance-capable boundary while
     /// the slow terminal response remains pending.
     #[tokio::test]
-    async fn s02_inv009_inv014_dispatch_gate_releases_at_acceptance_boundary() {
+    async fn dispatch_gate_releases_at_acceptance_boundary() {
         let (request, authorized) = prepared_fixture();
         let session = authorized.session();
         let attempt = authorized.attempt().id();

@@ -83,8 +83,8 @@ that resolves a request names that ordinal. Delivery order fixes the
 interleaving and the named ordinal fixes which promise resolves, identically in
 live execution and replay. `DeliveryKind::resolves` carries that ordinal.
 
-[Repository watch](repo-watch.md) owns the durable cursor and event rows that
-are this substrate's event source. They stay readable to a matcher outside it.
+[Repository watch](repo-watch.md) owns its durable cursor and event rows inside
+the module boundary. No out-of-module matcher reads those tables.
 
 A malformed journal row is typed corruption under the fail-closed reconstitution
 contract in [persistence protocol](persistence-protocol.md).

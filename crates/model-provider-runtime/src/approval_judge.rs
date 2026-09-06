@@ -1,6 +1,6 @@
 //! Dedicated model execution for delegated tool-approval decisions.
 
-use std::{error::Error, fmt, future::Future, pin::Pin, sync::Arc};
+use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
 use serde_json::{Map, Value, value::RawValue};
 use signalbox_application::ApprovalJudgeAuthorization;
@@ -11,8 +11,9 @@ use signalbox_domain::{
 use signalbox_model_runtime::{
     CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference, DeliveryMode,
     ModelOperation, ModelRuntime, ModelSettings, NoDomainConstraints, Observation,
-    PreparationOutcome, ProviderReportedModel, RequestedTarget, ResolvedTarget,
-    StructuredOutputContract, TerminalEvidence, TokenUsage, UnsentCause, decode_structured,
+    PreparationOutcome, ProviderCompactionMode, ProviderReportedModel, RequestedTarget,
+    ResolvedTarget, StructuredOutputContract, TerminalEvidence, TokenUsage, UnsentCause,
+    decode_structured,
 };
 
 use crate::{ProviderTargetRelation, RuntimeModelCatalog, relate_provider_target};
@@ -240,6 +241,8 @@ where
             operation.system = Some(request.system_prompt);
             operation.output_contract = Some(contract.clone());
             operation.delivery = DeliveryMode::Buffered;
+            operation.provider_compaction = ProviderCompactionMode::Suppressed;
+            operation.provider_compaction_supported = definition.provider_compaction_supported();
             let preparation = self
                 .runtime
                 .prepare(operation, CancellationSignal::never())
@@ -298,6 +301,9 @@ where
     }
     let reported_model = match &report.evidence {
         TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            completion.reported_model.as_ref()
+        }
         TerminalEvidence::Refused(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::ProviderError(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::CancellationConfirmed(evidence) => evidence.reported_model.as_ref(),
@@ -310,6 +316,9 @@ where
     }
     let completed = match report.evidence {
         TerminalEvidence::Completed(completed) => completed,
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => {
+            return Err(ApprovalJudgeModelError::InvalidDecision(completion.usage));
+        }
         TerminalEvidence::Refused(evidence) => {
             return Err(ApprovalJudgeModelError::Refused(evidence.usage));
         }
@@ -427,6 +436,7 @@ fn require_same_target(
 fn terminal_usage(evidence: &TerminalEvidence) -> TokenUsage {
     match evidence {
         TerminalEvidence::Completed(value) => value.usage,
+        TerminalEvidence::CompletedWithProviderCompaction { completion, .. } => completion.usage,
         TerminalEvidence::Refused(value) => value.usage,
         TerminalEvidence::ProviderError(value) => value.usage,
         TerminalEvidence::BoundaryLoss(value) => value.usage,
@@ -459,39 +469,56 @@ fn require_observation_correlations(
         .ok_or(ApprovalJudgeModelError::CorrelationMismatch(usage))
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized failure of one dedicated approval-judge call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApprovalJudgeModelError {
+    #[error("approval judge model target is not configured")]
     /// The durable target has no matching runtime configuration.
     UnconfiguredTarget,
+    #[error("approval judge structured-output contract is invalid")]
     /// The static structured-output contract could not be constructed.
     InvalidContract,
+    #[error("approval judge model call was cancelled before send")]
     /// Runtime preparation observed cancellation before send.
     CancelledBeforeSend,
+    #[error("approval judge model call preparation failed")]
     /// Credential or request preparation failed safely.
     PreparationFailed,
+    #[error("approval judge model call preparation was defective")]
     /// Adapter request construction was defective.
     PreparationDefect,
+    #[error("approval judge model authorization did not match preparation")]
     /// Durable authorization did not match the prepared one-shot request.
     AuthorizationMismatch,
+    #[error("approval judge model call preparation returned another correlation")]
     /// Runtime preparation returned another operation's correlation before send.
     PreparationCorrelationMismatch,
+    #[error("approval judge model call returned another correlation; usage={field_0:?}")]
     /// Runtime correlation differed from the durable call.
     CorrelationMismatch(TokenUsage),
+    #[error("approval judge model call was refused; usage={field_0:?}")]
     /// The provider returned an explicit refusal.
     Refused(TokenUsage),
+    #[error("approval judge model call returned a provider error; usage={field_0:?}")]
     /// A complete, correlated provider error response was observed.
     ProviderError(TokenUsage),
+    #[error("approval judge model call cancellation was confirmed")]
     /// The provider definitively confirmed cancellation.
     CancellationConfirmed,
+    #[error("approval judge model call was proven unsent")]
     /// The request provably never reached an acceptance-capable boundary.
     ProvenUnsent,
+    #[error("approval judge model call lost its provider boundary; usage={field_0:?}")]
     /// Provider acceptance or completion remained uncertain.
     BoundaryLoss(TokenUsage),
+    #[error("approval judge model call reported another model lineage; usage={field_0:?}")]
     /// The provider reported a different model lineage.
     ProviderTargetSubstituted(TokenUsage),
+    #[error("approval judge model call returned an incomplete decision; usage={field_0:?}")]
     /// The completion stopped before a complete decision.
     IncompleteDecision(TokenUsage),
+    #[error("approval judge model call returned an invalid decision; usage={field_0:?}")]
     /// The completion lacked exactly one valid typed decision.
     InvalidDecision(TokenUsage),
 }
@@ -525,69 +552,6 @@ impl ApprovalJudgeModelError {
     }
 }
 
-impl fmt::Display for ApprovalJudgeModelError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnconfiguredTarget => {
-                formatter.write_str("approval judge model target is not configured")
-            }
-            Self::InvalidContract => {
-                formatter.write_str("approval judge structured-output contract is invalid")
-            }
-            Self::CancelledBeforeSend => {
-                formatter.write_str("approval judge model call was cancelled before send")
-            }
-            Self::PreparationFailed => {
-                formatter.write_str("approval judge model call preparation failed")
-            }
-            Self::PreparationDefect => {
-                formatter.write_str("approval judge model call preparation was defective")
-            }
-            Self::AuthorizationMismatch => {
-                formatter.write_str("approval judge model authorization did not match preparation")
-            }
-            Self::PreparationCorrelationMismatch => formatter
-                .write_str("approval judge model call preparation returned another correlation"),
-            Self::CorrelationMismatch(usage) => write!(
-                formatter,
-                "approval judge model call returned another correlation; usage={usage:?}"
-            ),
-            Self::Refused(usage) => write!(
-                formatter,
-                "approval judge model call was refused; usage={usage:?}"
-            ),
-            Self::ProviderError(usage) => write!(
-                formatter,
-                "approval judge model call returned a provider error; usage={usage:?}"
-            ),
-            Self::CancellationConfirmed => {
-                formatter.write_str("approval judge model call cancellation was confirmed")
-            }
-            Self::ProvenUnsent => {
-                formatter.write_str("approval judge model call was proven unsent")
-            }
-            Self::BoundaryLoss(usage) => write!(
-                formatter,
-                "approval judge model call lost its provider boundary; usage={usage:?}"
-            ),
-            Self::ProviderTargetSubstituted(usage) => write!(
-                formatter,
-                "approval judge model call reported another model lineage; usage={usage:?}"
-            ),
-            Self::IncompleteDecision(usage) => write!(
-                formatter,
-                "approval judge model call returned an incomplete decision; usage={usage:?}"
-            ),
-            Self::InvalidDecision(usage) => write!(
-                formatter,
-                "approval judge model call returned an invalid decision; usage={usage:?}"
-            ),
-        }
-    }
-}
-
-impl Error for ApprovalJudgeModelError {}
-
 #[cfg(test)]
 mod tests {
     use signalbox_application::ApprovalJudgeAuthorization;
@@ -598,8 +562,8 @@ mod tests {
     };
     use signalbox_model_runtime::{
         AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, Observation,
-        ObservationFact, ProviderReportedModel, Script, ScriptedModel, TerminalEvidence,
-        TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        ObservationFact, ProviderCompactionMode, ProviderReportedModel, Script, ScriptedModel,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
     use uuid::Uuid;
 
@@ -770,6 +734,22 @@ mod tests {
         assert_eq!(
             result.usage.cache_read_input_tokens,
             Some(CACHE_READ_INPUT_TOKENS)
+        );
+    }
+
+    #[tokio::test]
+    async fn dedicated_approval_judge_suppresses_provider_compaction() {
+        let runtime = ScriptedModel::<ModelCallId>::single(approval_completion());
+        let receipt = runtime.clone();
+        let model = RuntimeApprovalJudgeModel::new(runtime, catalog());
+
+        execute(&model)
+            .await
+            .expect("the typed decision is admitted");
+
+        assert_eq!(
+            receipt.received_operations()[0].provider_compaction,
+            ProviderCompactionMode::Suppressed
         );
     }
 

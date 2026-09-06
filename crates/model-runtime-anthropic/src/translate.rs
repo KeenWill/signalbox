@@ -5,11 +5,12 @@ use std::collections::BTreeSet;
 use signalbox_model_runtime::{
     AnthropicServiceTier, CodexCliServiceTier, ConversationMessage, ConversationRole, DeliveryMode,
     FastMode, MessagePart, ModelOperation, ModelSettings, OpenAiServiceTier, PreparationFailure,
-    ReasoningLevel, ServiceTier, ToolChoice,
+    ProviderCompactionMode, ReasoningLevel, ServiceTier, ToolChoice,
 };
 
 use crate::wire::{
-    MessagesRequest, OutputConfig, WireMessage, WireRequestBlock, WireTool, WireToolChoice,
+    ContextManagement, MessagesRequest, OutputConfig, WireKnownRequestBlock, WireMessage,
+    WireRequestBlock, WireResponseBlock, WireTool, WireToolChoice, parse_response_block,
 };
 
 /// Builds the wire request for one operation.
@@ -26,12 +27,13 @@ use crate::wire::{
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
 ) -> Result<MessagesRequest, PreparationFailure> {
-    build_request_with_fast_mode(operation, operation.settings.fast_mode)
+    build_request_with_fast_mode(operation, operation.settings.fast_mode, false)
 }
 
 pub(crate) fn build_request_with_fast_mode<C>(
     operation: &ModelOperation<C>,
     request_fast_mode: FastMode,
+    provider_compaction_supported: bool,
 ) -> Result<MessagesRequest, PreparationFailure> {
     if let Err(error) = operation.validate() {
         return Err(PreparationFailure::UnsupportedOperation {
@@ -63,14 +65,27 @@ pub(crate) fn build_request_with_fast_mode<C>(
         .map(anthropic_effort)
         .transpose()?;
     let service_tier = anthropic_service_tier(&operation.settings, request_fast_mode)?;
+    let replay_provider_compaction = provider_compaction_supported;
+    let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
+        && replay_provider_compaction;
+    let messages = operation
+        .messages
+        .iter()
+        .map(|message| wire_message(message, replay_provider_compaction))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|message| !message.content.is_empty())
+        .collect::<Vec<_>>();
+    if messages.is_empty() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "the resolved Anthropic target has no replayable conversation messages"
+                .to_string(),
+        });
+    }
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
         max_tokens: operation.settings.max_output_tokens,
-        messages: operation
-            .messages
-            .iter()
-            .map(wire_message)
-            .collect::<Result<Vec<_>, _>>()?,
+        messages,
         system: plan.system_text(operation.system.as_deref()),
         stop_sequences: operation.settings.stop_sequences.clone(),
         output_config: effort.map(|effort| OutputConfig { effort }),
@@ -78,6 +93,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
         speed: (request_fast_mode == FastMode::Enabled).then_some("fast"),
         tools: plan.tools,
         tool_choice: plan.tool_choice,
+        context_management: server_compaction.then_some(ContextManagement::compact()),
         stream: operation.delivery == DeliveryMode::Streamed,
     })
 }
@@ -406,7 +422,10 @@ fn tool_plan<C>(operation: &ModelOperation<C>) -> Result<ToolPlan, PreparationFa
     })
 }
 
-fn wire_message(message: &ConversationMessage) -> Result<WireMessage, PreparationFailure> {
+fn wire_message(
+    message: &ConversationMessage,
+    replay_provider_compaction: bool,
+) -> Result<WireMessage, PreparationFailure> {
     let mut user_text_seen = false;
     for part in &message.parts {
         let valid_role = matches!(part, MessagePart::Text(_))
@@ -418,6 +437,7 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                         MessagePart::ToolCall(_)
                             | MessagePart::Thinking { .. }
                             | MessagePart::RedactedThinking { .. }
+                            | MessagePart::ProviderCompaction { .. }
                     )
             );
         if !valid_role {
@@ -448,8 +468,14 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
     let content = message
         .parts
         .iter()
+        .filter(|part| {
+            replay_provider_compaction
+                || !matches!(part, MessagePart::ProviderCompaction { .. })
+        })
         .map(|part| match part {
-            MessagePart::Text(text) => Ok(WireRequestBlock::Text { text: text.clone() }),
+            MessagePart::Text(text) => Ok(WireRequestBlock::Known(WireKnownRequestBlock::Text {
+                text: text.clone(),
+            })),
             MessagePart::ToolCall(proposal) => {
                 let input =
                     serde_json::value::RawValue::from_string(proposal.arguments_json.clone())
@@ -468,17 +494,19 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                         ),
                     });
                 }
-                Ok(WireRequestBlock::ToolUse {
+                Ok(WireRequestBlock::Known(WireKnownRequestBlock::ToolUse {
                     id: proposal.id.as_str().to_string(),
                     name: proposal.name.as_str().to_string(),
                     input,
-                })
+                }))
             }
-            MessagePart::ToolResult(result) => Ok(WireRequestBlock::ToolResult {
-                tool_use_id: result.tool_call_id.as_str().to_string(),
-                content: result.content.clone(),
-                is_error: result.is_error,
-            }),
+            MessagePart::ToolResult(result) => {
+                Ok(WireRequestBlock::Known(WireKnownRequestBlock::ToolResult {
+                    tool_use_id: result.tool_call_id.as_str().to_string(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                }))
+            }
             MessagePart::Thinking { text, signature } => match signature {
                 // The provider requires replayed thinking blocks to carry
                 // their integrity signature; sending one without it would
@@ -495,13 +523,36 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                             .to_string(),
                     })
                 }
-                Some(signature) => Ok(WireRequestBlock::Thinking {
+                Some(signature) => Ok(WireRequestBlock::Known(WireKnownRequestBlock::Thinking {
                     thinking: text.clone(),
                     signature: signature.clone(),
-                }),
+                })),
             },
-            MessagePart::RedactedThinking { data } => {
-                Ok(WireRequestBlock::RedactedThinking { data: data.clone() })
+            MessagePart::RedactedThinking { data } => Ok(WireRequestBlock::Known(
+                WireKnownRequestBlock::RedactedThinking { data: data.clone() },
+            )),
+            MessagePart::ProviderCompaction { block_json } => {
+                if !replay_provider_compaction {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "the resolved Anthropic target does not support replaying provider compaction blocks"
+                            .to_string(),
+                    });
+                }
+                let block = serde_json::value::RawValue::from_string(block_json.clone()).map_err(
+                    |error| PreparationFailure::UnsupportedOperation {
+                        detail: format!(
+                            "replayed provider compaction block is invalid JSON: {error}"
+                        ),
+                    },
+                )?;
+                if !matches!(parse_response_block(&block), Ok(WireResponseBlock::Compaction { .. }))
+                {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "replayed provider compaction block has invalid fields"
+                            .to_string(),
+                    });
+                }
+                Ok(WireRequestBlock::ProviderCompaction(block))
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -514,9 +565,9 @@ mod tests {
     use signalbox_model_runtime::CredentialReference;
     use signalbox_model_runtime::{
         AnthropicServiceTier, ConversationMessage, ConversationRole, DeliveryMode, FastMode,
-        MessagePart, ModelOperation, ModelSettings, PreparationFailure, ReasoningLevel,
-        RequestedTarget, ResolvedTarget, ServiceTier, StructuredOutputContract, ToolCallId,
-        ToolCallProposal, ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
+        MessagePart, ModelOperation, ModelSettings, PreparationFailure, ProviderCompactionMode,
+        ReasoningLevel, RequestedTarget, ResolvedTarget, ServiceTier, StructuredOutputContract,
+        ToolCallId, ToolCallProposal, ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
     use super::{build_request, build_request_with_fast_mode, validate_model_settings};
@@ -765,7 +816,7 @@ mod tests {
         operation.settings.service_tier = Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto));
 
         assert!(matches!(
-            build_request_with_fast_mode(&operation, FastMode::Disabled),
+            build_request_with_fast_mode(&operation, FastMode::Disabled, true),
             Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }
@@ -1113,6 +1164,109 @@ mod tests {
         let serialized = serde_json::to_string(&request).expect("request serializes");
 
         assert!(serialized.contains(raw));
+    }
+
+    #[test]
+    fn compaction_is_enabled_and_replayed_without_reserialization() {
+        let raw = r#"{"type":"compaction", "content":"summary", "encrypted_content":"opaque=="}"#;
+        let mut operation = operation("call-provider-compaction");
+        operation.resolved_target = ResolvedTarget::new("claude-opus-5");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ProviderCompaction {
+                block_json: raw.to_string(),
+            }],
+        }];
+
+        let request = build_request_with_fast_mode(&operation, FastMode::Disabled, true)
+            .expect("provider compaction history translates");
+        let serialized = serde_json::to_string(&request).expect("request serializes");
+
+        assert!(serialized.contains(raw));
+        assert!(
+            serialized.contains(r#""context_management":{"edits":[{"type":"compact_20260112"}]}"#)
+        );
+    }
+
+    #[test]
+    fn configured_capability_gates_compaction_and_replay() {
+        let mut operation = operation("call-unsupported-provider-compaction");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![
+                MessagePart::Text("retained text".to_string()),
+                MessagePart::ProviderCompaction {
+                    block_json:
+                        r#"{"type":"compaction","content":null,"encrypted_content":"opaque"}"#
+                            .to_string(),
+                },
+            ],
+        }];
+
+        let request = build_request_with_fast_mode(&operation, FastMode::Disabled, false)
+            .expect("unsupported target omits provider compaction");
+        let serialized = serde_json::to_string(&request).expect("request serializes");
+
+        assert!(!serialized.contains("context_management"));
+        assert!(!serialized.contains("opaque"));
+    }
+
+    #[test]
+    fn dedicated_operation_can_suppress_server_compaction() {
+        let mut operation = operation("call-dedicated-compaction");
+        operation.resolved_target = ResolvedTarget::new("claude-opus-5");
+        operation.provider_compaction = ProviderCompactionMode::Suppressed;
+
+        let request = build_request_with_fast_mode(&operation, FastMode::Disabled, true)
+            .expect("the summary operation translates");
+        let serialized = serde_json::to_string(&request).expect("request serializes");
+
+        assert!(!serialized.contains("context_management"));
+        assert!(!serialized.contains("compact_20260112"));
+    }
+
+    #[test]
+    fn compaction_replay_is_omitted_for_an_unsupported_target() {
+        let mut operation = operation("call-unsupported-provider-compaction");
+        operation.resolved_target = ResolvedTarget::new("claude-haiku-4-5");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![
+                MessagePart::Text(String::from("preserved output")),
+                MessagePart::ProviderCompaction {
+                    block_json: r#"{"type":"compaction","content":"summary"}"#.to_string(),
+                },
+            ],
+        }];
+
+        let request = build_request(&operation).expect("preserved history translates");
+        let serialized = serde_json::to_string(&request).expect("request serializes");
+
+        assert!(serialized.contains("preserved output"));
+        assert!(!serialized.contains("compaction"));
+    }
+
+    #[test]
+    fn malformed_compaction_replay_is_rejected_before_send() {
+        for block_json in [
+            r#"{"type":"compaction"}"#,
+            r#"{"type":"compaction","content":""}"#,
+            r#"{"type":"compaction","content":null,"encrypted_content":1}"#,
+        ] {
+            let mut operation = operation("call-malformed-provider-compaction");
+            operation.resolved_target = ResolvedTarget::new("claude-opus-5");
+            operation.messages = vec![ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::ProviderCompaction {
+                    block_json: block_json.to_string(),
+                }],
+            }];
+
+            assert!(matches!(
+                build_request_with_fast_mode(&operation, FastMode::Disabled, true),
+                Err(PreparationFailure::UnsupportedOperation { .. })
+            ));
+        }
     }
 
     #[test]

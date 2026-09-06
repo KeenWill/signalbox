@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::fmt;
 
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_model_runtime::CredentialValue;
@@ -110,15 +110,20 @@ pub(super) fn executor_error_diagnostic_class(
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked catalog/executor assumption failed inside `web_search`.
 #[derive(Clone, Eq, PartialEq)]
 pub enum WebSearchExecutorError {
+    #[error("web_search argument validation drifted")]
     /// Executor argument decoding disagreed with catalog validation.
     ArgumentValidationDrift,
+    #[error("web_search evidence encoding failed")]
     /// Sanitized result or error evidence could not be encoded.
     EvidenceEncoding,
+    #[error("web_search dispatch outcome is unknown")]
     /// Physical dispatch began without a complete bounded outcome.
     DispatchUnknown,
+    #[error("{}", & field_0.rendered)]
     /// A diagnostic collided with its request credential.
     CredentialDiagnosticCollision(WebSearchCredentialDiagnostic),
 }
@@ -135,23 +140,6 @@ impl fmt::Debug for WebSearchExecutorError {
         }
     }
 }
-
-impl fmt::Display for WebSearchExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ArgumentValidationDrift => {
-                formatter.write_str("web_search argument validation drifted")
-            }
-            Self::EvidenceEncoding => formatter.write_str("web_search evidence encoding failed"),
-            Self::DispatchUnknown => formatter.write_str("web_search dispatch outcome is unknown"),
-            Self::CredentialDiagnosticCollision(diagnostic) => {
-                formatter.write_str(&diagnostic.rendered)
-            }
-        }
-    }
-}
-
-impl Error for WebSearchExecutorError {}
 
 impl ClassifyOperatorFailure for WebSearchExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

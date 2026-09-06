@@ -245,14 +245,14 @@ prompt carries the session's commissioned goal, template, frozen system prompt,
 and optional dispatch authority, each separately delimited and quoted as
 untrusted evidence, and the prompt treats them as scope to compare with the
 request, never as instruction. Outside a turn judged under the commissioned
-generation's dispatch authority, which [repo-watch](repo-watch.md) owns, an
-`EscalateToHuman` result stores the completed call but no decision and leaves
-the same request parked. Under that authority the request stays parked when the
-turn has pending steering, or when the session escalated earlier and the
-authority still stands; an operator-commissioned dispatch keeps the park while
-its authority stands. A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous`
-terminal judge call retains the attended park while immediately admitting a user
-decision.
+generation's dispatch authority, an `EscalateToHuman` result stores the
+completed call but no decision and leaves the same request parked. A
+commissioned dispatch also keeps the request parked while its authority stands
+or when the turn has pending steering. Once that authority is withdrawn, an
+escalation with no pending steering terminalizes the unattended turn under the
+commissioned-dispatch audit. A `KnownFailed`, `Refused`, `Cancelled`, or
+`Ambiguous` terminal judge call retains the attended park while immediately
+admitting a user decision.
 
 Deny-and-end composes the recorded denial with the applied-interrupt stop path,
 and the interrupt remains the proof-bearing authority for ending the turn. An
@@ -453,18 +453,13 @@ it can be passed back as an argument. Every returned URL is one absolute
 credential-free HTTPS location. No code-host result has more than 100 collection
 members or more than 512 KiB of encoded JSON. Every bounded review-log list
 reports whether it is truncated together with its continuation cursor, and a
-verdict never treats a partial evidence page as complete. The reviewer verdict
-is parsed from review bodies and issue comments merged in code-host timestamp
-order, and a usage-limit response is recognized separately as one exact
-canonical text that supersedes an earlier verdict until a later verdict arrives.
-Only the reviewer bot account supplies a verdict or a usage-limit response, and
-a verdict must carry a line whose whole content is the `Reviewed commit:` label
-followed by a 7-to-40-character hexadecimal revision, with only emphasis or
-backtick markers around them. The last such line in the latest activity that
-carries one is the verdict, and a verdict whose revision does not prefix the
-current head is stale and never counts as current convergence evidence. The
-latest exact review request by an owner, member, or collaborator with no later
-reviewer response marks the review in flight and blocks convergence. The
+verdict never treats a partial evidence page as complete. The code-host
+convergence-state and review-gate tools return the `signalbox-convergence`
+verdict from one complete snapshot and the daemon's `[convergence]` policy.
+Their repository argument must match that policy's repository without regard to
+case. Census and history updates are serialized per pull request. Failed and
+cancelled censuses release entries without successful history after their last
+waiter exits. Stack and thread-inventory tools remain separate reads. The
 authenticated job-log endpoint is the sole redirect-shaped exchange: after one
 302 the adapter validates the location, pins a wholly public destination set,
 and downloads credential-free. A read transport or server failure is an executor

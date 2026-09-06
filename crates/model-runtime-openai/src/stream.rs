@@ -763,6 +763,8 @@ impl StreamDecoder {
                     reported_model: self.reported_model.clone(),
                     content,
                     usage: self.usage,
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
                 })
             }
             Some(finish) => TerminalEvidence::Completed(CompletionEvidence {

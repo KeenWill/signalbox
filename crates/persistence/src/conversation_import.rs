@@ -2,7 +2,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    error::Error,
     fmt,
     future::Future,
     pin::Pin,
@@ -85,12 +84,17 @@ impl fmt::Debug for ImportedRawBlobInput {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Verified publication facts registered with the importing aggregate.
 #[derive(Clone, Debug)]
 pub struct ImportedRawBlobPublication {
     expected: ExpectedBlob,
+    /// Returns the deployment store holding the verified object.
+    #[get]
     store: BlobStoreName,
     namespace_id: Uuid,
+    /// Returns the verified immutable object key.
+    #[get]
     object_key: BlobObjectKey,
 }
 
@@ -115,41 +119,23 @@ impl ImportedRawBlobPublication {
         self.expected
     }
 
-    /// Returns the deployment store holding the verified object.
-    pub const fn store(&self) -> &BlobStoreName {
-        &self.store
-    }
-
     /// Returns the deployment namespace bound to the store.
     pub const fn namespace_id(&self) -> Uuid {
         self.namespace_id
     }
-
-    /// Returns the verified immutable object key.
-    pub const fn object_key(&self) -> &BlobObjectKey {
-        &self.object_key
-    }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Content-silent imported-source store failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportedRawBlobStorageError {
+    #[error("imported raw blob storage is unavailable")]
     /// No bounded store operation can currently complete.
     Unavailable,
+    #[error("imported raw blob storage failed integrity verification")]
     /// Durable catalog or object bytes disagreed.
     Integrity,
 }
-
-impl fmt::Display for ImportedRawBlobStorageError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Unavailable => "imported raw blob storage is unavailable",
-            Self::Integrity => "imported raw blob storage failed integrity verification",
-        })
-    }
-}
-
-impl Error for ImportedRawBlobStorageError {}
 
 /// Bounded asynchronous publication result owned by an imported-source adapter.
 pub type ImportedRawBlobPublicationFuture<'storage> = Pin<
@@ -308,11 +294,14 @@ pub enum ImportedConversationIdentityCollision {
     TranscriptEntry,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable imported-conversation shape failed checked reconstruction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImportedConversationCorruption {
+    #[error("missing imported conversation {field_0}")]
     /// One required durable value is absent.
     Missing(&'static str),
+    #[error("unsupported imported conversation {field}: {value}")]
     /// A closed discriminator or representation version is unsupported.
     Unsupported {
         /// Durable field being decoded.
@@ -320,8 +309,10 @@ pub enum ImportedConversationCorruption {
         /// Unsupported non-content spelling.
         value: String,
     },
+    #[error("invalid imported conversation {field_0} size")]
     /// A fixed-size digest or content hash has another byte length.
     InvalidDigestSize(&'static str),
+    #[error("invalid imported conversation {field}: {reason}")]
     /// One stored positive ordinal cannot construct its domain type.
     InvalidOrdinal {
         /// Durable field being decoded.
@@ -329,6 +320,7 @@ pub enum ImportedConversationCorruption {
         /// Why the numeric value is invalid.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("invalid imported conversation {field} encoding: {failure:?}")]
     /// One versioned domain-algebra encoding is invalid.
     Encoding {
         /// Durable field being decoded.
@@ -336,8 +328,12 @@ pub enum ImportedConversationCorruption {
         /// Content-silent codec failure.
         failure: ImportedConversationEncodingCorruption,
     },
+    #[error("imported raw-record hash resolved to different bytes")]
     /// A content hash resolved to different exact raw bytes.
     RawRecordHashCollision,
+    #[error(
+        "imported raw record {position:?} declares {declared} entries but reconstructs {actual}"
+    )]
     /// A raw occurrence's declared normalized-entry count is not exact.
     RawRecordDeclaredEntryCountMismatch {
         /// Corrupt raw-record occurrence.
@@ -347,112 +343,39 @@ pub enum ImportedConversationCorruption {
         /// Reconstructed member count.
         actual: u64,
     },
+    #[error("imported source-session lineage disagrees with reconstructed entries")]
     /// Non-null source-session evidence disagrees with the reconstructed entries.
     SourceSessionLineageMismatch,
+    #[error("imported display title disagrees with re-derivation from the records")]
     /// A resolved display title disagrees with re-derivation from the records.
     DisplayTitleMismatch,
+    #[error("imported source digest resolved to a different snapshot")]
     /// One source digest resolved to a structurally different snapshot.
     ExistingSnapshotMismatch,
+    #[error("imported conversation domain reconstitution failed: {field_0:?}")]
     /// Complete durable fields failed domain-owned correlation.
     Domain(ImportedConversationReconstitutionFailure),
 }
 
-impl fmt::Display for ImportedConversationCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing imported conversation {field}"),
-            Self::Unsupported { field, value } => {
-                write!(
-                    formatter,
-                    "unsupported imported conversation {field}: {value}"
-                )
-            }
-            Self::InvalidDigestSize(field) => {
-                write!(formatter, "invalid imported conversation {field} size")
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(formatter, "invalid imported conversation {field}: {reason}")
-            }
-            Self::Encoding { field, failure } => {
-                write!(
-                    formatter,
-                    "invalid imported conversation {field} encoding: {failure:?}"
-                )
-            }
-            Self::RawRecordHashCollision => {
-                formatter.write_str("imported raw-record hash resolved to different bytes")
-            }
-            Self::RawRecordDeclaredEntryCountMismatch {
-                position,
-                declared,
-                actual,
-            } => write!(
-                formatter,
-                "imported raw record {position:?} declares {declared} entries but reconstructs {actual}"
-            ),
-            Self::SourceSessionLineageMismatch => formatter
-                .write_str("imported source-session lineage disagrees with reconstructed entries"),
-            Self::DisplayTitleMismatch => formatter
-                .write_str("imported display title disagrees with re-derivation from the records"),
-            Self::ExistingSnapshotMismatch => {
-                formatter.write_str("imported source digest resolved to a different snapshot")
-            }
-            Self::Domain(failure) => {
-                write!(
-                    formatter,
-                    "imported conversation domain reconstitution failed: {failure:?}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ImportedConversationCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL imported-conversation repository failure.
 #[derive(Debug)]
 pub enum ImportedConversationRepositoryError {
+    #[error("conversation import database failure: {field_0}")]
     /// PostgreSQL could not complete the operation.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("conversation import identity collision: {field_0:?}")]
     /// A candidate identity collided with a different durable record.
     IdentityCollision(ImportedConversationIdentityCollision),
+    #[error(transparent)]
     /// Blob publication or checked reading could not complete.
-    BlobStorage(ImportedRawBlobStorageError),
+    BlobStorage(#[source] ImportedRawBlobStorageError),
+    #[error(transparent)]
     /// Published placement facts could not join the importing transaction.
-    BlobCatalog(BlobCatalogRepositoryError),
+    BlobCatalog(#[source] BlobCatalogRepositoryError),
+    #[error(transparent)]
     /// Candidate or durable data cannot satisfy the imported-record contract.
-    Corruption(ImportedConversationCorruption),
-}
-
-impl fmt::Display for ImportedConversationRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => {
-                write!(formatter, "conversation import database failure: {error}")
-            }
-            Self::IdentityCollision(collision) => {
-                write!(
-                    formatter,
-                    "conversation import identity collision: {collision:?}"
-                )
-            }
-            Self::BlobStorage(error) => error.fmt(formatter),
-            Self::BlobCatalog(error) => error.fmt(formatter),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ImportedConversationRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::IdentityCollision(_) => None,
-            Self::BlobStorage(error) => Some(error),
-            Self::BlobCatalog(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] ImportedConversationCorruption),
 }
 
 impl From<sqlx::Error> for ImportedConversationRepositoryError {
@@ -1735,7 +1658,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_claude_code_converter_versions_have_distinct_storage_mappings() {
+    fn claude_code_converter_versions_have_distinct_storage_mappings() {
         assert_eq!(
             encode_format(ImportedConversationFormat::ClaudeCodeSessionJsonlV1),
             (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE)
@@ -1757,7 +1680,7 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_codex_rollout_converter_has_distinct_storage_mapping() {
+    fn codex_rollout_converter_has_distinct_storage_mapping() {
         assert_eq!(
             encode_format(ImportedConversationFormat::CodexRolloutJsonlV1),
             (CODEX_FORMAT, CODEX_VERSION_ONE)
@@ -1769,10 +1692,10 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: shared raw-blob keys are emitted in one deterministic
+    /// shared raw-blob keys are emitted in one deterministic
     /// acquisition order independent of physical transcript order.
     #[test]
-    fn s28_inv038_raw_blob_acquisition_is_content_hash_ordered() {
+    fn raw_blob_acquisition_is_content_hash_ordered() {
         let larger = encoded_raw(2);
         let smaller = encoded_raw(1);
         let raws = [larger, smaller];
@@ -1809,10 +1732,10 @@ mod tests {
         assert_eq!(super::total_expected_bytes([expected, expected]), Ok(6));
     }
 
-    /// S28 / INV-001 / INV-038: globally unique entry keys are emitted in one
+    /// globally unique entry keys are emitted in one
     /// deterministic acquisition order independent of transcript order.
     #[test]
-    fn s28_inv001_inv038_entry_acquisition_is_identity_ordered() {
+    fn entry_acquisition_is_identity_ordered() {
         let larger = encoded_entry(2);
         let smaller = encoded_entry(1);
         let entries = [larger, smaller];
