@@ -199,7 +199,7 @@ pub enum ReviewOrchestrationAttemptError {
     #[error("review orchestration attempt requires at least one concern")]
     /// At least one concern is required.
     EmptyConcernInventory,
-    # [error ("review orchestration attempt repeats concern `{}`" , concern . as_str ())]
+    #[error("review orchestration attempt repeats concern `{}`", concern.as_str())]
     /// One concern key appeared more than once.
     RepeatedConcern {
         /// Repeated configured key.
@@ -628,55 +628,55 @@ struct CompleteReviewFanout {
 /// Why durable concern claims do not prove one complete fan-out.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewFanoutBarrierFailure {
-    # [error ("review fan-out is missing concern `{}`" , concern . as_str ())]
+    #[error("review fan-out is missing concern `{}`", concern.as_str())]
     /// An expected concern has no current claim.
     MissingConcern {
         /// Missing configured concern.
         concern: ReviewKey,
     },
-    # [error ("review fan-out contains unconfigured concern `{}`" , concern . as_str ())]
+    #[error("review fan-out contains unconfigured concern `{}`", concern.as_str())]
     /// An unconfigured concern claim is present.
     ExtraConcern {
         /// Extra concern key.
         concern: ReviewKey,
     },
-    # [error ("review fan-out repeats concern `{}`" , concern . as_str ())]
+    #[error("review fan-out repeats concern `{}`", concern.as_str())]
     /// More than one current claim exists for one concern.
     RepeatedConcern {
         /// Repeated concern key.
         concern: ReviewKey,
     },
-    # [error ("review fan-out concern `{}` has a different template" , concern . as_str ())]
+    #[error("review fan-out concern `{}` has a different template", concern.as_str())]
     /// A member claim carries a different resolved template.
     TemplateMismatch {
         /// Concern with the mismatch.
         concern: ReviewKey,
     },
-    # [error ("review fan-out concern `{}` is incomplete" , concern . as_str ())]
+    #[error("review fan-out concern `{}` is incomplete", concern.as_str())]
     /// A member has not succeeded with a sealed inventory.
     MemberIncomplete {
         /// Incomplete concern.
         concern: ReviewKey,
     },
-    # [error ("review fan-out concern `{}` has a foreign producer target" , concern . as_str ())]
+    #[error("review fan-out concern `{}` has a foreign producer target", concern.as_str())]
     /// A successful producer belongs to another target.
     ForeignProducerTarget {
         /// Concern with cross-wired ancestry.
         concern: ReviewKey,
     },
-    # [error ("review fan-out concern `{}` has a foreign producer policy" , concern . as_str ())]
+    #[error("review fan-out concern `{}` has a foreign producer policy", concern.as_str())]
     /// A successful producer carries a different frozen policy.
     ForeignProducerPolicy {
         /// Concern with cross-wired policy.
         concern: ReviewKey,
     },
-    # [error ("review fan-out concern `{}` has foreign producer-template evidence" , concern . as_str ())]
+    #[error("review fan-out concern `{}` has foreign producer-template evidence", concern.as_str())]
     /// A successful producer reports a different resolved concern template.
     ForeignProducerTemplate {
         /// Concern with cross-wired template evidence.
         concern: ReviewKey,
     },
-    # [error ("review fan-out concern `{}` has invalid sealed finding {}" , concern . as_str () , finding . finding () . as_uuid ())]
+    #[error("review fan-out concern `{}` has invalid sealed finding {}", concern.as_str(), finding.finding().as_uuid())]
     /// A finding is not open or does not belong to its claimed producer.
     InvalidSealedFinding {
         /// Concern carrying the invalid member.
@@ -684,7 +684,7 @@ pub enum ReviewFanoutBarrierFailure {
         /// Invalid finding reference.
         finding: ReviewFindingRef,
     },
-    # [error ("review fan-out repeats finding {}" , finding . finding () . as_uuid ())]
+    #[error("review fan-out repeats finding {}", finding.finding().as_uuid())]
     /// A finding identity appears in multiple member inventories.
     RepeatedFinding {
         /// Repeated complete finding reference.
@@ -982,16 +982,16 @@ pub enum ReviewJudgmentPlanFailure {
     #[error("review judgment plan does not exactly cover the finding set")]
     /// A plan member is missing, extra, repeated, or not identity ordered.
     InexactFindingInventory,
-    # [error ("review judgment accepts below-threshold finding {}" , finding . finding () . as_uuid ())]
+    #[error("review judgment accepts below-threshold finding {}", finding.finding().as_uuid())]
     /// An accepted finding is below the frozen judgment threshold.
     AcceptedBelowThreshold { finding: ReviewFindingRef },
-    # [error ("review judgment has invalid reference for finding {}" , finding . finding () . as_uuid ())]
+    #[error("review judgment has invalid reference for finding {}", finding.finding().as_uuid())]
     /// A referenced finding is self, foreign, or outside the sealed set.
     InvalidReferencedFinding { finding: ReviewFindingRef },
-    # [error ("review judgment closes a reference cycle at finding {}" , finding . finding () . as_uuid ())]
+    #[error("review judgment closes a reference cycle at finding {}", finding.finding().as_uuid())]
     /// The reference graph contains a direct or transitive cycle.
     ReferenceCycle { finding: ReviewFindingRef },
-    # [error ("review judgment terminalizes referenced finding {} before admission" , finding . finding () . as_uuid ())]
+    #[error("review judgment terminalizes referenced finding {} before admission", finding.finding().as_uuid())]
     /// Canonical effect order would terminalize a reference before admission.
     ReferencedFindingTerminalBeforeAdmission { finding: ReviewFindingRef },
 }
