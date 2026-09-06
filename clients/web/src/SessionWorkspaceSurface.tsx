@@ -659,13 +659,16 @@ export function SessionWorkspaceSurface({
               )
             })}
           </div>
-          <SessionComposer
-            key={sessionId}
-            sessionId={sessionId ?? ''}
-            activeState={follow.live ? (follow.live.active?.state.kind ?? null) : undefined}
-            onAccepted={refetchSession}
-          />
         </section>
+      )}
+      {sessionId !== null && timelineCapability === 'available' && (
+        <SessionComposer
+          key={sessionId}
+          sessionId={sessionId ?? ''}
+          activeState={follow.live ? (follow.live.active?.state.kind ?? null) : undefined}
+          stateUnavailable={follow.error && follow.live === null}
+          onAccepted={refetchSession}
+        />
       )}
     </div>
   )

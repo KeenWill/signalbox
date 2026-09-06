@@ -2782,6 +2782,7 @@ kbd {
 
 .session-workspace-surface {
   display: grid;
+  grid-auto-rows: max-content;
   align-content: start;
   gap: 12px;
 }
@@ -2845,6 +2846,7 @@ kbd {
 }
 .session-workspace {
   display: grid;
+  grid-auto-rows: max-content;
   min-height: 0;
   border: 1px solid var(--border);
   background: var(--surface-2);
@@ -3098,4 +3100,7 @@ kbd {
 }
 .session-window-controls {
   flex-wrap: wrap;
+}
+.session-workspace-surface > .session-composer {
+  border: 1px solid var(--border);
 }

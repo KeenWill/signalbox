@@ -1,4 +1,5 @@
 import { expect, type Page, test } from '@playwright/test'
+import type { WebSessionTimelineDetail } from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
@@ -53,11 +54,11 @@ async function sessionApi(page: Page, busy = false) {
       })
     }
     if (url.pathname.endsWith('/timeline-detail')) {
-      const items = [
+      const items: WebSessionTimelineDetail[] = [
         {
           address: { event_sequence: '41' },
           kind: 'input_accepted',
-          projected_body_bytes: initialMessage.length,
+          projected_body_bytes: 128 + initialMessage.length,
           body: {
             type: 'user_input',
             turn_id: turnId,
@@ -67,10 +68,10 @@ async function sessionApi(page: Page, busy = false) {
         },
       ]
       if (state.grown)
-        (items as unknown[]).push({
+        items.push({
           address: { event_sequence: '44' },
           kind: 'model_call_transition',
-          projected_body_bytes: assistantMessage.length,
+          projected_body_bytes: 128 + assistantMessage.length,
           body: {
             type: 'model_call',
             turn_id: turnId,
@@ -103,12 +104,21 @@ async function sessionApi(page: Page, busy = false) {
               projected_structured_bytes: 78,
             },
             {
-              address: { event_sequence: latest },
-              kind: state.grown ? 'model_call_transition' : 'turn_completed',
+              address: { event_sequence: '43' },
+              kind: 'turn_completed',
               projected_structured_bytes: 78,
             },
+            ...(state.grown
+              ? [
+                  {
+                    address: { event_sequence: '44' },
+                    kind: 'model_call_transition',
+                    projected_structured_bytes: 85,
+                  },
+                ]
+              : []),
           ],
-          projected_structured_bytes: 156,
+          projected_structured_bytes: state.grown ? 241 : 156,
           continuation_before: null,
           continuation_after: null,
         },
@@ -117,11 +127,11 @@ async function sessionApi(page: Page, busy = false) {
       json: {
         session_id: sessionId,
         sizes: {
-          item_count: '2',
+          item_count: state.grown ? '3' : '2',
           projected_text_bytes: String(
             initialMessage.length + (state.grown ? assistantMessage.length : 0),
           ),
-          projected_structured_bytes: '156',
+          projected_structured_bytes: state.grown ? '241' : '156',
           referenced_blob_count: '0',
           referenced_blob_bytes: '0',
         },
@@ -181,6 +191,15 @@ test('retries an unconfirmed acceptance with the same command and text', async (
     'readonly',
     '',
   )
+  await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) =>
+    route.fulfill({ status: 503, body: 'Timeline temporarily unavailable' }),
+  )
+  api.grow()
+  await expect(
+    page
+      .getByRole('alert')
+      .filter({ hasText: 'The daemon could not provide this bounded session window' }),
+  ).toBeVisible()
   await page.getByRole('button', { name: 'Retry message' }).click()
   await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
   expect(attempts).toHaveLength(2)

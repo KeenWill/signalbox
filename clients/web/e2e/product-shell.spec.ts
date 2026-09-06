@@ -465,7 +465,11 @@ test('opens and inspects a bounded production session without a mouse', async ({
   )
   await expect(timeline).toHaveAttribute('aria-activedescendant', 'session-timeline-option-41')
   const latest = page.getByRole('button', { name: /Latest/ })
+  const reconnect = page.getByRole('button', { name: 'Reconnect live updates' })
+  await expect(reconnect).toBeVisible()
   await latest.focus()
+  await page.keyboard.press('Tab')
+  await expect(reconnect).toBeFocused()
   await page.keyboard.press('Tab')
   await expect(timeline).toBeFocused()
   await latest.focus()
@@ -483,7 +487,9 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(completed).toHaveAttribute('aria-describedby', 'session-timeline-disclosure-43')
   await expect(page.locator('#session-timeline-disclosure-43')).toHaveText('Expanded')
   await expect(page.locator('#session-timeline-detail-43')).toBeVisible()
-  await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
+  await expect(
+    page.getByText('Durable event metadata; message text appears in the transcript above'),
+  ).toBeVisible()
   const inspector = page.getByLabel('Inspector')
   await expect(inspector.getByText(sessionWorkspaceFixture.id, { exact: true })).toBeVisible()
   await expect(inspector.getByText('43', { exact: true })).toBeVisible()

@@ -98,6 +98,23 @@ impl WebContractBootstrap {
 }
 ```
 
+## WebSubmitInputRequest
+
+```rust
+pub struct WebSubmitInputRequest {
+    pub command_id: string::String,
+    pub message: string::String,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl<T> dyn_clone::DynClone for WebSubmitInputRequest
+where
+    T: clone::Clone,
+{
+    fn __clone_box(&self, _: sealed::Private) -> *mut ();
+}
+impl<T> de::DeserializeOwned for WebSubmitInputRequest where T: for<'de> de::Deserialize<'de> {}
+```
+
 ## WebContractExample
 
 ```rust

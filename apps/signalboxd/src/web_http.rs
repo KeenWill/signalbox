@@ -1200,6 +1200,11 @@ async fn session_submit_input(
     match service.execute(request).await {
         Ok(SubmitInputOutcome::Recorded(result)) => web_input_result(&result),
         Ok(SubmitInputOutcome::ConflictingReuse { .. }) => web_input_conflict(),
+        Err(SubmitInputRepositoryError::UnsupportedModelSetting(_)) => application_error(
+            StatusCode::CONFLICT,
+            "unsupported_model_setting",
+            "the selected model does not support an explicitly requested setting",
+        ),
         Err(_) => web_input_unconfirmed(),
     }
 }

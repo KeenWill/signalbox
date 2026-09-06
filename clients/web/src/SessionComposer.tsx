@@ -24,7 +24,10 @@ export function useSessionFollow(sessionId: string | null, onDurable: () => Prom
     void (async () => {
       try {
         for await (const event of followSession(sessionId, controller.signal)) {
-          if (event.kind === 'snapshot') setLive(event.snapshot)
+          if (event.kind === 'snapshot') {
+            setLive(event.snapshot)
+            await onDurable()
+          }
           if (event.kind === 'durable') {
             await onDurable()
             const snapshot = await readSessionLive(sessionId, controller.signal)
@@ -47,10 +50,12 @@ export function useSessionFollow(sessionId: string | null, onDurable: () => Prom
 export function SessionComposer({
   sessionId,
   activeState,
+  stateUnavailable,
   onAccepted,
 }: {
   sessionId: string
   activeState: string | null | undefined
+  stateUnavailable: boolean
   onAccepted: () => Promise<unknown>
 }) {
   const dispatch = useAppDispatch()
@@ -108,11 +113,13 @@ export function SessionComposer({
       <header>
         <h3>Message</h3>
         <span>
-          {activeState === undefined
-            ? 'Checking input state…'
-            : activeState === null
-              ? 'Starts a turn when idle'
-              : `Input unavailable: ${activeState.replaceAll('_', ' ')}`}
+          {stateUnavailable
+            ? 'Input state unavailable'
+            : activeState === undefined
+              ? 'Checking input state…'
+              : activeState === null
+                ? 'Starts a turn when idle'
+                : `Input unavailable: ${activeState.replaceAll('_', ' ')}`}
         </span>
       </header>
       <label htmlFor="session-message">Message to session</label>
