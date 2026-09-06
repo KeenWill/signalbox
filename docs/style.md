@@ -336,7 +336,7 @@ does not replace those join keys.
 A code comment states a constraint, rationale, or contract directly. Process
 artifacts, dates, reviews, and decision-history documents are provenance for git
 history, not authorities cited in source comments. Cite an owning spec by name,
-or an applicable scenario, without a process-rule or section number.
+without a process-rule or section number.
 
 When code defends against a failure the type system cannot express, such as
 stack depth, timing, or resource exhaustion, its comment names the failure the
