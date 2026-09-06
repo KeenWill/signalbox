@@ -426,6 +426,9 @@ impl RepoWatchStore {
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
+        let projections_match =
+            stored_projections_match(&mut transaction, repository_state, pull_request_states)
+                .await?;
         upsert_repository(&mut transaction, repository_state).await?;
         replace_pull_requests(&mut transaction, repository, pull_request_states).await?;
         let frontier = frontier.entries().collect::<Vec<_>>();
@@ -515,13 +518,14 @@ impl RepoWatchStore {
         .fetch_one(&mut *transaction)
         .await?;
         if unchanged {
-            return if events.is_empty() {
+            if events.is_empty() && projections_match {
                 transaction.commit().await?;
-                Ok(FrontierEventAdmission::Unchanged)
-            } else {
+                return Ok(FrontierEventAdmission::Unchanged);
+            }
+            if !events.is_empty() {
                 transaction.rollback().await?;
-                Ok(FrontierEventAdmission::ConflictingReuse)
-            };
+                return Ok(FrontierEventAdmission::ConflictingReuse);
+            }
         }
         if omitted || stale {
             transaction.rollback().await?;
@@ -817,6 +821,72 @@ impl RepoWatchStore {
         transaction.commit().await?;
         Ok(true)
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct StoredPullRequestProjection {
+    pull_request_number: Decimal,
+    lifecycle: String,
+    head_sha: String,
+    head_repository: String,
+    head_branch: String,
+    base_branch: String,
+    title: String,
+    body: String,
+    draft: bool,
+    author: Option<String>,
+    observed_at: OffsetDateTime,
+}
+
+async fn stored_projections_match(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_state: &RepositoryState<'_>,
+    pull_request_states: &[PullRequestState<'_>],
+) -> Result<bool, StoreError> {
+    let repository: Option<(String, String, OffsetDateTime)> = sqlx::query_as(
+        "SELECT default_branch, default_head_sha, observed_at
+           FROM repository_state
+          WHERE repository = $1",
+    )
+    .bind(repository_state.repository.as_str())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if repository
+        .as_ref()
+        .is_none_or(|(default_branch, default_head, observed_at)| {
+            default_branch != repository_state.default_branch.as_str()
+                || default_head != repository_state.default_head.as_str()
+                || *observed_at != repository_state.observed_at
+        })
+    {
+        return Ok(false);
+    }
+    let stored: Vec<StoredPullRequestProjection> = sqlx::query_as(
+        "SELECT pull_request_number, lifecycle, head_sha, head_repository,
+                head_branch, base_branch, title, body, draft, author, observed_at
+           FROM pr_state
+          WHERE repository = $1
+          ORDER BY pull_request_number",
+    )
+    .bind(repository_state.repository.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut candidate = pull_request_states.iter().collect::<Vec<_>>();
+    candidate.sort_by_key(|state| state.number);
+    Ok(stored.len() == candidate.len()
+        && stored.iter().zip(candidate).all(|(stored, candidate)| {
+            stored.pull_request_number == Decimal::from(candidate.number.get())
+                && stored.lifecycle == candidate.lifecycle.storage()
+                && stored.head_sha == candidate.head.as_str()
+                && stored.head_repository == candidate.head_repository.as_str()
+                && stored.head_branch == candidate.head_branch.as_str()
+                && stored.base_branch == candidate.base_branch.as_str()
+                && stored.title == candidate.title.as_str()
+                && stored.body == candidate.body.as_str()
+                && stored.draft == candidate.draft
+                && stored.author.as_deref() == candidate.author.map(RepoWatchAuthorLogin::as_str)
+                && stored.observed_at == candidate.observed_at
+        }))
 }
 
 async fn upsert_repository(
