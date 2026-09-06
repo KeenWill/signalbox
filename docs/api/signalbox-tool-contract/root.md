@@ -112,7 +112,7 @@ pub fn rendered_contract_schema<Contract: ToolContract + ?marker::Sized>() -> va
 
 ```rust
 pub fn compile_contract_definition<Contract: ToolContract + ?marker::Sized>(
-    permission_default: tool::ToolPermissionDefault,
-    effect_class: tool::ToolEffectClass,
+    permission_default: policy::ToolPermissionDefault,
+    effect_class: policy::ToolEffectClass,
 ) -> result::Result<tool_loop::ToolDefinition, ToolContractCompileError>;
 ```
