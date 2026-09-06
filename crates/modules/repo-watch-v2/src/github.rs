@@ -16,7 +16,7 @@ pub struct GitHubClient {
 }
 
 impl GitHubClient {
-    /// Builds an authenticated client without exposing its credential to module state.
+    /// Builds a client that retains its sensitive authorization header for its lifetime.
     pub fn try_new(user_agent: &str, token: &str) -> Result<Self, GitHubClientError> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut headers = HeaderMap::new();

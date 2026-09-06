@@ -12,7 +12,7 @@ use signalbox_domain::{
     RepositorySlug, SessionId, SessionOwnership, SessionParkCause, SessionParkResponder,
 };
 use sqlx::{
-    PgConnection, PgPool,
+    PgPool,
     types::{Uuid, time::OffsetDateTime},
 };
 
@@ -977,16 +977,10 @@ impl PostgresConvergenceSweepStore {
                 .into_iter()
                 .map(SessionId::from_uuid)
                 .collect::<Vec<_>>();
-            // Model-call preparation locks lifecycle before its activity fence.
-            // Take every lifecycle lock first so this path cannot invert that
-            // order while waiting on another cohort member.
             for cohort_session in &cohort_sessions {
                 crate::session_lifecycle::load_locked(&mut transaction, *cohort_session)
                     .await
                     .map_err(|error| ConvergenceSweepStoreError::Lifecycle(Box::new(error)))?;
-            }
-            for cohort_session in cohort_sessions {
-                lock_model_activity_fence(&mut transaction, cohort_session).await?;
             }
         }
         let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
@@ -1216,21 +1210,6 @@ impl PostgresConvergenceSweepStore {
             Err(error) => Err(ConvergenceSweepStoreError::Database(error)),
         }
     }
-}
-
-/// Serializes first model-call creation with inactivity parking for one session.
-pub(crate) async fn lock_model_activity_fence(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!(
-            "convergence_model_activity:{}",
-            session.into_uuid()
-        ))
-        .execute(connection)
-        .await?;
-    Ok(())
 }
 
 async fn restore_commissioned_dispatch_park(
