@@ -859,18 +859,6 @@ impl RepoWatchStore {
         .bind(repository.as_str())
         .fetch_all(&mut *transaction)
         .await?;
-        let mut locked_ids = configured_ids.clone();
-        locked_ids.extend(active_rules.iter().map(|(rule_id, _)| rule_id.as_str()));
-        for rule_id in locked_ids {
-            sqlx::query(
-                "SELECT pg_advisory_xact_lock(
-                    hashtextextended(length($1)::text || ':' || $1 || $2, 0))",
-            )
-            .bind(repository.as_str())
-            .bind(rule_id)
-            .execute(&mut *transaction)
-            .await?;
-        }
         let activation_tail: Decimal = sqlx::query_scalar(
             "SELECT COALESCE(max(repository_event_ordinal), 0)
                FROM gh_event WHERE repository = $1",
