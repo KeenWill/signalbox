@@ -183,9 +183,9 @@ use signalbox_persistence::{
         SessionDelegationCorruption, SessionDelegationRepository, SessionDelegationRepositoryError,
     },
     start_eligible_turn::{
-        CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
-        StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,
-        StartEligibleTurnRepositoryError,
+        CommitActivationPreviewOutcome, CommitCountedAttachmentFailurePreviewOutcome,
+        StartEligibleTurnCorruption, StartEligibleTurnIdentityCollision,
+        StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
     },
     startup::PostgresStartupScanRepository,
     submit_input::{
