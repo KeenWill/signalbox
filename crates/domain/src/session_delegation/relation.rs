@@ -471,17 +471,28 @@ impl SessionDelegation {
     }
 }
 
+/// Reason a session delegation transition cannot be applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DelegationTransitionFailure {
+    /// The parent and child identify the same session.
     SameSession,
+    /// The terminal relation cannot accept the requested outcome.
     AlreadyTerminal,
+    /// The relation has no event from which to allocate the next ordinal.
     MissingSpawnEvent,
+    /// The request or authority does not match the relation or its dispatch.
     InvalidProvenance,
+    /// The parent termination scope excludes descendants.
     DescendantsNotSelected,
+    /// Another delivered message already uses the supplied message identity.
     DuplicateMessageIdentity,
+    /// The sending request was replayed with different message data.
     ConflictingMessageReplay,
+    /// The outcome authority already identifies a different recorded outcome.
     DuplicateOutcomeAuthority,
+    /// The outcome does not match the relation or its lifecycle.
     OutcomeReasonMismatch,
+    /// No next event ordinal is available while preserving required terminal capacity.
     EventOrdinalExhausted,
 }
 
@@ -508,6 +519,9 @@ pub enum RejectedDelegationTransition {
     },
 }
 
+/// Rejected transition identified by its spawning request and failure reason.
+///
+/// Consuming transitions retain their unchanged input for recovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DelegationTransitionError {
     spawning_request: ToolRequestId,
@@ -516,14 +530,17 @@ pub struct DelegationTransitionError {
 }
 
 impl DelegationTransitionError {
+    /// Returns the reason the transition was rejected.
     pub const fn failure(&self) -> DelegationTransitionFailure {
         self.failure
     }
 
+    /// Returns the spawning request that identifies the delegation relation.
     pub const fn spawning_request(&self) -> ToolRequestId {
         self.spawning_request
     }
 
+    /// Recovers the unchanged input of a rejected consuming transition, if present.
     pub fn into_rejected(self) -> Option<RejectedDelegationTransition> {
         self.rejected.map(|rejected| *rejected)
     }
