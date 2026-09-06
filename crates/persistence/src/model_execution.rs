@@ -1783,26 +1783,10 @@ impl PostgresModelCallRepository {
                 current.target(),
                 fast_mode,
             );
-            let stored_effective_target = sqlx::query_scalar::<_, Uuid>(
-                "SELECT effective_provider_model_identity_id
-                   FROM model_call
-                  WHERE session_id = $1
-                    AND model_call_id = $2",
-            )
-            .bind(session_id_to_uuid(session))
-            .bind(call.into_uuid())
-            .fetch_optional(&mut *transaction)
-            .await?
-            .ok_or(ModelCallCorruption::Missing(
-                "current model call effective target",
-            ))?;
-            if stored_effective_target != current_effective_target.identity().into_uuid() {
-                return Ok((false, AuthorizeModelCallOutcome::NoSend));
-            }
             let authorized = execution.authorize_send().map_err(|_| {
                 ModelCallCorruption::Inconsistent("checked Prepared call could not authorize send")
             })?;
-            persist_authorization(&mut transaction, &authorized).await?;
+            persist_authorization(&mut transaction, &authorized, current_effective_target).await?;
             Ok((
                 true,
                 AuthorizeModelCallOutcome::Authorized(Box::new(authorized)),
@@ -7873,6 +7857,7 @@ async fn load_frozen_epoch_system_prompt(
 async fn persist_authorization(
     connection: &mut PgConnection,
     authorized: &AuthorizedModelCall,
+    effective_target: ResolvedProviderTarget,
 ) -> Result<(), ModelCallRepositoryError> {
     let attempt_rows = sqlx::query(
         "UPDATE turn_attempt
@@ -7892,7 +7877,8 @@ async fn persist_authorization(
     .rows_affected();
     let call_rows = sqlx::query(
         "UPDATE model_call
-            SET state_kind = 'in_flight'
+            SET state_kind = 'in_flight',
+                effective_provider_model_identity_id = $5
           WHERE model_call_id = $1
             AND turn_id = $2
             AND session_id = $3
@@ -7904,6 +7890,7 @@ async fn persist_authorization(
     .bind(turn_id_to_uuid(authorized.turn()))
     .bind(session_id_to_uuid(authorized.session()))
     .bind(authorized.attempt().id().into_uuid())
+    .bind(effective_target.identity().into_uuid())
     .execute(&mut *connection)
     .await?
     .rows_affected();

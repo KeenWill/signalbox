@@ -665,12 +665,12 @@ async fn effective_target_baseline_rejects_changed_alternate_mapping() -> Result
     Ok(())
 }
 
-/// A prepared call pins the serving target selected before a restart. If the
-/// configured alternate-target mapping changes, authorization must not send
-/// the call through a target different from that durable attribution.
+/// A prepared call refreshes its serving-target attribution at authorization.
+/// A restart with a changed alternate-target mapping therefore records the
+/// target used by the capability that can enter the provider.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn effective_target_authorization_rejects_changed_mapping_after_restart()
+async fn effective_target_authorization_records_changed_mapping_after_restart()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x6d79;
@@ -769,10 +769,8 @@ async fn effective_target_authorization_rejects_changed_mapping_after_restart()
     .await
     .expect_err("a prepared call's effective target is immutable");
     assert_eq!(
-        mutation
-            .as_database_error()
-            .and_then(|error| error.constraint()),
-        Some("model_call_effective_target_immutable")
+        mutation.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
     );
 
     let new_families = ModelCredentialFamilyCatalog::try_new([
@@ -784,10 +782,10 @@ async fn effective_target_authorization_rejects_changed_mapping_after_restart()
     let restarted =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
             .with_session_credentials(new_families);
-    assert_eq!(
+    assert!(matches!(
         restarted.authorize_send(session, call).await?,
-        AuthorizeModelCallOutcome::NoSend
-    );
+        AuthorizeModelCallOutcome::Authorized(_)
+    ));
     let durable: (String, Uuid) = sqlx::query_as(
         "SELECT state_kind, effective_provider_model_identity_id
            FROM model_call
@@ -799,8 +797,8 @@ async fn effective_target_authorization_rejects_changed_mapping_after_restart()
     assert_eq!(
         durable,
         (
-            "prepared".to_owned(),
-            old_fast_target.identity().into_uuid()
+            "in_flight".to_owned(),
+            new_fast_target.identity().into_uuid()
         )
     );
 
