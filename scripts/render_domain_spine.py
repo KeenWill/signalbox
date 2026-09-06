@@ -576,11 +576,15 @@ class Renderer:
                 for kind, group in groups.items():
                     parts = sorted((path for path in previous if re.fullmatch(rf'{kind}(?:-\d+)?\.md', path.name)),
                                    key=lambda path: int(path.stem.rpartition('-')[2]) if '-' in path.stem else 1)
-                    boundaries = {headings[-1] for path in parts[:-1]
+                    boundaries = {headings[-1]: number for number, path in enumerate(parts[:-1], 1)
                                   if (headings := re.findall(r'^## (.+)$', path.read_text(), re.MULTILINE))}
+                    starts = {headings[0]: number for number, path in enumerate(parts[1:], 1)
+                              if (headings := re.findall(r'^## (.+)$', path.read_text(), re.MULTILINE))}
                     chunks = [[]]
                     for block in group:
-                        if (chunks[-1] and chunks[-1][-1].splitlines()[0].removeprefix('## ') in boundaries
+                        if (chunks[-1] and (
+                                boundaries.get(chunks[-1][-1].splitlines()[0].removeprefix('## ')) == len(chunks)
+                                or starts.get(block.splitlines()[0].removeprefix('## ')) == len(chunks))
                                 or not fits(page(f'{module}: {kind}', chunks[-1] + [block]))):
                             if not chunks[-1]:
                                 raise ValueError(f'{module}: one item exceeds the page limits')

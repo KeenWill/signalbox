@@ -534,6 +534,21 @@ pub struct Token;
         self.assertIn('## Event', files['example/types-2.md'])
         self.assertIn('## Token', files['example/types-2.md'])
 
+    def test_split_page_survives_removal_of_preceding_pages_trailing_declaration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'docs/api/sample/example'
+            directory.mkdir(parents=True)
+            (directory / 'types.md').write_text('# example: types\n\n## Record\n\n## Removed\n')
+            (directory / 'types-2.md').write_text('# example: types-2\n\n## Event\n\n## Token\n')
+            with patch('render_domain_spine.ROOT', root):
+                files = Renderer(fixture()).files('sample')
+        self.assertIn('## Record', files['example/types.md'])
+        self.assertNotIn('## Event', files['example/types.md'])
+        self.assertIn('## Event', files['example/types-2.md'])
+        self.assertIn('## Token', files['example/types-2.md'])
+        self.assertNotIn('example/types-3.md', files)
+
     def test_oversized_type_group_continues_at_item_boundaries(self):
         document = fixture()
         root_items = document['index']['0']['inner']['module']['items']
