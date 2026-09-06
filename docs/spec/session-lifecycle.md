@@ -27,12 +27,12 @@ the two machines never disagree.
 Waiting carries a typed kind and the party expected to end the wait. Only an
 owned session carries a deadline, and its state sets the kind: admission covers
 created and dispatched, active stall covers active and recovering, and waiting
-covers waiting. Each of those states carries exactly one deadline; blocked and
+covers waiting, each of those states with exactly one deadline; blocked and
 parked carry none. The admission and waiting bounds come from configuration. A
-parked session carries a machine-readable cause and the responder who must act,
-the operator queue or one module. An expired waiting deadline and a module park
-are the two paths into parked. The operator queue is every parked session; the
-recorded responder does not filter it.
+parked session, reached only by an expired waiting deadline or a module park,
+carries a machine-readable cause and the responder who must act, the operator
+queue or one module. The operator queue is every parked session; the recorded
+responder does not filter it.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a finish check passed and declared when no check ran; a failed check blocks
@@ -127,15 +127,15 @@ error rather than a guess.
 Lifecycle state, deadlines, budgets, recovery, and staleness detection live in
 daemon core; no module implements any of them except the core-integrated
 [convergence](repo-watch.md) sweep, which owns its dispatch failure budget and
-parks the session as a module when that budget is exhausted. A dispatched
-[repo-watch](repo-watch.md) session is the other exception: the module holds a
-start lease over the wait for that session's first model call, and an expired
-lease ends the commissioned goal generation through a composed goal stop rather
-than a lifecycle deadline, leaving the session non-terminal. Repo-watch also
-owns a dispatch-attempt budget, and an obligation that exhausts it parks the
-owned sessions it wraps as the module. Lifecycle behavior or an event kind a
-module needs and core does not provide is added to core, and modules never
-reconstruct events by joining core tables.
+parks the session as a module when that budget is exhausted, and
+[repo-watch](repo-watch.md), which owns a dispatch-attempt budget and holds a
+start lease. An obligation that exhausts the dispatch-attempt budget parks the
+owned sessions it wraps as the module. The start lease covers a dispatched
+session's wait for its first model call, and an expired lease ends the
+commissioned goal generation through a composed goal stop rather than a
+lifecycle deadline, leaving the session non-terminal. Lifecycle behavior or an
+event kind a module needs and core does not provide is added to core, and
+modules never reconstruct events by joining core tables.
 
 The attention classifier that
 [sessions and the transcript](sessions-and-transcript.md) owns is a projection

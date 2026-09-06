@@ -277,7 +277,18 @@ impl<C: Clone> EventDecoder<C> {
                 "Claude init carries an empty session or model id",
             ));
         }
-        if event.claude_code_version != SUPPORTED_CLAUDE_CLI_VERSION {
+        let observed_version =
+            semver::Version::parse(&event.claude_code_version).map_err(|_| {
+                DecodeFailure::stream_protocol(format!(
+                    "Claude Code version `{}` is not SemVer",
+                    event.claude_code_version
+                ))
+            })?;
+        let supported_version =
+            semver::Version::parse(SUPPORTED_CLAUDE_CLI_VERSION).map_err(|_| {
+                DecodeFailure::stream_protocol("the pinned Claude Code version is not SemVer")
+            })?;
+        if observed_version != supported_version {
             return Err(DecodeFailure::stream_protocol(format!(
                 "Claude Code version `{}` does not match pinned `{SUPPORTED_CLAUDE_CLI_VERSION}`",
                 event.claude_code_version

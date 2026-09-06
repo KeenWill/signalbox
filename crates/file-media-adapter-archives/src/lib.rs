@@ -23,7 +23,7 @@ use signalbox_file_media_runtime::{
 use zip::{CompressionMethod, ZipArchive};
 
 const PROVIDER_NAME: &str = "archives";
-const READER_REVISION: &str = "zip8-tar04-gz1-zstd013-v1";
+const READER_REVISION: &str = "zip8-tar04-gz1-zstd013-v2";
 const ENTRIES_VIEW: &str = "entries";
 const MALFORMED_REASON: &str = "malformed_archive";
 const ENTRY_COUNT_REASON: &str = "entry_count_limit";
@@ -34,7 +34,6 @@ const RECURSIVE_REASON: &str = "recursive_container";
 const SPECIAL_ENTRY_REASON: &str = "special_entry";
 const SOURCE_SIZE_REASON: &str = "source_size_limit";
 const UNSUPPORTED_COMPRESSION_REASON: &str = "unsupported_compression_method";
-const UNSUPPORTED_DICTIONARY_REASON: &str = "unsupported_dictionary";
 // numeric-bound: hard safety ceiling - bounds probe I/O and retained signature evidence
 const PROBE_BYTES: u64 = 1_024;
 // numeric-bound: hard safety ceiling - bounds whole-archive memory and decode latency
@@ -233,8 +232,7 @@ impl FileMediaProvider for ArchiveProvider {
                     | ArchiveIssue::Link
                     | ArchiveIssue::Recursive
                     | ArchiveIssue::Special
-                    | ArchiveIssue::UnsupportedCompression
-                    | ArchiveIssue::UnsupportedDictionary,
+                    | ArchiveIssue::UnsupportedCompression,
                 ) => Err(FileMediaProviderFailure::Failed),
             }
         })
@@ -307,7 +305,6 @@ fn reader_declaration(
             ReasonCode::try_new(SPECIAL_ENTRY_REASON)?,
             ReasonCode::try_new(SOURCE_SIZE_REASON)?,
             ReasonCode::try_new(UNSUPPORTED_COMPRESSION_REASON)?,
-            ReasonCode::try_new(UNSUPPORTED_DICTIONARY_REASON)?,
         ],
         streaming_text_fallback: StreamingTextFallback::Disabled,
     })?)
@@ -403,7 +400,6 @@ enum ArchiveIssue {
     Recursive,
     Special,
     UnsupportedCompression,
-    UnsupportedDictionary,
 }
 
 impl ArchiveIssue {
@@ -417,7 +413,6 @@ impl ArchiveIssue {
             Self::Recursive => RECURSIVE_REASON,
             Self::Special => SPECIAL_ENTRY_REASON,
             Self::UnsupportedCompression => UNSUPPORTED_COMPRESSION_REASON,
-            Self::UnsupportedDictionary => UNSUPPORTED_DICTIONARY_REASON,
         }
     }
 }
@@ -602,7 +597,8 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
     let mut expanded = 0_u64;
     let mut detector = RecursiveDetector::new();
     while !remaining.is_empty() {
-        let name = match gzip_name(remaining)? {
+        let mut decoder = GzDecoder::new(Cursor::new(remaining));
+        let name = match decoder.header().and_then(flate2::GzHeader::filename) {
             Some(name) => checked_name_text(&latin1_name(name))?,
             None => String::from("content"),
         };
@@ -612,7 +608,6 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         if first_name.is_none() {
             first_name = Some(name);
         }
-        let mut decoder = GzDecoder::new(Cursor::new(remaining));
         let maximum = MAX_ENTRY_BYTES
             .checked_sub(expanded)
             .ok_or(ArchiveIssue::Expansion)?;
@@ -636,9 +631,6 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
 }
 
 fn enumerate_zstd(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
-    if zstd_frames_have_dictionary(bytes)? {
-        return Err(ArchiveIssue::UnsupportedDictionary);
-    }
     let mut decoder = zstd_decoder(bytes)?;
     let (expanded, recursive) = count_reader(&mut decoder, MAX_ENTRY_BYTES)?;
     if recursive {
@@ -729,22 +721,8 @@ fn structurally_valid_gzip(bytes: &[u8]) -> bool {
 }
 
 fn structurally_valid_zstd(bytes: &[u8]) -> bool {
-    if !zstd_header(bytes) {
-        return false;
-    }
-    match zstd_frames_have_dictionary(bytes) {
-        Ok(true) => return true,
-        Ok(false) => {}
-        Err(ArchiveIssue::Malformed)
-        | Err(ArchiveIssue::Expansion)
-        | Err(ArchiveIssue::EntryCount)
-        | Err(ArchiveIssue::HostileName)
-        | Err(ArchiveIssue::Link)
-        | Err(ArchiveIssue::Special)
-        | Err(ArchiveIssue::Encrypted)
-        | Err(ArchiveIssue::Recursive)
-        | Err(ArchiveIssue::UnsupportedCompression)
-        | Err(ArchiveIssue::UnsupportedDictionary) => return false,
+    if dictionary_zstd_frames(bytes) {
+        return true;
     }
     let Ok(mut decoder) = zstd_decoder(bytes) else {
         return false;
@@ -752,24 +730,43 @@ fn structurally_valid_zstd(bytes: &[u8]) -> bool {
     reader_decode_status(&mut decoder) != DecodeStatus::Malformed
 }
 
-fn structurally_valid_tar(bytes: &[u8]) -> bool {
-    if !tar_header(bytes) {
-        return false;
+// The decoder cannot validate dictionary-dependent payloads without the dictionary.
+// zstd-safe owns frame boundaries and dictionary IDs for structural recursion detection.
+fn dictionary_zstd_frames(mut bytes: &[u8]) -> bool {
+    let mut has_dictionary = false;
+    while !bytes.is_empty() {
+        let Ok(length) = zstd::zstd_safe::find_frame_compressed_size(bytes) else {
+            return false;
+        };
+        if length == 0 {
+            return false;
+        }
+        has_dictionary |= zstd::zstd_safe::get_dict_id_from_frame(bytes).is_some();
+        let Some(remaining) = bytes.get(length..) else {
+            return false;
+        };
+        bytes = remaining;
     }
+    has_dictionary
+}
+
+fn structurally_valid_tar(bytes: &[u8]) -> bool {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     archive.set_ignore_zeros(true);
     let Ok(entries) = archive.entries() else {
         return false;
     };
+    let mut saw_entry = false;
     for entry in entries {
         let Ok(mut entry) = entry else {
             return false;
         };
+        saw_entry = true;
         if reader_decode_status(&mut entry) == DecodeStatus::Malformed {
             return false;
         }
     }
-    true
+    saw_entry || empty_tar(bytes)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -873,83 +870,25 @@ fn zstd_header(bytes: &[u8]) -> bool {
     magic == 0xfd2f_b528 || (0x184d_2a50..=0x184d_2a5f).contains(&magic)
 }
 
-fn zstd_frames_have_dictionary(mut bytes: &[u8]) -> Result<bool, ArchiveIssue> {
-    let mut saw_frame = false;
-    let mut has_dictionary = false;
-    while !bytes.is_empty() {
-        let magic = bytes.get(..4).ok_or(ArchiveIssue::Malformed)?;
-        let magic = u32::from_le_bytes([magic[0], magic[1], magic[2], magic[3]]);
-        if (0x184d_2a50..=0x184d_2a5f).contains(&magic) {
-            let length = bytes.get(4..8).ok_or(ArchiveIssue::Malformed)?;
-            let length = usize::try_from(u32::from_le_bytes([
-                length[0], length[1], length[2], length[3],
-            ]))
-            .map_err(|_| ArchiveIssue::Malformed)?;
-            let next = 8_usize.checked_add(length).ok_or(ArchiveIssue::Malformed)?;
-            bytes = bytes.get(next..).ok_or(ArchiveIssue::Malformed)?;
-            saw_frame = true;
-            continue;
-        }
-        if magic != 0xfd2f_b528 {
-            return Err(ArchiveIssue::Malformed);
-        }
-        has_dictionary |= zstd::zstd_safe::get_dict_id_from_frame(bytes).is_some();
-        let length = zstd::zstd_safe::find_frame_compressed_size(bytes)
-            .map_err(|_| ArchiveIssue::Malformed)?;
-        if length == 0 {
-            return Err(ArchiveIssue::Malformed);
-        }
-        bytes = bytes.get(length..).ok_or(ArchiveIssue::Malformed)?;
-        saw_frame = true;
-    }
-    if saw_frame {
-        Ok(has_dictionary)
-    } else {
-        Err(ArchiveIssue::Malformed)
-    }
-}
-
 fn tar_header(bytes: &[u8]) -> bool {
-    empty_tar(bytes) || bytes.get(257..262) == Some(b"ustar") || valid_tar_checksum(bytes)
+    if empty_tar(bytes) || bytes.get(257..262) == Some(b"ustar") {
+        return true;
+    }
+    let Some(block) = bytes.get(..512) else {
+        return false;
+    };
+    let mut header = tar::Header::from_byte_slice(block).clone();
+    let Ok(expected) = header.cksum() else {
+        return false;
+    };
+    header.set_cksum();
+    header.cksum().is_ok_and(|actual| actual == expected)
 }
 
 fn empty_tar(bytes: &[u8]) -> bool {
     bytes
         .get(..1_024)
         .is_some_and(|blocks| blocks.iter().all(|byte| *byte == 0))
-}
-
-fn valid_tar_checksum(bytes: &[u8]) -> bool {
-    let Some(header) = bytes.get(..512) else {
-        return false;
-    };
-    let Some(checksum_bytes) = header.get(148..156) else {
-        return false;
-    };
-    let Some(expected) = parse_tar_octal(checksum_bytes) else {
-        return false;
-    };
-    let actual = header
-        .iter()
-        .enumerate()
-        .map(|(index, byte)| {
-            if (148..156).contains(&index) {
-                u64::from(b' ')
-            } else {
-                u64::from(*byte)
-            }
-        })
-        .sum::<u64>();
-    expected == actual
-}
-
-fn parse_tar_octal(bytes: &[u8]) -> Option<u64> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let digits = text.trim_matches(['\0', ' ']);
-    if digits.is_empty() || !digits.bytes().all(|byte| matches!(byte, b'0'..=b'7')) {
-        return None;
-    }
-    u64::from_str_radix(digits, 8).ok()
 }
 
 fn is_link(mode: Option<u32>) -> bool {
@@ -965,51 +904,6 @@ fn zip_special(mode: Option<u32>) -> bool {
         let kind = mode & 0o170_000;
         !matches!(kind, 0 | 0o040_000 | 0o100_000 | 0o120_000)
     })
-}
-
-fn gzip_name(bytes: &[u8]) -> Result<Option<&[u8]>, ArchiveIssue> {
-    if bytes.len() < 10 || !bytes.starts_with(b"\x1f\x8b\x08") {
-        return Err(ArchiveIssue::Malformed);
-    }
-    let flags = bytes[3];
-    if flags & 0b1110_0000 != 0 {
-        return Err(ArchiveIssue::Malformed);
-    }
-    let mut offset = 10_usize;
-    if flags & 0x04 != 0 {
-        let length_bytes = bytes
-            .get(offset..offset + 2)
-            .ok_or(ArchiveIssue::Malformed)?;
-        let length = usize::from(u16::from_le_bytes([length_bytes[0], length_bytes[1]]));
-        offset = offset
-            .checked_add(2 + length)
-            .ok_or(ArchiveIssue::Malformed)?;
-        bytes.get(..offset).ok_or(ArchiveIssue::Malformed)?;
-    }
-    let name = if flags & 0x08 != 0 {
-        let rest = bytes.get(offset..).ok_or(ArchiveIssue::Malformed)?;
-        let end = rest
-            .iter()
-            .position(|byte| *byte == 0)
-            .ok_or(ArchiveIssue::Malformed)?;
-        offset = offset.checked_add(end + 1).ok_or(ArchiveIssue::Malformed)?;
-        Some(&rest[..end])
-    } else {
-        None
-    };
-    if flags & 0x10 != 0 {
-        let rest = bytes.get(offset..).ok_or(ArchiveIssue::Malformed)?;
-        let end = rest
-            .iter()
-            .position(|byte| *byte == 0)
-            .ok_or(ArchiveIssue::Malformed)?;
-        offset = offset.checked_add(end + 1).ok_or(ArchiveIssue::Malformed)?;
-    }
-    if flags & 0x02 != 0 {
-        offset = offset.checked_add(2).ok_or(ArchiveIssue::Malformed)?;
-    }
-    bytes.get(..offset).ok_or(ArchiveIssue::Malformed)?;
-    Ok(name)
 }
 
 fn validated_output(

@@ -64,7 +64,7 @@ flags:
 # the whole report. The last is a one-line edit here if even this is too much.
 #
 # `behavior: default` updates the existing comment rather than appending a new
-# one per push, matching how both in-repo coverage comments already behave.
+# one per push.
 comment:
   layout: "condensed_header, flags, condensed_files, condensed_footer"
   behavior: default

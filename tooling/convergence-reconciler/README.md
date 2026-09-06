@@ -77,10 +77,10 @@ A mismatched commit OID blocks convergence even when every returned check is
 successful.
 
 Check names ending with the exact, case-sensitive suffix `(report only)` are
-non-gating. The case-insensitive names `codecov/project`, `codecov/patch`, and
-`Comment the coverage report` are also non-gating, matching
-the repository's declared informational coverage posture. These results are
-still included in the computed state passed to operator commands.
+non-gating. The case-insensitive names `codecov/project` and `codecov/patch` are
+also non-gating, matching the repository's declared informational coverage
+posture. These results are still included in the computed state passed to
+operator commands.
 
 `CONFLICTING` and `UNKNOWN` mergeability both block convergence. Draft pull
 requests also remain unconverged.
@@ -92,18 +92,18 @@ case-sensitive shell-pattern matching. Matching and previously tracked open pull
 requests are then fetched in batches of 20, including their first 100 review
 threads, changed files, and check contexts. Each current base/head OID pair is
 compared and then re-read in a separate request so a racing base advance cannot
-converge from stale evidence. Planning-only status checks changed files one at
-a time and stops at the first ineligible file; every file must carry the banner
-at the head and, unless newly added, at the base. Additional
-thread or check pages use dynamically aliased GraphQL fields, up to 20
-continuations in one request. Review-thread comments, top-level comments, and
-reviews are also paginated. REST compare requests conservatively classify
-post-review rename-only, source-comment-only, and proven clean base-forward
-changes; a base forward must be a single merge of the reviewed head and exact
-current base whose complete patch matches the base delta. REST pull-request-file
-requests recover base paths for renamed planning files. Previously watched node
-IDs are folded into the listing call so merged and closed pull requests can be
-recorded once and then omitted from future queries.
+converge from stale evidence. Planning-only status checks changed files one at a
+time and stops at the first ineligible file; every file must carry the banner at
+the head and, unless newly added, at the base. Additional thread or check pages
+use dynamically aliased GraphQL fields, up to 20 continuations in one request.
+Review-thread comments, top-level comments, and reviews are also paginated. REST
+compare requests conservatively classify post-review rename-only,
+source-comment-only, and proven clean base-forward changes; a base forward must
+be a single merge of the reviewed head and exact current base whose complete
+patch matches the base delta. REST pull-request-file requests recover base paths
+for renamed planning files. Previously watched node IDs are folded into the
+listing call so merged and closed pull requests can be recorded once and then
+omitted from future queries.
 
 ## Decision flow
 
@@ -122,13 +122,12 @@ The active-work command runs only for an unconverged pull request outside its
 cool-off. Exit status 0 means active, 1 means inactive, and any other status is
 an error that prevents dispatch. The dispatch command runs only after an
 inactive result. Immediately before each dispatch, a fresh timestamp is taken
-and the state file records a cool-off
-fence. A definite start failure removes that fence. Every outcome after the
-child starts, including a nonzero exit or timeout, keeps it because dispatch may
-have happened. This prevents an ambiguous command outcome or later tick failure
-from causing an immediate duplicate dispatch. Both
-commands are run directly, without a shell, and receive two appended positional
-arguments:
+and the state file records a cool-off fence. A definite start failure removes
+that fence. Every outcome after the child starts, including a nonzero exit or
+timeout, keeps it because dispatch may have happened. This prevents an ambiguous
+command outcome or later tick failure from causing an immediate duplicate
+dispatch. Both commands are run directly, without a shell, and receive two
+appended positional arguments:
 
 1. the decimal pull-request number;
 2. one compact JSON object containing the head and base refs, exact head and
