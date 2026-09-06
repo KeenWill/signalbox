@@ -1249,6 +1249,10 @@ where
     true
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one admission carries the pass and every occupancy/shutdown observer it requires"
+)]
 fn spawn_pass<Pass>(
     passes: &mut JoinSet<PassTaskOutcome<Pass::Error>>,
     pass: &mut Pass,
