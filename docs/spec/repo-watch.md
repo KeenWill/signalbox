@@ -60,6 +60,9 @@ another module schema.
 
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
 GET requests. It is an external-I/O capability and receives no database handle.
+The daemon's repository-specific client loader rereads the configured credential
+file on each load and returns only an authenticated client handle. Credential
+and client-construction failures have distinct redacted error classes.
 
 The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
 membership path back to the core identity, and has no table privileges in
