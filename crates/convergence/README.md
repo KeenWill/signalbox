@@ -105,5 +105,5 @@ review edits after disposition, wave boundaries and check reruns, rename-only
 and comment-only heads requiring a fresh review, clean and material base
 forwards, 101-thread pagination, and disappearing checks.
 
-Not built: consumer changes, provider abstractions, new convergence gates,
-schedulers, storage tables, or migrations.
+Not built: provider abstractions, new convergence gates, schedulers, storage
+tables, or migrations.
