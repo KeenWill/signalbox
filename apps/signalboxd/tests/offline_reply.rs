@@ -234,6 +234,8 @@ fn goal_refusal_script() -> Script {
         reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
         content: Vec::new(),
         usage: TokenUsage::unreported(),
+        retained_input_tokens: None,
+        retained_output_tokens: None,
     }))
 }
 

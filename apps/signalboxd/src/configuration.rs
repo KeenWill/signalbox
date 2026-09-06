@@ -1408,6 +1408,7 @@ impl HubModelConfiguration {
                     "fast_target_id",
                     "service_tiers",
                     "settings_profile",
+                    "provider_compaction",
                 ],
             )?;
             let selection = DirectModelSelection::from_uuid(required_uuid(model, "selection_id")?);
@@ -1424,6 +1425,7 @@ impl HubModelConfiguration {
             }
             let max_output_tokens = required_positive_u32(model, "max_output_tokens")?;
             let context_window_tokens = required_positive_u32(model, "context_window_tokens")?;
+            let provider_compaction = parse_provider_compaction_capability(model, mapping.adapter)?;
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
@@ -1548,6 +1550,11 @@ impl HubModelConfiguration {
                 context_window_tokens,
             )
             .map_err(|_| HubModelConfigurationError::InvalidField)?;
+            let runtime_definition = if provider_compaction {
+                runtime_definition.with_provider_compaction()
+            } else {
+                runtime_definition
+            };
             runtime_definitions.push(match fast_target {
                 Some(target) => runtime_definition.with_fast_target(target),
                 None => runtime_definition,
@@ -1571,6 +1578,7 @@ impl HubModelConfiguration {
                         "provider_model",
                         "max_output_tokens",
                         "context_window_tokens",
+                        "provider_compaction",
                     ],
                 )?;
                 let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -1589,6 +1597,8 @@ impl HubModelConfiguration {
                     return Err(HubModelConfigurationError::InvalidProviderModel);
                 }
                 let provider_model = provider_model.to_owned();
+                let provider_compaction =
+                    parse_provider_compaction_capability(serving_target, mapping.adapter)?;
                 let max_output_tokens = required_positive_u32(serving_target, "max_output_tokens")?;
                 let context_window_tokens =
                     required_positive_u32(serving_target, "context_window_tokens")?;
@@ -1602,15 +1612,18 @@ impl HubModelConfiguration {
                 {
                     return Err(HubModelConfigurationError::ConflictingProviderModelRoute);
                 }
-                runtime_definitions.push(
-                    RuntimeModelDefinition::try_new(
-                        target,
-                        provider_model,
-                        max_output_tokens,
-                        context_window_tokens,
-                    )
-                    .map_err(|_| HubModelConfigurationError::InvalidField)?,
-                );
+                let runtime_definition = RuntimeModelDefinition::try_new(
+                    target,
+                    provider_model,
+                    max_output_tokens,
+                    context_window_tokens,
+                )
+                .map_err(|_| HubModelConfigurationError::InvalidField)?;
+                runtime_definitions.push(if provider_compaction {
+                    runtime_definition.with_provider_compaction()
+                } else {
+                    runtime_definition
+                });
             }
         }
 
@@ -1679,12 +1692,17 @@ impl HubModelConfiguration {
                 let effective = runtime_models
                     .effective_definition(definition, fast_mode)
                     .ok_or(HubModelConfigurationError::ConflictingTarget)?;
-                tool_continuation_usage_limits.push(ToolContinuationUsageLimit::new(
+                let limit = ToolContinuationUsageLimit::new(
                     route.target,
                     fast_mode,
                     u64::from(effective.max_output_tokens()),
                     u64::from(effective.context_window_tokens()),
-                ));
+                );
+                tool_continuation_usage_limits.push(if effective.provider_compaction_supported() {
+                    limit.with_provider_compaction_replay()
+                } else {
+                    limit
+                });
             }
         }
         let billing_rates = target_billing_rates
@@ -3658,6 +3676,24 @@ struct RuntimeCapabilityProjection {
     capabilities: ModelCapabilities,
 }
 
+fn parse_provider_compaction_capability(
+    table: &Table,
+    adapter: ModelAdapter,
+) -> Result<bool, HubModelConfigurationError> {
+    let supported = table
+        .get("provider_compaction")
+        .map(|item| {
+            item.as_bool()
+                .ok_or(HubModelConfigurationError::InvalidModelCapabilities)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if supported && adapter != ModelAdapter::Anthropic {
+        return Err(HubModelConfigurationError::InvalidModelCapabilities);
+    }
+    Ok(supported)
+}
+
 fn project_runtime_model_capabilities(
     projections: Vec<RuntimeCapabilityProjection>,
     target_provider_models: &HashMap<ResolvedProviderTarget, String>,
@@ -4536,9 +4572,9 @@ pub(crate) mod tests {
     use signalbox_domain::{
         AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
         ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
-        PullRequestNumber, ReasoningLevel, RepoWatchEventKindNameV1, RepoWatchRuleVersion,
-        RepoWatchSingletonScope, ServiceTier, SessionTemplateName, SettingOverlay,
-        ToolApprovalPosture,
+        ProviderModelIdentity, PullRequestNumber, ReasoningLevel, RepoWatchEventKindNameV1,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, ResolvedProviderTarget, ServiceTier,
+        SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
@@ -9287,6 +9323,97 @@ extra = true"#,
         assert_eq!(
             HubModelConfiguration::parse(&impossible_reservation).err(),
             Some(HubModelConfigurationError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn provider_compaction_is_an_explicit_per_target_capability() {
+        let disabled = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("omitted provider compaction defaults closed");
+        let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+            Uuid::parse_str("20000000-0000-4000-8000-000000000001")
+                .expect("fixture target is a UUID"),
+        ));
+        assert!(
+            !disabled
+                .runtime_model_catalog()
+                .resolve(target)
+                .expect("fixture target is configured")
+                .provider_compaction_supported()
+        );
+
+        let enabled = HubModelConfiguration::parse(&CONFIGURATION.replace(
+            "provider_model = \"claude-example\"",
+            "provider_model = \"claude-example\"\nprovider_compaction = true",
+        ))
+        .expect("the Anthropic target declares provider compaction");
+        assert!(
+            enabled
+                .runtime_model_catalog()
+                .resolve(target)
+                .expect("fixture target is configured")
+                .provider_compaction_supported()
+        );
+
+        let malformed = CONFIGURATION.replace(
+            "provider_model = \"claude-example\"",
+            "provider_model = \"claude-example\"\nprovider_compaction = \"true\"",
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&malformed).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+
+        let wrong_adapter = format!(
+            "{}\n[codex_cli]\nexecutable = \"/bin/true\"\nworking_directory = \"/tmp\"\n",
+            CONFIGURATION
+                .replace(
+                    "adapter = \"anthropic\"\ncredential_pool = \"anthropic-main\"",
+                    "adapter = \"codex_cli\"\ncredential_pool = \"codex-main\"",
+                )
+                .replace(
+                    "provider_model = \"claude-example\"",
+                    "provider_model = \"claude-example\"\nprovider_compaction = true",
+                )
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&wrong_adapter).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+    }
+
+    #[test]
+    fn provider_compaction_capability_is_keyed_by_target_not_provider_spelling() {
+        let configuration = format!(
+            "{}\n[[models]]\nselection_id = \"10000000-0000-4000-8000-000000000002\"\ntarget_id = \"20000000-0000-4000-8000-000000000002\"\nmodel_family = \"anthropic\"\nprovider_model = \"claude-example\"\nmax_output_tokens = 256\ncontext_window_tokens = 200000\n",
+            CONFIGURATION.replace(
+                "provider_model = \"claude-example\"",
+                "provider_model = \"claude-example\"\nprovider_compaction = true",
+            )
+        );
+        let configuration = HubModelConfiguration::parse(&configuration)
+            .expect("distinct targets may share a provider spelling and differ in compaction");
+        let models = configuration.runtime_model_catalog();
+        let enabled = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+            Uuid::parse_str("20000000-0000-4000-8000-000000000001")
+                .expect("fixture target is a UUID"),
+        ));
+        let disabled = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+            Uuid::parse_str("20000000-0000-4000-8000-000000000002")
+                .expect("fixture target is a UUID"),
+        ));
+
+        assert!(
+            models
+                .resolve(enabled)
+                .expect("first target is configured")
+                .provider_compaction_supported()
+        );
+        assert!(
+            !models
+                .resolve(disabled)
+                .expect("second target is configured")
+                .provider_compaction_supported()
         );
     }
 

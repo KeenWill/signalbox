@@ -23,6 +23,11 @@ where
 ```rust
 pub enum TerminalEvidence {
     Completed(CompletionEvidence),
+    CompletedWithProviderCompaction {
+        completion: CompletionEvidence,
+        retained_input_tokens: u64,
+        retained_output_tokens: u64,
+    },
     Refused(RefusalEvidence),
     ProviderError(ProviderErrorEvidence),
     CancellationConfirmed(CancellationConfirmedEvidence),
@@ -179,6 +184,8 @@ pub struct RefusalEvidence {
     pub reported_model: option::Option<ProviderReportedModel>,
     pub content: vec::Vec<AssistantPart>,
     pub usage: TokenUsage,
+    pub retained_input_tokens: option::Option<u64>,
+    pub retained_output_tokens: option::Option<u64>,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
 impl<T> dyn_clone::DynClone for RefusalEvidence

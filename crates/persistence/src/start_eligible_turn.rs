@@ -1181,6 +1181,7 @@ async fn insert_prepared_accepted_activation(
         | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+        | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -1264,6 +1265,7 @@ async fn insert_prepared_accepted_activation(
             | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
             | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
             | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+            | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
             | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }

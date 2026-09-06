@@ -56,16 +56,18 @@ names the completed producing call, a tool-execution-result entry names the
 attempt that owns the evidence, and a denial or turn-end closure entry names the
 request. An assistant-text entry carries the exact assistant text and names the
 call that produced it. `ProviderCompaction` is a distinct semantic-entry payload
-variant carrying its producing call and one complete opaque block retained
-byte-for-byte for same-provider replay; the replay bytes are not assistant text
-and do not cross transcript protocol output. A context summary carries the
-summary text its dedicated call produced and the inclusive range it stands for.
-An imported entry carries one normalized imported content value with its speaker
-attestation. A model-identity entry marks where executed history crossed to a
-different frozen model selection. Delegation entries record a delegated task, a
-delegation message, and a delivered result. A completed, cancelled, or failed
-turn ends with exactly one terminal marker; refused, reconciliation-required,
-and retired turns have none.
+variant carrying its producing call and one complete validated opaque block.
+Buffered responses retain the provider object's exact bytes; streamed responses
+reconstruct an equivalent complete object from the validated start and delta
+fields. The resulting durable bytes replay unchanged to the same provider, are
+not assistant text, and do not cross transcript protocol output. A context
+summary carries the summary text its dedicated call produced and the inclusive
+range it stands for. An imported entry carries one normalized imported content
+value with its speaker attestation. A model-identity entry marks where executed
+history crossed to a different frozen model selection. Delegation entries record
+a delegated task, a delegation message, and a delivered result. A completed,
+cancelled, or failed turn ends with exactly one terminal marker; refused,
+reconciliation-required, and retired turns have none.
 
 A `ContextCompaction` has six correlated immutable facts: its identity and
 optional predecessor, the source frontier, a dedicated model call, the
@@ -528,10 +530,12 @@ terminal frontier extends its latest call or starting frontier by the exact
 terminal tool-result suffix when one exists and then by exactly its own marker.
 A completed turn's terminal frontier extends its call frontier by that call's
 ordered assistant entries and then the completion marker. A refused turn's
-terminal frontier is a distinct equal-content copy of its latest call frontier;
-a reconciliation-required turn over a model call carries the same distinct copy,
-and one over a tool attempt extends the producing call's frontier by its
-terminal tool-result suffix.
+terminal frontier is a distinct copy of its latest call frontier, extended in
+provider order by any provider-compaction entries the refused response produced;
+ordinary refusal text is not transcript content. A reconciliation-required turn
+over a model call carries the same distinct equal-content copy, and one over a
+tool attempt extends the producing call's frontier by its terminal tool-result
+suffix.
 
 The failed-turn marker has four producers, each emitting the turn-failed update
 event atomically with the marker: the model-call known-failure closure, startup

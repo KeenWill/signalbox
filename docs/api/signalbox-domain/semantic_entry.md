@@ -14,6 +14,25 @@ impl AssistantText {
 }
 ```
 
+## ProviderCompactionBlock
+
+```rust
+pub struct ProviderCompactionBlock(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ProviderCompactionBlock {
+    pub fn try_new(value: string::String) -> result::Result<Self, ProviderCompactionBlockError>;
+    pub fn as_json(&self) -> &str;
+    pub fn into_json(self) -> string::String;
+}
+```
+
+## ProviderCompactionBlockError
+
+```rust
+pub struct ProviderCompactionBlockError;
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## SemanticTranscriptEntryPayload
 
 ```rust
@@ -68,6 +87,10 @@ pub enum SemanticTranscriptEntryPayload {
     AssistantText {
         producing_call: ModelCallId,
         value: AssistantText,
+    },
+    ProviderCompaction {
+        producing_call: ModelCallId,
+        block: ProviderCompactionBlock,
     },
     AssistantToolUse {
         producing_call: ModelCallId,

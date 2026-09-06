@@ -547,6 +547,8 @@ impl CodexCliRuntime {
             tool_choice: operation.tool_choice,
             output_contract: operation.output_contract,
             delivery: operation.delivery,
+            provider_compaction: operation.provider_compaction,
+            provider_compaction_supported: operation.provider_compaction_supported,
         };
         let capabilities = match self
             .model_capabilities

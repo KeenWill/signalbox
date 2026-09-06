@@ -52,6 +52,9 @@ pub enum MessagePart {
     RedactedThinking {
         data: string::String,
     },
+    ProviderCompaction {
+        block_json: string::String,
+    },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
 impl<T> dyn_clone::DynClone for MessagePart
@@ -90,6 +93,9 @@ pub enum AssistantPart {
     },
     RedactedThinking {
         data: string::String,
+    },
+    ProviderCompaction {
+        block_json: string::String,
     },
     ToolCall(ToolCallProposal),
     SuppressedToolCall(ToolName),

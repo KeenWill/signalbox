@@ -10,7 +10,8 @@ use serde::{
 };
 
 use crate::{
-    AssistantText, DurableCommandId, ModelCallId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
+    AssistantText, DurableCommandId, ModelCallId, ProviderCompactionBlock, SessionId,
+    ToolAttemptId, ToolRequestId, TurnId,
 };
 
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
@@ -407,6 +408,8 @@ impl ToolCallProposal {
 pub enum AssistantResponsePart {
     /// Exact assistant text.
     Text(AssistantText),
+    /// One opaque provider-produced compaction block.
+    ProviderCompaction(ProviderCompactionBlock),
     /// One normalized logical tool proposal.
     ToolCall(ToolCallProposal),
 }
