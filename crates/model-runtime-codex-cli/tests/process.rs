@@ -2064,12 +2064,16 @@ async fn explicit_refusal_is_refusal_evidence() {
 }
 
 #[tokio::test]
-async fn rendered_failure_before_a_buffered_refusal_stays_opaque() {
-    assert_error_scenario("credential_precedence", ProviderErrorKind::Unrecognized).await;
+async fn credential_rejection_precedes_a_buffered_refusal() {
+    assert_error_scenario(
+        "credential_precedence",
+        ProviderErrorKind::CredentialRejected,
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn stderr_failure_is_redacted_and_stays_opaque() {
+async fn stderr_credential_rejection_is_classified_before_exit_status() {
     let result = execute_scenario(
         "stderr_redaction",
         DeliveryMode::Buffered,
@@ -2079,7 +2083,7 @@ async fn stderr_failure_is_redacted_and_stays_opaque() {
     .await;
     let error = provider_error(&result.evidence);
 
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
     assert!(!error.non_acceptance_proven);
     assert!(
         !error
@@ -2092,43 +2096,51 @@ async fn stderr_failure_is_redacted_and_stays_opaque() {
 }
 
 #[tokio::test]
-async fn permission_message_stays_opaque() {
-    assert_error_scenario("error_permission", ProviderErrorKind::Unrecognized).await;
+async fn permission_error_is_typed() {
+    assert_error_scenario("error_permission", ProviderErrorKind::PermissionDenied).await;
 }
 
 #[tokio::test]
-async fn invalid_request_message_stays_opaque() {
-    assert_error_scenario("error_invalid_request", ProviderErrorKind::Unrecognized).await;
+async fn invalid_request_error_is_typed() {
+    assert_error_scenario("error_invalid_request", ProviderErrorKind::InvalidRequest).await;
 }
 
 #[tokio::test]
-async fn target_not_found_message_stays_opaque() {
-    assert_error_scenario("error_target_not_found", ProviderErrorKind::Unrecognized).await;
+async fn target_not_found_error_is_typed() {
+    assert_error_scenario("error_target_not_found", ProviderErrorKind::TargetNotFound).await;
 }
 
 #[tokio::test]
-async fn request_too_large_message_stays_opaque() {
-    assert_error_scenario("error_request_too_large", ProviderErrorKind::Unrecognized).await;
+async fn request_too_large_error_is_typed() {
+    assert_error_scenario(
+        "error_request_too_large",
+        ProviderErrorKind::RequestTooLarge,
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn rate_limit_message_stays_opaque() {
-    assert_error_scenario("error_rate_limited", ProviderErrorKind::Unrecognized).await;
+async fn rate_limit_error_is_typed() {
+    assert_error_scenario("error_rate_limited", ProviderErrorKind::RateLimited).await;
 }
 
 #[tokio::test]
-async fn quota_exhaustion_message_stays_opaque() {
-    assert_error_scenario("error_quota_exhausted", ProviderErrorKind::Unrecognized).await;
+async fn quota_exhaustion_error_is_typed() {
+    assert_error_scenario("error_quota_exhausted", ProviderErrorKind::QuotaExhausted).await;
 }
 
 #[tokio::test]
-async fn overload_message_stays_opaque() {
-    assert_error_scenario("error_overloaded", ProviderErrorKind::Unrecognized).await;
+async fn overload_error_is_typed() {
+    assert_error_scenario("error_overloaded", ProviderErrorKind::Overloaded).await;
 }
 
 #[tokio::test]
-async fn provider_internal_message_stays_opaque() {
-    assert_error_scenario("error_provider_internal", ProviderErrorKind::Unrecognized).await;
+async fn provider_internal_error_is_typed() {
+    assert_error_scenario(
+        "error_provider_internal",
+        ProviderErrorKind::ProviderInternal,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2139,12 +2151,12 @@ async fn unknown_definitive_error_fails_closed() {
 /// Defect regression: the pinned CLI reports a failed exchange as a
 /// stream-level `error` event followed by its `turn.failed` lifecycle echo. The
 /// decoder accepts exactly that trailer and keeps the stream-level message, so
-/// the provider error is never downgraded to a post-terminal protocol
+/// the typed provider error is never downgraded to a post-terminal protocol
 /// violation. This fixture is the record of that sequencing; the gated
 /// compatibility smoke could not have supplied it, because no run of that
 /// workflow had ever authenticated when this case was written.
 #[tokio::test]
-async fn a_turn_failed_echo_after_a_stream_error_keeps_the_provider_error() {
+async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error() {
     let result = execute_scenario(
         "error_then_turn_failed",
         DeliveryMode::Buffered,
@@ -2154,8 +2166,8 @@ async fn a_turn_failed_echo_after_a_stream_error_keeps_the_provider_error() {
     .await;
     let error = provider_error(&result.evidence);
 
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
-    assert!(!error.non_acceptance_proven);
+    assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert!(error.non_acceptance_proven);
     assert_eq!(
         error.native.message.as_deref(),
         Some(fixtures::STREAM_ERROR_MESSAGE)
@@ -2164,10 +2176,13 @@ async fn a_turn_failed_echo_after_a_stream_error_keeps_the_provider_error() {
 }
 
 /// A stream-level `error` that the process never echoes as `turn.failed`
-/// proves nothing about acceptance.
+/// classifies the cause but proves nothing about acceptance.
 ///
-/// An exact `turn.failed` echo preserves definitive failure evidence without
-/// proving non-acceptance; a lone stream error carries no proof either.
+/// The substitution contract admits the Codex proof only on the exact,
+/// noncontradictory `turn.failed` closure. A truncated stream, or an exit after
+/// a lone `error` event, may still follow a request the provider accepted, so
+/// reporting the proof here would let credential-pool rotation reissue the turn
+/// under a second account and duplicate billed work.
 #[tokio::test]
 async fn a_stream_error_without_its_turn_failed_echo_proves_no_non_acceptance() {
     let result = execute_scenario(
@@ -2179,7 +2194,7 @@ async fn a_stream_error_without_its_turn_failed_echo_proves_no_non_acceptance() 
     .await;
     let error = provider_error(&result.evidence);
 
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
     assert!(!error.non_acceptance_proven);
     assert_eq!(
         error.native.message.as_deref(),
@@ -2596,8 +2611,8 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
 /// A leader that already exited while a surviving descendant held the
 /// inherited stdin read end (keeping the oversized upload blocked past the
 /// deadline) is preserved at the upload-deadline arm: its definitive nonzero
-/// status remains provider-error evidence instead of being laundered into
-/// timeout loss by the group kill, mirroring the cancellation arm's
+/// status classifies as a typed provider error instead of being laundered
+/// into timeout loss by the group kill, mirroring the cancellation arm's
 /// work-first probe.
 #[cfg(unix)]
 #[tokio::test]
@@ -2619,7 +2634,7 @@ async fn upload_deadline_preserves_an_exited_leader_with_held_stdin() {
         .await;
     let failure = provider_error(&report.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
+    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
     assert!(
         failure
             .native
@@ -2647,7 +2662,7 @@ async fn nonzero_exit_while_writing_stdin_preserves_provider_error() {
         .await;
     let failure = provider_error(&report.evidence);
 
-    assert_eq!(failure.kind, ProviderErrorKind::Unrecognized);
+    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
     assert!(
         failure
             .native
@@ -3169,11 +3184,12 @@ async fn drifted_thread_id_is_redacted_against_held_state() {
     assert!(diagnostic.contains("[redacted]"));
 }
 
-/// A nonzero exit retains bounded stderr as opaque native evidence, while
-/// credential redaction still sanitizes the emitted message.
+/// A nonzero exit is classified from the bounded raw stderr, so an error
+/// phrase sharing a line with a consumed credential marker still yields the
+/// correct typed kind while the emitted message stays sanitized.
 #[cfg(unix)]
 #[tokio::test]
-async fn opaque_stderr_is_credential_redacted() {
+async fn stderr_is_classified_before_credential_redaction() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = stdout_holding_masked_credential_failure_cli(temporary.path());
     let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(10));
@@ -3193,7 +3209,7 @@ async fn opaque_stderr_is_credential_redacted() {
         .await;
     let error = provider_error(&report.evidence);
 
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
     assert!(
         !error
             .native
@@ -3208,7 +3224,7 @@ async fn opaque_stderr_is_credential_redacted() {
 }
 
 /// Work-first: a cancellation arriving after a terminal marker but a nonzero
-/// exit keeps the failed invocation as a provider error, so cancellation
+/// exit classifies the failed invocation as a provider error, so cancellation
 /// cannot launder it into the recorded completion.
 #[cfg(unix)]
 #[tokio::test]
@@ -3266,14 +3282,14 @@ async fn cancellation_after_a_nonzero_exit_keeps_provider_error() {
         .await;
     let error = provider_error(&report.evidence);
 
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-cancel-exit-group"));
 }
 
-/// evidence: a leader that wrote a stderr failure, closed stderr, and
-/// exited nonzero keeps that opaque native message at the stdout-cleanup
-/// deadline — even while a descendant holds stdout open — instead of degrading
-/// to the synthetic "stderr unavailable" message.
+/// evidence: a leader that wrote a classifiable stderr failure,
+/// closed stderr, and exited nonzero keeps that failure's typed kind at the
+/// stdout-cleanup deadline — even while a descendant holds stdout open —
+/// instead of degrading to the synthetic "stderr unavailable" message.
 #[cfg(unix)]
 #[tokio::test]
 async fn completed_stderr_is_preserved_during_stdout_cleanup() {
@@ -3298,7 +3314,7 @@ async fn completed_stderr_is_preserved_during_stdout_cleanup() {
         .await;
     let error = provider_error(&report.evidence);
 
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
     assert!(
         error
             .native
@@ -3312,12 +3328,12 @@ async fn completed_stderr_is_preserved_during_stdout_cleanup() {
     );
 }
 
-/// A leader that wrote a stderr failure but handed its stderr to
-/// a surviving descendant (so the reader is not yet finished at the cleanup
-/// deadline) still keeps that opaque native message. The group kill
+/// A leader that wrote a classifiable stderr failure but handed
+/// its stderr to a surviving descendant (so the reader is not yet finished at
+/// the cleanup deadline) still keeps that failure's typed kind. The group kill
 /// closes the descendant's write end, and the bounded drain awaits the reader
 /// rather than aborting it, so the buffered `authentication failed` is not
-/// discarded; the failure kind remains `Unrecognized`.
+/// discarded and degraded to `Unrecognized`.
 #[cfg(unix)]
 #[tokio::test]
 async fn held_stderr_is_drained_during_stdout_cleanup() {
@@ -3340,7 +3356,7 @@ async fn held_stderr_is_drained_during_stdout_cleanup() {
         .await;
     let error = provider_error(&report.evidence);
 
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
     assert!(
         error
             .native
@@ -3354,8 +3370,8 @@ async fn held_stderr_is_drained_during_stdout_cleanup() {
 
 /// A nonterminal line read after the deadline — while a descendant keeps
 /// stdout alive but the leader has already exited — preserves the leader's
-/// definitive nonzero status at the post-line deadline check as provider-error
-/// evidence instead of being force-killed into timeout loss,
+/// definitive nonzero status at the post-line deadline check: it classifies
+/// as a typed provider error instead of being force-killed into timeout loss,
 /// mirroring the adjacent cancellation arm's work-first probe.
 #[cfg(unix)]
 #[tokio::test]
@@ -3379,7 +3395,7 @@ async fn post_line_deadline_preserves_an_exited_leader() {
         .await;
     let error = provider_error(&report.evidence);
 
-    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
     assert!(
         error
             .native
@@ -4252,8 +4268,8 @@ printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cache
 
 /// Scripts a CLI whose stderr places an explicit error phrase after a
 /// line-scoped credential marker, then exits nonzero with a stdout-holding
-/// descendant. Sanitization removes the marker's line; any retained stderr is
-/// opaque native evidence and does not determine the failure kind.
+/// descendant. The sanitized message consumes the marker's line, so the
+/// failure can only classify correctly from the bounded raw stderr.
 #[cfg(unix)]
 fn stdout_holding_masked_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
     let script = r#"#!/bin/sh
@@ -4290,7 +4306,7 @@ exit 7
     script_cli(directory, "completed-nonzero-codex", &script)
 }
 
-/// Scripts a CLI that exits nonzero after writing stderr evidence while a
+/// Scripts a CLI that exits nonzero after a classifiable stderr while a
 /// descendant both holds stdout open and signals readiness, so a cancellation
 /// can be timed to arrive after the leader has already exited.
 #[cfg(unix)]
@@ -4312,7 +4328,7 @@ exit 7
     script_cli(directory, "cancel-after-exit-codex", script)
 }
 
-/// Scripts a CLI that writes opaque credential-rejection prose to stderr,
+/// Scripts a CLI that writes a classifiable credential-rejection to stderr,
 /// closes stderr, hands a stdout-holding descendant the pipe, and exits
 /// nonzero. The stdout-decode loop then reaches its deadline with the leader
 /// already exited and stderr already complete, exercising the branch that
@@ -4332,8 +4348,8 @@ exit 7
     script_cli(directory, "stderr-credential-codex", script)
 }
 
-/// Scripts a CLI that emits its nonterminal preamble, writes opaque failure
-/// evidence to stderr, hands stdout to a descendant that floods benign unknown
+/// Scripts a CLI that emits its nonterminal preamble, writes a classifiable
+/// stderr failure, hands stdout to a descendant that floods benign unknown
 /// keepalive events continuously, and exits nonzero. The flood keeps the
 /// biased select's read arm always ready, so the deadline is only ever
 /// noticed by the post-line check — on a freshly read line while the
@@ -4409,7 +4425,7 @@ while :; do cat fake-codex-flood-block; done
     script_cli(directory, "starving-flood-codex", &script)
 }
 
-/// Scripts a CLI that writes opaque failure evidence to stderr, then hands its
+/// Scripts a CLI that writes a classifiable stderr failure, then hands its
 /// stdout and stderr handles to a surviving descendant (so neither pipe reaches
 /// EOF on its own) and exits nonzero. Unlike `stdout_holding_credential_failure_cli`,
 /// the leader never closes stderr, so at the cleanup deadline the reader is not

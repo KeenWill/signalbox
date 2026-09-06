@@ -312,12 +312,9 @@ successor attempt that fails as its predecessor did.
 Settings whose effect the daemon cannot supply are typed startup failures rather
 than retained and inert: `round_robin`, `least_used`, any headroom reserve, a
 non-`stay` `on_headroom_low`, and a `switch_now` whose adapter cannot prove
-non-acceptance for that trigger's cause unless it is `on_credential_rejected`. A
-Codex pool rejects non-`stay` actions on availability and credential-rejection
-triggers because its opaque failures cannot fire them. A Claude pool rejects
-non-`stay` quota actions because HTTP status classification supplies no
-quota-exhaustion cause. Why: a configured protection that silently never fires
-reads as one the deployment has.
+non-acceptance for that trigger's cause unless it is `on_credential_rejected`.
+Why: a configured protection that silently never fires reads as one the
+deployment has.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
@@ -336,14 +333,17 @@ non-acceptance proof. The rejected profile and `CredentialRejected` cause remain
 recorded durably on the failed attempt. `switch_now` remains refused on
 `on_headroom_low`, because low headroom is not a failure.
 
-Codex rendered authentication prose is opaque and produces no
-credential-rejection trigger or delivery-layer refresh-race bypass.
+A `codex_home` refresh race gets no delivery-layer bypass, because the Codex CLI
+reports one undifferentiated authentication failure the adapter cannot split;
+every `codex_home` credential rejection follows the pool's configured
+`on_credential_rejected` action.
 
 An HTTP adapter proves non-acceptance only with a decoded native error envelope
 naming the cause in a pre-stream error response. An SSE error record never
 carries that proof, whatever token it holds, because by then the provider has
-begun processing the request. Neither CLI adapter supplies non-acceptance proof,
-so neither admits `switch_now` on availability triggers.
+begun processing the request. The Codex CLI proves non-acceptance instead
+through its machine-readable `turn.failed` closure, so a `codex_cli` pool admits
+`switch_now` on all three availability causes.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
 observed it, and nothing ends one. It applies to every session except one that

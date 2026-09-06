@@ -255,10 +255,11 @@ pub trait CliSession<C>: Sized {
         cause: LossCause,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
-    /// Produces a provider failure from sanitized exit evidence.
+    /// Produces a provider failure from sanitized evidence and bounded raw exit material.
     fn provider_error_after_exit(
         self,
         message: &str,
+        classification: &str,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence;
 }
@@ -709,10 +710,14 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                         if exited_before_cleanup || !was_killed_by_group_cleanup(&status) =>
                     {
                         child.disarm();
-                        // Drain buffered stderr under the bound to retain it as
-                        // opaque native evidence. The reader may not yet report
-                        // `is_finished()` after the group kill closes its write
-                        // ends; aborting it here would discard that evidence.
+                        // A leader that wrote and closed stderr before exiting,
+                        // or a descendant whose stderr write end the group kill
+                        // just closed, leaves classifiable failure text buffered
+                        // in the reader. Await it under the bounded drain so a
+                        // credential rejection or quota failure keeps its typed
+                        // kind instead of degrading to the synthetic cleanup
+                        // message; `is_finished()` is not yet true right after
+                        // the kill, so aborting here would discard that text.
                         let stderr_detail = drain_stderr_after_cleanup(
                             &mut stderr_task,
                             &format!(
@@ -802,9 +807,10 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 {
                     child.disarm();
                     reaped_status = Some(Ok(status));
-                    // Drain buffered stderr after the group kill closes the
-                    // descendant's write end, preserving opaque native evidence
-                    // that aborting the reader would discard.
+                    // Same bounded drain as the exit-wait deadline: a descendant
+                    // whose stderr the group kill just closed may still hold
+                    // buffered classifiable text, so await the reader instead of
+                    // aborting it and losing a typed provider failure.
                     drain_stderr_after_cleanup(
                         &mut stderr_task,
                         &format!(
@@ -930,22 +936,36 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             // continuation would otherwise keep the pair from rejoining, and
             // the continuation would survive the stateless stderr redaction.
             let stderr_detail = sanitized_stderr(&redacting_sink, &stderr, stderr_limit);
-            let message = if !stderr_detail.trim().is_empty() {
-                format!(
-                    "{} exited with status {status}: {stderr_detail}",
-                    labels.process
+            // The emitted message carries only sanitized stderr; the failure
+            // is classified from the bounded raw stderr so an explicit error
+            // phrase sharing a line with a consumed credential marker still
+            // reaches the classifier.
+            let (message, classification) = if !stderr_detail.trim().is_empty() {
+                (
+                    format!(
+                        "{} exited with status {status}: {stderr_detail}",
+                        labels.process
+                    ),
+                    format!(
+                        "{} exited with status {status}: {}",
+                        labels.process,
+                        stderr.classification().trim()
+                    ),
                 )
             } else if let Some(error) = input_error {
-                format!(
+                let message = format!(
                     "{} exited with status {status} after stdin failed: {error}",
                     labels.process
-                )
+                );
+                (message.clone(), message)
             } else {
-                format!("{} exited with status {status}", labels.process)
+                let message = format!("{} exited with status {status}", labels.process);
+                (message.clone(), message)
             };
             // Evidence is built before the sink flushes so the failure
             // message still sees the held cross-fragment redaction state.
-            let evidence = decoder.provider_error_after_exit(&message, &mut redacting_sink);
+            let evidence =
+                decoder.provider_error_after_exit(&message, &classification, &mut redacting_sink);
             redacting_sink.finish();
             evidence
         }
@@ -1219,10 +1239,13 @@ async fn reap_exited_leader(
 /// Await a stderr reader after the process group has been killed, under a short
 /// bound.
 ///
-/// Killing the group closes the descendants' stderr write ends, allowing the
-/// reader to finish with buffered text retained only as opaque native evidence.
-/// Await the reader to preserve that evidence; if it remains pending past the
-/// bound, abort it and report `unavailable_message`.
+/// Killing the group closes the descendants' stderr write ends, so the reader
+/// reaches EOF and finishes with its already-buffered classifiable failure
+/// text. Await it — rather than aborting an `is_finished()`-not-yet reader,
+/// which drops that buffered text and degrades a recognizable provider failure
+/// (a credential rejection, a quota exhaustion) to `Unrecognized`. Only a reader
+/// still held open past the bound — a descendant that ignored the kill — is
+/// aborted and reported with `unavailable_message`.
 async fn drain_stderr_after_cleanup(
     stderr_task: &mut tokio::task::JoinHandle<std::io::Result<BoundedOutput>>,
     unavailable_message: &str,
@@ -1434,6 +1457,7 @@ fn oversize_event(limit: usize, labels: CliProcessLabels) -> std::io::Error {
 
 struct BoundedOutput {
     raw: Vec<u8>,
+    classification_end: usize,
     evidence_truncated: bool,
 }
 
@@ -1441,9 +1465,19 @@ impl BoundedOutput {
     fn diagnostic(text: String) -> Self {
         let raw = text.into_bytes();
         Self {
+            classification_end: raw.len(),
             raw,
             evidence_truncated: false,
         }
+    }
+
+    fn classification(&self) -> String {
+        let mut classification =
+            String::from_utf8_lossy(&self.raw[..self.classification_end]).into_owned();
+        if self.evidence_truncated {
+            classification.push_str(TRUNCATION_SUFFIX);
+        }
+        classification
     }
 }
 
@@ -1464,8 +1498,10 @@ async fn read_bounded_output<R: AsyncRead + Unpin>(
         retained.extend_from_slice(&buffer[..admitted]);
         evidence_truncated |= retained.len() > evidence_limit || admitted < read;
     }
+    let classification_end = retained.len().min(evidence_limit);
     Ok(BoundedOutput {
         raw: retained,
+        classification_end,
         evidence_truncated,
     })
 }
@@ -1829,6 +1865,7 @@ mod tests {
         fn provider_error_after_exit(
             self,
             _message: &str,
+            _classification: &str,
             _sink: &mut RedactingSink<'_, u8>,
         ) -> TerminalEvidence {
             unused_terminal_evidence()
@@ -1923,6 +1960,7 @@ mod tests {
         fn provider_error_after_exit(
             self,
             _message: &str,
+            _classification: &str,
             _sink: &mut RedactingSink<'_, u8>,
         ) -> TerminalEvidence {
             unused_terminal_evidence()
@@ -2199,6 +2237,7 @@ mod tests {
             .expect("the fixture carries one JSON escape")
             + 2;
         let stderr = BoundedOutput {
+            classification_end: body.len(),
             raw: body.into_bytes(),
             evidence_truncated: false,
         };
@@ -2218,6 +2257,7 @@ mod tests {
         const SYNTHETIC_CREDENTIAL: &str = "SYNTHETIC-SECRET-STDERR-Z";
         let stderr = BoundedOutput {
             raw: format!("api_key={SYNTHETIC_CREDENTIAL}").into_bytes(),
+            classification_end: 0,
             evidence_truncated: true,
         };
         let mut observed: Vec<crate::Observation<u8>> = Vec::new();
@@ -2234,6 +2274,7 @@ mod tests {
         const EVIDENCE_LIMIT: usize = 12;
         let stderr = BoundedOutput {
             raw: b"api_key=x".to_vec(),
+            classification_end: 0,
             evidence_truncated: false,
         };
         let mut observed: Vec<crate::Observation<u8>> = Vec::new();
@@ -2254,6 +2295,19 @@ mod tests {
             .expect("the in-memory reader succeeds");
 
         assert_eq!(output.raw, &INPUT[..2 * EVIDENCE_LIMIT]);
+    }
+
+    #[tokio::test]
+    async fn stderr_classification_preserves_the_original_bounded_prefix() {
+        const EVIDENCE_LIMIT: usize = 8;
+        const INPUT: &[u8] = b"abcdefghijklmnopq";
+
+        let output = read_bounded_output(INPUT, EVIDENCE_LIMIT)
+            .await
+            .expect("the in-memory reader succeeds");
+
+        let expected = [&INPUT[..EVIDENCE_LIMIT], TRUNCATION_SUFFIX.as_bytes()].concat();
+        assert_eq!(output.classification().as_bytes(), expected);
     }
 
     #[tokio::test]
