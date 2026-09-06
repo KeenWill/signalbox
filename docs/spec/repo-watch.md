@@ -40,8 +40,8 @@ versioned semantics.
 Each repository frontier commit includes the complete current repository and
 pull-request projections, expected generation, complete identity candidate, and
 ordered event occurrences in one transaction. A generation mismatch is stale
-unless that complete input exactly replays the immediately succeeding commit.
-An empty event batch with an unchanged cursor is unchanged only when both stored
+unless that complete input exactly replays the immediately succeeding commit. An
+empty event batch with an unchanged cursor is unchanged only when both stored
 projections also match; a projection-only change advances the generation and
 records the complete commit digest.
 
