@@ -94,11 +94,11 @@ async fn nonterminal_system_events_do_not_mask_the_initialized_exchange() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a credential marker in a discarded lifecycle event remains part of
+/// a credential marker in a discarded lifecycle event remains part of
 /// the redaction lookbehind, so retained assistant output cannot disclose its
 /// otherwise opaque continuation.
 #[tokio::test]
-async fn inv_035_dropped_system_lifecycle_event_seeds_output_redaction() {
+async fn dropped_system_lifecycle_event_seeds_output_redaction() {
     let result = execute_scenario("system_lifecycle_event_redaction", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -121,11 +121,11 @@ async fn lifecycle_session_contradicting_init_is_a_protocol_violation() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an uncorrelated lifecycle `session_id` is provider content, not a
+/// an uncorrelated lifecycle `session_id` is provider content, not a
 /// repeated identity, so it seeds the redaction lookbehind rather than being
 /// discarded unexamined.
 #[tokio::test]
-async fn inv_035_uncorrelated_lifecycle_session_seeds_output_redaction() {
+async fn uncorrelated_lifecycle_session_seeds_output_redaction() {
     let result = execute_scenario("lifecycle_session_precedes_init", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -142,7 +142,7 @@ async fn assistant_resolved_model_may_differ_from_the_selected_init_alias() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: the provider-resolved model an assistant event newly accepts is
+/// the provider-resolved model an assistant event newly accepts is
 /// stored for the contradiction check and then discarded, so it reaches no
 /// record and this ambient-delivery runtime holds no exact value to redact
 /// downstream. A marker prefix ending that model must still seed the redaction
@@ -153,7 +153,7 @@ async fn assistant_resolved_model_may_differ_from_the_selected_init_alias() {
 /// the only source of the marker — no other chain can account for the
 /// suppression.
 #[tokio::test]
-async fn inv_035_resolved_model_prefix_is_held_into_the_first_text_block() {
+async fn resolved_model_prefix_is_held_into_the_first_text_block() {
     let result = execute_scenario("resolved_model_prefix_redaction", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -162,12 +162,12 @@ async fn inv_035_resolved_model_prefix_is_held_into_the_first_text_block() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: every assistant envelope repeats and discards the resolved model,
+/// every assistant envelope repeats and discards the resolved model,
 /// so each one re-seeds the redaction lookbehind ahead of its own content. A
 /// first event whose clean text spends that lookbehind must not leave a second
 /// event's text free to continue the marker the model ends in.
 #[tokio::test]
-async fn inv_035_repeated_model_prefix_is_held_into_each_events_text() {
+async fn repeated_model_prefix_is_held_into_each_events_text() {
     let result = execute_scenario("repeated_model_prefix_redaction", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -176,7 +176,7 @@ async fn inv_035_repeated_model_prefix_is_held_into_each_events_text() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a repeat of the discarded resolved model is the same field, not a
+/// a repeat of the discarded resolved model is the same field, not a
 /// second one. Classifying it as new would spend the discarded-field slot and
 /// fail the exchange closed, destroying ordinary output that the held marker
 /// legitimately releases once its candidate resolves clean.
@@ -348,7 +348,7 @@ async fn file_delivery_rejects_a_nul_bearing_credential_before_spawn() {
 }
 
 #[tokio::test]
-async fn inv_035_harmless_terminal_credential_prefix_remains_byte_exact() {
+async fn harmless_terminal_credential_prefix_remains_byte_exact() {
     let result = execute_scenario("safe_terminal_prefix", OperationShape::Text).await;
 
     assert_eq!(
@@ -483,7 +483,7 @@ async fn refusal_requires_the_typed_refusal_stop_reason() {
     assert_eq!(result.spawns, 1);
 }
 #[tokio::test]
-async fn inv_035_credential_shaped_cli_text_is_redacted_from_all_evidence() {
+async fn credential_shaped_cli_text_is_redacted_from_all_evidence() {
     let result = execute_scenario("credential_redaction", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -493,7 +493,7 @@ async fn inv_035_credential_shaped_cli_text_is_redacted_from_all_evidence() {
 }
 
 #[tokio::test]
-async fn inv_035_fragmented_credential_is_redacted_from_observations_and_terminal_content() {
+async fn fragmented_credential_is_redacted_from_observations_and_terminal_content() {
     let result = execute_scenario("fragmented_credential_redaction", OperationShape::Text).await;
     let observed = observation_text(&result.observations);
     let terminal = completion_text(&result.evidence);
@@ -506,7 +506,7 @@ async fn inv_035_fragmented_credential_is_redacted_from_observations_and_termina
 }
 
 #[tokio::test]
-async fn inv_035_control_sequence_cannot_obfuscate_a_streamed_credential() {
+async fn control_sequence_cannot_obfuscate_a_streamed_credential() {
     let result = execute_scenario(
         "control_sequence_credential_redaction",
         OperationShape::Text,
@@ -520,7 +520,7 @@ async fn inv_035_control_sequence_cannot_obfuscate_a_streamed_credential() {
 }
 
 #[tokio::test]
-async fn inv_035_redacted_provider_identities_still_compare_by_native_value() {
+async fn redacted_provider_identities_still_compare_by_native_value() {
     let result = execute_scenario("redacted_native_identity", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -535,7 +535,7 @@ async fn inv_035_redacted_provider_identities_still_compare_by_native_value() {
 }
 
 #[tokio::test]
-async fn inv_035_model_identifier_prefix_is_held_into_the_first_text_block() {
+async fn model_identifier_prefix_is_held_into_the_first_text_block() {
     let result = execute_scenario("model_prefix_redaction", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -544,7 +544,7 @@ async fn inv_035_model_identifier_prefix_is_held_into_the_first_text_block() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an assistant message id ending in a credential marker prefix seeds
+/// an assistant message id ending in a credential marker prefix seeds
 /// the emitted-context lookbehind, so the first text block of that same message
 /// cannot complete the marker across the two retained completion fields.
 ///
@@ -554,7 +554,7 @@ async fn inv_035_model_identifier_prefix_is_held_into_the_first_text_block() {
 /// value carries no credential indicator of its own, so a pass proves the id
 /// seeded the lookbehind rather than proving the value looked secret-shaped.
 #[tokio::test]
-async fn inv_035_message_id_credential_prefix_is_held_into_the_first_text_block() {
+async fn message_id_credential_prefix_is_held_into_the_first_text_block() {
     let result = execute_scenario("message_id_prefix_redaction", OperationShape::Text).await;
     let completion = completed(&result.evidence);
     let message_id = completion
@@ -570,11 +570,11 @@ async fn inv_035_message_id_credential_prefix_is_held_into_the_first_text_block(
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: a tool proposal id ending in a credential marker prefix seeds the
+/// a tool proposal id ending in a credential marker prefix seeds the
 /// same lookbehind, so a following text block cannot complete the marker across
 /// the emitted proposal and the emitted text.
 #[tokio::test]
-async fn inv_035_tool_proposal_id_credential_prefix_is_held_into_following_text() {
+async fn tool_proposal_id_credential_prefix_is_held_into_following_text() {
     let result = execute_scenario("tool_id_prefix_redaction", OperationShape::Tool).await;
     let completion = completed(&result.evidence);
     let [
@@ -632,7 +632,7 @@ async fn reported_usage_precedes_the_finish_fact_from_the_same_result() {
     );
 }
 
-/// INV-035: fail-closed suppression is absorbing for the sink's lifetime. The
+/// fail-closed suppression is absorbing for the sink's lifetime. The
 /// usage barrier flushes held text, but it must not re-enable
 /// provider-controlled bytes: a terminal error whose message continues a marker
 /// that began in suppressed content would otherwise be judged by the stateless
@@ -643,7 +643,7 @@ async fn reported_usage_precedes_the_finish_fact_from_the_same_result() {
 /// `UsageReported` is now emitted as the `result` event is processed, ahead of
 /// the error branch that sanitizes the native facts.
 #[tokio::test]
-async fn inv_035_suppression_survives_the_usage_barrier_into_terminal_error_facts() {
+async fn suppression_survives_the_usage_barrier_into_terminal_error_facts() {
     let result = execute_scenario(
         "suppressed_state_survives_the_usage_barrier",
         OperationShape::Text,
@@ -661,7 +661,7 @@ async fn inv_035_suppression_survives_the_usage_barrier_into_terminal_error_fact
 }
 
 #[tokio::test]
-async fn inv_035_credential_shaped_tool_ids_receive_distinct_safe_surrogates() {
+async fn credential_shaped_tool_ids_receive_distinct_safe_surrogates() {
     let result = execute_scenario("redacted_tool_ids", OperationShape::Tool).await;
     let completion = completed(&result.evidence);
     let (first, second) = two_tool_calls(&completion.content);
@@ -748,7 +748,7 @@ async fn api_error_status_classifies_a_generic_terminal_error() {
 }
 
 #[tokio::test]
-async fn inv_035_credential_shaped_finish_tokens_are_redacted_from_typed_evidence() {
+async fn credential_shaped_finish_tokens_are_redacted_from_typed_evidence() {
     let result = execute_scenario("credential_finish_token", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -758,7 +758,7 @@ async fn inv_035_credential_shaped_finish_tokens_are_redacted_from_typed_evidenc
 }
 
 #[tokio::test]
-async fn inv_035_credential_shaped_error_tokens_are_redacted_from_typed_evidence() {
+async fn credential_shaped_error_tokens_are_redacted_from_typed_evidence() {
     let result = execute_scenario("credential_error_token", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -768,7 +768,7 @@ async fn inv_035_credential_shaped_error_tokens_are_redacted_from_typed_evidence
 }
 
 #[tokio::test]
-async fn inv_035_reasoning_metadata_cannot_complete_a_streamed_credential() {
+async fn reasoning_metadata_cannot_complete_a_streamed_credential() {
     let result = execute_scenario("reasoning_metadata_credential", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -778,7 +778,7 @@ async fn inv_035_reasoning_metadata_cannot_complete_a_streamed_credential() {
 }
 
 #[tokio::test]
-async fn inv_035_redacted_reasoning_metadata_cannot_complete_a_streamed_credential() {
+async fn redacted_reasoning_metadata_cannot_complete_a_streamed_credential() {
     let result = execute_scenario(
         "redacted_reasoning_metadata_credential",
         OperationShape::Text,

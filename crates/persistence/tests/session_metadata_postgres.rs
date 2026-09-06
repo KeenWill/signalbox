@@ -148,12 +148,11 @@ fn assert_check_violation(error: &sqlx::Error) {
     );
 }
 
-/// INV-002: a created session with no metadata write has the canonical
+/// a created session with no metadata write has the canonical
 /// unwritten snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv002_initial_metadata_read_returns_unwritten_snapshot() -> Result<(), Box<dyn Error>>
-{
+async fn s01_initial_metadata_read_returns_unwritten_snapshot() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -172,10 +171,10 @@ async fn s01_inv002_initial_metadata_read_returns_unwritten_snapshot() -> Result
     Ok(())
 }
 
-/// INV-012: a missing-session rejection is durable and equal replay returns it.
+/// a missing-session rejection is durable and equal replay returns it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv012_missing_session_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+async fn s01_missing_session_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = SessionMetadataRepository::new(pool.clone());
     let absent = replacement(0x901, 0x799, metadata(Some("absent"), &[], &[], false));
@@ -193,12 +192,12 @@ async fn s01_inv012_missing_session_rejection_replays_exactly() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-012: an applied receipt with an unsupported stored command actor fails
+/// an applied receipt with an unsupported stored command actor fails
 /// closed during repository reconstitution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_applied_metadata_receipt_rejects_unsupported_command_actor()
--> Result<(), Box<dyn Error>> {
+async fn applied_metadata_receipt_rejects_unsupported_command_actor() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -244,12 +243,12 @@ async fn inv012_applied_metadata_receipt_rejects_unsupported_command_actor()
     Ok(())
 }
 
-/// INV-012: a rejected receipt with an unsupported stored command actor fails
+/// a rejected receipt with an unsupported stored command actor fails
 /// closed during repository reconstitution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_rejected_metadata_receipt_rejects_unsupported_command_actor()
--> Result<(), Box<dyn Error>> {
+async fn rejected_metadata_receipt_rejects_unsupported_command_actor() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let repository = SessionMetadataRepository::new(pool.clone());
     repository
@@ -291,12 +290,11 @@ async fn inv012_rejected_metadata_receipt_rejects_unsupported_command_actor()
     Ok(())
 }
 
-/// INV-012: changing both stored actor projections to another supported actor
+/// changing both stored actor projections to another supported actor
 /// cannot change the constructor-selected command issuer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_metadata_receipt_rejects_supported_actor_reattribution()
--> Result<(), Box<dyn Error>> {
+async fn metadata_receipt_rejects_supported_actor_reattribution() -> Result<(), Box<dyn Error>> {
     const TARGET_SESSION: u128 = 0x701;
     const REPLACEMENT_COMMAND: u128 = 0x902;
     const CORRUPT_TOOL_REQUEST: u128 = 0xA01;
@@ -345,12 +343,11 @@ async fn inv012_metadata_receipt_rejects_supported_actor_reattribution()
     Ok(())
 }
 
-/// INV-005 / INV-012: one applied command retains its exact receipt, equal
+/// one applied command retains its exact receipt, equal
 /// replay, and conflicting-reuse classification without changing current state.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Result<(), Box<dyn Error>>
-{
+async fn applied_metadata_replay_and_conflict_are_exact() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -410,11 +407,11 @@ async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Resul
     Ok(())
 }
 
-/// INV-012: an admitted tool-attributed replacement round-trips the exact
+/// an admitted tool-attributed replacement round-trips the exact
 /// request agency through the immutable receipt and current writer stamp.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_tool_metadata_actor_round_trips_exactly() -> Result<(), Box<dyn Error>> {
+async fn tool_metadata_actor_round_trips_exactly() -> Result<(), Box<dyn Error>> {
     const CREATION_COMMAND: u128 = 0x801;
     const TARGET_SESSION: u128 = 0x701;
     const REPLACEMENT_COMMAND: u128 = 0x902;
@@ -471,11 +468,11 @@ async fn inv012_tool_metadata_actor_round_trips_exactly() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-012: a multi-member tag and attribute set is retained exactly in both
+/// a multi-member tag and attribute set is retained exactly in both
 /// the current snapshot and its immutable receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_metadata_satellites_install_as_one_receipt() -> Result<(), Box<dyn Error>> {
+async fn metadata_satellites_install_as_one_receipt() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -519,12 +516,11 @@ async fn inv012_metadata_satellites_install_as_one_receipt() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-012: a blocked writer samples one post-lock statement timestamp and
+/// a blocked writer samples one post-lock statement timestamp and
 /// records that exact value in both current state and its durable receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_metadata_writer_stamp_is_sampled_after_lock_and_shared()
--> Result<(), Box<dyn Error>> {
+async fn metadata_writer_stamp_is_sampled_after_lock_and_shared() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -651,11 +647,11 @@ async fn metadata_list_applies_exact_tag_and_title_filters() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-013: the default metadata list hides archived sessions without changing
+/// the default metadata list hides archived sessions without changing
 /// the inclusive organizational view.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv013_metadata_list_hides_archived_sessions_by_default() -> Result<(), Box<dyn Error>> {
+async fn metadata_list_hides_archived_sessions_by_default() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -736,11 +732,11 @@ async fn metadata_list_uses_bounded_keyset_pages() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// INV-012: the atomic race contract requires both distinct writes to record,
+/// the atomic race contract requires both distinct writes to record,
 /// one exact serialized current winner, and replay of both receipts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_concurrent_replacements_serialize_and_replay() -> Result<(), Box<dyn Error>> {
+async fn concurrent_replacements_serialize_and_replay() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -794,11 +790,11 @@ async fn inv012_concurrent_replacements_serialize_and_replay() -> Result<(), Box
     Ok(())
 }
 
-/// INV-012: append-only installation evidence prevents an earlier applied
+/// append-only installation evidence prevents an earlier applied
 /// receipt from becoming current for the same session a second time.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_prior_metadata_receipt_cannot_be_reinstalled() -> Result<(), Box<dyn Error>> {
+async fn prior_metadata_receipt_cannot_be_reinstalled() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -849,11 +845,11 @@ async fn inv012_prior_metadata_receipt_cannot_be_reinstalled() -> Result<(), Box
     Ok(())
 }
 
-/// INV-012: each installation authenticates the complete current snapshot
+/// each installation authenticates the complete current snapshot
 /// before another write in the same transaction can supersede it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_metadata_installation_authenticates_snapshot_before_supersession()
+async fn metadata_installation_authenticates_snapshot_before_supersession()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -903,11 +899,11 @@ async fn inv012_metadata_installation_authenticates_snapshot_before_supersession
     Ok(())
 }
 
-/// INV-012: deleting installation evidence cannot reopen an applied receipt for
+/// deleting installation evidence cannot reopen an applied receipt for
 /// a second physical installation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_metadata_installation_evidence_rejects_delete() -> Result<(), Box<dyn Error>> {
+async fn metadata_installation_evidence_rejects_delete() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -937,10 +933,10 @@ async fn inv012_metadata_installation_evidence_rejects_delete() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-005: a sealed metadata receipt parent cannot be rewritten.
+/// a sealed metadata receipt parent cannot be rewritten.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv005_metadata_receipt_parent_rejects_update() -> Result<(), Box<dyn Error>> {
+async fn metadata_receipt_parent_rejects_update() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -968,10 +964,10 @@ async fn inv005_metadata_receipt_parent_rejects_update() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// INV-002: a written metadata root cannot return to the initial absent state.
+/// a written metadata root cannot return to the initial absent state.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_written_metadata_root_rejects_delete() -> Result<(), Box<dyn Error>> {
+async fn written_metadata_root_rejects_delete() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -1002,12 +998,11 @@ async fn inv002_written_metadata_root_rejects_delete() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// INV-002: a mutable root cannot change its owning session even when it has no
+/// a mutable root cannot change its owning session even when it has no
 /// tag or attribute children.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_metadata_root_rejects_identity_change_without_satellites()
--> Result<(), Box<dyn Error>> {
+async fn metadata_root_rejects_identity_change_without_satellites() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -1057,11 +1052,11 @@ async fn inv002_metadata_root_rejects_identity_change_without_satellites()
     Ok(())
 }
 
-/// INV-002: deleting one current tag cannot silently change a snapshot without
+/// deleting one current tag cannot silently change a snapshot without
 /// a matching immutable replacement receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_current_metadata_tag_rejects_partial_delete() -> Result<(), Box<dyn Error>> {
+async fn current_metadata_tag_rejects_partial_delete() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -1101,12 +1096,11 @@ async fn inv002_current_metadata_tag_rejects_partial_delete() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-002: updating one current attribute cannot silently change a snapshot
+/// updating one current attribute cannot silently change a snapshot
 /// without a matching immutable replacement receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_current_metadata_attribute_rejects_out_of_band_update() -> Result<(), Box<dyn Error>>
-{
+async fn current_metadata_attribute_rejects_out_of_band_update() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -1142,10 +1136,10 @@ async fn inv002_current_metadata_attribute_rejects_out_of_band_update() -> Resul
     Ok(())
 }
 
-/// INV-005: sealed receipt satellites cannot gain either kind of late member.
+/// sealed receipt satellites cannot gain either kind of late member.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv005_metadata_receipt_satellites_reject_late_inserts() -> Result<(), Box<dyn Error>> {
+async fn metadata_receipt_satellites_reject_late_inserts() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -1183,10 +1177,10 @@ async fn inv005_metadata_receipt_satellites_reject_late_inserts() -> Result<(), 
     Ok(())
 }
 
-/// INV-002: the applied receipt shape always carries its actor evidence.
+/// the applied receipt shape always carries its actor evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), Box<dyn Error>> {
+async fn applied_metadata_receipt_requires_result_actor() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let missing_applied_actor = sqlx::query(
         "INSERT INTO replace_session_metadata_command
@@ -1211,11 +1205,11 @@ async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), B
     Ok(())
 }
 
-/// INV-002: the current metadata timestamp cannot use PostgreSQL's positive
+/// the current metadata timestamp cannot use PostgreSQL's positive
 /// infinity sentinel.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_current_metadata_timestamp_must_be_finite() -> Result<(), Box<dyn Error>> {
+async fn current_metadata_timestamp_must_be_finite() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -1244,11 +1238,11 @@ async fn inv002_current_metadata_timestamp_must_be_finite() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-002: an applied receipt timestamp cannot use PostgreSQL's negative
+/// an applied receipt timestamp cannot use PostgreSQL's negative
 /// infinity sentinel.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_metadata_receipt_timestamp_must_be_finite() -> Result<(), Box<dyn Error>> {
+async fn metadata_receipt_timestamp_must_be_finite() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let infinite = sqlx::query(
         "INSERT INTO replace_session_metadata_command
@@ -1273,11 +1267,11 @@ async fn inv002_metadata_receipt_timestamp_must_be_finite() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-002: an applied receipt must name a retained current metadata root for
+/// an applied receipt must name a retained current metadata root for
 /// its exact target session.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), Box<dyn Error>> {
+async fn applied_metadata_receipt_requires_current_root() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -1315,11 +1309,11 @@ async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), B
     Ok(())
 }
 
-/// INV-012: a user-global identifier claimed by another command kind is a
+/// a user-global identifier claimed by another command kind is a
 /// conflict, never an absent metadata command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_cross_kind_reuse_is_conflict() -> Result<(), Box<dyn Error>> {
+async fn cross_kind_reuse_is_conflict() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -1342,11 +1336,11 @@ async fn inv012_cross_kind_reuse_is_conflict() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// INV-002: a list item validates the complete stored metadata even though its
+/// a list item validates the complete stored metadata even though its
 /// public projection intentionally omits attributes.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_metadata_list_validates_omitted_attributes() -> Result<(), Box<dyn Error>> {
+async fn metadata_list_validates_omitted_attributes() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
@@ -1409,11 +1403,11 @@ async fn inv002_metadata_list_validates_omitted_attributes() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-005: bulk truncation cannot bypass metadata current-state or sealed
+/// bulk truncation cannot bypass metadata current-state or sealed
 /// receipt guards.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv005_metadata_tables_reject_truncate() -> Result<(), Box<dyn Error>> {
+async fn metadata_tables_reject_truncate() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
 
     let current_root = sqlx::query("TRUNCATE session_metadata CASCADE")

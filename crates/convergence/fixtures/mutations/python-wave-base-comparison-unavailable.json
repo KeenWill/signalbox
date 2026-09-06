@@ -1,0 +1,10 @@
+{
+  "source": "clean-base-forward.json",
+  "edge": "wave base comparison unavailable",
+  "mutations": [
+    {
+      "path": "/comparisons/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "value": null
+    }
+  ]
+}

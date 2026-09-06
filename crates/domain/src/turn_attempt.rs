@@ -791,7 +791,7 @@ mod tests {
         causes.clone()
     }
 
-    /// INV-004 / INV-006: Prepared is the sole entry and authorization
+    /// Prepared is the sole entry and authorization
     /// preserves the physical-attempt identity.
     #[test]
     fn prepared_begins_running_with_the_same_identity() {
@@ -801,7 +801,7 @@ mod tests {
         assert_eq!(current.state(), &CurrentTurnAttemptState::Running);
     }
 
-    /// INV-006: authorization rejects every non-Prepared current state and
+    /// authorization rejects every non-Prepared current state and
     /// returns that state unchanged.
     #[test]
     fn begin_running_rejects_every_other_current_state_unchanged() {
@@ -819,7 +819,7 @@ mod tests {
         );
     }
 
-    /// S07 / INV-006 / INV-029: Running accepts either singleton stop; stopped
+    /// S07: Running accepts either singleton stop; stopped
     /// values replay/union compatible causes; Prepared accepts neither.
     #[test]
     fn stop_request_transition_matrix_preserves_complete_causes() {
@@ -877,7 +877,7 @@ mod tests {
         );
     }
 
-    /// INV-006 / INV-029: a distinct second interrupt is rejected for either
+    /// a distinct second interrupt is rejected for either
     /// stopped family without changing the exact current attempt.
     #[test]
     fn conflicting_interrupt_returns_the_unchanged_stopped_attempt() {
@@ -896,7 +896,7 @@ mod tests {
         );
     }
 
-    /// S03 / S04 / S07 / INV-006 / INV-029 / INV-034: Prepared accepts exactly
+    /// S03 / S04 / S07: Prepared accepts exactly
     /// the restricted unsent and startup terminal branches from
     /// docs/spec/turn-lifecycle-and-scheduling.md.
     #[test]
@@ -1015,7 +1015,7 @@ mod tests {
         .assert_eq(&table(&rows));
     }
 
-    /// S02 / S04 / S06 / S07 / S10 / S23 / INV-004 / INV-006: Running may
+    /// S02 / S04 / S06 / S07 / S10 / S23: Running may
     /// enter every type-valid terminal branch once slice 5 establishes guards.
     #[test]
     fn running_accepts_every_type_valid_terminal_value() {
@@ -1211,7 +1211,7 @@ mod tests {
         );
     }
 
-    /// S04 / S07 / S23 / INV-006 / INV-029 / INV-034: CancellationOnly ends
+    /// S04 / S07 / S23: CancellationOnly ends
     /// only as AfterCancellation with its exact proof and any honest result.
     #[test]
     fn cancellation_stopped_terminal_matrix_is_complete() {
@@ -1365,7 +1365,7 @@ mod tests {
         .assert_eq(&table(&rows));
     }
 
-    /// S04 / S06 / S21 / S23 / INV-006 / INV-034: FatalMismatch ends only as
+    /// S04 / S06 / S21 / S23: FatalMismatch ends only as
     /// AfterFatalMismatch with the exact complete cause value.
     #[test]
     fn fatal_stopped_terminal_matrix_is_complete() {
@@ -1616,7 +1616,7 @@ mod tests {
         }
     }
 
-    /// INV-006: fatal stop is nonempty and repeated additions are canonical set
+    /// fatal stop is nonempty and repeated additions are canonical set
     /// union rather than duplicate causes.
     #[test]
     fn fatal_failures_are_nonempty_canonical_set_union() {
@@ -1635,7 +1635,7 @@ mod tests {
         assert!(!causes.contains(failure(3)));
     }
 
-    /// S07 / INV-006 / INV-029: fatal failure and applied interrupt addition is
+    /// S07: fatal failure and applied interrupt addition is
     /// idempotent and event-order independent without losing either fact.
     #[test]
     fn stop_union_is_idempotent_and_event_order_independent() {
@@ -1660,7 +1660,7 @@ mod tests {
         );
     }
 
-    /// INV-006 / INV-029: a distinct second proof cannot replace the retained
+    /// a distinct second proof cannot replace the retained
     /// cancellation authority.
     #[test]
     fn distinct_second_interrupt_is_rejected_unchanged() {
@@ -1719,7 +1719,7 @@ mod tests {
         );
     }
 
-    /// INV-006: the three accepted fatal-reference kinds remain typed and
+    /// the three accepted fatal-reference kinds remain typed and
     /// distinct.
     #[test]
     fn fatal_failure_reference_kinds_are_distinct() {
@@ -1753,7 +1753,7 @@ mod tests {
         );
     }
 
-    /// S04 / S06 / S07 / S10 / S23 / INV-006 / INV-018 / INV-029 / INV-034:
+    /// S04 / S06 / S07 / S10 / S23:
     /// each terminal family retains its exact typed cause and disposition.
     #[test]
     fn every_allowed_terminal_disposition_stays_in_its_typed_family() {
@@ -1899,7 +1899,7 @@ mod tests {
         table(rows)
     }
 
-    /// INV-018: refusal remains representable without fatal stop and after a
+    /// refusal remains representable without fatal stop and after a
     /// cancellation race; the fatal family has no refusal variant.
     #[test]
     fn refusal_is_typed_for_unstopped_and_cancellation_race_history() {
@@ -1923,7 +1923,7 @@ mod tests {
         ));
     }
 
-    /// S04 / INV-034: startup loss retains the terminal family matching the
+    /// S04: startup loss retains the terminal family matching the
     /// complete recovered stop causes.
     #[test]
     fn lost_is_representable_in_all_three_matching_terminal_families() {
@@ -1962,7 +1962,7 @@ mod tests {
         ));
     }
 
-    /// INV-004 / INV-006: a successful terminal transition preserves identity
+    /// a successful terminal transition preserves identity
     /// and exact history; rejection returns the unchanged state and input.
     #[test]
     fn terminal_transition_preserves_success_and_rejection_inputs_exactly() {

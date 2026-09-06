@@ -18,8 +18,8 @@ use signalbox_application::{
     RepoWatchEventIdGenerator, RepoWatchEventOccurrenceV1, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
-    RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation, RepoWatchThreadState,
-    RepoWatchWorkflowRunObservation, derive_repo_watch_events,
+    RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation, derive_repo_watch_events,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
@@ -30,6 +30,7 @@ use signalbox_domain::{
     WorkflowName,
 };
 use signalbox_persistence::{
+    MIGRATOR,
     attention::AutomaticResumeAttemptBounds,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -90,7 +91,7 @@ const REVIEW_COMMENT_ID: u64 = 62;
 const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
     AutomaticResumeAttemptBounds::unbounded();
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
@@ -109,6 +110,11 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .max_connections(4)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
+    Ok((container, pool))
+}
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let (container, pool) = unmigrated_postgres().await?;
     migrate(&pool).await?;
     Ok((container, pool))
 }
@@ -165,6 +171,15 @@ fn pull_request_state(
     threads: Vec<RepoWatchThreadObservation>,
     mergeable_state: MergeableState,
 ) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+    pull_request_state_with_reviews(head, threads, mergeable_state, Vec::new())
+}
+
+fn pull_request_state_with_reviews(
+    head: &str,
+    threads: Vec<RepoWatchThreadObservation>,
+    mergeable_state: MergeableState,
+    reviews: Vec<RepoWatchReviewObservation>,
+) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
     Ok(RepoWatchPullRequestState::try_new(
         RepoWatchPullRequestStateInput {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
@@ -196,7 +211,7 @@ fn pull_request_state(
                 CheckRunName::try_new(String::from(CHECK_RUN_NAME))?,
                 CheckConclusion::Success,
             )],
-            reviews: Vec::new(),
+            reviews,
             threads,
             reactions: Vec::new(),
         },
@@ -482,6 +497,38 @@ fn next_generation_value(generation: RepoWatchCursorGeneration) -> u64 {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn frontier_commit_columns_are_added_after_the_ingest_migration() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR.run_to(202609050102, &pool).await?;
+
+    let columns_before: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM information_schema.columns
+          WHERE table_schema = 'mod_repo_watch'
+            AND table_name = 'repository_state'
+            AND column_name = ANY (ARRAY['frontier_generation', 'last_frontier_commit_digest'])",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(columns_before, 0);
+
+    migrate(&pool).await?;
+    let columns_after: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM information_schema.columns
+          WHERE table_schema = 'mod_repo_watch'
+            AND table_name = 'repository_state'
+            AND column_name = ANY (ARRAY['frontier_generation', 'last_frontier_commit_digest'])",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(columns_after, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn cursor_commits_advance_one_generation_at_a_time() -> Result<(), Box<dyn Error>> {
     let fixture = committed_fixture().await?;
 
@@ -687,6 +734,61 @@ async fn unchanged_candidate_without_events_does_not_advance() -> Result<(), Box
         .await?;
 
     assert_eq!(unchanged_generation(unchanged), fixture.second_generation);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn non_recurring_event_with_changed_projection_advances() -> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+    let reviewed = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull_request_state_with_reviews(
+                INITIAL_HEAD,
+                Vec::new(),
+                MergeableState::Mergeable,
+                vec![RepoWatchReviewObservation::new(
+                    GitHubObjectId::new(71_u64.try_into()?),
+                    RepoWatchAuthorLogin::try_new(REVIEW_REVIEWER.to_owned())?,
+                    Some(ReviewState::ChangesRequested),
+                    CommitSha::try_new(REVIEW_COMMIT.to_owned())?,
+                )],
+            )?],
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(BASE_REVISION.to_owned())?,
+            )],
+        })?,
+    );
+    let mut frontier = fixture.second_candidate.event_identity_frontier().clone();
+    let events = derive_repo_watch_events(
+        &fixture.repository,
+        Some(fixture.second_candidate.observation()),
+        &reviewed,
+        &mut frontier,
+        &mut FixedEventIds(100),
+    )?;
+    assert_eq!(
+        frontier,
+        *fixture.second_candidate.event_identity_frontier()
+    );
+    assert_eq!(events.len(), 1);
+    let candidate = RepoWatchCursorCandidate::with_event_identity_frontier(reviewed, frontier);
+
+    let committed = fixture
+        .store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(Some(fixture.second_generation), candidate, events),
+        )
+        .await?;
+
+    assert_eq!(
+        committed_generation(committed).get(),
+        next_generation_value(fixture.second_generation)
+    );
     Ok(())
 }
 
@@ -1544,7 +1646,7 @@ async fn append_only_guards_reject_update_delete_and_truncate() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv073_stale_review_clearance_journals_are_append_only() -> Result<(), Box<dyn Error>> {
+async fn stale_review_clearance_journals_are_append_only() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let store = PostgresRepoWatchStore::new(pool.clone());

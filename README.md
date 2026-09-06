@@ -39,9 +39,8 @@ boundaries.
 - [Target model](docs/target-model.md)
 - [Architecture](docs/architecture.md)
 - [Glossary](docs/glossary.md)
-- [Scenarios](docs/scenarios.md)
-- [Invariant test index](docs/invariants.md)
-- [Domain spine](docs/domain-spine.md)
+- [Domain API](docs/api/signalbox-domain/README.md)
+- [Application API](docs/api/signalbox-application/README.md)
 - [Testing style](docs/agents/testing-style.md)
 - [Open questions](docs/open-questions.md)
 - [Living specification](docs/spec/README.md)
@@ -158,8 +157,9 @@ for the exec supervisor, so first materialize a runtime copy with the host
 executable that Cargo builds (inside `devenv shell`):
 
 ```console
-supervisor="$(tooling/resolve-cargo-bin.sh "$PWD/Cargo.toml" "$PWD/target" \
-  signalbox-tools-exec signalbox-exec-supervisor)"
+host_target="$(rustc -vV | sed -n 's/^host: //p')"
+supervisor="$(cargo run --quiet --target "$host_target" -p signalbox-cargo-bin-resolver -- \
+  "$PWD/Cargo.toml" signalbox-tools-exec signalbox-exec-supervisor)"
 signalbox-materialize-config config/signalboxd.example.toml \
   target/signalboxd.live.toml "$supervisor"
 ```

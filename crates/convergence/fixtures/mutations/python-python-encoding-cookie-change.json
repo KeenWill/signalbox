@@ -1,0 +1,20 @@
+{
+  "source": "comment-only-head.json",
+  "edge": "python encoding cookie change",
+  "mutations": [
+    {
+      "path": "/comparisons/417a88fd53464ef0783ec39f5c4da3c50a3ef5e2...113746d23d6c7b398ef34464a071dca532791898/files",
+      "value": [
+        {
+          "filename": "tool.py",
+          "status": "modified",
+          "changes": 2,
+          "additions": 1,
+          "deletions": 1,
+          "sha": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+          "patch": "@@ -1 +1 @@\n-# -*- coding: utf-8 -*-\n+# -*- coding: latin-1 -*-"
+        }
+      ]
+    }
+  ]
+}

@@ -341,10 +341,10 @@ mod tests {
         .expect("the fixture catalog has one exact target")
     }
 
-    /// S37 / INV-051: validation uses the exact target record and rejects an
+    /// S37: validation uses the exact target record and rejects an
     /// unsupported explicit level before an adapter can prepare traffic.
     #[test]
-    fn s37_inv051_exact_target_capability_rejects_unsupported_reasoning() {
+    fn s37_exact_target_capability_rejects_unsupported_reasoning() {
         let mut settings = ModelSettings::new(128);
         settings.reasoning_level = Some(ReasoningLevel::Medium);
 
@@ -360,10 +360,10 @@ mod tests {
         );
     }
 
-    /// S37 / INV-054: a mapped fast target is returned only from its exact
+    /// S37: a mapped fast target is returned only from its exact
     /// declared capability record.
     #[test]
-    fn s37_inv054_capability_returns_only_the_declared_fast_target() {
+    fn s37_capability_returns_only_the_declared_fast_target() {
         let selected = ResolvedTarget::new("fixture-standard");
         let mapped = ResolvedTarget::new("fixture-fast");
         let capabilities = ModelCapabilities::new(
@@ -411,10 +411,10 @@ mod tests {
             .assert_eq(&tier.to_string());
     }
 
-    /// S37 / INV-054: a same-target request control cannot masquerade as a
+    /// S37: a same-target request control cannot masquerade as a
     /// distinct serving-identity mapping.
     #[test]
-    fn s37_inv054_capability_catalog_rejects_self_mapped_fast_target() {
+    fn s37_capability_catalog_rejects_self_mapped_fast_target() {
         let selected = ResolvedTarget::new("fixture-model");
         let definition = ModelCapabilityDefinition::new(
             selected.clone(),

@@ -13,6 +13,15 @@ repositories are watched, and without a repository-watch section the subsystem
 does not start. The configuration section (`RepositoryWatchConfiguration`) and
 the example TOML own the shape of what an operator writes.
 
+The v2 implementation is a compiled-in ownership module behind the ownership
+seam. Its PostgreSQL role owns only the `mod_repo_watch` schema and has no core
+table privileges. Mutable `repository_state` and normalized `pr_state` rows are
+rebuildable projections. Authenticated webhook metadata, exact body bytes, and
+processing disposition share one caller-supplied expiry and are releasable
+together after that boundary. The module's own core-event cursor records which
+lifecycle effects have committed. No v2 command worker is started, so v2
+dispatch remains off until an owner-approved code change enables it.
+
 Two transports feed one fact store. Polling sends conditional requests from one
 independent task per configured repository at that repository's interval; the
 conditional-request cache starts empty on every daemon start, so the first poll
@@ -28,8 +37,17 @@ the normalized repository state the next comparison needs, the exact
 signal-reviewer set, and the last positive occurrence sequence of every
 recurring event stream. A merged pull request leaves the ordinary observation
 and keeps only a compact baseline of the members the differ needs to recognize
-post-merge changes. A per-repository atomic commit takes an expected generation,
-one complete cursor candidate, and its ordered batch of event occurrences.
+post-merge changes. A per-repository atomic commit takes the complete current
+repository and pull-request projections, an expected generation, one complete
+cursor candidate, and its ordered batch of event occurrences. The projection
+retains the complete normalized differ observation, including signal-reviewer
+provenance, pull requests, workflows, and branch heads. A generation mismatch is
+stale unless the complete projections, candidate, and ordered batch exactly
+replay the immediately succeeding commit. An empty event batch with an unchanged
+cursor is unchanged only when both stored projections also match; a
+projection-only change advances the generation and records the complete commit
+digest. Projection timestamps use PostgreSQL microsecond precision in both the
+stored comparison and commit identity.
 
 A pure differ (`derive_repo_watch_events`) compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities,
@@ -42,7 +60,8 @@ producers. Stream identity is closed by event kind: a recurring kind names the
 pull request plus its kind-specific label, thread, branch, or reaction member;
 an immutable check-suite fact names provider identity and completion generation;
 a review names its provider review identity; a workflow fact names branch,
-workflow, run, and attempt.
+workflow, run, and attempt. Each newly accepted occurrence receives the next
+positive per-repository event ordinal.
 
 Rules are versioned structures (`RepoWatchMatcherV1`). Fields within one rule
 are conjunctive and distinct rules are disjunctive. Omitting every target field
@@ -63,13 +82,21 @@ count of matches it collapsed, the boundary event identities, and that state.
 One event and rule match admits the rule's complete ordered action list as one
 singleton batch. Each dispatch record links the triggering event, rule identity
 and version, singleton key, action ordinal, session-template provenance, and the
-new session. A durable delivery intent records the reserved submit-command,
-accepted-input, turn, and cancellation candidates beside the applied link, so
-equal recovery reuses the committed batch. An obligation records exactly one
-blocker: the occupying repository-watch dispatch or an external commissioned
-session. Every park and release of an obligation appends a journal row naming
-the count at the transition and, for a release, its operator or the causing
-event, under a schema-owned vocabulary. Readiness in
+new session. Initial actions and lifecycle reactions are retained and submitted
+in strictly increasing, unique action-ordinal order. A created session indexes
+its retained rule revision, event, dispatch, and action ordinal, so lifecycle
+reaction planning survives rule removal and process restart. Equal evaluation
+recovery finds that retained batch before considering newly reserved dispatch or
+command identities. A lifecycle reaction targets the session named by its
+trigger. Before submitting a later action, the dispatcher records a synchronous
+create-session command-identity conflict as rejected; an applied creation
+settles from its `SessionCreated` event. A durable delivery intent records the
+reserved submit-command, accepted-input, turn, and cancellation candidates
+beside the applied link, so equal recovery reuses the committed batch. An
+obligation records exactly one blocker: the occupying repository-watch dispatch
+or an external commissioned session. Every park and release of an obligation
+appends a journal row naming the count at the transition and, for a release, its
+operator or the causing event, under a schema-owned vocabulary. Readiness in
 `repo_watch_outstanding_dispatch_obligation` excludes a parked obligation and,
 independently, one whose count has reached the budget.
 
@@ -108,14 +135,14 @@ dispatch, obligation, webhook, and commissioned records.
 
 The convergence sweep is a periodic pass that runs beside repository watch.
 Repository watch owns event-driven dispatch; the sweep supplies liveness for
-watched pull requests whose provider events stopped arriving. It owns its
-convergence predicate, its fenced commission, its durable retry and park
-records, and its configuration throttle. It is opt-in twice:
+watched pull requests whose provider events stopped arriving. It uses
+`signalbox-convergence` for its predicate and owns its fenced commission,
+durable retry and park records, and configuration throttle. It is opt-in twice:
 `[repository_watch.convergence_sweep]` supplies one review-response session
 template and the timing policy, and each repository lists its
-`convergence_pull_requests`. A census snapshot is converged exactly when no
-review thread is unresolved, the status rollup belongs to the current head,
-every gating check is green, and mergeability is `mergeable`.
+`convergence_pull_requests`. The `[convergence]` policy supplies the shared
+predicate described in [review workflows](review-workflows.md). The sweep
+evaluates one revalidated snapshot and uses that verdict for its decision.
 
 ## Design decisions
 
@@ -179,14 +206,15 @@ baseline remains while the merged pull request's recurring streams remain in the
 frontier, because evicting it alone would make a later refresh look like an
 initial observation. No lifecycle releases a stream: a release is valid only for
 a subject that provably produces no further occurrence, and a merged pull
-request is not one. Exceeding the stream ceiling fails the comparison, and
-sequence exhaustion fails rather than wrapping, because reuse would mint a
-content identity colliding with a durable one. The frontier is never replaced
-with an empty one, because every stream would restart at sequence one and mint
-identities a commit coalesces, silently losing those events and their
-dispatches. The frontier records the pull request owning each recurring stream
-although nothing reads it yet, because a stream identity is a one-way hash no
-later migration can invert.
+request is not one. A release carries the observed frontier generation and is
+stale after any intervening frontier commit. Exceeding the stream ceiling fails
+the comparison, and sequence exhaustion fails rather than wrapping, because
+reuse would mint a content identity colliding with a durable one. The frontier
+is never replaced with an empty one, because every stream would restart at
+sequence one and mint identities a commit coalesces, silently losing those
+events and their dispatches. The frontier records the pull request owning each
+recurring stream although nothing reads it yet, because a stream identity is a
+one-way hash no later migration can invert.
 
 The content identity is a domain-separated SHA-256 digest over the repository,
 event version, canonical target, identifying payload members, a separately
@@ -209,15 +237,15 @@ completion time, or conclusion. Workflows sharing a display name stay distinct,
 renaming cannot re-emit an observed run attempt, and a new attempt under an
 unchanged run identity does emit.
 
-An unchanged candidate with no events does not advance the cursor, and an
-unchanged candidate carrying events is rejected. Replay detection compares
-against the batch the replayed generation would have stored, so a coalesced
-commit is still recognized as its own replay. Each compact baseline records the
-signal-reviewer filter that produced its reactions, and the cursor binds its
-reaction projection to the exact signal-reviewer set; a changed set replaces
-only the reaction baseline without emitting `ReactionChanged`, because comparing
-projections formed under different filters would manufacture transitions. A
-first observation emits `PullRequestOpened` and the current
+An unchanged complete candidate with no events does not advance the cursor, and
+an unchanged complete candidate carrying events is rejected. Replay detection
+compares against the batch the replayed generation would have stored, so a
+coalesced commit is still recognized as its own replay. Each compact baseline
+records the signal-reviewer filter that produced its reactions, and the cursor
+binds its reaction projection to the exact signal-reviewer set; a changed set
+replaces only the reaction baseline without emitting `ReactionChanged`, because
+comparing projections formed under different filters would manufacture
+transitions. A first observation emits `PullRequestOpened` and the current
 `MergeableStateChanged` fact for each open pull request, then establishes its
 baseline, so an already-conflicting pull request reaches the first rule at once.
 Closing by merge emits `PullRequestMerged`, not both merged and closed. A base
@@ -249,7 +277,8 @@ obligation eventually emits one action using the latest joined event plus the
 delivery member, never one action per joined event. The embedded event is the
 complete triggering durable fact, not reconstructed API state, and the matched
 count and boundary identities summarize collapse without replaying intermediate
-facts into the session.
+facts into the session. One dispatch reference names exactly one rule revision
+and event evaluation, including its complete ordered action batch.
 
 The goal statement is synthesized from the dispatching rule, the resolved
 template, and the typed parameters, and states only the rule, the template, and,
@@ -415,35 +444,35 @@ following poll observes the dismissal through the ordinary review and
 convergence projections and may then seal; no synthetic approval is created, no
 fresh review is requested, and dismissal itself does not stop dispatch.
 
-A newly configured rule activates immediately after the repository's current
-durable event tail, before its task polls, and consumes later events in cursor
-and event-ordinal order. Restart resumes the oldest unevaluated fact and the
-oldest eligible obligation for that rule version, redispatching no evaluated
-fact and treating no pre-activation history as live. Reconciliation records an
-append-only deactivation when a configured identity or its repository disappears
-from configuration, and deactivation settles an obligation without dispatch
-rather than leaving permanently owed work; terminal-target settlement records
-why the obligation is no longer owed. Guarded startup admits the complete
-repository set, the empty set included, in two phases: it first validates the
-whole set in one transaction it discards, in the Configuration phase before
-either local socket binds, then commits the deactivations and activations in one
-transaction after every remaining fallible startup step succeeds. A refusal
-anywhere in the set, or any startup failure before that commit, leaves no
-deactivation or activation, so restoring the previous configuration is admitted
-rather than refused as reuse. A lost commit response is resolved by rereading
-the durable active set, which commits nothing and so cannot itself become
-ambiguous. Reconciliation and evaluation serialize per repository, so an
-already-loaded event cannot create a dispatch after deactivation commits, though
-a committed evaluation may replay. Changing a rule's semantics while keeping the
-same rule identity and revision fails in the Configuration phase. A higher
-revision under the same rule identity is a replacement and the ordinary way to
-preserve stable identity and history: reconciliation appends deactivation of the
-old revision and activation of the new one after the current event tail; a fresh
-rule identity remains an admitted replacement path. A deactivated
-identity-and-revision pair cannot be configured again, a revision below the
-highest ever recorded for that identity in that repository is refused, and rule
-identity is per repository, so the same identity first configured in a newly
-watched repository starts its own lineage.
+A newly configured rule records and activates immediately after the repository's
+current durable event ordinal, before its task polls, and consumes later events
+in repository-event-ordinal order. Restart resumes the oldest unevaluated fact
+and the oldest eligible obligation for that rule version, redispatching no
+evaluated fact and treating no pre-activation history as live. Reconciliation
+records an append-only deactivation when a configured identity or its repository
+disappears from configuration, and deactivation settles an obligation without
+dispatch rather than leaving permanently owed work; terminal-target settlement
+records why the obligation is no longer owed. Guarded startup admits the
+complete repository set, the empty set included, in two phases: it first
+validates the whole set in one transaction it discards, in the Configuration
+phase before either local socket binds, then commits the deactivations and
+activations in one transaction after every remaining fallible startup step
+succeeds. A refusal anywhere in the set, or any startup failure before that
+commit, leaves no deactivation or activation, so restoring the previous
+configuration is admitted rather than refused as reuse. A lost commit response
+is resolved by rereading the durable active set, which commits nothing and so
+cannot itself become ambiguous. Reconciliation and evaluation serialize per
+repository, so an already-loaded event cannot create a dispatch after
+deactivation commits, though a committed evaluation may replay. Changing a
+rule's semantics while keeping the same rule identity and revision fails in the
+Configuration phase. A higher revision under the same rule identity is a
+replacement and the ordinary way to preserve stable identity and history:
+reconciliation appends deactivation of the old revision and activation of the
+new one after the current event tail; a fresh rule identity remains an admitted
+replacement path. A deactivated identity-and-revision pair cannot be configured
+again, a revision below the highest ever recorded for that identity in that
+repository is refused, and rule identity is per repository, so the same identity
+first configured in a newly watched repository starts its own lineage.
 
 Everything the listener does before a delivery is durably admitted is identical
 in both webhook modes. The body's canonical repository must equal the repository
@@ -611,6 +640,17 @@ copy, submits the tagged context as its first accepted JSON input through
 transaction. No dispatched session is visible without its accepted input, its
 queued turn, its dispatch-to-turn audit link, and a statement of the authority
 it was dispatched under.
+
+Before submission, the module ledger retains an opaque core encoding of every
+complete checked command payload. Pending ledger rows remain recoverable without
+the removed or inactive rule, and newly resolved template or configuration
+values cannot replace the committed payload. A repository-watch `SessionCreated`
+event settles the next pending create action for its dispatch and records the
+new session; replaying that event cannot settle another action. Every action and
+every lifecycle reaction in a batch has its own one-based ordinal. A
+release-start or sticky-stop reaction remains admissible after rule deactivation
+when it names a committed dispatch from that rule revision; deactivation
+prevents new matching dispatches, not reactions owed by an existing one.
 
 An operator commission through `commission_session`, and every sweep dispatch,
 commits in one transaction the template session, the append-only
