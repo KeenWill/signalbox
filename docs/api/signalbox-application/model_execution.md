@@ -78,7 +78,7 @@ pub enum ModelConversationMessage {
         spawning_request: signalbox_domain::ToolRequestId,
         parent_session: signalbox_domain::SessionId,
         parent_turn: signalbox_domain::TurnId,
-        content: session_delegation::DelegationContent,
+        content: content::DelegationContent,
     },
     DelegationMessage {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -87,7 +87,7 @@ pub enum ModelConversationMessage {
         sender: signalbox_domain::SessionId,
         recipient: signalbox_domain::SessionId,
         delivery_sequence: nonzero::NonZeroU64,
-        content: session_delegation::DelegationContent,
+        content: content::DelegationContent,
     },
     BackgroundDelegationResult {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -95,7 +95,7 @@ pub enum ModelConversationMessage {
         spawning_request: signalbox_domain::ToolRequestId,
         child: signalbox_domain::SessionId,
         delivery_sequence: nonzero::NonZeroU64,
-        outcome: session_delegation::DelegationOutcome,
+        outcome: outcome::DelegationOutcome,
     },
     Assistant {
         source: context_frontier::SemanticTranscriptEntryRef,
@@ -141,7 +141,7 @@ pub enum ModelToolResultContent {
         reason: option::Option<policy::ToolDenialReason>,
     },
     ClosedByTurnEnd,
-    Delegation(session_delegation::DelegationOutcome),
+    Delegation(outcome::DelegationOutcome),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
