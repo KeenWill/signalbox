@@ -74,9 +74,11 @@ pub enum RepoWatchEventIdentityFrontierError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchEventIdentityFrontierError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for RepoWatchEventIdentityFrontierError {}
+impl error::Error for RepoWatchEventIdentityFrontierError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## RepoWatchEventOccurrenceV1
@@ -125,9 +127,11 @@ impl RepoWatchCheckCompletionGeneration {
 pub struct RepoWatchCheckCompletionGenerationError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchCheckCompletionGenerationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for RepoWatchCheckCompletionGenerationError {}
+impl error::Error for RepoWatchCheckCompletionGenerationError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## RepoWatchCheckSuiteObservation
@@ -265,9 +269,11 @@ impl RepoWatchConvergenceAssessment {
 pub struct RepoWatchConvergenceAssessmentError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchConvergenceAssessmentError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for RepoWatchConvergenceAssessmentError {}
+impl error::Error for RepoWatchConvergenceAssessmentError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## RepoWatchStaleReviewClearanceCandidate
@@ -297,9 +303,11 @@ impl RepoWatchStaleReviewClearanceCandidate {
 pub struct RepoWatchStaleReviewClearanceCandidateError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchStaleReviewClearanceCandidateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for RepoWatchStaleReviewClearanceCandidateError {}
+impl error::Error for RepoWatchStaleReviewClearanceCandidateError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## RepoWatchThreadObservation
@@ -537,9 +545,11 @@ pub enum RepoWatchRepositoryStateError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchRepositoryStateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for RepoWatchRepositoryStateError {}
+impl error::Error for RepoWatchRepositoryStateError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
 
 ## RepoWatchDifferFailureKind
@@ -779,7 +789,7 @@ pub enum RepoWatchDispatchPreparationError {
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for RepoWatchDispatchPreparationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for RepoWatchDispatchPreparationError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
@@ -825,10 +835,12 @@ impl<TransactionError> fmt::Display for RepoWatchDispatchServiceError<Transactio
 where
     TransactionError: fmt::Display,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl<TransactionError> error::Error for RepoWatchDispatchServiceError<TransactionError> where
-    TransactionError: error::Error + 'static
+impl<TransactionError> error::Error for RepoWatchDispatchServiceError<TransactionError>
+where
+    TransactionError: error::Error + 'static + fmt::Display,
 {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```
