@@ -9,7 +9,7 @@ pub enum ProcessTranscriptEntry {
     DelegatedTask {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         spawning_request: signalbox_domain::ToolRequestId,
         parent_session: signalbox_domain::SessionId,
         parent_turn: signalbox_domain::TurnId,
@@ -18,7 +18,7 @@ pub enum ProcessTranscriptEntry {
     DelegationMessage {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         spawning_request: signalbox_domain::ToolRequestId,
         message: signalbox_domain::DelegationMessageId,
         sender: signalbox_domain::SessionId,
@@ -30,7 +30,7 @@ pub enum ProcessTranscriptEntry {
     DelegationResult {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         awaiting_request: signalbox_domain::ToolRequestId,
         spawning_request: signalbox_domain::ToolRequestId,
         child: signalbox_domain::SessionId,
@@ -44,32 +44,32 @@ pub enum ProcessTranscriptEntry {
     ModelIdentityChanged {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         turn: signalbox_domain::TurnId,
         defaults_version: u64,
-        selected: configuration::DirectModelSelection,
+        selected: signalbox_domain::DirectModelSelection,
     },
     ContextSummary {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         model_call: signalbox_domain::ModelCallId,
-        first: context_frontier::SemanticTranscriptEntryRef,
-        through: context_frontier::SemanticTranscriptEntryRef,
+        first: signalbox_domain::SemanticTranscriptEntryRef,
+        through: signalbox_domain::SemanticTranscriptEntryRef,
         content: string::String,
     },
     User {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: signalbox_domain::TurnId,
-        content: user_content::UserContent,
+        content: signalbox_domain::UserContent,
     },
     Assistant {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         turn: signalbox_domain::TurnId,
         model_call: signalbox_domain::ModelCallId,
         content: string::String,
@@ -77,14 +77,14 @@ pub enum ProcessTranscriptEntry {
     ProviderCompaction {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         turn: signalbox_domain::TurnId,
         model_call: signalbox_domain::ModelCallId,
     },
     AssistantToolUse {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         turn: signalbox_domain::TurnId,
         model_call: signalbox_domain::ModelCallId,
         request: signalbox_domain::ToolRequestId,
@@ -95,7 +95,7 @@ pub enum ProcessTranscriptEntry {
     ToolExecutionResult {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         request: signalbox_domain::ToolRequestId,
         attempt: signalbox_domain::ToolAttemptId,
         disposition: process_read::ProcessToolExecutionResultDisposition,
@@ -104,39 +104,39 @@ pub enum ProcessTranscriptEntry {
     ToolDenied {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         request: signalbox_domain::ToolRequestId,
         content: string::String,
     },
     ToolClosed {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         request: signalbox_domain::ToolRequestId,
         content: string::String,
     },
     TurnFailed {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         turn: signalbox_domain::TurnId,
     },
     TurnCompleted {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         turn: signalbox_domain::TurnId,
     },
     TurnCancelled {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         turn: signalbox_domain::TurnId,
     },
     ImportedText {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         imported_conversation: signalbox_domain::ImportedConversationId,
         imported_entry: signalbox_domain::ImportedTranscriptEntryId,
         source_speaker: process_read::ProcessImportedSourceSpeaker,
@@ -145,7 +145,7 @@ pub enum ProcessTranscriptEntry {
     Imported {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,
-        entry: context_frontier::SemanticTranscriptEntryId,
+        entry: signalbox_domain::SemanticTranscriptEntryId,
         imported_conversation: signalbox_domain::ImportedConversationId,
         imported_entry: signalbox_domain::ImportedTranscriptEntryId,
         source_speaker: process_read::ProcessImportedSourceSpeaker,
@@ -153,60 +153,6 @@ pub enum ProcessTranscriptEntry {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessTranscriptEntry
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for process_read::ProcessTranscriptEntry
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessTranscriptEntry {}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessTranscriptEntry {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessTranscriptEntry
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessTranscriptEntry {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessTranscriptEntry {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessTranscriptEntry
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessTranscriptEntry
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessTranscriptEntry
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ProcessToolApproval
@@ -214,66 +160,12 @@ where
 ```rust
 pub struct ProcessToolApproval {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessToolApproval
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for process_read::ProcessToolApproval
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessToolApproval {}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessToolApproval {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessToolApproval
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessToolApproval {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessToolApproval {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessToolApproval
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessToolApproval
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessToolApproval
-where
-    T: ?marker::Sized,
-{
+impl process_read::ProcessToolApproval {
+    pub const fn decision(&self) -> &signalbox_domain::ToolApprovalDecision;
 }
 impl process_read::ProcessToolApproval {
-    pub const fn decision(&self) -> &approval::ToolApprovalDecision;
-}
-impl process_read::ProcessToolApproval {
-    pub const fn decider(&self) -> policy::ToolApprovalDecider;
-    pub const fn rationale(&self) -> option::Option<&policy::ToolDecisionRationale>;
+    pub const fn decider(&self) -> signalbox_domain::ToolApprovalDecider;
+    pub const fn rationale(&self) -> option::Option<&signalbox_domain::ToolDecisionRationale>;
 }
 ```
 
@@ -282,60 +174,6 @@ impl process_read::ProcessToolApproval {
 ```rust
 pub struct ProcessTranscriptSnapshot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessTranscriptSnapshot
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for process_read::ProcessTranscriptSnapshot
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessTranscriptSnapshot {}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessTranscriptSnapshot {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessTranscriptSnapshot
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessTranscriptSnapshot {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessTranscriptSnapshot {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessTranscriptSnapshot
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessTranscriptSnapshot
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessTranscriptSnapshot
-where
-    T: ?marker::Sized,
-{
-}
 impl process_read::ProcessTranscriptSnapshot {
     pub fn turns(&self) -> &[process_read::ProcessTranscriptTurn];
     pub fn model_call_usage(&self) -> &[process_read::ProcessTranscriptModelCallUsage];
@@ -357,60 +195,6 @@ pub enum ProcessTranscriptItem {
     Entry(process_read::ProcessTranscriptEntry),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessTranscriptItem
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for process_read::ProcessTranscriptItem
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessTranscriptItem {}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessTranscriptItem {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessTranscriptItem
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessTranscriptItem {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessTranscriptItem {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessTranscriptItem
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessTranscriptItem
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessTranscriptItem
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ProcessTranscriptSummary
@@ -418,60 +202,6 @@ where
 ```rust
 pub struct ProcessTranscriptSummary {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessTranscriptSummary
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for process_read::ProcessTranscriptSummary
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessTranscriptSummary {}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessTranscriptSummary {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessTranscriptSummary
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessTranscriptSummary {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessTranscriptSummary {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessTranscriptSummary
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessTranscriptSummary
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessTranscriptSummary
-where
-    T: ?marker::Sized,
-{
-}
 impl process_read::ProcessTranscriptSummary {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn cursor(&self) -> u64;
@@ -486,48 +216,6 @@ impl process_read::ProcessTranscriptSummary {
 ```rust
 pub struct ProcessTranscriptReader {/* private */}
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for process_read::ProcessTranscriptReader {}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessTranscriptReader {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessTranscriptReader
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessTranscriptReader {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessTranscriptReader {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessTranscriptReader
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessTranscriptReader
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessTranscriptReader
-where
-    T: ?marker::Sized,
-{
-}
 impl process_read::ProcessTranscriptReader {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn runner(&self) -> option::Option<&process_read::ProcessRunnerProjection>;
@@ -555,60 +243,6 @@ pub enum ProcessReadCorruption {
     InvalidOrdinal(&'static str),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for process_read::ProcessReadCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for process_read::ProcessReadCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessReadCorruption {}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessReadCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessReadCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessReadCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessReadCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessReadCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessReadCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessReadCorruption
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for process_read::ProcessReadCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -625,48 +259,6 @@ pub enum ProcessReadError {
     Corruption(process_read::ProcessReadCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for process_read::ProcessReadError {}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessReadError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessReadError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessReadError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessReadError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessReadError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessReadError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessReadError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for process_read::ProcessReadError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -686,60 +278,6 @@ impl convert::From<process_read::ProcessReadCorruption> for process_read::Proces
 ```rust
 pub struct ProcessReadRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for process_read::ProcessReadRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for process_read::ProcessReadRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for process_read::ProcessReadRepository {}
-impl<T> parse_display::IntoResult<T> for process_read::ProcessReadRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for process_read::ProcessReadRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for process_read::ProcessReadRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for process_read::ProcessReadRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for process_read::ProcessReadRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for process_read::ProcessReadRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for process_read::ProcessReadRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl process_read::ProcessReadRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub const fn with_automatic_reconciliation_attempt_budget(
@@ -749,7 +287,7 @@ impl process_read::ProcessReadRepository {
     pub async fn read_session_defaults(
         &self,
         session: signalbox_domain::SessionId,
-        version: option::Option<configuration::SessionConfigurationDefaultsVersion>,
+        version: option::Option<signalbox_domain::SessionConfigurationDefaultsVersion>,
     ) -> result::Result<process_read::ProcessSessionDefaultsRead, process_read::ProcessReadError>;
     pub async fn list_sessions(
         &self,
@@ -782,7 +320,7 @@ impl process_read::ProcessReadRepository {
     pub async fn read_selected_transcript_entries(
         &self,
         positions: &[u64],
-        references: &[context_frontier::SemanticTranscriptEntryRef],
+        references: &[signalbox_domain::SemanticTranscriptEntryRef],
     ) -> result::Result<
         boxed::Box<[process_read::ProcessTranscriptEntry]>,
         process_read::ProcessReadError,

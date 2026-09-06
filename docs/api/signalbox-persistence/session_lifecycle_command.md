@@ -6,73 +6,12 @@
 
 ```rust
 pub enum SessionLifecycleCommandHandlingOutcome {
-    Recorded(session_lifecycle_command::SessionLifecycleCommandResult),
+    Recorded(signalbox_domain::SessionLifecycleCommandResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_lifecycle_command::SessionLifecycleCommandHandlingOutcome
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## SessionLifecycleCommandRepositoryError
@@ -85,55 +24,6 @@ pub enum SessionLifecycleCommandRepositoryError {
     Lifecycle(boxed::Box<session_lifecycle::SessionLifecycleRepositoryError>),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither
-    for session_lifecycle_command::SessionLifecycleCommandRepositoryError
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for session_lifecycle_command::SessionLifecycleCommandRepositoryError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_lifecycle_command::SessionLifecycleCommandRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for session_lifecycle_command::SessionLifecycleCommandRepositoryError
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle_command::SessionLifecycleCommandRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_lifecycle_command::SessionLifecycleCommandRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_lifecycle_command::SessionLifecycleCommandRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_lifecycle_command::SessionLifecycleCommandRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for session_lifecycle_command::SessionLifecycleCommandRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -152,68 +42,12 @@ impl convert::From<error::Error>
 ```rust
 pub struct SessionLifecycleCommandRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for session_lifecycle_command::SessionLifecycleCommandRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for session_lifecycle_command::SessionLifecycleCommandRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_lifecycle_command::SessionLifecycleCommandRepository {}
-impl<T> parse_display::IntoResult<T>
-    for session_lifecycle_command::SessionLifecycleCommandRepository
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_lifecycle_command::SessionLifecycleCommandRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for session_lifecycle_command::SessionLifecycleCommandRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_lifecycle_command::SessionLifecycleCommandRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_lifecycle_command::SessionLifecycleCommandRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_lifecycle_command::SessionLifecycleCommandRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_lifecycle_command::SessionLifecycleCommandRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl session_lifecycle_command::SessionLifecycleCommandRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn handle(
         &self,
-        command: session_lifecycle_command::SessionLifecycleCommand,
-        principal: session_lifecycle_command::CommandPrincipal,
+        command: signalbox_domain::SessionLifecycleCommand,
+        principal: signalbox_domain::CommandPrincipal,
     ) -> result::Result<
         session_lifecycle_command::SessionLifecycleCommandHandlingOutcome,
         session_lifecycle_command::SessionLifecycleCommandRepositoryError,

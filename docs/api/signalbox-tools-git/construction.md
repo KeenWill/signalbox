@@ -10,7 +10,7 @@ pub enum LocalGitToolsConstructionError {
     Schema,
     ErrorDetail,
     Duplicate,
-    Root(path::WorkspaceRootError),
+    Root(signalbox_tools_workspace::WorkspaceRootError),
     Repository,
 }
 // derives: fmt::Debug

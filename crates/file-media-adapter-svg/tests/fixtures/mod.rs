@@ -32,6 +32,14 @@ impl SvgFixture {
         ))
     }
 
+    /// Builds an SVG root with the requested number of distinct unused prefixes.
+    pub fn unused_namespace_declarations(count: usize) -> Self {
+        let declarations = (0..count)
+            .map(|index| format!(r#" xmlns:p{index}="urn:example:{index}""#))
+            .collect::<String>();
+        Self::raw(format!(r#"<svg xmlns="http://www.w3.org/2000/svg"{declarations}/>"#).as_bytes())
+    }
+
     pub fn truncated() -> Self {
         Self {
             bytes: br#"<svg xmlns="http://www.w3.org/2000/svg"><text>unfinished"#.to_vec(),

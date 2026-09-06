@@ -7,30 +7,11 @@
 ```rust
 pub struct ThreadResolveResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::ThreadResolveResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::ThreadResolveResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::ThreadResolveResult {
+impl ThreadResolveResult {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
+        bounds: CodeHostNumericBounds,
         thread_id: string::String,
-        resolution: code_host::result::ReviewThreadResolution,
+        resolution: ReviewThreadResolution,
     ) -> option::Option<Self>;
 }
 ```
@@ -40,31 +21,12 @@ impl code_host::result::ThreadResolveResult {
 ```rust
 pub struct CiJobLogResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::CiJobLogResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::CiJobLogResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::CiJobLogResult {
+impl CiJobLogResult {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
+        bounds: CodeHostNumericBounds,
         job_id: u64,
         text: string::String,
-        completeness: code_host::result::CodeHostResultCompleteness,
+        completeness: CodeHostResultCompleteness,
     ) -> option::Option<Self>;
 }
 ```
@@ -74,26 +36,7 @@ impl code_host::result::CiJobLogResult {
 ```rust
 pub struct RerunFailedJobsResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::RerunFailedJobsResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::RerunFailedJobsResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::RerunFailedJobsResult {
+impl RerunFailedJobsResult {
     pub const fn try_new(run_id: u64) -> option::Option<Self>;
 }
 ```
@@ -102,44 +45,25 @@ impl code_host::result::RerunFailedJobsResult {
 
 ```rust
 pub enum CodeHostResult {
-    Summary(code_host::result::ChangeRequestSummaryResult),
-    ChangedFiles(code_host::result::ChangedFilesResult),
-    FilePatch(code_host::result::FilePatchResult),
-    ListDirectory(code_host::repository_result::RepositoryListDirectoryResult),
-    ReadFile(code_host::repository_result::RepositoryReadFileResult),
-    ChecksStatus(code_host::result::ChecksStatusResult),
-    Comment(code_host::result::ChangeRequestCommentResult),
-    ReviewThreads(code_host::result::ReviewThreadsResult),
-    ThreadReply(code_host::result::ThreadReplyResult),
-    ThreadResolve(code_host::result::ThreadResolveResult),
-    CiJobLog(code_host::result::CiJobLogResult),
-    RerunFailedJobs(code_host::result::RerunFailedJobsResult),
-    ConvergenceState(code_host::convergence_read::ConvergenceReadResult),
-    StackState(code_host::review_slog::stack::StackStateResult),
-    ThreadInventory(code_host::review_slog::inventory::ThreadInventoryResult),
-    ReviewGateCheck(code_host::convergence_read::ConvergenceReadResult),
+    Summary(ChangeRequestSummaryResult),
+    ChangedFiles(ChangedFilesResult),
+    FilePatch(FilePatchResult),
+    ListDirectory(RepositoryListDirectoryResult),
+    ReadFile(RepositoryReadFileResult),
+    ChecksStatus(ChecksStatusResult),
+    Comment(ChangeRequestCommentResult),
+    ReviewThreads(ReviewThreadsResult),
+    ThreadReply(ThreadReplyResult),
+    ThreadResolve(ThreadResolveResult),
+    CiJobLog(CiJobLogResult),
+    RerunFailedJobs(RerunFailedJobsResult),
+    ConvergenceState(ConvergenceReadResult),
+    StackState(StackStateResult),
+    ThreadInventory(ThreadInventoryResult),
+    ReviewGateCheck(ConvergenceReadResult),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::result::CodeHostResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::result::CodeHostResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::result::CodeHostResult {
+impl CodeHostResult {
     pub fn into_json_value(self) -> value::Value;
 }
 ```
@@ -149,32 +73,9 @@ impl code_host::result::CodeHostResult {
 ```rust
 pub struct ReviewGateCheckArguments {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for code_host::review_gate_check::ReviewGateCheckArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for code_host::review_gate_check::ReviewGateCheckArguments where
-    T: for<'de> de::Deserialize<'de>
-{
-}
-impl<T> policy::PolicyExt for code_host::review_gate_check::ReviewGateCheckArguments
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::review_gate_check::ReviewGateCheckArguments {
-    pub fn repository(&self) -> &code_host::arguments::CodeHostRepository;
-    pub const fn number(&self) -> code_host::arguments::CodeHostChangeRequestNumber;
+impl ReviewGateCheckArguments {
+    pub fn repository(&self) -> &CodeHostRepository;
+    pub const fn number(&self) -> CodeHostChangeRequestNumber;
 }
 ```
 
@@ -187,25 +88,6 @@ pub enum ReviewAuthorClass {
     Unknown,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::review_slog::inventory::ReviewAuthorClass
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::review_slog::inventory::ReviewAuthorClass
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## ReviewDispositionClass
@@ -218,25 +100,6 @@ pub enum ReviewDispositionClass {
     Undispositioned,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::review_slog::inventory::ReviewDispositionClass
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::review_slog::inventory::ReviewDispositionClass
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## ReviewThreadInventoryItem
@@ -244,34 +107,15 @@ where
 ```rust
 pub struct ReviewThreadInventoryItem {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::review_slog::inventory::ReviewThreadInventoryItem
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::review_slog::inventory::ReviewThreadInventoryItem
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::review_slog::inventory::ReviewThreadInventoryItem {
+impl ReviewThreadInventoryItem {
     pub fn id(&self) -> &str;
 }
-impl code_host::review_slog::inventory::ReviewThreadInventoryItem {
+impl ReviewThreadInventoryItem {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
-        fields: code_host::review_slog::inventory::ReviewThreadInventoryFields,
+        bounds: CodeHostNumericBounds,
+        fields: ReviewThreadInventoryFields,
     ) -> option::Option<Self>;
-    pub const fn disposition(&self) -> code_host::review_slog::inventory::ReviewDispositionClass;
+    pub const fn disposition(&self) -> ReviewDispositionClass;
 }
 ```
 
@@ -285,30 +129,11 @@ pub struct ReviewThreadInventoryFields {
     pub resolved: bool,
     pub outdated: bool,
     pub author: option::Option<string::String>,
-    pub author_class: code_host::review_slog::inventory::ReviewAuthorClass,
+    pub author_class: ReviewAuthorClass,
     pub finding_title: string::String,
-    pub disposition: code_host::review_slog::inventory::ReviewDispositionClass,
+    pub disposition: ReviewDispositionClass,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::review_slog::inventory::ReviewThreadInventoryFields
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::review_slog::inventory::ReviewThreadInventoryFields
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```
 
 ## ThreadInventoryResult
@@ -316,30 +141,11 @@ where
 ```rust
 pub struct ThreadInventoryResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::review_slog::inventory::ThreadInventoryResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::review_slog::inventory::ThreadInventoryResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::review_slog::inventory::ThreadInventoryResult {
+impl ThreadInventoryResult {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
+        bounds: CodeHostNumericBounds,
         head_revision: string::String,
-        threads: vec::Vec<code_host::review_slog::inventory::ReviewThreadInventoryItem>,
+        threads: vec::Vec<ReviewThreadInventoryItem>,
         truncated: bool,
         next_cursor: option::Option<string::String>,
     ) -> option::Option<Self>;
@@ -351,28 +157,9 @@ impl code_host::review_slog::inventory::ThreadInventoryResult {
 ```rust
 pub struct ChildStackState {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::review_slog::stack::ChildStackState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::review_slog::stack::ChildStackState
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::review_slog::stack::ChildStackState {
+impl ChildStackState {
     pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
+        bounds: CodeHostNumericBounds,
         number: u32,
         head_ref: string::String,
         head_revision: string::String,
@@ -387,30 +174,9 @@ impl code_host::review_slog::stack::ChildStackState {
 ```rust
 pub struct StackStateResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::review_slog::stack::StackStateResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::review_slog::stack::StackStateResult
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
-impl code_host::review_slog::stack::StackStateResult {
-    pub fn try_new(
-        bounds: code_host::CodeHostNumericBounds,
-        fields: code_host::review_slog::stack::StackStateFields,
-    ) -> option::Option<Self>;
+impl StackStateResult {
+    pub fn try_new(bounds: CodeHostNumericBounds, fields: StackStateFields)
+        -> option::Option<Self>;
 }
 ```
 
@@ -427,28 +193,9 @@ pub struct StackStateFields {
     pub default_revision: string::String,
     pub base_commits_not_in_head: u64,
     pub main_commits_not_in_base: u64,
-    pub children: vec::Vec<code_host::review_slog::stack::ChildStackState>,
+    pub children: vec::Vec<ChildStackState>,
     pub children_truncated: bool,
     pub children_next_cursor: option::Option<string::String>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for code_host::review_slog::stack::StackStateFields
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> policy::PolicyExt for code_host::review_slog::stack::StackStateFields
-where
-    T: ?marker::Sized,
-{
-    fn and<P, B, E>(self, other: P) -> and::And<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-    fn or<P, B, E>(self, other: P) -> or::Or<T, P>
-    where
-        T: marker::Sized + policy::Policy<B, E>,
-        P: policy::Policy<B, E>;
-}
 ```

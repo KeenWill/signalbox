@@ -6,16 +6,12 @@
 
 ```rust
 pub trait CodeHostTransport: marker::Send {
-    fn numeric_bounds(&self) -> code_host::CodeHostNumericBounds;
+    fn numeric_bounds(&self) -> CodeHostNumericBounds;
     fn execute(
         &mut self,
-        operation: code_host::CodeHostOperation,
-        credential: &credential::CredentialValue,
-    ) -> impl future::Future<
-        Output = result::Result<
-            code_host::result::CodeHostResult,
-            code_host::CodeHostTransportFailure,
-        >,
-    > + marker::Send;
+        operation: CodeHostOperation,
+        credential: &signalbox_model_runtime::CredentialValue,
+    ) -> impl future::Future<Output = result::Result<CodeHostResult, CodeHostTransportFailure>>
+           + marker::Send;
 }
 ```

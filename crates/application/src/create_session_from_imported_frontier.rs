@@ -546,10 +546,10 @@ mod tests {
         assert!(!candidate.is_max());
     }
 
-    /// S28: reserved identities fail before request
+    /// reserved identities fail before request
     /// construction.
     #[test]
-    fn s28_request_rejects_reserved_command_identifiers() {
+    fn request_rejects_reserved_command_identifiers() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
         assert_reserved_command_rejected(
@@ -564,10 +564,10 @@ mod tests {
         );
     }
 
-    /// S28: the admitted request retains exactly the caller-selected frontier,
+    /// the admitted request retains exactly the caller-selected frontier,
     /// relationship, and initial defaults without a second conversation field.
     #[test]
-    fn s28_request_preserves_the_complete_caller_payload() {
+    fn request_preserves_the_complete_caller_payload() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
         let identity = command_id(1);
@@ -587,10 +587,10 @@ mod tests {
         assert_eq!(request.initial_configuration_defaults(), &initial_defaults);
     }
 
-    /// S28: production generation supplies fresh UUIDv7
+    /// production generation supplies fresh UUIDv7
     /// values for all three distinct domain identity kinds.
     #[test]
-    fn s28_production_generator_supplies_fresh_uuid_v7_candidates() {
+    fn production_generator_supplies_fresh_uuid_v7_candidates() {
         let mut generator = UuidV7CreateSessionFromImportedFrontierIdGenerator;
         let first_session = generator.next_session_id().into_uuid();
         let first_entry = generator.next_semantic_entry_id().into_uuid();
@@ -622,11 +622,11 @@ mod tests {
         assert_uuid_v7(second_frontier);
     }
 
-    /// S28: one invocation passes fixed candidates once
+    /// one invocation passes fixed candidates once
     /// and semantic identities remain transaction-controlled after prefix
     /// resolution.
     #[test]
-    fn s28_orchestrates_one_atomic_checked_seed_creation() {
+    fn orchestrates_one_atomic_checked_seed_creation() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
         let expected_command = command_id(1);
@@ -675,10 +675,10 @@ mod tests {
         );
     }
 
-    /// S28: equal replay returns the recorded session and does not
+    /// equal replay returns the recorded session and does not
     /// request variable-cardinality semantic identities.
     #[test]
-    fn s28_equal_replay_discards_fresh_fixed_candidates() {
+    fn equal_replay_discards_fresh_fixed_candidates() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
         let replayed_command = command_id(1);
@@ -730,10 +730,10 @@ mod tests {
         assert_eq!(transaction.observed.len(), 1);
     }
 
-    /// S28: claimed cross-kind or changed-payload reuse passes
+    /// claimed cross-kind or changed-payload reuse passes
     /// through unchanged before semantic identity generation.
     #[test]
-    fn s28_conflicting_reuse_is_typed_and_not_retried() {
+    fn conflicting_reuse_is_typed_and_not_retried() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
         let conflicting_command = command_id(1);
@@ -754,10 +754,10 @@ mod tests {
         assert_eq!(transaction.observed.len(), 1);
     }
 
-    /// S28: a missing imported target remains a pre-claim terminal
+    /// a missing imported target remains a pre-claim terminal
     /// result and requests no semantic identities.
     #[test]
-    fn s28_missing_target_passes_through_without_semantic_generation() {
+    fn missing_target_passes_through_without_semantic_generation() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
         let missing_conversation =
@@ -794,9 +794,9 @@ mod tests {
         assert_eq!(transaction.observed.len(), 2);
     }
 
-    /// S28: transaction failure is returned once with no application retry.
+    /// transaction failure is returned once with no application retry.
     #[test]
-    fn s28_transaction_failure_is_returned_without_retry() {
+    fn transaction_failure_is_returned_without_retry() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
         let mut service = CreateSessionFromImportedFrontierService::new(

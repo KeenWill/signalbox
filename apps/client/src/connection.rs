@@ -315,7 +315,7 @@ mod tests {
     use std::{error::Error, time::Duration};
 
     use signalbox_process_protocol::{ErrorCode, ErrorDetail, encode_server_line};
-    use tokio::{io::AsyncWriteExt as _, time::timeout};
+    use tokio::time::timeout;
 
     use super::*;
 

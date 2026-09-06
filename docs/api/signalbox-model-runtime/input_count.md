@@ -12,12 +12,6 @@ pub enum InputTokenCountOutcome<C> {
     Failed { correlation: C },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for InputTokenCountOutcome<C>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ModelInputTokenCounter

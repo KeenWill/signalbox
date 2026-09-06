@@ -152,7 +152,7 @@ fn assert_check_violation(error: &sqlx::Error) {
 /// unwritten snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_initial_metadata_read_returns_unwritten_snapshot() -> Result<(), Box<dyn Error>> {
+async fn initial_metadata_read_returns_unwritten_snapshot() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -174,7 +174,7 @@ async fn s01_initial_metadata_read_returns_unwritten_snapshot() -> Result<(), Bo
 /// a missing-session rejection is durable and equal replay returns it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_missing_session_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+async fn missing_session_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = SessionMetadataRepository::new(pool.clone());
     let absent = replacement(0x901, 0x799, metadata(Some("absent"), &[], &[], false));

@@ -7,60 +7,6 @@
 ```rust
 pub struct TurnLivenessPersistenceBounds {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for turn_liveness::TurnLivenessPersistenceBounds
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for turn_liveness::TurnLivenessPersistenceBounds
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for turn_liveness::TurnLivenessPersistenceBounds {}
-impl<T> parse_display::IntoResult<T> for turn_liveness::TurnLivenessPersistenceBounds {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for turn_liveness::TurnLivenessPersistenceBounds
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::TurnLivenessPersistenceBounds {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::TurnLivenessPersistenceBounds {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for turn_liveness::TurnLivenessPersistenceBounds
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for turn_liveness::TurnLivenessPersistenceBounds
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for turn_liveness::TurnLivenessPersistenceBounds
-where
-    T: ?marker::Sized,
-{
-}
 impl turn_liveness::TurnLivenessPersistenceBounds {
     pub const fn new(
         lock_wait: option::Option<time::Duration>,
@@ -88,56 +34,14 @@ pub enum TurnLivenessRepositoryError {
     Terminalization(startup::StartupScanRepositoryError),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for turn_liveness::TurnLivenessRepositoryError {}
-impl<T> parse_display::IntoResult<T> for turn_liveness::TurnLivenessRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for turn_liveness::TurnLivenessRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::TurnLivenessRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::TurnLivenessRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for turn_liveness::TurnLivenessRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for turn_liveness::TurnLivenessRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for turn_liveness::TurnLivenessRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for turn_liveness::TurnLivenessRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for turn_liveness::TurnLivenessRepositoryError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for turn_liveness::TurnLivenessRepositoryError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for turn_liveness::TurnLivenessRepositoryError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
     fn operator_failure_cause_code(&self) -> &'static str;
 }
 impl convert::From<startup::StartupScanRepositoryError>
@@ -155,60 +59,6 @@ pub enum TurnLivenessObservationMode {
     Advance,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for turn_liveness::TurnLivenessObservationMode
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for turn_liveness::TurnLivenessObservationMode
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for turn_liveness::TurnLivenessObservationMode {}
-impl<T> parse_display::IntoResult<T> for turn_liveness::TurnLivenessObservationMode {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for turn_liveness::TurnLivenessObservationMode
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::TurnLivenessObservationMode {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::TurnLivenessObservationMode {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for turn_liveness::TurnLivenessObservationMode
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for turn_liveness::TurnLivenessObservationMode
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for turn_liveness::TurnLivenessObservationMode
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## PostgresTurnLivenessRepository
@@ -216,60 +66,6 @@ where
 ```rust
 pub struct PostgresTurnLivenessRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for turn_liveness::PostgresTurnLivenessRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for turn_liveness::PostgresTurnLivenessRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for turn_liveness::PostgresTurnLivenessRepository {}
-impl<T> parse_display::IntoResult<T> for turn_liveness::PostgresTurnLivenessRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for turn_liveness::PostgresTurnLivenessRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::PostgresTurnLivenessRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::PostgresTurnLivenessRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for turn_liveness::PostgresTurnLivenessRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for turn_liveness::PostgresTurnLivenessRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for turn_liveness::PostgresTurnLivenessRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl turn_liveness::PostgresTurnLivenessRepository {
     pub fn new(
         pool: sqlx_postgres::PgPool,
@@ -291,12 +87,12 @@ impl turn_liveness::PostgresTurnLivenessRepository {
     >;
     pub async fn record_complete_observation(
         &self,
-        guard: turn_liveness::TurnLivenessGuardKind,
-        scan_interval: turn_liveness::TurnLivenessScanInterval,
-        candidates: &[turn_liveness::StaleTurnCandidate],
+        guard: signalbox_application::TurnLivenessGuardKind,
+        scan_interval: signalbox_application::TurnLivenessScanInterval,
+        candidates: &[signalbox_application::StaleTurnCandidate],
         mode: turn_liveness::TurnLivenessObservationMode,
     ) -> result::Result<
-        boxed::Box<[turn_liveness::DurableTurnLivenessObservation]>,
+        boxed::Box<[signalbox_application::DurableTurnLivenessObservation]>,
         turn_liveness::TurnLivenessRepositoryError,
     >;
     pub async fn clear_guard_observations(
@@ -306,36 +102,39 @@ impl turn_liveness::PostgresTurnLivenessRepository {
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<turn_liveness::StaleTurnCandidate>,
+        option::Option<signalbox_application::StaleTurnCandidate>,
         turn_liveness::TurnLivenessRepositoryError,
     >;
     pub async fn recover_observed_slot_held_turn<Generator>(
         &self,
-        candidate: turn_liveness::StaleTurnCandidate,
-        identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
+        candidate: signalbox_application::StaleTurnCandidate,
+        identities: signalbox_domain::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
     ) -> result::Result<
-        option::Option<startup_scan::StartupScanSessionOutcome>,
+        option::Option<signalbox_application::StartupScanSessionOutcome>,
         turn_liveness::TurnLivenessRepositoryError,
     >
     where
-        Generator: startup_scan::StartupScanIdGenerator + marker::Send;
+        Generator: signalbox_application::StartupScanIdGenerator + marker::Send;
     pub async fn recover_abandoned_compaction(
         &self,
         session: signalbox_domain::SessionId,
         abandoned_call: signalbox_domain::ModelCallId,
     ) -> result::Result<
-        option::Option<startup_scan::StartupScanSessionOutcome>,
+        option::Option<signalbox_application::StartupScanSessionOutcome>,
         turn_liveness::TurnLivenessRepositoryError,
     >;
     pub async fn terminalize_stale_turn<Generator>(
         &self,
-        candidate: turn_liveness::StaleTurnCandidate,
-        identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
+        candidate: signalbox_application::StaleTurnCandidate,
+        identities: signalbox_domain::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
-    ) -> result::Result<turn_liveness::StaleTurnOutcome, turn_liveness::TurnLivenessRepositoryError>
+    ) -> result::Result<
+        signalbox_application::StaleTurnOutcome,
+        turn_liveness::TurnLivenessRepositoryError,
+    >
     where
-        Generator: startup_scan::StartupScanIdGenerator + marker::Send;
+        Generator: signalbox_application::StartupScanIdGenerator + marker::Send;
 }
 ```
 
@@ -344,66 +143,12 @@ impl turn_liveness::PostgresTurnLivenessRepository {
 ```rust
 pub struct QuiescentActiveTurnPage {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for turn_liveness::QuiescentActiveTurnPage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for turn_liveness::QuiescentActiveTurnPage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for turn_liveness::QuiescentActiveTurnPage {}
-impl<T> parse_display::IntoResult<T> for turn_liveness::QuiescentActiveTurnPage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for turn_liveness::QuiescentActiveTurnPage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for turn_liveness::QuiescentActiveTurnPage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for turn_liveness::QuiescentActiveTurnPage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for turn_liveness::QuiescentActiveTurnPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for turn_liveness::QuiescentActiveTurnPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for turn_liveness::QuiescentActiveTurnPage
-where
-    T: ?marker::Sized,
-{
-}
 impl turn_liveness::QuiescentActiveTurnPage {
-    pub fn candidates(&self) -> &[turn_liveness::StaleTurnCandidate];
+    pub fn candidates(&self) -> &[signalbox_application::StaleTurnCandidate];
 }
 impl turn_liveness::QuiescentActiveTurnPage {
     pub const fn rows(&self) -> usize;
-    pub fn into_candidates(self) -> boxed::Box<[turn_liveness::StaleTurnCandidate]>;
+    pub fn into_candidates(self) -> boxed::Box<[signalbox_application::StaleTurnCandidate]>;
     pub const fn resume_after(&self) -> option::Option<signalbox_domain::SessionId>;
 }
 ```

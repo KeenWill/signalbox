@@ -21,72 +21,11 @@ pub enum ImportedSessionCorruption {
         reason: mapping::DurableCommandIdMappingError,
     },
     ImportedConversation(conversation_import::ImportedConversationCorruption),
-    CreationDomain(imported_session::CreateSessionFromImportedFrontierReconstitutionFailure),
-    BoundedCurrentDomain(imported_session::BoundedImportedSessionReconstitutionFailure),
-    CurrentDomain(imported_session::ImportedSessionReconstitutionFailure),
+    CreationDomain(signalbox_domain::CreateSessionFromImportedFrontierReconstitutionFailure),
+    BoundedCurrentDomain(signalbox_domain::BoundedImportedSessionReconstitutionFailure),
+    CurrentDomain(signalbox_domain::ImportedSessionReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for create_session_from_imported_frontier::ImportedSessionCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for create_session_from_imported_frontier::ImportedSessionCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for create_session_from_imported_frontier::ImportedSessionCorruption
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for create_session_from_imported_frontier::ImportedSessionCorruption
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for create_session_from_imported_frontier::ImportedSessionCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for create_session_from_imported_frontier::ImportedSessionCorruption
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for create_session_from_imported_frontier::ImportedSessionCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for create_session_from_imported_frontier::ImportedSessionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for create_session_from_imported_frontier::ImportedSessionCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for create_session_from_imported_frontier::ImportedSessionCorruption
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for create_session_from_imported_frontier::ImportedSessionCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -104,72 +43,6 @@ pub enum ImportedSessionIdentityCollision {
     SeedFrontier,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T>
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V>
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L>
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-{
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for create_session_from_imported_frontier::ImportedSessionIdentityCollision
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for create_session_from_imported_frontier::ImportedSessionIdentityCollision {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -187,63 +60,12 @@ pub enum ImportedSessionRepositoryError {
     DifferentCommandKind {
         command_id: signalbox_domain::DurableCommandId,
     },
-    Preparation(imported_session::CreateSessionFromImportedFrontierPreparationFailure),
+    Preparation(signalbox_domain::CreateSessionFromImportedFrontierPreparationFailure),
     IdentityCollision(create_session_from_imported_frontier::ImportedSessionIdentityCollision),
     ImportedConversation(conversation_import::ImportedConversationRepositoryError),
     Corruption(create_session_from_imported_frontier::ImportedSessionCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither
-    for create_session_from_imported_frontier::ImportedSessionRepositoryError
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for create_session_from_imported_frontier::ImportedSessionRepositoryError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for create_session_from_imported_frontier::ImportedSessionRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for create_session_from_imported_frontier::ImportedSessionRepositoryError
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L>
-    for create_session_from_imported_frontier::ImportedSessionRepositoryError
-{
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for create_session_from_imported_frontier::ImportedSessionRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for create_session_from_imported_frontier::ImportedSessionRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for create_session_from_imported_frontier::ImportedSessionRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for create_session_from_imported_frontier::ImportedSessionRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -272,67 +94,6 @@ impl convert::From<conversation_import::ImportedConversationRepositoryError>
 ```rust
 pub struct ImportedSessionRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for create_session_from_imported_frontier::ImportedSessionRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for create_session_from_imported_frontier::ImportedSessionRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for create_session_from_imported_frontier::ImportedSessionRepository
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for create_session_from_imported_frontier::ImportedSessionRepository
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for create_session_from_imported_frontier::ImportedSessionRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for create_session_from_imported_frontier::ImportedSessionRepository
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for create_session_from_imported_frontier::ImportedSessionRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for create_session_from_imported_frontier::ImportedSessionRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for create_session_from_imported_frontier::ImportedSessionRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for create_session_from_imported_frontier::ImportedSessionRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl create_session_from_imported_frontier::ImportedSessionRepository {
     pub fn with_imported_conversations(
         pool: sqlx_postgres::PgPool,
@@ -341,34 +102,47 @@ impl create_session_from_imported_frontier::ImportedSessionRepository {
     ) -> Self;
     pub fn with_preloaded_conversation(
         self,
-        conversation: conversation::ImportedConversation,
+        conversation: signalbox_domain::ImportedConversation,
     ) -> Self;
+    #[cfg(feature = "postgres-integration")]
     pub fn new(pool: sqlx_postgres::PgPool, credential_pin: SessionCredentialPin) -> Self;
     pub async fn handle<NextSemanticEntryId>(
         &self,
-        command: session::CreateSessionFromImportedFrontier,
+        command: signalbox_domain::CreateSessionFromImportedFrontier,
         session: signalbox_domain::SessionId,
-        seed_frontier: context_frontier::ContextFrontierId,
+        seed_frontier: signalbox_domain::ContextFrontierId,
         next_semantic_entry_id: NextSemanticEntryId,
     ) -> result::Result<
-        create_session_from_imported_frontier::CreateSessionFromImportedFrontierOutcome,
+        signalbox_application::CreateSessionFromImportedFrontierOutcome,
         create_session_from_imported_frontier::ImportedSessionRepositoryError,
     >
     where
         NextSemanticEntryId:
-            function::FnMut() -> context_frontier::SemanticTranscriptEntryId + marker::Send;
+            function::FnMut() -> signalbox_domain::SemanticTranscriptEntryId + marker::Send;
     pub async fn load(
         &self,
         command_id: signalbox_domain::DurableCommandId,
     ) -> result::Result<
-        option::Option<imported_session::ReconstitutedSessionCreationFromImportedFrontier>,
+        option::Option<signalbox_domain::ReconstitutedSessionCreationFromImportedFrontier>,
         create_session_from_imported_frontier::ImportedSessionRepositoryError,
     >;
 }
-impl create_session_from_imported_frontier::CreateSessionFromImportedFrontierTransaction
+impl signalbox_application::CreateSessionFromImportedFrontierTransaction
     for create_session_from_imported_frontier::ImportedSessionRepository
 {
     type Error = create_session_from_imported_frontier::ImportedSessionRepositoryError;
-    async fn handle<NextSemanticEntryId>(&mut self, command: session::CreateSessionFromImportedFrontier, session: signalbox_domain::SessionId, seed_frontier: context_frontier::ContextFrontierId, next_semantic_entry_id: NextSemanticEntryId) -> result::Result<create_session_from_imported_frontier::CreateSessionFromImportedFrontierOutcome, <Self as create_session_from_imported_frontier::CreateSessionFromImportedFrontierTransaction>::Error> where NextSemanticEntryId: function::FnMut() -> context_frontier::SemanticTranscriptEntryId + marker::Send;
+    async fn handle<NextSemanticEntryId>(
+        &mut self,
+        command: signalbox_domain::CreateSessionFromImportedFrontier,
+        session: signalbox_domain::SessionId,
+        seed_frontier: signalbox_domain::ContextFrontierId,
+        next_semantic_entry_id: NextSemanticEntryId,
+    ) -> result::Result<
+        signalbox_application::CreateSessionFromImportedFrontierOutcome,
+        <Self as signalbox_application::CreateSessionFromImportedFrontierTransaction>::Error,
+    >
+    where
+        NextSemanticEntryId:
+            function::FnMut() -> signalbox_domain::SemanticTranscriptEntryId + marker::Send;
 }
 ```

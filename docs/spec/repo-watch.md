@@ -1,12 +1,9 @@
 # Repository watch
 
-Repository watch has a checked domain vocabulary and a compiled-in v2 ownership
-module. The v2 module is not dispatched: the daemon starts no module poller,
-webhook listener, command worker, lease-expiry task, or operator projection
-route. Enabling dispatch requires an owner-approved code change that composes a
-worker; there is no latent runtime switch.
+Repository watch defines the checked vocabulary and module-owned persistence for
+observing repositories and reducing accepted facts into held session commands.
 
-## Domain vocabulary
+## Overview
 
 A pure differ (`derive_repo_watch_events`) compares canonical repository and
 pull-request observations and produces immutable `RepoWatchEvent` values in
@@ -36,48 +33,6 @@ repository, event-kind, pull-request context, label, draft, author,
 mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
-
-Each repository frontier commit includes the complete current repository and
-pull-request projections, expected generation, complete identity candidate, and
-ordered event occurrences in one transaction. The projection retains the
-complete normalized differ observation, including signal-reviewer provenance,
-pull requests, workflows, and branch heads. A generation mismatch is stale
-unless that complete input exactly replays the immediately succeeding commit. An
-empty event batch with an unchanged cursor is unchanged only when both stored
-projections also match; a projection-only change advances the generation and
-records the complete commit digest. Projection timestamps use PostgreSQL
-microsecond precision in both the stored comparison and commit identity. Each
-newly accepted occurrence receives the next positive per-repository event
-ordinal and records its producer, frontier generation, and position within that
-frontier batch.
-
-## Ownership boundary
-
-The v2 crate depends on the ownership seam as its only Signalbox dependency. It
-consumes the seam's lifecycle events and emits only the seam's checked session
-commands. It cannot import core persistence, qualify `public` tables, or name
-another module schema.
-
-The module retains an authenticated, HTTPS-only GitHub client for API-relative
-GET requests. It is an external-I/O capability and receives no database handle.
-The daemon's repository-specific client loader rereads the configured credential
-file on each load and returns only an authenticated client handle. Credential
-and client-construction failures have distinct redacted error classes.
-
-The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
-membership path back to the core identity, and has no table privileges in
-`public`. Module SQL uses an unqualified search path confined to its schema.
-Core and other modules receive no privileges on the module tables.
-
-Initial dispatch actions and lifecycle reactions are retained and submitted in
-strictly increasing, unique action-ordinal order. A created session indexes its
-retained rule revision, event, dispatch, and action ordinal, so lifecycle
-reaction planning survives rule removal and process restart. Equal evaluation
-recovery finds the retained batch before considering newly reserved dispatch or
-command identities. A lifecycle reaction targets the session named by its
-trigger. Before submitting a later action, the dispatcher records a synchronous
-create-session command-identity conflict as rejected; an applied creation
-settles from its `SessionCreated` event.
 
 The module schema contains twelve tables:
 
@@ -112,26 +67,12 @@ The module schema contains twelve tables:
   authenticated delivery under its caller-selected expiry.
 - `core_event_cursor` records module application progress.
 
-Every table is derived or module-local state and its migration declares its
-growth class and release condition. The code implements no pruning pass and
-selects no retention duration.
-
-## Reducer and dispatch ledger
-
 The repository-event reducer evaluates the existing checked rule matcher and
 returns one batch with a fresh dispatch identity for each matching rule. It
 turns each dispatch action into a `create_session` command through a core-owned
 factory. The reducer forces the resulting session to start held and owned with
 an external finish condition. Core supplies the command payload and therefore
 mints core identities.
-
-Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
-only `release_start` or sticky-stop lifecycle commands. These are the command
-forms used for convergence release and stale-work termination; no module lease
-table or scheduler join exists. Each reaction in a multi-action batch has its
-own one-based ordinal. A reaction naming a committed dispatch remains admissible
-after its rule is deactivated; deactivation prevents only new matched
-dispatches.
 
 The convergence sweep is a periodic pass that runs beside repository watch.
 Repository watch owns event-driven dispatch; the sweep supplies liveness for
@@ -144,17 +85,30 @@ template and the timing policy, and each repository lists its
 predicate described in [review workflows](review-workflows.md). The sweep
 evaluates one revalidated snapshot and uses that verdict for its decision.
 
-The module records a command in `dispatch_ledger` before submission and applies
-settlement lifecycle events to pending ledger rows. `SessionCreated` settles the
-next pending create action for its repository-watch dispatch and records the new
-session; replaying the event cannot settle another action. Identity reuse is
-idempotent only when all retained command metadata agrees. One dispatch
-reference names exactly one rule revision and event evaluation, including its
-complete ordered action batch. Pending ledger rows remain recoverable without
-the removed or inactive rule, and newly resolved template or configuration
-values cannot replace the committed payload.
+The v2 module is not composed into the daemon runtime: the daemon starts no
+module worker and exposes no module operator route. Planned dispatch actions and
+lifecycle reactions are retained in strictly increasing, unique action-ordinal
+order; no submitter is composed and no submission behavior is specified.
 
-## Ingest
+## Design decisions
+
+Each repository frontier commit includes the complete current repository and
+pull-request projections, expected generation, complete identity candidate, and
+ordered event occurrences in one transaction. The projection retains the
+complete normalized differ observation, including signal-reviewer provenance,
+pull requests, workflows, and branch heads. A generation mismatch is stale
+unless that complete input exactly replays the immediately succeeding commit. An
+empty event batch with an unchanged cursor is unchanged only when both stored
+projections also match; a projection-only change advances the generation and
+records the complete commit digest. Projection timestamps use PostgreSQL
+microsecond precision in both the stored comparison and commit identity. Each
+newly accepted occurrence receives the next positive per-repository event
+ordinal and records its producer, frontier generation, and position within that
+frontier batch.
+
+Every table is derived or module-local state and its migration declares its
+growth class and release condition. The code implements no pruning pass and
+selects no retention duration.
 
 Repository and pull-request UPSERTs replace one complete current projection.
 Webhook admission writes delivery metadata, exact authenticated bytes, and a
@@ -163,9 +117,49 @@ is a replay; different content is a conflict. Settlement changes a pending
 disposition exactly once. A frontier release supplies its observed generation
 and is stale after any intervening frontier commit.
 
-The v2 module has no poller, webhook listener, command worker, lease-expiry
-task, operator routes, or public-schema persistence surface. Its durable state
-is the module-owned projection and command ledger described above.
+Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
+only `release_start` or sticky-stop lifecycle commands. These are the command
+forms used for convergence release and stale-work termination; no module lease
+table or scheduler join exists. Each reaction in a multi-action batch has its
+own one-based ordinal. A reaction naming a committed dispatch remains admissible
+after its rule is deactivated; deactivation prevents only new matched
+dispatches.
+
+The module retains a command in `dispatch_ledger` before any future submission
+and applies settlement lifecycle events to pending ledger rows. `SessionCreated`
+settles the next pending create action for its repository-watch dispatch and
+records the new session; replaying the event cannot settle another action.
+Identity reuse is idempotent only when all retained command metadata agrees. One
+dispatch reference names exactly one rule revision and event evaluation,
+including its complete ordered action batch. Pending ledger rows remain
+recoverable without the removed or inactive rule, and newly resolved template or
+configuration values cannot replace the committed payload.
+
+## Boundary contracts
+
+The v2 crate depends on the ownership seam as its only Signalbox dependency. It
+consumes the seam's lifecycle events and emits only the seam's checked session
+commands. It cannot import core persistence, qualify `public` tables, or name
+another module schema.
+
+The module retains an authenticated, HTTPS-only GitHub client for API-relative
+GET requests. It is an external-I/O capability and receives no database handle.
+The daemon's repository-specific client loader rereads the configured credential
+file on each load and returns only an authenticated client handle. Credential
+and client-construction failures have distinct redacted error classes.
+
+The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
+membership path back to the core identity, and has no table privileges in
+`public`. Module SQL uses an unqualified search path confined to its schema.
+Core and other modules receive no privileges on the module tables.
+
+A created session indexes its retained rule revision, event, dispatch, and
+action ordinal, so lifecycle reaction planning survives rule removal and process
+restart. Equal evaluation recovery finds the retained batch before considering
+newly reserved dispatch or command identities. A lifecycle reaction targets the
+session named by its trigger. A synchronous create-session command-identity
+conflict is recorded as rejected on its retained action; an applied creation
+settles from its `SessionCreated` event.
 
 Contracts this page relies on but does not own: module-state pruning and outbox
 retention permission in [persistence protocol](persistence-protocol.md), session
@@ -173,5 +167,11 @@ command behavior, and the module event/command/database boundary in the
 [ownership seam](ownership-seam.md).
 
 ## Planned
+
+Repository-watch dispatch provenance is planned in the
+[repository watch design](../design/repo-watch.md).
+
+Restart-persistent poll caching is planned in the
+[repository watch design](../design/repo-watch.md).
 
 - Webhook listener composition and reload: [design](../design/repo-watch.md).

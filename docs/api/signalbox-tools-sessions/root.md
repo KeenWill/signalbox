@@ -37,20 +37,14 @@ pub const MAX_DELEGATION_CONTENT_BYTES: usize;
 ```rust
 pub struct SpawnSessionReceipt {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SpawnSessionReceipt
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl SpawnSessionReceipt {
     pub fn from_relation(
-        request: &session_delegation::DelegatedSpawnRequest,
-        relation: &session_delegation::SessionDelegation,
+        request: &signalbox_domain::DelegatedSpawnRequest,
+        relation: &signalbox_domain::SessionDelegation,
     ) -> option::Option<Self>;
     pub const fn tool_request(&self) -> signalbox_domain::ToolRequestId;
     pub const fn child(&self) -> signalbox_domain::SessionId;
-    pub const fn policy(&self) -> session_delegation::ChildRelationshipPolicy;
+    pub const fn policy(&self) -> signalbox_domain::ChildRelationshipPolicy;
 }
 ```
 
@@ -59,20 +53,14 @@ impl SpawnSessionReceipt {
 ```rust
 pub struct AwaitSessionReceipt {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for AwaitSessionReceipt
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl AwaitSessionReceipt {
     pub fn from_wait(
-        request: &session_delegation::DelegationAwaitRequest,
-        wait: session_delegation::DelegationWait,
+        request: &signalbox_domain::DelegationAwaitRequest,
+        wait: signalbox_domain::DelegationWait,
     ) -> option::Option<Self>;
     pub const fn tool_request(self) -> signalbox_domain::ToolRequestId;
     pub const fn child(self) -> signalbox_domain::SessionId;
-    pub const fn mode(self) -> session_delegation::DelegationWaitMode;
+    pub const fn mode(self) -> signalbox_domain::DelegationWaitMode;
 }
 ```
 
@@ -81,21 +69,15 @@ impl AwaitSessionReceipt {
 ```rust
 pub struct SessionMessageReceipt {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionMessageReceipt
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl SessionMessageReceipt {
     pub fn from_delivery(
-        request: &session_delegation::DelegationMessageRequest,
-        delivery: &impl session_delegation::DelegationMessageDeliveryProjection,
+        request: &signalbox_domain::DelegationMessageRequest,
+        delivery: &impl signalbox_application::DelegationMessageDeliveryProjection,
     ) -> option::Option<Self>;
     pub const fn tool_request(self) -> signalbox_domain::ToolRequestId;
     pub const fn message(self) -> signalbox_domain::DelegationMessageId;
-    pub const fn direction(self) -> session_delegation::DelegationMessageDirection;
-    pub const fn ordinal(self) -> session_delegation::DelegationEventOrdinal;
+    pub const fn direction(self) -> signalbox_domain::DelegationMessageDirection;
+    pub const fn ordinal(self) -> signalbox_domain::DelegationEventOrdinal;
     pub const fn delivery_sequence(self) -> nonzero::NonZeroU64;
 }
 ```
@@ -105,28 +87,22 @@ impl SessionMessageReceipt {
 ```rust
 pub struct DeliveredChildResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for DeliveredChildResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl DeliveredChildResult {
     pub fn from_stored_outcome(
-        wait: session_delegation::DelegationWait,
-        outcome: session_delegation::DelegationOutcome,
+        wait: signalbox_domain::DelegationWait,
+        outcome: signalbox_domain::DelegationOutcome,
     ) -> option::Option<Self>;
     pub fn try_new(
-        wait: session_delegation::DelegationWait,
-        relation: &session_delegation::SessionDelegation,
-        event: &session_delegation::DelegationEvent,
+        wait: signalbox_domain::DelegationWait,
+        relation: &signalbox_domain::SessionDelegation,
+        event: &signalbox_domain::DelegationEvent,
     ) -> result::Result<Self, DeliveredChildResultError>;
-    pub const fn wait(&self) -> session_delegation::DelegationWait;
+    pub const fn wait(&self) -> signalbox_domain::DelegationWait;
     pub const fn child(&self) -> signalbox_domain::SessionId;
-    pub const fn kind(&self) -> session_delegation::DelegationOutcomeKind;
-    pub const fn content(&self) -> option::Option<&session_delegation::DelegationContent>;
-    pub const fn reason(&self) -> session_delegation::DelegationOutcomeReason;
-    pub const fn provenance(&self) -> session_delegation::DelegationProvenance;
+    pub const fn kind(&self) -> signalbox_domain::DelegationOutcomeKind;
+    pub const fn content(&self) -> option::Option<&signalbox_domain::DelegationContent>;
+    pub const fn reason(&self) -> signalbox_domain::DelegationOutcomeReason;
+    pub const fn provenance(&self) -> signalbox_domain::DelegationProvenance;
 }
 ```
 
@@ -135,12 +111,6 @@ impl DeliveredChildResult {
 ```rust
 pub struct DeliveredChildResultError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for DeliveredChildResultError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for DeliveredChildResultError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -151,8 +121,8 @@ impl DeliveredChildResultError {
     pub fn into_parts(
         self,
     ) -> (
-        session_delegation::DelegationWait,
-        session_delegation::DelegationEvent,
+        signalbox_domain::DelegationWait,
+        signalbox_domain::DelegationEvent,
     );
 }
 ```
@@ -166,12 +136,6 @@ pub enum SessionDelegationPortOutcome<Value> {
     DurablyRejected,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionDelegationPortOutcome<Value>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## AwaitSessionPortOutcome
@@ -180,29 +144,23 @@ where
 pub enum AwaitSessionPortOutcome {
     BackgroundRegistered(AwaitSessionReceipt),
     Delivered(DeliveredChildResult),
-    ForegroundPending(session_delegation::DelegationWait),
+    ForegroundPending(signalbox_domain::DelegationWait),
     Rejected,
     DurablyRejected,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for AwaitSessionPortOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## SessionDelegationPort
 
 ```rust
 pub trait SessionDelegationPort: marker::Send {
-    type Error: operator_failure::ClassifyOperatorFailure;
-    type MessageDelivery: session_delegation::DelegationMessageDeliveryProjection;
+    type Error: signalbox_application::ClassifyOperatorFailure;
+    type MessageDelivery: signalbox_application::DelegationMessageDeliveryProjection;
     fn spawn_session(
         &mut self,
-        request: session_delegation::DelegatedSpawnRequest,
-        dispatch: tool_attempt::ToolDispatchAuthority,
+        request: signalbox_domain::DelegatedSpawnRequest,
+        dispatch: signalbox_domain::ToolDispatchAuthority,
     ) -> impl future::Future<
         Output = result::Result<
             SessionDelegationPortOutcome<SpawnSessionReceipt>,
@@ -211,15 +169,15 @@ pub trait SessionDelegationPort: marker::Send {
     > + marker::Send;
     fn await_session(
         &mut self,
-        request: session_delegation::DelegationAwaitRequest,
-        dispatch: tool_attempt::ToolDispatchAuthority,
+        request: signalbox_domain::DelegationAwaitRequest,
+        dispatch: signalbox_domain::ToolDispatchAuthority,
     ) -> impl future::Future<
         Output = result::Result<AwaitSessionPortOutcome, <Self as SessionDelegationPort>::Error>,
     > + marker::Send;
     fn send_session_message(
         &mut self,
-        request: session_delegation::DelegationMessageRequest,
-        dispatch: tool_attempt::ToolDispatchAuthority,
+        request: signalbox_domain::DelegationMessageRequest,
+        dispatch: signalbox_domain::ToolDispatchAuthority,
     ) -> impl future::Future<
         Output = result::Result<
             SessionDelegationPortOutcome<<Self as SessionDelegationPort>::MessageDelivery>,
@@ -239,12 +197,6 @@ pub enum SessionDelegationToolsConstructionError {
     Duplicate,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionDelegationToolsConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for SessionDelegationToolsConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -258,18 +210,12 @@ impl error::Error for SessionDelegationToolsConstructionError {
 ```rust
 pub struct SessionDelegationTools<Port> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for SessionDelegationTools<Port>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Port> SessionDelegationTools<Port> {
     pub fn try_new(port: Port) -> result::Result<Self, SessionDelegationToolsConstructionError>;
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         SessionDelegationExecutor<Port>,
     );
 }
@@ -283,12 +229,6 @@ pub enum SessionDelegationRequestDecodeFailure {
     Sealed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionDelegationRequestDecodeFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## SessionDelegationRequestDecodeError
@@ -296,15 +236,9 @@ where
 ```rust
 pub struct SessionDelegationRequestDecodeError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionDelegationRequestDecodeError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl SessionDelegationRequestDecodeError {
     pub const fn failure(&self) -> SessionDelegationRequestDecodeFailure;
-    pub fn into_request(self) -> request::ToolRequest;
+    pub fn into_request(self) -> signalbox_domain::ToolRequest;
 }
 impl fmt::Display for SessionDelegationRequestDecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -318,8 +252,8 @@ impl error::Error for SessionDelegationRequestDecodeError {
 
 ```rust
 pub fn foreground_await_request(
-    request: &request::ToolRequest,
-) -> option::Option<session_delegation::DelegationAwaitRequest>;
+    request: &signalbox_domain::ToolRequest,
+) -> option::Option<signalbox_domain::DelegationAwaitRequest>;
 ```
 
 ## ForegroundAwaitPending
@@ -327,15 +261,9 @@ pub fn foreground_await_request(
 ```rust
 pub struct ForegroundAwaitPending {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ForegroundAwaitPending
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ForegroundAwaitPending {
-    pub const fn correlation(self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-    pub const fn wait(self) -> session_delegation::DelegationWait;
+    pub const fn correlation(self) -> signalbox_domain::ToolAttemptDispatchCorrelation;
+    pub const fn wait(self) -> signalbox_domain::DelegationWait;
 }
 ```
 
@@ -344,14 +272,8 @@ impl ForegroundAwaitPending {
 ```rust
 pub struct ForegroundAwaitDelivered {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ForegroundAwaitDelivered
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ForegroundAwaitDelivered {
-    pub const fn correlation(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
+    pub const fn correlation(&self) -> signalbox_domain::ToolAttemptDispatchCorrelation;
     pub const fn result(&self) -> &DeliveredChildResult;
     pub fn into_result(self) -> DeliveredChildResult;
 }
@@ -361,18 +283,12 @@ impl ForegroundAwaitDelivered {
 
 ```rust
 pub enum SessionDelegationExecutionDisposition {
-    Completed(tool_loop::CorrelatedToolExecutorEvidence),
-    DurableCompletion(tool_loop::CorrelatedDurableToolCompletion),
+    Completed(signalbox_application::CorrelatedToolExecutorEvidence),
+    DurableCompletion(signalbox_application::CorrelatedDurableToolCompletion),
     ForegroundDelivered(ForegroundAwaitDelivered),
     ForegroundPending(ForegroundAwaitPending),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionDelegationExecutionDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## SessionDelegationExecutor
@@ -380,12 +296,6 @@ where
 ```rust
 pub struct SessionDelegationExecutor<Port> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for SessionDelegationExecutor<Port>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Port> SessionDelegationExecutor<Port> {
     pub fn into_port(self) -> Port;
 }
@@ -395,7 +305,7 @@ where
 {
     pub async fn execute_nonblocking(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
         SessionDelegationExecutionDisposition,
         SessionDelegationExecutorError<<Port as SessionDelegationPort>::Error>,
@@ -425,12 +335,12 @@ where
 {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl<PortError> operator_failure::ClassifyOperatorFailure
+impl<PortError> signalbox_application::ClassifyOperatorFailure
     for SessionDelegationExecutorError<PortError>
 where
-    PortError: operator_failure::ClassifyOperatorFailure,
+    PortError: signalbox_application::ClassifyOperatorFailure,
 {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -447,12 +357,6 @@ pub fn render_delivered_child_result(
 ```rust
 pub struct DeliveredChildResultRenderError;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for DeliveredChildResultRenderError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for DeliveredChildResultRenderError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

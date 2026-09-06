@@ -6,66 +6,12 @@
 
 ```rust
 pub enum SessionPlacementRepositoryOutcome {
-    Recorded(session_placement::UpdateSessionPlacementResult),
+    Recorded(signalbox_domain::UpdateSessionPlacementResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for session_placement::SessionPlacementRepositoryOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for session_placement::SessionPlacementRepositoryOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_placement::SessionPlacementRepositoryOutcome {}
-impl<T> parse_display::IntoResult<T> for session_placement::SessionPlacementRepositoryOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_placement::SessionPlacementRepositoryOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for session_placement::SessionPlacementRepositoryOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_placement::SessionPlacementRepositoryOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_placement::SessionPlacementRepositoryOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_placement::SessionPlacementRepositoryOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_placement::SessionPlacementRepositoryOutcome
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## SessionPlacementRepositoryError
@@ -78,48 +24,6 @@ pub enum SessionPlacementRepositoryError {
     Corruption(&'static str),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for session_placement::SessionPlacementRepositoryError {}
-impl<T> parse_display::IntoResult<T> for session_placement::SessionPlacementRepositoryError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_placement::SessionPlacementRepositoryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for session_placement::SessionPlacementRepositoryError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_placement::SessionPlacementRepositoryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_placement::SessionPlacementRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_placement::SessionPlacementRepositoryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_placement::SessionPlacementRepositoryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for session_placement::SessionPlacementRepositoryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -136,65 +40,11 @@ impl convert::From<error::Error> for session_placement::SessionPlacementReposito
 ```rust
 pub struct SessionPlacementRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for session_placement::SessionPlacementRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for session_placement::SessionPlacementRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for session_placement::SessionPlacementRepository {}
-impl<T> parse_display::IntoResult<T> for session_placement::SessionPlacementRepository {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for session_placement::SessionPlacementRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for session_placement::SessionPlacementRepository {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for session_placement::SessionPlacementRepository {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for session_placement::SessionPlacementRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for session_placement::SessionPlacementRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for session_placement::SessionPlacementRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl session_placement::SessionPlacementRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn handle(
         &self,
-        command: session_placement::UpdateSessionPlacement,
+        command: signalbox_domain::UpdateSessionPlacement,
     ) -> result::Result<
         session_placement::SessionPlacementRepositoryOutcome,
         session_placement::SessionPlacementRepositoryError,
@@ -203,20 +53,20 @@ impl session_placement::SessionPlacementRepository {
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<session_placement::VersionedSessionPlacement>,
+        option::Option<signalbox_domain::VersionedSessionPlacement>,
         session_placement::SessionPlacementRepositoryError,
     >;
 }
-impl update_session_placement::UpdateSessionPlacementTransaction
+impl signalbox_application::UpdateSessionPlacementTransaction
     for session_placement::SessionPlacementRepository
 {
     type Error = session_placement::SessionPlacementRepositoryError;
     async fn handle(
         &mut self,
-        command: session_placement::UpdateSessionPlacement,
+        command: signalbox_domain::UpdateSessionPlacement,
     ) -> result::Result<
-        update_session_placement::UpdateSessionPlacementOutcome,
-        <Self as update_session_placement::UpdateSessionPlacementTransaction>::Error,
+        signalbox_application::UpdateSessionPlacementOutcome,
+        <Self as signalbox_application::UpdateSessionPlacementTransaction>::Error,
     >;
 }
 ```

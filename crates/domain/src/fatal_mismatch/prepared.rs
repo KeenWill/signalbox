@@ -278,10 +278,10 @@ mod tests {
         .expect("prepared completed-call invalidation derives sealed facts")
     }
 
-    /// S21: Prepared ends directly as exact known failure
+    /// Prepared ends directly as exact known failure
     /// while every open logical dependency remains an atomic closure requirement.
     #[test]
-    fn s21_prepared_invalidation_binds_atomic_failure_only() {
+    fn prepared_invalidation_binds_atomic_failure_only() {
         let facts = prepared_facts([
             (
                 IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
@@ -330,10 +330,10 @@ mod tests {
         ));
     }
 
-    /// S21: unclassified work or blocking ambiguity rejects
+    /// unclassified work or blocking ambiguity rejects
     /// the atomic-only path with exact facts and source phase unchanged.
     #[test]
-    fn s21_incomplete_prepared_physical_closure_rejects_unchanged() {
+    fn incomplete_prepared_physical_closure_rejects_unchanged() {
         assert_incomplete_physical_closure_rejects_unchanged(IssuedOperationClosure::Unclassified);
         assert_incomplete_physical_closure_rejects_unchanged(
             IssuedOperationClosure::PhysicallyAmbiguous {

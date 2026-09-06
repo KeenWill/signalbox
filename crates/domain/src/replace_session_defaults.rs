@@ -749,7 +749,7 @@ mod tests {
         ReplaceSessionDefaultsReconstitutionInput, ReplaceSessionDefaultsRejectedResult,
         ReplaceSessionDefaultsResult,
     };
-    use signalbox_expect_table::table;
+    use expectable::print;
 
     use crate::test_support::{command_id, direct, session_id};
     use crate::{
@@ -851,10 +851,10 @@ mod tests {
         }
     }
 
-    /// S01: comparison excludes command identity and includes the
+    /// comparison excludes command identity and includes the
     /// stable target, expected version, and caller-owned replacement fields.
     #[test]
-    fn s01_comparison_payload_is_structural() {
+    fn comparison_payload_is_structural() {
         let target = session_id(1);
         let baseline = ReplaceSessionDefaults::new(command_id(1), target, version(1), defaults(2));
         let different_command_id =
@@ -872,10 +872,10 @@ mod tests {
         assert_ne!(baseline, different_replacement);
     }
 
-    /// S37: server-derived adjustment evidence travels
+    /// server-derived adjustment evidence travels
     /// with a new command but does not alter caller-payload replay equality.
     #[test]
-    fn s37_adjustment_evidence_is_not_caller_payload() {
+    fn adjustment_evidence_is_not_caller_payload() {
         let target = session_id(1);
         let adjustment = ModelChangeAdjustment::ReasoningLevelClamped {
             from: ReasoningLevel::High,
@@ -901,10 +901,10 @@ mod tests {
         assert_eq!(with_adjustment.model_settings_adjustments(), [adjustment]);
     }
 
-    /// S37: replay equality follows the stable caller
+    /// replay equality follows the stable caller
     /// overlay instead of a server-normalized installed settings snapshot.
     #[test]
-    fn s37_server_normalized_settings_are_not_caller_payload() {
+    fn server_normalized_settings_are_not_caller_payload() {
         let target = session_id(1);
         let selection = direct(2);
         let capabilities = ModelCapabilities::new(
@@ -979,10 +979,10 @@ mod tests {
         assert_eq!(recorded, replay);
     }
 
-    /// S01: matching current state installs one complete immutable
+    /// matching current state installs one complete immutable
     /// successor without changing the source session snapshot.
     #[test]
-    fn s01_matching_version_prepares_complete_successor() {
+    fn matching_version_prepares_complete_successor() {
         let target = session_id(1);
         let current = session(target, 1);
         let replacement = command_expecting(target, 1);
@@ -1003,10 +1003,10 @@ mod tests {
         );
     }
 
-    /// S01: stale current state is a typed terminal
+    /// stale current state is a typed terminal
     /// rejection retaining both compared versions.
     #[test]
-    fn s01_stale_version_prepares_authoritative_rejection() {
+    fn stale_version_prepares_authoritative_rejection() {
         let target = session_id(1);
         let prepared = command_expecting(target, 1)
             .prepare_against(&session(target, 2))
@@ -1023,10 +1023,10 @@ mod tests {
         assert_eq!(mismatch.current(), version(2));
     }
 
-    /// S01: absence and ordinal exhaustion are distinct
+    /// absence and ordinal exhaustion are distinct
     /// authoritative results, while a cross-wired session is not.
     #[test]
-    fn s01_missing_exhausted_and_cross_wired_are_distinct() {
+    fn missing_exhausted_and_cross_wired_are_distinct() {
         let target = session_id(1);
         let missing = command_expecting(target, 1).prepare_session_not_found();
         assert!(matches!(
@@ -1057,10 +1057,10 @@ mod tests {
         assert_eq!(error.provided_session(), session_id(2));
     }
 
-    /// S01: complete applied effect facts
+    /// complete applied effect facts
     /// reconstruct exactly one correlated typed result.
     #[test]
-    fn s01_applied_reconstitution_checks_complete_effects() {
+    fn applied_reconstitution_checks_complete_effects() {
         let target = session_id(1);
         let command = command_expecting(target, 1);
         let reconstructed = AppliedFacts::matching(&command)
@@ -1076,11 +1076,11 @@ mod tests {
         assert_eq!(applied.installed().defaults(), command.replacement());
     }
 
-    /// S01: equal replay of an earlier applied command
+    /// equal replay of an earlier applied command
     /// remains valid after a later command advances the mutable current
     /// pointer.
     #[test]
-    fn s01_historical_applied_receipt_ignores_later_current_pointer() {
+    fn historical_applied_receipt_ignores_later_current_pointer() {
         let target = session_id(1);
         let historical_command = command_expecting(target, 1);
         let current_after_later_replacement = session(target, 3);
@@ -1101,10 +1101,10 @@ mod tests {
         assert_eq!(applied.installed().version(), version(2));
     }
 
-    /// S01: a cross-wired owner, non-successor, or
+    /// a cross-wired owner, non-successor, or
     /// mismatched replacement fails closed instead of constructing authority.
     #[test]
-    fn s01_applied_reconstitution_fails_closed() {
+    fn applied_reconstitution_fails_closed() {
         let target = session_id(1);
         let another_session = session_id(2);
         let command = command_expecting(target, 1);
@@ -1171,7 +1171,7 @@ mod tests {
             ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch
         );
 
-        // S34: a stored install diverging from the command's
+        // a stored install diverging from the command's
         // replacement only in its optional system prompt is the same
         // fail-closed defaults mismatch.
         let prompt_diverged = AppliedFacts {
@@ -1197,14 +1197,10 @@ mod tests {
         /// rendered as a snapshot row supplementing the targeted asserts
         /// above (TS-10, TS-12). The field names
         /// are the rendered column headers.
-        #[derive(Debug)]
-        #[allow(
-            dead_code,
-            reason = "the table renderer reads every field through the Debug derive"
-        )]
+        #[derive(Debug, serde::Serialize)]
         struct PerturbedFactRow {
             perturbed_stored_fact: &'static str,
-            failure: ReplaceSessionDefaultsReconstitutionFailure,
+            failure: String,
         }
 
         expect![[r#"
@@ -1218,34 +1214,34 @@ mod tests {
             │ stored replacement differs         │ StoredDefaultsMismatch         │
             └────────────────────────────────────┴────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             PerturbedFactRow {
                 perturbed_stored_fact: "result session cross-wired",
-                failure: cross_wired_result,
+                failure: format!("{cross_wired_result:?}"),
             },
             PerturbedFactRow {
                 perturbed_stored_fact: "defaults owner cross-wired",
-                failure: cross_wired_defaults_owner,
+                failure: format!("{cross_wired_defaults_owner:?}"),
             },
             PerturbedFactRow {
                 perturbed_stored_fact: "result and installed versions torn",
-                failure: torn_result_version,
+                failure: format!("{torn_result_version:?}"),
             },
             PerturbedFactRow {
                 perturbed_stored_fact: "installed version skips successor",
-                failure: skipped_successor,
+                failure: format!("{skipped_successor:?}"),
             },
             PerturbedFactRow {
                 perturbed_stored_fact: "stored replacement differs",
-                failure: replaced_defaults,
+                failure: format!("{replaced_defaults:?}"),
             },
         ]));
     }
 
-    /// S01: each rejected record validates its command
+    /// each rejected record validates its command
     /// correlation and semantic predicate before reconstruction.
     #[test]
-    fn s01_rejected_reconstitution_is_checked() {
+    fn rejected_reconstitution_is_checked() {
         let target = session_id(1);
         let command = command_expecting(target, 1);
 

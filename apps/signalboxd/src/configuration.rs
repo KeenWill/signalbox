@@ -9568,10 +9568,10 @@ extra = true"#,
         );
     }
 
-    /// S37: every explicit lower layer is validated even when a
+    /// every explicit lower layer is validated even when a
     /// higher-precedence layer masks it in the effective configuration.
     #[test]
-    fn s37_configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
+    fn configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
         let profile_configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9594,10 +9594,10 @@ extra = true"#,
         );
     }
 
-    /// S37: an explicit unsupported selected-profile value is
+    /// an explicit unsupported selected-profile value is
     /// rejected even when the global layer is valid.
     #[test]
-    fn s37_configuration_rejects_an_unsupported_selected_profile_value() {
+    fn configuration_rejects_an_unsupported_selected_profile_value() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9614,10 +9614,10 @@ extra = true"#,
         );
     }
 
-    /// S37: a selected profile cannot combine individually
+    /// a selected profile cannot combine individually
     /// supported controls that its adapter cannot enforce together.
     #[test]
-    fn s37_configuration_rejects_an_adapter_incompatible_selected_profile() {
+    fn configuration_rejects_an_adapter_incompatible_selected_profile() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",
@@ -9634,10 +9634,10 @@ extra = true"#,
         );
     }
 
-    /// S37: an adapter-incompatible global combination remains
+    /// an adapter-incompatible global combination remains
     /// invalid when a selected profile masks it with a supported combination.
     #[test]
-    fn s37_configuration_rejects_a_masked_adapter_incompatible_global_layer() {
+    fn configuration_rejects_a_masked_adapter_incompatible_global_layer() {
         let configuration = CONFIGURATION
             .replace(
                 "version = 1",

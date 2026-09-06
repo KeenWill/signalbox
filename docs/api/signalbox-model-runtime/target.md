@@ -7,12 +7,6 @@
 ```rust
 pub struct RequestedTarget(/* private */);
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for RequestedTarget
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl RequestedTarget {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -24,12 +18,6 @@ impl RequestedTarget {
 ```rust
 pub struct ResolvedTarget(/* private */);
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ResolvedTarget
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ResolvedTarget {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -41,12 +29,6 @@ impl ResolvedTarget {
 ```rust
 pub struct ProviderReportedModel(/* private */);
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ProviderReportedModel
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ProviderReportedModel {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;

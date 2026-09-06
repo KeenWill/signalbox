@@ -96,6 +96,146 @@ def fixture():
 
 
 class RenderDomainSpineTests(unittest.TestCase):
+    def test_dependency_paths_use_public_reexports_across_crate_local_ids(self):
+        dependency = fixture()
+        dependency['index']['0']['inner']['module']['items'] = [30]
+        dependency['index']['30']['inner']['use']['name'] = 'PublicRecord'
+        exports = Renderer(dependency).exports()
+        consumer = fixture()
+        consumer['index']['0']['name'] = 'consumer'
+        consumer['paths']['200'] = {'crate_id': 7, 'path': ['sample', 'example', 'Record']}
+        args = {'angle_bracketed': {'args': [{'type': {'primitive': 'u32'}}], 'constraints': []}}
+        renderer = Renderer(consumer, exports)
+        self.assertEqual(renderer.path(path('Record', 200, args)), 'sample::PublicRecord<u32>')
+
+    def test_dependency_public_module_reexport_replaces_private_definition_path(self):
+        dependency = fixture()
+        dependency['index']['50'] = {
+            **dependency['index']['0'], 'id': 50, 'name': 'public',
+            'inner': {'module': {'items': [30], 'is_crate': False}},
+        }
+        dependency['index']['0']['inner']['module']['items'] = [50]
+        consumer = fixture()
+        consumer['index']['0']['name'] = 'consumer'
+        consumer['paths']['200'] = {'crate_id': 7, 'path': ['sample', 'example', 'Record']}
+        renderer = Renderer(consumer, Renderer(dependency).exports())
+        self.assertEqual(renderer.path(path('Record', 200)), 'sample::public::Alias')
+
+    def test_cfg_trace_preserves_nested_conditions_on_a_method(self):
+        document = fixture()
+        document['index']['3']['attrs'] = [{'other':
+            '#[attr = CfgTrace([All([NameValue { name: "feature", value: Some("fixture"), '
+            'span: src/lib.rs:2:11: 2:30 (#0) }, Not(NameValue { name: "unix", value: None, '
+            'span: src/lib.rs:2:36: 2:40 (#0) }, src/lib.rs:2:35: 2:41 (#0))], '
+            'src/lib.rs:2:10: 2:42 (#0))])]'}]
+        block = Renderer(document).block(document['index']['1'])
+        self.assertIn('#[cfg(all(feature = "fixture", not(unix)))]\n    pub fn new', block)
+
+    def test_gated_reexport_propagates_its_condition_to_the_type_and_impls(self):
+        document = fixture()
+        document['index']['0']['inner']['module']['items'] = [30]
+        document['index']['30']['attrs'] = [{'other':
+            '#[attr = CfgTrace([NameValue { name: "feature", value: Some("fixture"), '
+            'span: src/lib.rs:2:7: 2:26 (#0) }])]'}]
+        files = Renderer(document).files('sample')
+        self.assertIn('#[cfg(feature = "fixture")]\npub struct Record<T>', files['example.md'])
+        self.assertIn('#[cfg(feature = "fixture")]\nimpl Alias', files['example.md'])
+        self.assertIn('#[cfg(feature = "fixture")]\npub use example::Record as Alias;', files['example.md'])
+
+    def test_module_cfg_propagates_to_nested_declarations(self):
+        document = fixture()
+        document['index']['0']['attrs'] = [{'other':
+            '#[attr = CfgTrace([NameValue { name: "feature", value: Some("fixture"), '
+            'span: src/lib.rs:2:7: 2:26 (#0) }])]'}]
+        block = Renderer(document).block(document['index']['20'])
+        self.assertIn('#[cfg(feature = "fixture")]\npub fn fetch()', block)
+
+    def test_complementary_source_exports_keep_the_public_type_available(self):
+        document = fixture()
+        document['index']['0']['inner']['module']['items'] = [30]
+        export = document['index']['30']
+        export['span']['filename'] = 'src/lib.rs'
+        export['inner']['use']['name'] = 'Record'
+        export['attrs'] = [{'other':
+            '#[attr = CfgTrace([NameValue { name: "target_os", value: Some("linux"), '
+            'span: src/lib.rs:2:7: 2:26 (#0) }])]'}]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'src').mkdir()
+            for counterpart, unconditional in [
+                ('unsupported::{Other, Record}', True),
+                ('unsupported::Fallback as Record', True),
+                ('unsupported::Other', False),
+            ]:
+                with self.subTest(counterpart=counterpart):
+                    (root / 'src/lib.rs').write_text(
+                        '#[cfg(target_os = "linux")]\npub use sandbox::Record;\n'
+                        '#[cfg(not(target_os = "linux"))]\npub use ' + counterpart + ';\n')
+                    with patch('render_domain_spine.ROOT', root):
+                        block = Renderer(document).block(document['index']['1'])
+                    self.assertEqual('#[cfg(target_os = "linux")]' not in block, unconditional)
+                    self.assertIn('pub struct Record', block)
+                    self.assertIn('pub fn new', block)
+
+    def test_unconditional_export_does_not_inherit_a_gated_alias_condition(self):
+        document = fixture()
+        document['index']['30']['attrs'] = [{'other':
+            '#[attr = CfgTrace([NameValue { name: "feature", value: Some("fixture"), '
+            'span: src/lib.rs:2:7: 2:26 (#0) }])]'}]
+        block = Renderer(document).block(document['index']['1'])
+        self.assertNotIn('#[cfg(', block)
+
+    def test_alternative_gated_exports_keep_either_feature_available(self):
+        document = fixture()
+        document['index']['0']['inner']['module']['items'] = [30, 31]
+        document['index']['30']['attrs'] = [{'other':
+            '#[attr = CfgTrace([NameValue { name: "feature", value: Some("first"), '
+            'span: src/lib.rs:2:7: 2:26 (#0) }])]'}]
+        document['index']['31'] = {
+            **copy.deepcopy(document['index']['30']), 'id': 31,
+            'attrs': [{'other': '#[attr = CfgTrace([NameValue { name: "feature", '
+                       'value: Some("second"), span: src/lib.rs:3:7: 3:27 (#0) }])]'}],
+        }
+        document['index']['31']['inner']['use']['name'] = 'OtherAlias'
+        block = Renderer(document).block(document['index']['1'])
+        self.assertIn('#[cfg(any(all(feature = "first"), all(feature = "second")))]', block)
+
+    def test_external_blanket_impl_with_unbound_type_parameter_is_excluded(self):
+        document = fixture()
+        implementation = document['index']['6']['inner']['impl']
+        implementation.update(trait=path('DynClone', 104), blanket_impl={'generic': 'T'})
+        implementation['generics'] = {'params': [{'name': 'T', 'kind': {'type': {
+            'bounds': [], 'default': None, 'is_synthetic': False}}}], 'where_predicates': []}
+        document['paths']['104'] = {'crate_id': 1, 'path': ['dyn_clone', 'DynClone']}
+        block = Renderer(document).block(document['index']['1'])
+        self.assertNotIn('DynClone', block)
+        self.assertIn('impl Record', block)
+
+    def test_substituted_external_blanket_impl_is_excluded_with_generic_trait_arguments(self):
+        document = fixture()
+        implementation = document['index']['6']['inner']['impl']
+        implementation.update(trait=path('FromRef', 104, {'angle_bracketed': {
+            'args': [{'type': {'generic': 'T'}}], 'constraints': []}}), blanket_impl={'generic': 'T'})
+        implementation['generics'] = {'params': [{'name': 'T', 'kind': {'type': {
+            'bounds': [], 'default': None, 'is_synthetic': False}}}], 'where_predicates': []}
+        document['paths']['104'] = {'crate_id': 1, 'path': ['axum', 'extract', 'FromRef']}
+        block = Renderer(document).block(document['index']['1'])
+        self.assertNotIn('FromRef', block)
+        self.assertIn('impl Record', block)
+
+    def test_external_blanket_impl_keeps_its_unsubstituted_self_type(self):
+        document = fixture()
+        implementation = document['index']['6']['inner']['impl']
+        implementation.update(trait=path('DynClone', 104), blanket_impl={'generic': 'T'})
+        implementation['for']['resolved_path']['args'] = {'angle_bracketed': {
+            'args': [{'type': {'generic': 'T'}}], 'constraints': []}}
+        implementation['blanket_impl'] = copy.deepcopy(implementation['for'])
+        implementation['generics'] = {'params': [{'name': 'T', 'kind': {'type': {
+            'bounds': [], 'default': None, 'is_synthetic': False}}}], 'where_predicates': []}
+        document['paths']['104'] = {'crate_id': 1, 'path': ['dyn_clone', 'DynClone']}
+        block = Renderer(document).block(document['index']['1'])
+        self.assertIn('impl<T> dyn_clone::DynClone for Record<T>', block)
+
     def test_primitive_representation_does_not_add_a_conflicting_rust_hint(self):
         document = fixture()
         document['index']['10']['attrs'] = [
@@ -407,6 +547,77 @@ pub struct Token;
             self.assertTrue(content.startswith(HEADER), name)
             if name != 'README.md':
                 self.assertIn(f']({name})', files['README.md'])
+
+    def test_existing_split_pages_keep_item_boundaries_when_declarations_shrink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'docs/api/sample/example'
+            directory.mkdir(parents=True)
+            (directory / 'types.md').write_text('# example: types\n\n## Record\n')
+            (directory / 'types-2.md').write_text('# example: types-2\n\n## Token\n')
+            with patch('render_domain_spine.ROOT', root):
+                files = Renderer(fixture()).files('sample')
+        self.assertNotIn('example.md', files)
+        self.assertIn('## Record', files['example/types.md'])
+        self.assertNotIn('## Event', files['example/types.md'])
+        self.assertIn('## Event', files['example/types-2.md'])
+        self.assertIn('## Token', files['example/types-2.md'])
+
+    def test_split_page_survives_removal_of_preceding_pages_trailing_declaration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'docs/api/sample/example'
+            directory.mkdir(parents=True)
+            (directory / 'types.md').write_text('# example: types\n\n## Record\n\n## Removed\n')
+            (directory / 'types-2.md').write_text('# example: types-2\n\n## Event\n\n## Token\n')
+            with patch('render_domain_spine.ROOT', root):
+                files = Renderer(fixture()).files('sample')
+        self.assertIn('## Record', files['example/types.md'])
+        self.assertNotIn('## Event', files['example/types.md'])
+        self.assertIn('## Event', files['example/types-2.md'])
+        self.assertIn('## Token', files['example/types-2.md'])
+        self.assertNotIn('example/types-3.md', files)
+
+    def test_later_split_page_survives_an_empty_first_page(self):
+        document = fixture()
+        document['index']['0']['inner']['module']['items'] = [10, 40]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'docs/api/sample/example'
+            directory.mkdir(parents=True)
+            (directory / 'types.md').write_text('# example: types\n\n## Record\n')
+            (directory / 'types-2.md').write_text('# example: types-2\n\n## Event\n\n## Token\n')
+            with patch('render_domain_spine.ROOT', root):
+                files = Renderer(document).files('sample')
+                for name, content in files.items():
+                    (root / 'docs/api/sample' / name).write_text(content)
+                self.assertEqual(Renderer(document).files('sample'), files)
+        self.assertNotIn('## ', files['example/types.md'])
+        self.assertIn('## Event', files['example/types-2.md'])
+        self.assertIn('## Token', files['example/types-2.md'])
+        self.assertIn('](example/types-2.md)', files['README.md'])
+
+    def test_empty_module_render_is_stable_after_removing_all_split_declarations(self):
+        document = fixture()
+        document['index']['50'] = {
+            **copy.deepcopy(document['index']['0']), 'id': 50, 'name': 'example',
+            'inner': {'module': {'items': [], 'is_crate': False}},
+        }
+        document['index']['0']['inner']['module']['items'] = [50]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'docs/api/sample'
+            with patch('render_domain_spine.ROOT', root):
+                write_files(directory, {'example/types.md': '## Record\n',
+                                        'example/types-2.md': '## Event\n'})
+                files = Renderer(document).files('sample')
+                write_files(directory, files)
+                self.assertEqual(Renderer(document).files('sample'), files)
+                (directory / 'example').rmdir()
+                self.assertEqual(Renderer(document).files('sample'), files)
+        self.assertEqual(set(files), {'README.md', 'example.md'})
+        self.assertNotIn('## ', files['example.md'])
+        self.assertIn('| example | 0 | 0 | 0 | [example](example.md) |', files['README.md'])
 
     def test_oversized_type_group_continues_at_item_boundaries(self):
         document = fixture()

@@ -17,10 +17,10 @@ pub enum ValueError {
     Correlation,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for value::ValueError {
+impl fmt::Display for ValueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for value::ValueError {}
+impl error::Error for ValueError {}
 ```
 
 ## CanonicalUuid
@@ -28,17 +28,16 @@ impl error::Error for value::ValueError {}
 ```rust
 pub struct CanonicalUuid(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for value::CanonicalUuid where T: for<'de> de::Deserialize<'de> {}
-impl value::CanonicalUuid {
+impl CanonicalUuid {
     pub const fn into_uuid(self) -> uuid::Uuid;
 }
-impl value::CanonicalUuid {
+impl CanonicalUuid {
     pub const fn from_uuid(value: uuid::Uuid) -> Self;
 }
-impl fmt::Display for value::CanonicalUuid {
+impl fmt::Display for CanonicalUuid {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl ser::Serialize for value::CanonicalUuid {
+impl ser::Serialize for CanonicalUuid {
     fn serialize<S>(
         &self,
         serializer: S,
@@ -46,7 +45,7 @@ impl ser::Serialize for value::CanonicalUuid {
     where
         S: ser::Serializer;
 }
-impl<'de> de::Deserialize<'de> for value::CanonicalUuid {
+impl<'de> de::Deserialize<'de> for CanonicalUuid {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;
@@ -58,14 +57,13 @@ impl<'de> de::Deserialize<'de> for value::CanonicalUuid {
 ```rust
 pub struct PositiveU64(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
-impl<T> de::DeserializeOwned for value::PositiveU64 where T: for<'de> de::Deserialize<'de> {}
-impl value::PositiveU64 {
+impl PositiveU64 {
     pub const fn get(self) -> u64;
 }
-impl value::PositiveU64 {
-    pub const fn try_new(value: u64) -> result::Result<Self, value::ValueError>;
+impl PositiveU64 {
+    pub const fn try_new(value: u64) -> result::Result<Self, ValueError>;
 }
-impl<'de> de::Deserialize<'de> for value::PositiveU64 {
+impl<'de> de::Deserialize<'de> for PositiveU64 {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;
@@ -77,14 +75,13 @@ impl<'de> de::Deserialize<'de> for value::PositiveU64 {
 ```rust
 pub struct Digest(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> de::DeserializeOwned for value::Digest where T: for<'de> de::Deserialize<'de> {}
-impl value::Digest {
+impl Digest {
     pub fn as_str(&self) -> &str;
 }
-impl value::Digest {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
+impl Digest {
+    pub fn try_new(value: string::String) -> result::Result<Self, ValueError>;
 }
-impl ser::Serialize for value::Digest {
+impl ser::Serialize for Digest {
     fn serialize<S>(
         &self,
         serializer: S,
@@ -92,7 +89,7 @@ impl ser::Serialize for value::Digest {
     where
         S: ser::Serializer;
 }
-impl<'de> de::Deserialize<'de> for value::Digest {
+impl<'de> de::Deserialize<'de> for Digest {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;
@@ -104,14 +101,13 @@ impl<'de> de::Deserialize<'de> for value::Digest {
 ```rust
 pub struct CapabilityName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
-impl<T> de::DeserializeOwned for value::CapabilityName where T: for<'de> de::Deserialize<'de> {}
-impl value::CapabilityName {
+impl CapabilityName {
     pub fn as_str(&self) -> &str;
 }
-impl value::CapabilityName {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
+impl CapabilityName {
+    pub fn try_new(value: string::String) -> result::Result<Self, ValueError>;
 }
-impl<'de> de::Deserialize<'de> for value::CapabilityName {
+impl<'de> de::Deserialize<'de> for CapabilityName {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;
@@ -123,14 +119,13 @@ impl<'de> de::Deserialize<'de> for value::CapabilityName {
 ```rust
 pub struct DetailName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
-impl<T> de::DeserializeOwned for value::DetailName where T: for<'de> de::Deserialize<'de> {}
-impl value::DetailName {
+impl DetailName {
     pub fn as_str(&self) -> &str;
 }
-impl value::DetailName {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
+impl DetailName {
+    pub fn try_new(value: string::String) -> result::Result<Self, ValueError>;
 }
-impl<'de> de::Deserialize<'de> for value::DetailName {
+impl<'de> de::Deserialize<'de> for DetailName {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;
@@ -142,14 +137,13 @@ impl<'de> de::Deserialize<'de> for value::DetailName {
 ```rust
 pub struct WireToolName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
-impl<T> de::DeserializeOwned for value::WireToolName where T: for<'de> de::Deserialize<'de> {}
-impl value::WireToolName {
+impl WireToolName {
     pub fn as_str(&self) -> &str;
 }
-impl value::WireToolName {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
+impl WireToolName {
+    pub fn try_new(value: string::String) -> result::Result<Self, ValueError>;
 }
-impl<'de> de::Deserialize<'de> for value::WireToolName {
+impl<'de> de::Deserialize<'de> for WireToolName {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;
@@ -161,14 +155,13 @@ impl<'de> de::Deserialize<'de> for value::WireToolName {
 ```rust
 pub struct ProfileName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
-impl<T> de::DeserializeOwned for value::ProfileName where T: for<'de> de::Deserialize<'de> {}
-impl value::ProfileName {
+impl ProfileName {
     pub fn as_str(&self) -> &str;
 }
-impl value::ProfileName {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
+impl ProfileName {
+    pub fn try_new(value: string::String) -> result::Result<Self, ValueError>;
 }
-impl<'de> de::Deserialize<'de> for value::ProfileName {
+impl<'de> de::Deserialize<'de> for ProfileName {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;
@@ -180,14 +173,13 @@ impl<'de> de::Deserialize<'de> for value::ProfileName {
 ```rust
 pub struct RepositoryKey(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
-impl<T> de::DeserializeOwned for value::RepositoryKey where T: for<'de> de::Deserialize<'de> {}
-impl value::RepositoryKey {
+impl RepositoryKey {
     pub fn as_str(&self) -> &str;
 }
-impl value::RepositoryKey {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
+impl RepositoryKey {
+    pub fn try_new(value: string::String) -> result::Result<Self, ValueError>;
 }
-impl<'de> de::Deserialize<'de> for value::RepositoryKey {
+impl<'de> de::Deserialize<'de> for RepositoryKey {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;
@@ -202,7 +194,6 @@ pub enum SandboxProfile {
     WorkspaceRestricted,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for value::SandboxProfile where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceCapability
@@ -212,7 +203,6 @@ pub enum WorkspaceCapability {
     WorktreePerSession,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for value::WorkspaceCapability where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## EffectClass
@@ -224,7 +214,6 @@ pub enum EffectClass {
     SideEffecting,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for value::EffectClass where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ManifestLifecycle
@@ -237,7 +226,6 @@ pub enum ManifestLifecycle {
     Releasing,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for value::ManifestLifecycle where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ExecutionErrorKind
@@ -251,7 +239,6 @@ pub enum ExecutionErrorKind {
     CrashLost,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for value::ExecutionErrorKind where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## SUCCESS_TEXT_BYTES
@@ -274,10 +261,9 @@ pub struct ResultBounds {
     pub failure_detail_bytes: u64,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for value::ResultBounds where T: for<'de> de::Deserialize<'de> {}
-impl value::ResultBounds {
+impl ResultBounds {
     pub const fn version_one() -> Self;
-    pub const fn validate(self) -> result::Result<(), value::ValueError>;
+    pub const fn validate(self) -> result::Result<(), ValueError>;
 }
 ```
 
@@ -289,19 +275,18 @@ pub enum TerminalResult {
         text: string::String,
     },
     KnownFailure {
-        error_kind: value::ExecutionErrorKind,
+        error_kind: ExecutionErrorKind,
         detail: option::Option<string::String>,
     },
     Ambiguous,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> de::DeserializeOwned for value::TerminalResult where T: for<'de> de::Deserialize<'de> {}
-impl<'de> de::Deserialize<'de> for value::TerminalResult {
+impl<'de> de::Deserialize<'de> for TerminalResult {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
     where
         D: de::Deserializer<'de>;
 }
-impl value::TerminalResult {
-    pub fn validate(&self) -> result::Result<(), value::ValueError>;
+impl TerminalResult {
+    pub fn validate(&self) -> result::Result<(), ValueError>;
 }
 ```

@@ -7,12 +7,6 @@
 ```rust
 pub struct ToolName(/* private */);
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, hash::Hash
-impl<T> dyn_clone::DynClone for ToolName
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ToolName {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -24,12 +18,6 @@ impl ToolName {
 ```rust
 pub struct ToolCallId(/* private */);
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq, hash::Hash
-impl<T> dyn_clone::DynClone for ToolCallId
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl ToolCallId {
     pub fn new(value: impl convert::Into<string::String>) -> Self;
     pub fn as_str(&self) -> &str;
@@ -45,12 +33,6 @@ pub struct ToolDefinition {
     pub input_schema: boxed::Box<raw::RawValue>,
 }
 // derives: fmt::Debug, clone::Clone
-impl<T> dyn_clone::DynClone for ToolDefinition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl cmp::PartialEq for ToolDefinition {
     fn eq(&self, other: &Self) -> bool;
 }
@@ -81,12 +63,6 @@ pub struct ToolCallProposal {
     pub arguments_json: string::String,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ToolCallProposal
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ToolDecodeFailure
@@ -97,12 +73,6 @@ pub enum ToolDecodeFailure {
     SchemaMismatch { detail: string::String },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
-impl<T> dyn_clone::DynClone for ToolDecodeFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for ToolDecodeFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

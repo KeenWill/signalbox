@@ -7,68 +7,12 @@
 ```rust
 pub struct ImportedConversationPageRequest {
     pub after: option::Option<signalbox_domain::ImportedConversationId>,
-    pub format: option::Option<format::ImportedConversationFormat>,
+    pub format: option::Option<signalbox_domain::ImportedConversationFormat>,
     pub source_session_id: option::Option<vec::Vec<u8>>,
     pub source_session_maximum_bytes: nonzero::NonZeroU32,
     pub limit: nonzero::NonZeroU32,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationPageRequest
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedConversationPageRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedConversationPageRequest {}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationPageRequest
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedConversationPageRequest
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationPageRequest {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationPageRequest {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedConversationPageRequest
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedConversationPageRequest
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedConversationPageRequest
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedTextProjection
@@ -79,60 +23,6 @@ pub struct ImportedTextProjection {
     pub complete: bool,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedTextProjection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedTextProjection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedTextProjection {}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedTextProjection {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedTextProjection
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedTextProjection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedTextProjection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedTextProjection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedTextProjection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedTextProjection
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedConversationSummary
@@ -140,69 +30,13 @@ where
 ```rust
 pub struct ImportedConversationSummary {
     pub conversation: signalbox_domain::ImportedConversationId,
-    pub display_title: option::Option<conversation::ImportedConversationDisplayTitle>,
-    pub format: format::ImportedConversationFormat,
+    pub display_title: option::Option<signalbox_domain::ImportedConversationDisplayTitle>,
+    pub format: signalbox_domain::ImportedConversationFormat,
     pub source_session_id: option::Option<conversation_import_discovery::ImportedTextProjection>,
     pub source_session_digest: option::Option<[u8; 32]>,
     pub entry_count: u64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationSummary
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedConversationSummary
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedConversationSummary {}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationSummary
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedConversationSummary
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationSummary {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationSummary {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedConversationSummary
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedConversationSummary
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedConversationSummary
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedConversationPage
@@ -213,60 +47,6 @@ pub struct ImportedConversationPage {
     pub next_after: option::Option<signalbox_domain::ImportedConversationId>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationPage
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedConversationPage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedConversationPage {}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedConversationPage {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedConversationPage
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationPage {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationPage {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedConversationPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedConversationPage
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedConversationPage
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedConversationSizeFacts
@@ -278,62 +58,6 @@ pub struct ImportedConversationSizeFacts {
     pub normalized_entry_bytes: u64,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationSizeFacts
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedConversationSizeFacts
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedConversationSizeFacts {}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationSizeFacts
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedConversationSizeFacts
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationSizeFacts {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationSizeFacts {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedConversationSizeFacts
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedConversationSizeFacts
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedConversationSizeFacts
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedContinuationReference
@@ -345,62 +69,6 @@ pub struct ImportedContinuationReference {
     pub position: u64,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedContinuationReference
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedContinuationReference
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedContinuationReference {}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedContinuationReference
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedContinuationReference
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedContinuationReference {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedContinuationReference {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedContinuationReference
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedContinuationReference
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedContinuationReference
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedConversationDescriptor
@@ -408,8 +76,8 @@ where
 ```rust
 pub struct ImportedConversationDescriptor {
     pub conversation: signalbox_domain::ImportedConversationId,
-    pub display_title: option::Option<conversation::ImportedConversationDisplayTitle>,
-    pub format: format::ImportedConversationFormat,
+    pub display_title: option::Option<signalbox_domain::ImportedConversationDisplayTitle>,
+    pub format: signalbox_domain::ImportedConversationFormat,
     pub source_digest: [u8; 32],
     pub source_session_id: option::Option<conversation_import_discovery::ImportedTextProjection>,
     pub raw_record_count: u64,
@@ -419,62 +87,6 @@ pub struct ImportedConversationDescriptor {
     pub latest: conversation_import_discovery::ImportedContinuationReference,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedConversationDescriptor
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedConversationDescriptor
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedConversationDescriptor {}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDescriptor
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedConversationDescriptor
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedConversationDescriptor {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationDescriptor {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedConversationDescriptor
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedConversationDescriptor
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedConversationDescriptor
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedEntryWindowAnchor
@@ -486,60 +98,6 @@ pub enum ImportedEntryWindowAnchor {
     Position(u64),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedEntryWindowAnchor
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedEntryWindowAnchor
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedEntryWindowAnchor {}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedEntryWindowAnchor {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedEntryWindowAnchor
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedEntryWindowAnchor {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedEntryWindowAnchor {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedEntryWindowAnchor
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedEntryWindowAnchor
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedEntryWindowAnchor
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedEntryProjection
@@ -549,64 +107,11 @@ pub struct ImportedEntryProjection {
     pub frontier: conversation_import_discovery::ImportedContinuationReference,
     pub raw_record_position: u64,
     pub record_entry_position: u64,
-    pub source_speaker: structured_value::ImportedSourceAttestation<content::ImportedSpeaker>,
+    pub source_speaker:
+        signalbox_domain::ImportedSourceAttestation<signalbox_domain::ImportedSpeaker>,
     pub content: conversation_import_discovery::ImportedEntryContentProjection,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedEntryProjection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedEntryProjection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedEntryProjection {}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedEntryProjection {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedEntryProjection
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedEntryProjection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedEntryProjection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedEntryProjection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedEntryProjection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedEntryProjection
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedEntryContentProjection
@@ -615,7 +120,7 @@ where
 pub enum ImportedEntryContentProjection {
     SourceEvent,
     Text(
-        structured_value::ImportedSourceAttestation<
+        signalbox_domain::ImportedSourceAttestation<
             conversation_import_discovery::ImportedTextProjection,
         >,
     ),
@@ -628,62 +133,6 @@ pub enum ImportedEntryContentProjection {
     SourceMessageBlock,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedEntryContentProjection
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedEntryContentProjection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedEntryContentProjection {}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedEntryContentProjection
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedEntryContentProjection
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedEntryContentProjection {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedEntryContentProjection {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedEntryContentProjection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedEntryContentProjection
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedEntryContentProjection
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedEntryWindow
@@ -698,60 +147,6 @@ pub struct ImportedEntryWindow {
     pub items: vec::Vec<conversation_import_discovery::ImportedEntryProjection>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for conversation_import_discovery::ImportedEntryWindow
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for conversation_import_discovery::ImportedEntryWindow
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for conversation_import_discovery::ImportedEntryWindow {}
-impl<T> parse_display::IntoResult<T> for conversation_import_discovery::ImportedEntryWindow {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedEntryWindow
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for conversation_import_discovery::ImportedEntryWindow {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedEntryWindow {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedEntryWindow
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedEntryWindow
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedEntryWindow
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ImportedConversationDiscoveryCorruption
@@ -768,71 +163,6 @@ pub enum ImportedConversationDiscoveryCorruption {
     InvalidEntryEncoding,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-{
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedConversationDiscoveryCorruption
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for conversation_import_discovery::ImportedConversationDiscoveryCorruption {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -849,72 +179,6 @@ pub enum ImportedConversationDiscoveryRequestError {
     WindowTooLarge,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-{
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedConversationDiscoveryRequestError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for conversation_import_discovery::ImportedConversationDiscoveryRequestError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -932,55 +196,6 @@ pub enum ImportedConversationDiscoveryError {
     Corruption(conversation_import_discovery::ImportedConversationDiscoveryCorruption),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither
-    for conversation_import_discovery::ImportedConversationDiscoveryError
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryError
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedConversationDiscoveryError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryError
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for conversation_import_discovery::ImportedConversationDiscoveryError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedConversationDiscoveryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedConversationDiscoveryError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedConversationDiscoveryError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for conversation_import_discovery::ImportedConversationDiscoveryError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -1011,71 +226,6 @@ impl convert::From<conversation_import_discovery::ImportedConversationDiscoveryR
 ```rust
 pub struct ImportedConversationDiscoveryRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-{
-}
-impl<T> parse_display::IntoResult<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-{
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for conversation_import_discovery::ImportedConversationDiscoveryRepository
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-{
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-{
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for conversation_import_discovery::ImportedConversationDiscoveryRepository
-where
-    T: ?marker::Sized,
-{
-}
 impl conversation_import_discovery::ImportedConversationDiscoveryRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn list(

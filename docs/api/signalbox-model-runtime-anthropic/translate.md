@@ -6,6 +6,6 @@
 
 ```rust
 pub fn validate_model_settings(
-    settings: &settings::ModelSettings,
-) -> result::Result<(), preparation::PreparationFailure>;
+    settings: &signalbox_model_runtime::ModelSettings,
+) -> result::Result<(), signalbox_model_runtime::PreparationFailure>;
 ```

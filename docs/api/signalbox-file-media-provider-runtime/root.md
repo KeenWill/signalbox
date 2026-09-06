@@ -5,7 +5,9 @@
 ## neutral_file_digest
 
 ```rust
-pub const fn neutral_file_digest(digest: blob::BlobDigest) -> value::FileDigest;
+pub const fn neutral_file_digest(
+    digest: signalbox_domain::BlobDigest,
+) -> signalbox_file_media_runtime::FileDigest;
 ```
 
 ## ResolvedFileUse
@@ -14,10 +16,10 @@ pub const fn neutral_file_digest(digest: blob::BlobDigest) -> value::FileDigest;
 pub struct ResolvedFileUse<Source> {/* private */}
 // derives: fmt::Debug
 impl<Source> ResolvedFileUse<Source> {
-    pub const fn new(file_use: value::FileUse, source: Source) -> Self;
-    pub const fn file_use(&self) -> &value::FileUse;
+    pub const fn new(file_use: signalbox_file_media_runtime::FileUse, source: Source) -> Self;
+    pub const fn file_use(&self) -> &signalbox_file_media_runtime::FileUse;
     pub const fn source(&self) -> &Source;
-    pub fn into_parts(self) -> (value::FileUse, Source);
+    pub fn into_parts(self) -> (signalbox_file_media_runtime::FileUse, Source);
 }
 ```
 
@@ -44,13 +46,7 @@ pub enum FileUseResolutionError {
     Internal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for FileUseResolutionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl convert::From<FileUseResolutionError> for detection::FileMediaFailure {
+impl convert::From<FileUseResolutionError> for signalbox_file_media_runtime::FileMediaFailure {
     fn from(value: FileUseResolutionError) -> Self;
 }
 ```
@@ -59,7 +55,7 @@ impl convert::From<FileUseResolutionError> for detection::FileMediaFailure {
 
 ```rust
 pub trait FileUseResolver: marker::Send {
-    type Source: detection::VerifiedBlobSource;
+    type Source: signalbox_file_media_runtime::VerifiedBlobSource;
     fn resolve(
         &mut self,
         request: signalbox_tools_file_media::FileInspectServiceRequest,
@@ -76,27 +72,33 @@ impl<Resolver, Processor, Cancellation>
     RegistryFileMediaAgentService<Resolver, Processor, Cancellation>
 {
     pub const fn new(
-        registry: registry::FileMediaRegistry,
+        registry: signalbox_file_media_runtime::FileMediaRegistry,
         resolver: Resolver,
         processor: Processor,
         cancellation: Cancellation,
     ) -> Self;
-    pub const fn registry(&self) -> &registry::FileMediaRegistry;
+    pub const fn registry(&self) -> &signalbox_file_media_runtime::FileMediaRegistry;
 }
 impl<Resolver, Processor, Cancellation> signalbox_tools_file_media::FileMediaAgentService
     for RegistryFileMediaAgentService<Resolver, Processor, Cancellation>
 where
     Resolver: FileUseResolver,
-    Processor: detection::FileMediaProcessor,
-    Cancellation: detection::CancellationSignal,
+    Processor: signalbox_file_media_runtime::FileMediaProcessor,
+    Cancellation: signalbox_file_media_runtime::CancellationSignal,
 {
     fn inspect(
         &mut self,
         request: signalbox_tools_file_media::FileInspectServiceRequest,
-    ) -> signalbox_tools_file_media::FileMediaAgentServiceFuture<'_, detection::FileInspection>;
+    ) -> signalbox_tools_file_media::FileMediaAgentServiceFuture<
+        '_,
+        signalbox_file_media_runtime::FileInspection,
+    >;
     fn read(
         &mut self,
         request: signalbox_tools_file_media::FileReadServiceRequest,
-    ) -> signalbox_tools_file_media::FileMediaAgentServiceFuture<'_, detection::FileReadResult>;
+    ) -> signalbox_tools_file_media::FileMediaAgentServiceFuture<
+        '_,
+        signalbox_file_media_runtime::FileReadResult,
+    >;
 }
 ```

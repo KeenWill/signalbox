@@ -726,17 +726,10 @@ pub use sqlx::types::time::OffsetDateTime;
 
 ```rust
 pub struct SessionCreated {
-    pub cause: session::SessionCreationCause,
-    pub ownership: session_lifecycle::SessionOwnership,
+    pub cause: signalbox_domain::SessionCreationCause,
+    pub ownership: signalbox_domain::SessionOwnership,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionCreated
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionCreated {}
 ```
 
 ## SessionStateKind
@@ -752,13 +745,6 @@ pub enum SessionStateKind {
     Parked,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionStateKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionStateKind {}
 ```
 
 ## SessionStateChanged
@@ -766,17 +752,10 @@ impl<T> into_either::IntoEither for SessionStateKind {}
 ```rust
 pub struct SessionStateChanged {
     pub prior: SessionStateKind,
-    pub state: session_lifecycle::SessionLifecycleState,
-    pub actor: session_lifecycle::LifecycleActor,
+    pub state: signalbox_domain::SessionLifecycleState,
+    pub actor: signalbox_domain::LifecycleActor,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionStateChanged
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionStateChanged {}
 ```
 
 ## SessionTerminal
@@ -784,18 +763,11 @@ impl<T> into_either::IntoEither for SessionStateChanged {}
 ```rust
 pub struct SessionTerminal {
     pub prior: SessionStateKind,
-    pub outcome: session_lifecycle::SessionTerminalOutcome,
-    pub standing: option::Option<session_lifecycle::SessionFailureCause>,
-    pub actor: session_lifecycle::LifecycleActor,
+    pub outcome: signalbox_domain::SessionTerminalOutcome,
+    pub standing: option::Option<signalbox_domain::SessionFailureCause>,
+    pub actor: signalbox_domain::LifecycleActor,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionTerminal
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionTerminal {}
 ```
 
 ## ReconciliationOperation
@@ -806,13 +778,6 @@ pub enum ReconciliationOperation {
     ToolAttempt(signalbox_domain::ToolAttemptId),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ReconciliationOperation
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for ReconciliationOperation {}
 ```
 
 ## TurnTerminalDisposition
@@ -821,35 +786,28 @@ impl<T> into_either::IntoEither for ReconciliationOperation {}
 pub enum TurnTerminalDisposition {
     Completed {
         call: signalbox_domain::ModelCallId,
-        completion_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        completion_entry: signalbox_domain::SemanticTranscriptEntryId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     Refused {
         call: signalbox_domain::ModelCallId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     Failed {
-        failure_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        failure_entry: signalbox_domain::SemanticTranscriptEntryId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     Cancelled {
-        cancellation_entry: context_frontier::SemanticTranscriptEntryId,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        cancellation_entry: signalbox_domain::SemanticTranscriptEntryId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     ReconciliationRequired {
         operation: ReconciliationOperation,
-        terminal_frontier: context_frontier::ContextFrontierId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
     },
     Retired,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for TurnTerminalDisposition
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for TurnTerminalDisposition {}
 ```
 
 ## GoalEventKind
@@ -865,13 +823,6 @@ pub enum GoalEventKind {
     SessionClosed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GoalEventKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for GoalEventKind {}
 ```
 
 ## GoalChange
@@ -883,13 +834,6 @@ pub struct GoalChange {
     pub kind: GoalEventKind,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GoalChange
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for GoalChange {}
 ```
 
 ## OwnershipChange
@@ -897,17 +841,10 @@ impl<T> into_either::IntoEither for GoalChange {}
 ```rust
 pub struct OwnershipChange {
     pub event_ordinal: u64,
-    pub transition: session_lifecycle::SessionOwnershipTransition,
-    pub actor: session_lifecycle::LifecycleActor,
+    pub transition: signalbox_domain::SessionOwnershipTransition,
+    pub actor: signalbox_domain::LifecycleActor,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for OwnershipChange
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for OwnershipChange {}
 ```
 
 ## CommandSettlement
@@ -918,13 +855,6 @@ pub enum CommandSettlement {
     Rejected { kind: string::String },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for CommandSettlement
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for CommandSettlement {}
 ```
 
 ## InjectionOutcome
@@ -940,13 +870,6 @@ pub enum InjectionOutcome {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for InjectionOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for InjectionOutcome {}
 ```
 
 ## LifecycleEventKind
@@ -972,13 +895,6 @@ pub enum LifecycleEventKind {
     SessionOwnershipChanged(OwnershipChange),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for LifecycleEventKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for LifecycleEventKind {}
 ```
 
 ## LifecycleEvent
@@ -986,18 +902,12 @@ impl<T> into_either::IntoEither for LifecycleEventKind {}
 ```rust
 pub struct LifecycleEvent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for LifecycleEvent
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for LifecycleEvent {}
 impl LifecycleEvent {
     pub const fn sequence(&self) -> u64;
     pub const fn recorded_at(&self) -> offset_date_time::OffsetDateTime;
     pub const fn session(&self) -> option::Option<signalbox_domain::SessionId>;
     pub const fn kind(&self) -> &LifecycleEventKind;
+    #[cfg(feature = "test-support")]
     pub const fn session_created_for_test(
         sequence: u64,
         recorded_at: offset_date_time::OffsetDateTime,
@@ -1012,22 +922,18 @@ impl LifecycleEvent {
 ```rust
 pub struct LifecycleEventSource {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for LifecycleEventSource
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for LifecycleEventSource {}
 impl LifecycleEventSource {
     pub const fn new(core_pool: sqlx_postgres::PgPool) -> Self;
     pub async fn next(
         &self,
-    ) -> result::Result<option::Option<LifecycleEvent>, outbox::OutboxDispatchError>;
+    ) -> result::Result<
+        option::Option<LifecycleEvent>,
+        signalbox_persistence::outbox::OutboxDispatchError,
+    >;
     pub async fn acknowledge(
         &self,
         event: &LifecycleEvent,
-    ) -> result::Result<(), outbox::OutboxDispatchError>;
+    ) -> result::Result<(), signalbox_persistence::outbox::OutboxDispatchError>;
 }
 ```
 
@@ -1035,19 +941,12 @@ impl LifecycleEventSource {
 
 ```rust
 pub enum SessionCommandPayload {
-    CreateSession(session::CreateSession),
-    SubmitInput(command::SubmitInput),
-    Goal(goal_command::GoalUserCommand),
-    Lifecycle(session_lifecycle_command::SessionLifecycleCommand),
+    CreateSession(signalbox_domain::CreateSession),
+    SubmitInput(signalbox_domain::SubmitInput),
+    Goal(signalbox_domain::GoalUserCommand),
+    Lifecycle(signalbox_domain::SessionLifecycleCommand),
 }
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for SessionCommandPayload
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionCommandPayload {}
 ```
 
 ## SessionCommand
@@ -1055,22 +954,18 @@ impl<T> into_either::IntoEither for SessionCommandPayload {}
 ```rust
 pub struct SessionCommand {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for SessionCommand
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionCommand {}
 impl SessionCommand {
     pub fn create_session(
-        command: session::CreateSession,
+        command: signalbox_domain::CreateSession,
     ) -> result::Result<Self, CommandOutsideSeam>;
-    pub fn submit_input(command: command::SubmitInput) -> result::Result<Self, CommandOutsideSeam>;
-    pub fn goal(command: goal_command::GoalUserCommand)
-        -> result::Result<Self, CommandOutsideSeam>;
+    pub fn submit_input(
+        command: signalbox_domain::SubmitInput,
+    ) -> result::Result<Self, CommandOutsideSeam>;
+    pub fn goal(
+        command: signalbox_domain::GoalUserCommand,
+    ) -> result::Result<Self, CommandOutsideSeam>;
     pub fn lifecycle(
-        command: session_lifecycle_command::SessionLifecycleCommand,
+        command: signalbox_domain::SessionLifecycleCommand,
     ) -> result::Result<Self, CommandOutsideSeam>;
     pub fn into_payload(self) -> SessionCommandPayload;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
@@ -1088,13 +983,6 @@ pub enum SessionCommandKind {
     Lifecycle,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionCommandKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionCommandKind {}
 ```
 
 ## CommandOutsideSeam
@@ -1102,13 +990,6 @@ impl<T> into_either::IntoEither for SessionCommandKind {}
 ```rust
 pub struct CommandOutsideSeam;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for CommandOutsideSeam
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for CommandOutsideSeam {}
 impl fmt::Display for CommandOutsideSeam {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
