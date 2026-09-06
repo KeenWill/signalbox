@@ -8792,8 +8792,8 @@ mod tests {
         Ok(())
     }
 
-    /// a directory replaced after enumeration cannot redirect
-    /// a queued candidate read through a symbolic link.
+    /// a directory replaced after enumeration cannot redirect a queued candidate read through a
+    /// symbolic link.
     #[tokio::test]
     async fn scan_refuses_directory_symlink_replacement() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -8818,9 +8818,8 @@ mod tests {
         Ok(())
     }
 
-    /// an unreadable `--system-prompt-file` names the prompt file, not
-    /// the unrelated conversation-import source, in both its typed variant and
-    /// its rendered diagnostic.
+    /// an unreadable `--system-prompt-file` names the prompt file, not the unrelated
+    /// conversation-import source, in both its typed variant and its rendered diagnostic.
     #[tokio::test]
     async fn missing_system_prompt_file_reports_a_prompt_file_failure() -> Result<(), Box<dyn Error>>
     {
@@ -8839,8 +8838,8 @@ mod tests {
         Ok(())
     }
 
-    /// a regular candidate replaced after enumeration by a
-    /// FIFO is rejected without waiting for a writer.
+    /// a regular candidate replaced after enumeration by a FIFO is rejected without waiting for a
+    /// writer.
     #[cfg(not(target_vendor = "apple"))]
     #[tokio::test]
     async fn scan_refuses_fifo_replacement_without_blocking() -> Result<(), Box<dyn Error>> {
@@ -9513,9 +9512,8 @@ mod tests {
         Ok(())
     }
 
-    /// the inspection read is the client's source of selectable
-    /// positions, so a gap in the emitted sequence is rejected before any row
-    /// can suggest a position the daemon did not emit.
+    /// the inspection read is the client's source of selectable positions, so a gap in the emitted
+    /// sequence is rejected before any row can suggest a position the daemon did not emit.
     #[tokio::test]
     async fn imported_rejects_noncontiguous_positions_before_writing_rows()
     -> Result<(), Box<dyn Error>> {
@@ -9584,10 +9582,9 @@ mod tests {
         Ok(())
     }
 
-    /// an imported conversation's normalized entry sequence is nonempty,
-    /// so an empty inventory contradicts the record the daemon claims to be
-    /// reading. The shared reader fails closed on it rather than printing a
-    /// conversation with no selectable position.
+    /// an imported conversation's normalized entry sequence is nonempty, so an empty inventory
+    /// contradicts the record the daemon claims to be reading. The shared reader fails closed on it
+    /// rather than printing a conversation with no selectable position.
     #[tokio::test]
     async fn imported_rejects_an_empty_entry_inventory() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
@@ -9647,9 +9644,9 @@ mod tests {
         Ok(())
     }
 
-    /// `latest` resolves against the imported conversation's own declared
-    /// entry count and reaches the wire as that concrete ordinal, so the
-    /// durable command an exact replay reconstructs is unchanged.
+    /// `latest` resolves against the imported conversation's own declared entry count and reaches
+    /// the wire as that concrete ordinal, so the durable command an exact replay reconstructs is
+    /// unchanged.
     #[tokio::test]
     async fn continue_resolves_latest_to_a_concrete_wire_position() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
@@ -10579,7 +10576,8 @@ mod tests {
         Ok(())
     }
 
-    /// the current client sends the configuration-free request and returns its typed accepted-input/source-turn receipt.
+    /// the current client sends the configuration-free request and returns its typed
+    /// accepted-input/source-turn receipt.
     #[tokio::test]
     async fn current_client_uses_the_exact_steering_exchange() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;

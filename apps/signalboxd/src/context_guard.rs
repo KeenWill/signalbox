@@ -1473,9 +1473,9 @@ mod tests {
         }
     }
 
-    /// the production guarded pass replaced the activated pass,
-    /// so an unprovable guarded activation commit must still raise the fatal
-    /// recovery signal — every turn depends on it, not only compacted ones.
+    /// the production guarded pass replaced the activated pass, so an unprovable guarded activation
+    /// commit must still raise the fatal recovery signal — every turn depends on it, not only
+    /// compacted ones.
     #[test]
     fn ambiguous_guarded_activation_commit_reports_post_activation_failure() {
         let (execution, signal) = supervised();
@@ -1485,9 +1485,9 @@ mod tests {
         assert!(signal.is_triggered());
     }
 
-    /// an automatic compaction whose durable preparation cannot
-    /// be proven committed reports the same outcome as an ambiguous activation
-    /// commit, rather than failing silently on the compaction path.
+    /// an automatic compaction whose durable preparation cannot be proven committed reports the
+    /// same outcome as an ambiguous activation commit, rather than failing silently on the
+    /// compaction path.
     #[test]
     fn ambiguous_compaction_preparation_reports_post_activation_failure() {
         let (execution, signal) = supervised();
@@ -1502,8 +1502,8 @@ mod tests {
         assert!(signal.is_triggered());
     }
 
-    /// a database failure before any commit boundary is ordinary
-    /// scheduler retry work and raises no recovery signal.
+    /// a database failure before any commit boundary is ordinary scheduler retry work and raises no
+    /// recovery signal.
     #[test]
     fn activation_failure_before_the_commit_boundary_reports_nothing() {
         let (execution, signal) = supervised();
@@ -1521,8 +1521,8 @@ mod tests {
         assert!(!signal.is_triggered());
     }
 
-    /// execution failures keep their own supervision rule, so
-    /// the guarded pass adds no second reaction to them.
+    /// execution failures keep their own supervision rule, so the guarded pass adds no second
+    /// reaction to them.
     #[test]
     fn execution_failure_keeps_its_own_supervision_rule() {
         let (execution, signal) = supervised();
