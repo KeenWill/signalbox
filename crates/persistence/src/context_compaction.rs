@@ -1525,14 +1525,14 @@ fn require_single(
 }
 
 #[derive(signalbox_derive::OperatorError)]
-/// Committed storage facts could not form one exact compaction lifecycle.
+/// Provider output or lifecycle facts could not form one exact compaction result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextCompactionCorruption {
     #[error("context compaction storage is inconsistent: required durable fact is missing")]
     /// Required durable fact was absent.
     Missing(&'static str),
-    #[error("context compaction storage is inconsistent: stored ordinal is outside the u64 range")]
-    /// Stored ordinal was outside the admitted u64 range.
+    #[error("context compaction ordinal cannot be represented as u64")]
+    /// A decoded or computed ordinal was outside the admitted u64 range.
     InvalidOrdinal(&'static str),
     #[error("context compaction storage is inconsistent: related lifecycle facts disagree")]
     /// Related lifecycle facts disagreed.
@@ -1543,7 +1543,7 @@ pub enum ContextCompactionCorruption {
     #[error("context compaction storage is inconsistent: unknown command kind discriminator")]
     /// Stored user-global command-kind discriminator is unknown.
     UnsupportedCommandKind(String),
-    #[error("context compaction storage is inconsistent: summary text is invalid")]
+    #[error("context compaction provider summary is invalid")]
     /// Summary text did not satisfy the semantic entry scalar.
     InvalidSummary,
 }
@@ -1562,8 +1562,8 @@ pub enum ContextCompactionRepositoryError {
     /// A daemon-minted call or result identity collided globally and may be
     /// reminted.
     IdentityCollision,
-    #[error("context compaction persistence failed: durable lifecycle is inconsistent")]
-    /// Durable rows contradicted the closed lifecycle.
+    #[error("context compaction persistence failed: {field_0}")]
+    /// Provider output or durable facts contradicted the closed lifecycle.
     Corruption(#[source] ContextCompactionCorruption),
 }
 
@@ -1613,7 +1613,7 @@ mod tests {
     use signalbox_domain::{SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId};
 
     #[test]
-    fn operator_error_messages_distinguish_compaction_storage_failures() {
+    fn operator_error_messages_distinguish_compaction_validation_failures() {
         use super::ContextCompactionCorruption;
 
         let errors = [
@@ -1628,11 +1628,11 @@ mod tests {
 
         expect_test::expect![[r#"
             context compaction storage is inconsistent: required durable fact is missing
-            context compaction storage is inconsistent: stored ordinal is outside the u64 range
+            context compaction ordinal cannot be represented as u64
             context compaction storage is inconsistent: related lifecycle facts disagree
             context compaction storage is inconsistent: unknown command result discriminator
             context compaction storage is inconsistent: unknown command kind discriminator
-            context compaction storage is inconsistent: summary text is invalid"#]]
+            context compaction provider summary is invalid"#]]
         .assert_eq(&messages);
     }
 
@@ -1654,7 +1654,7 @@ mod tests {
             context compaction persistence failed: database operation failed
             context compaction persistence failed: commit outcome is ambiguous
             context compaction persistence failed: generated identity collided
-            context compaction persistence failed: durable lifecycle is inconsistent"#]]
+            context compaction persistence failed: context compaction provider summary is invalid"#]]
         .assert_eq(&messages);
     }
 
