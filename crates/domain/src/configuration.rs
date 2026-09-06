@@ -1056,9 +1056,8 @@ mod tests {
     };
     use uuid::Uuid;
 
-    /// the domain retains exact prompt text independently of
-    /// deployment policy; empty and U+0000-bearing text is rejected with the
-    /// value retained unchanged.
+    /// the domain retains exact prompt text independently of deployment policy; empty and
+    /// U+0000-bearing text is rejected with the value retained unchanged.
     #[test]
     fn system_prompt_retains_large_exact_utf8_text() {
         let exact = "y".repeat(2 * 1024 * 1024) + "\u{221a}";
@@ -1080,9 +1079,8 @@ mod tests {
         assert_eq!(with_null.into_parts().0, "a\u{0}b");
     }
 
-    /// the complete defaults value carries the optional prompt
-    /// in structural equality, so an epoch differing only in its prompt is a
-    /// different replacement payload.
+    /// the complete defaults value carries the optional prompt in structural equality, so an epoch
+    /// differing only in its prompt is a different replacement payload.
     #[test]
     fn defaults_equality_covers_the_system_prompt() {
         let model = ModelSelectionRequest::Direct(direct(1));
@@ -1205,8 +1203,8 @@ mod tests {
         assert_ne!(definition, other_definition);
     }
 
-    /// alias retargeting resolves the caller overlay
-    /// against the new direct capability and retains its automatic adjustment.
+    /// alias retargeting resolves the caller overlay against the new direct capability and retains
+    /// its automatic adjustment.
     #[test]
     fn alias_retarget_freezes_adjusted_origin_settings() {
         let prior_selection = direct(1);
@@ -1832,8 +1830,8 @@ mod tests {
         );
     }
 
-    /// the catalog-free origin path cannot preserve
-    /// settings admitted for an alias's prior direct target after retargeting.
+    /// the catalog-free origin path cannot preserve settings admitted for an alias's prior direct
+    /// target after retargeting.
     #[test]
     fn legacy_freeze_rejects_alias_retarget_settings() {
         let prior_selection = direct(1);
@@ -1886,8 +1884,8 @@ mod tests {
         );
     }
 
-    /// legacy reconstitution rejects an alias whose
-    /// frozen target differs from the stored settings validation identity.
+    /// legacy reconstitution rejects an alias whose frozen target differs from the stored settings
+    /// validation identity.
     #[test]
     fn legacy_reconstitution_rejects_alias_retarget_settings() {
         let prior_selection = direct(1);

@@ -6700,8 +6700,7 @@ mod tests {
         );
     }
 
-    /// a running pass admits monotonic lag after its canonical
-    /// turn terminalizes.
+    /// a running pass admits monotonic lag after its canonical turn terminalizes.
     #[test]
     fn running_pass_admits_terminal_turn_projection_lag() {
         let lagging = ReviewPassState::Running { turn: turn_id(6) };
@@ -6734,8 +6733,8 @@ mod tests {
         );
     }
 
-    /// a queued pass starts only while its canonical turn is
-    /// active; terminal outcomes cannot lead an unprojected start.
+    /// a queued pass starts only while its canonical turn is active; terminal outcomes cannot lead
+    /// an unprojected start.
     #[test]
     fn queued_pass_start_requires_active_turn() {
         let mut run = ReviewRun::new(
@@ -6770,8 +6769,7 @@ mod tests {
         assert_eq!(error.failure(), ReviewPassTransitionFailure::TurnNotActive);
     }
 
-    /// run reconstitution accepts its exact canonical pass
-    /// outcome.
+    /// run reconstitution accepts its exact canonical pass outcome.
     #[test]
     fn run_reconstitution_accepts_exact_pass_outcome() {
         let state = ReviewRunState::Succeeded {
@@ -6801,8 +6799,7 @@ mod tests {
         );
     }
 
-    /// run reconstitution rejects a contradictory canonical
-    /// pass outcome.
+    /// run reconstitution rejects a contradictory canonical pass outcome.
     #[test]
     fn run_reconstitution_rejects_cross_wired_pass_outcome() {
         let state = ReviewRunState::Succeeded {
@@ -6829,8 +6826,7 @@ mod tests {
         assert_eq!(mismatch.input(), &mismatched);
     }
 
-    /// canonical pass evidence must carry the run's frozen
-    /// policy.
+    /// canonical pass evidence must carry the run's frozen policy.
     #[test]
     fn run_reconstitution_rejects_foreign_pass_policy() {
         let state = ReviewRunState::Succeeded {
@@ -6896,8 +6892,7 @@ mod tests {
         );
     }
 
-    /// a run that names a pass requires independently loaded
-    /// canonical pass evidence.
+    /// a run that names a pass requires independently loaded canonical pass evidence.
     #[test]
     fn run_reconstitution_requires_pass_evidence() {
         let state = ReviewRunState::Succeeded {
@@ -7248,8 +7243,7 @@ mod tests {
         );
     }
 
-    /// a failed pass may project completed execution whose
-    /// workflow result was invalid.
+    /// a failed pass may project completed execution whose workflow result was invalid.
     #[test]
     fn failed_pass_accepts_completed_turn_outcome() {
         assert_pass_outcome_reconstitutes(
@@ -7304,8 +7298,8 @@ mod tests {
         );
     }
 
-    /// authenticated successful pass evidence may project one
-    /// exact effect result without changing its execution facts.
+    /// authenticated successful pass evidence may project one exact effect result without changing
+    /// its execution facts.
     #[test]
     fn succeeded_pass_evidence_projects_one_exact_effect_result() {
         let pass = succeeded_pass(70, ReviewPassKind::ImportExternalContext);
@@ -7340,8 +7334,8 @@ mod tests {
         );
     }
 
-    /// an authenticated effect projection admits exact replay
-    /// but cannot be rebound to a distinct result.
+    /// an authenticated effect projection admits exact replay but cannot be rebound to a distinct
+    /// result.
     #[test]
     fn pass_evidence_result_projection_is_immutable() {
         let pass = succeeded_pass(71, ReviewPassKind::ImportExternalContext);
@@ -7364,8 +7358,8 @@ mod tests {
         assert_eq!(projected.project_result(distinct), None);
     }
 
-    /// authenticated blocked pass evidence may project one exact
-    /// effect result without changing its execution facts.
+    /// authenticated blocked pass evidence may project one exact effect result without changing its
+    /// execution facts.
     #[test]
     fn blocked_pass_evidence_projects_one_exact_effect_result() {
         let pass = ReviewPassEvidence::new(
@@ -7441,8 +7435,7 @@ mod tests {
         assert_eq!(cancelled.project_result(result), None);
     }
 
-    /// a terminal canonical turn outcome always carries its
-    /// checked terminal frontier.
+    /// a terminal canonical turn outcome always carries its checked terminal frontier.
     #[test]
     fn pass_evidence_rejects_terminal_outcome_without_frontier() {
         assert_pass_reconstitution_rejects(
@@ -7471,8 +7464,7 @@ mod tests {
         );
     }
 
-    /// an active canonical turn outcome never carries a
-    /// terminal frontier.
+    /// an active canonical turn outcome never carries a terminal frontier.
     #[test]
     fn pass_evidence_rejects_active_outcome_with_frontier() {
         assert_pass_reconstitution_rejects(
@@ -7675,8 +7667,7 @@ mod tests {
         );
     }
 
-    /// an event cannot be replayed into another same-run
-    /// finding.
+    /// an event cannot be replayed into another same-run finding.
     #[test]
     fn finding_history_rejects_foreign_event_owner() {
         let event = finding_event(

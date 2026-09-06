@@ -1040,8 +1040,8 @@ mod tests {
         );
     }
 
-    /// long-frontier derivation shares the exact source prefix,
-    /// appends only the stated suffix, and leaves the source unchanged.
+    /// long-frontier derivation shares the exact source prefix, appends only the stated suffix, and
+    /// leaves the source unchanged.
     #[test]
     fn long_frontier_derivation_preserves_source_prefix() {
         let source_entries = distinct_entries(512);
@@ -1061,8 +1061,8 @@ mod tests {
         assert_eq!(derived.entry_count(), 514);
     }
 
-    /// hundreds of one-entry derivations retain one exact
-    /// ordered frontier without rebuilding or mutating any semantic prefix.
+    /// hundreds of one-entry derivations retain one exact ordered frontier without rebuilding or
+    /// mutating any semantic prefix.
     #[test]
     fn long_frontier_chain_preserves_every_append() {
         let root = snapshot(session_id(1), 1, vec![entry(1)]);
@@ -1126,8 +1126,8 @@ mod tests {
         );
     }
 
-    /// later candidate derivation retains the complete earlier
-    /// prefix in order and only appends exact new semantic entries.
+    /// later candidate derivation retains the complete earlier prefix in order and only appends
+    /// exact new semantic entries.
     #[test]
     fn derivation_is_prefix_preserving_and_append_only() {
         let owner = session_id(1);
@@ -1215,9 +1215,8 @@ mod tests {
         );
     }
 
-    /// a new consuming session owns its own frontier while
-    /// preserving inherited source-session and semantic-entry identities
-    /// before appending its own origin entry.
+    /// a new consuming session owns its own frontier while preserving inherited source-session and
+    /// semantic-entry identities before appending its own origin entry.
     #[test]
     fn inherited_entry_references_are_preserved_without_reminting() {
         let source_session = session_id(1);

@@ -851,8 +851,8 @@ mod tests {
         }
     }
 
-    /// comparison excludes command identity and includes the
-    /// stable target, expected version, and caller-owned replacement fields.
+    /// comparison excludes command identity and includes the stable target, expected version, and
+    /// caller-owned replacement fields.
     #[test]
     fn comparison_payload_is_structural() {
         let target = session_id(1);
@@ -872,8 +872,8 @@ mod tests {
         assert_ne!(baseline, different_replacement);
     }
 
-    /// server-derived adjustment evidence travels
-    /// with a new command but does not alter caller-payload replay equality.
+    /// server-derived adjustment evidence travels with a new command but does not alter
+    /// caller-payload replay equality.
     #[test]
     fn adjustment_evidence_is_not_caller_payload() {
         let target = session_id(1);
@@ -901,8 +901,8 @@ mod tests {
         assert_eq!(with_adjustment.model_settings_adjustments(), [adjustment]);
     }
 
-    /// replay equality follows the stable caller
-    /// overlay instead of a server-normalized installed settings snapshot.
+    /// replay equality follows the stable caller overlay instead of a server-normalized installed
+    /// settings snapshot.
     #[test]
     fn server_normalized_settings_are_not_caller_payload() {
         let target = session_id(1);
@@ -979,8 +979,8 @@ mod tests {
         assert_eq!(recorded, replay);
     }
 
-    /// matching current state installs one complete immutable
-    /// successor without changing the source session snapshot.
+    /// matching current state installs one complete immutable successor without changing the source
+    /// session snapshot.
     #[test]
     fn matching_version_prepares_complete_successor() {
         let target = session_id(1);
@@ -1003,8 +1003,7 @@ mod tests {
         );
     }
 
-    /// stale current state is a typed terminal
-    /// rejection retaining both compared versions.
+    /// stale current state is a typed terminal rejection retaining both compared versions.
     #[test]
     fn stale_version_prepares_authoritative_rejection() {
         let target = session_id(1);
@@ -1023,8 +1022,8 @@ mod tests {
         assert_eq!(mismatch.current(), version(2));
     }
 
-    /// absence and ordinal exhaustion are distinct
-    /// authoritative results, while a cross-wired session is not.
+    /// absence and ordinal exhaustion are distinct authoritative results, while a cross-wired
+    /// session is not.
     #[test]
     fn missing_exhausted_and_cross_wired_are_distinct() {
         let target = session_id(1);
@@ -1057,8 +1056,7 @@ mod tests {
         assert_eq!(error.provided_session(), session_id(2));
     }
 
-    /// complete applied effect facts
-    /// reconstruct exactly one correlated typed result.
+    /// complete applied effect facts reconstruct exactly one correlated typed result.
     #[test]
     fn applied_reconstitution_checks_complete_effects() {
         let target = session_id(1);
@@ -1076,9 +1074,8 @@ mod tests {
         assert_eq!(applied.installed().defaults(), command.replacement());
     }
 
-    /// equal replay of an earlier applied command
-    /// remains valid after a later command advances the mutable current
-    /// pointer.
+    /// equal replay of an earlier applied command remains valid after a later command advances the
+    /// mutable current pointer.
     #[test]
     fn historical_applied_receipt_ignores_later_current_pointer() {
         let target = session_id(1);
@@ -1101,8 +1098,8 @@ mod tests {
         assert_eq!(applied.installed().version(), version(2));
     }
 
-    /// a cross-wired owner, non-successor, or
-    /// mismatched replacement fails closed instead of constructing authority.
+    /// a cross-wired owner, non-successor, or mismatched replacement fails closed instead of
+    /// constructing authority.
     #[test]
     fn applied_reconstitution_fails_closed() {
         let target = session_id(1);
@@ -1171,9 +1168,8 @@ mod tests {
             ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch
         );
 
-        // a stored install diverging from the command's
-        // replacement only in its optional system prompt is the same
-        // fail-closed defaults mismatch.
+        // a stored install diverging from the command's replacement only in its optional system
+        // prompt is the same fail-closed defaults mismatch.
         let prompt_diverged = AppliedFacts {
             defaults: SessionConfigurationDefaults::complete(
                 command.replacement().model(),
@@ -1242,8 +1238,8 @@ mod tests {
         ]));
     }
 
-    /// each rejected record validates its command
-    /// correlation and semantic predicate before reconstruction.
+    /// each rejected record validates its command correlation and semantic predicate before
+    /// reconstruction.
     #[test]
     fn rejected_reconstitution_is_checked() {
         let target = session_id(1);

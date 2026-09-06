@@ -1,4 +1,5 @@
-//! Submit-input stored facts and checked reconstruction for `docs/spec/turn-lifecycle-and-scheduling.md`.
+//! Submit-input stored facts and checked reconstruction for
+//! `docs/spec/turn-lifecycle-and-scheduling.md`.
 
 use super::SubmitInput;
 use super::SubmitInputAppliedResult;

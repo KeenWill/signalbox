@@ -376,9 +376,8 @@ mod tests {
         }
     }
 
-    /// one open logical dependency and one
-    /// unclassified issued operation are exact blockers, while independently
-    /// derived `U` still retains the known blocking ambiguity.
+    /// one open logical dependency and one unclassified issued operation are exact blockers, while
+    /// independently derived `U` still retains the known blocking ambiguity.
     #[test]
     fn unfinished_owned_work_derives_exact_blockers() {
         let owned_call = model_call_id(1);
@@ -423,9 +422,8 @@ mod tests {
         assert!(remainder.contains(ambiguous));
     }
 
-    /// when every owned fact is classified
-    /// and no blocking ambiguity remains, closure is a candidate for direct
-    /// failure; resolved and accepted-risk physical ambiguities are excluded
+    /// when every owned fact is classified and no blocking ambiguity remains, closure is a
+    /// candidate for direct failure; resolved and accepted-risk physical ambiguities are excluded
     /// without being rewritten.
     #[test]
     fn closed_without_blocking_ambiguity_is_exact() {
@@ -471,8 +469,7 @@ mod tests {
         assert!(facts.blocking_ambiguities().is_none());
     }
 
-    /// the primary scenario's
-    /// closed `{Y}` remainder is derived exactly and canonically.
+    /// the primary scenario's closed `{Y}` remainder is derived exactly and canonically.
     #[test]
     fn closed_remainder_is_exact() {
         let owned_call = model_call_id(1);
@@ -505,9 +502,8 @@ mod tests {
         assert!(remainder.contains(y));
     }
 
-    /// prior failures, the new trusted failure,
-    /// and the exact applied interrupt are retained by canonical idempotent
-    /// union.
+    /// prior failures, the new trusted failure, and the exact applied interrupt are retained by
+    /// canonical idempotent union.
     #[test]
     fn fatal_mismatch_unions_failure_causes_and_preserves_interrupt() {
         let owned_call = model_call_id(1);
@@ -591,9 +587,8 @@ mod tests {
         assert_eq!(replayed.causes().interrupt(), facts.causes().interrupt());
     }
 
-    /// resolving mismatch evidence changes
-    /// only the ambiguous call's turn treatment, so another blocking operation
-    /// remains exact while the physical call stays ambiguous.
+    /// resolving mismatch evidence changes only the ambiguous call's turn treatment, so another
+    /// blocking operation remains exact while the physical call stays ambiguous.
     #[test]
     fn terminal_resolution_removes_only_resolved_call() {
         let resolved_call = model_call_id(1);
@@ -629,9 +624,8 @@ mod tests {
         );
     }
 
-    /// all three trusted
-    /// effects accept exactly their compatible physical predecessor states.
-    /// Every other effect/state pair rejects with both inputs unchanged.
+    /// all three trusted effects accept exactly their compatible physical predecessor states. Every
+    /// other effect/state pair rejects with both inputs unchanged.
     #[test]
     fn mismatch_effect_requires_matching_operation_closure_and_attempt_state() {
         let call = model_call_id(1);
