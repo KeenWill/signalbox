@@ -1,7 +1,5 @@
 //! PostgreSQL loading for the current long-lived [`Session`] aggregate.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::SessionReader;
@@ -27,11 +25,14 @@ use crate::mapping::{
 
 const NO_ANCESTRY: &str = "none";
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable shape that cannot reconstruct one complete current session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionCorruption {
+    #[error("missing durable Session {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported Session {field}: {value}")]
     /// A closed discriminator has no admitted storage mapping.
     Unsupported {
         /// The record field that could not be decoded.
@@ -39,8 +40,10 @@ pub enum SessionCorruption {
         /// The durable spelling that was observed.
         value: String,
     },
+    #[error("inconsistent Session {field_0}")]
     /// A discriminator and its variant-specific fields disagree.
     Inconsistent(&'static str),
+    #[error("invalid Session {field}: {reason}")]
     /// A stored defaults version cannot construct the positive domain ordinal.
     InvalidOrdinal {
         /// The ordinal-bearing record field.
@@ -48,63 +51,24 @@ pub enum SessionCorruption {
         /// Why the numeric value is outside the domain.
         reason: PositiveOrdinalMappingError,
     },
+    #[error("Session domain reconstitution failed: {field_0:?}")]
     /// Complete checked values fail domain-owned aggregate correlation.
     Domain(SessionReconstitutionFailure),
+    #[error(transparent)]
     /// Imported ancestry or its immutable seed projection is corrupt.
     Imported(ImportedSessionCorruption),
 }
 
-impl fmt::Display for SessionCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing durable Session {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported Session {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent Session {relationship}")
-            }
-            Self::InvalidOrdinal { field, reason } => {
-                write!(formatter, "invalid Session {field}: {reason}")
-            }
-            Self::Domain(failure) => {
-                write!(
-                    formatter,
-                    "Session domain reconstitution failed: {failure:?}"
-                )
-            }
-            Self::Imported(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for SessionCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure or fail-closed current-session shape failure.
 #[derive(Debug)]
 pub enum SessionRepositoryError {
+    #[error("Session database failure: {field_0}")]
     /// PostgreSQL could not complete the load.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Durable records cannot reconstruct the requested session.
-    Corruption(SessionCorruption),
-}
-
-impl fmt::Display for SessionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "Session database failure: {error}"),
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for SessionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] SessionCorruption),
 }
 
 impl From<sqlx::Error> for SessionRepositoryError {

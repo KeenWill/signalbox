@@ -1,7 +1,5 @@
 //! Durable hub-generation fencing and fenced PostgreSQL pool construction.
 
-use std::{error::Error, fmt};
-
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use sqlx::{
     Connection, PgConnection, PgPool,
@@ -234,64 +232,41 @@ fn advisory_key(generation: u64) -> i64 {
     i64::from_ne_bytes(namespaced.to_ne_bytes())
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A committed fence row that cannot form the required generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HubFenceCorruption {
+    #[error("hub fence state is missing")]
     /// The singleton fence row was absent.
     MissingState,
+    #[error("hub fence generation is invalid")]
     /// The stored generation was not a positive unsigned 64-bit integer.
     InvalidGeneration,
+    #[error("hub fence generation is exhausted")]
     /// Advancing the unsigned generation would wrap.
     GenerationExhausted,
+    #[error("hub fence state changed unexpectedly")]
     /// The locked singleton did not advance from the observed generation.
     StateChanged,
+    #[error("hub pool generation is no longer current")]
     /// A pool session acquired a lock for a generation other than the durable
     /// current generation.
     GenerationMismatch,
+    #[error("hub fence could not retain the prior generation")]
     /// The prior-generation lock could not be retained for the hub lifetime.
     FenceRetentionFailed,
 }
 
-impl fmt::Display for HubFenceCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::MissingState => "hub fence state is missing",
-            Self::InvalidGeneration => "hub fence generation is invalid",
-            Self::GenerationExhausted => "hub fence generation is exhausted",
-            Self::StateChanged => "hub fence state changed unexpectedly",
-            Self::GenerationMismatch => "hub pool generation is no longer current",
-            Self::FenceRetentionFailed => "hub fence could not retain the prior generation",
-        })
-    }
-}
-
-impl Error for HubFenceCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL failure or fail-closed hub-fence corruption.
 #[derive(Debug)]
 pub enum HubFenceError {
+    #[error("hub fence database operation failed")]
     /// PostgreSQL could not establish or advance fencing.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("hub fence corruption: {field_0}")]
     /// Committed fence state could not form the required generation.
-    Corruption(HubFenceCorruption),
-}
-
-impl fmt::Display for HubFenceError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(_) => formatter.write_str("hub fence database operation failed"),
-            Self::Corruption(error) => write!(formatter, "hub fence corruption: {error}"),
-        }
-    }
-}
-
-impl Error for HubFenceError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] HubFenceCorruption),
 }
 
 impl From<sqlx::Error> for HubFenceError {

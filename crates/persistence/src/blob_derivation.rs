@@ -1,7 +1,5 @@
 //! PostgreSQL adapter for immutable blob derivation provenance.
 
-use std::{error::Error, fmt};
-
 use signalbox_application::{BlobDerivationRecordOutcome, BlobDerivationStore};
 use signalbox_domain::{
     BlobDerivation, BlobDerivationId, BlobDerivationProducer, BlobDigest, BlobTransformation,
@@ -21,63 +19,38 @@ const LOAD_ROOT_BY_KEY: &str = r#"SELECT derivation_id, deterministic_key,
       FROM blob_derivation
      WHERE deterministic_key = $1"#;
 
+#[derive(signalbox_derive::OperatorError)]
 /// Durable derivation facts disagreed with the domain algebra.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlobDerivationCorruption {
+    #[error("stored blob derivation identity is invalid")]
     InvalidIdentity,
+    #[error("stored blob derivation digest is invalid")]
     InvalidDigest,
+    #[error("stored blob transformation is invalid")]
     InvalidTransformation,
+    #[error("stored blob derivation producer is invalid")]
     InvalidProducer,
+    #[error("stored blob derivation cardinality is invalid")]
     InvalidCardinality,
+    #[error("stored blob derivation ordinal is invalid")]
     InvalidOrdinal,
+    #[error("stored blob derivation cache key is invalid")]
     DeterministicKeyMismatch,
+    #[error("blob derivation identity already exists")]
     IdentityCollision,
 }
 
-impl fmt::Display for BlobDerivationCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidIdentity => "stored blob derivation identity is invalid",
-            Self::InvalidDigest => "stored blob derivation digest is invalid",
-            Self::InvalidTransformation => "stored blob transformation is invalid",
-            Self::InvalidProducer => "stored blob derivation producer is invalid",
-            Self::InvalidCardinality => "stored blob derivation cardinality is invalid",
-            Self::InvalidOrdinal => "stored blob derivation ordinal is invalid",
-            Self::DeterministicKeyMismatch => "stored blob derivation cache key is invalid",
-            Self::IdentityCollision => "blob derivation identity already exists",
-        })
-    }
-}
-
-impl Error for BlobDerivationCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL unavailability, commit ambiguity, or durable corruption.
 #[derive(Debug)]
 pub enum BlobDerivationRepositoryError {
-    Database(sqlx::Error),
-    CommitAmbiguous(sqlx::Error),
-    Corruption(BlobDerivationCorruption),
-}
-
-impl fmt::Display for BlobDerivationRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "blob derivation database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(formatter, "blob derivation commit is ambiguous: {error}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for BlobDerivationRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    #[error("blob derivation database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("blob derivation commit is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error(transparent)]
+    Corruption(#[source] BlobDerivationCorruption),
 }
 
 impl From<sqlx::Error> for BlobDerivationRepositoryError {

@@ -3,7 +3,7 @@
 //! The event stream is authoritative. Loads decode every durable event and
 //! replay it through the domain aggregate; no mutable current-state row exists.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::num::NonZeroU64;
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -127,11 +127,14 @@ impl PendingGoalExecutionFailure {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A durable goal shape that cannot reconstruct domain values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GoalCorruption {
+    #[error("missing goal {field_0}")]
     /// One required row or field is absent.
     Missing(&'static str),
+    #[error("unsupported goal {field}: {value}")]
     /// A closed discriminator is unsupported.
     Unsupported {
         /// The unsupported field.
@@ -139,103 +142,48 @@ pub enum GoalCorruption {
         /// The exact stored spelling.
         value: String,
     },
+    #[error("inconsistent goal {field_0}")]
     /// Stored variant fields or relationships disagree.
     Inconsistent(&'static str),
+    #[error("invalid goal column representation: {field_0}")]
     /// A PostgreSQL column could not decode into its declared Rust representation.
     Column(&'static str),
+    #[error("invalid goal ordinal: {field_0}")]
     /// A positive stored ordinal cannot map to the domain.
-    InvalidOrdinal(PositiveOrdinalMappingError),
+    InvalidOrdinal(#[source] PositiveOrdinalMappingError),
+    #[error("invalid goal text: {field_0}")]
     /// Stored bounded text cannot map to the domain.
-    InvalidText(GoalTextError),
+    InvalidText(#[source] GoalTextError),
+    #[error("invalid goal command identity: {field_0}")]
     /// Stored user-command provenance uses a sentinel identity.
-    InvalidCommandId(DurableCommandIdMappingError),
+    InvalidCommandId(#[source] DurableCommandIdMappingError),
+    #[error("goal reconstitution failed: {field_0:?}")]
     /// The complete history failed domain-owned replay.
     Domain(GoalReconstitutionFailure),
+    #[error("goal turn Session is invalid: {field_0}")]
     /// The session configuration needed to accept a goal turn is corrupt.
-    Session(SessionCorruption),
-}
-impl fmt::Display for GoalCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(field) => write!(formatter, "missing goal {field}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported goal {field}: {value}")
-            }
-            Self::Inconsistent(relationship) => {
-                write!(formatter, "inconsistent goal {relationship}")
-            }
-            Self::Column(reason) => {
-                write!(formatter, "invalid goal column representation: {reason}")
-            }
-            Self::InvalidOrdinal(reason) => write!(formatter, "invalid goal ordinal: {reason}"),
-            Self::InvalidText(reason) => write!(formatter, "invalid goal text: {reason}"),
-            Self::InvalidCommandId(reason) => {
-                write!(formatter, "invalid goal command identity: {reason}")
-            }
-            Self::Domain(reason) => write!(formatter, "goal reconstitution failed: {reason:?}"),
-            Self::Session(reason) => write!(formatter, "goal turn Session is invalid: {reason}"),
-        }
-    }
+    Session(#[source] SessionCorruption),
 }
 
-impl Error for GoalCorruption {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidOrdinal(error) => Some(error),
-            Self::InvalidText(error) => Some(error),
-            Self::InvalidCommandId(error) => Some(error),
-            Self::Session(error) => Some(error),
-            Self::Missing(_)
-            | Self::Unsupported { .. }
-            | Self::Inconsistent(_)
-            | Self::Column(_)
-            | Self::Domain(_) => None,
-        }
-    }
-}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database failure, ambiguous commit, wrong load purpose, or corruption.
 #[derive(Debug)]
 pub enum GoalRepositoryError {
+    #[error("goal database failure: {field_0}")]
     /// PostgreSQL could not complete the operation.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("goal commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL did not reveal whether the final commit took effect.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("durable command {command_id:?} does not name a goal command")]
     /// A purpose-specific load named another admitted command kind.
     DifferentCommandKind {
         /// The user-global identity naming another command kind.
         command_id: DurableCommandId,
     },
+    #[error(transparent)]
     /// Durable rows cannot reconstruct the requested value.
-    Corruption(GoalCorruption),
-}
-
-impl fmt::Display for GoalRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "goal database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(formatter, "goal commit outcome is ambiguous: {error}")
-            }
-            Self::DifferentCommandKind { command_id } => {
-                write!(
-                    formatter,
-                    "durable command {command_id:?} does not name a goal command"
-                )
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for GoalRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::DifferentCommandKind { .. } => None,
-            Self::Corruption(error) => Some(error),
-        }
-    }
+    Corruption(#[source] GoalCorruption),
 }
 
 impl From<sqlx::Error> for GoalRepositoryError {
@@ -2576,6 +2524,8 @@ mod tests {
 
 #[cfg(test)]
 mod diagnostic_tests {
+    use std::error::Error;
+
     use super::*;
 
     #[test]

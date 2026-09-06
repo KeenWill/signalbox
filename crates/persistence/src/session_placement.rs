@@ -1,6 +1,6 @@
 //! Append-only session-placement history and explicit update replay.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 use signalbox_application::{UpdateSessionPlacementOutcome, UpdateSessionPlacementTransaction};
@@ -34,42 +34,19 @@ pub enum SessionPlacementRepositoryOutcome {
     ConflictingReuse { command_id: DurableCommandId },
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Database or fail-closed placement-history failure.
 #[derive(Debug)]
 pub enum SessionPlacementRepositoryError {
+    #[error("session placement command identity is reserved")]
     /// The user-global durable command identity is a reserved sentinel.
     InvalidCommandId,
-    Database(sqlx::Error),
-    CommitAmbiguous(sqlx::Error),
+    #[error("session placement database failure: {field_0}")]
+    Database(#[source] sqlx::Error),
+    #[error("session placement commit is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("session placement storage is corrupt: {field_0}")]
     Corruption(&'static str),
-}
-
-impl fmt::Display for SessionPlacementRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidCommandId => {
-                formatter.write_str("session placement command identity is reserved")
-            }
-            Self::Database(error) => {
-                write!(formatter, "session placement database failure: {error}")
-            }
-            Self::CommitAmbiguous(error) => {
-                write!(formatter, "session placement commit is ambiguous: {error}")
-            }
-            Self::Corruption(reason) => {
-                write!(formatter, "session placement storage is corrupt: {reason}")
-            }
-        }
-    }
-}
-
-impl Error for SessionPlacementRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::InvalidCommandId | Self::Corruption(_) => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for SessionPlacementRepositoryError {

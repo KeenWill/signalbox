@@ -7,8 +7,6 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    error::Error,
-    fmt,
     num::NonZeroU64,
     sync::Arc,
 };
@@ -7684,9 +7682,11 @@ const fn session_id(value: Uuid) -> SessionId {
     SessionId::from_uuid(value)
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Why a pristine enrollment or registration resume fails before mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerEnrollmentRequestFailure {
+    #[error("runner enrollment request {} conflicts with active enrollment {}", request.as_uuid(), active_enrollment.as_uuid())]
     /// Another active version-one enrollment already occupies the singleton slot.
     ActiveEnrollmentExists {
         /// The rejected stable request identity.
@@ -7694,21 +7694,25 @@ pub enum RunnerEnrollmentRequestFailure {
         /// The enrollment currently occupying the active slot.
         active_enrollment: RunnerEnrollmentId,
     },
+    #[error("runner enrollment request {} replayed with different availability", request.as_uuid())]
     /// A replay changed the availability payload bound to its request identity.
     ReplayAdvertisementMismatch {
         /// The replayed stable request identity.
         request: RunnerEnrollmentRequestId,
     },
+    #[error("runner enrollment request {} replayed with different allowed classes", request.as_uuid())]
     /// A replay changed daemon-owned allowed classes bound to the enrollment.
     ReplayPolicyMismatch {
         /// The replayed stable request identity.
         request: RunnerEnrollmentRequestId,
     },
+    #[error("runner resume names unknown enrollment request {}", request.as_uuid())]
     /// Resume named no durable enrollment request.
     UnknownRequest {
         /// The unknown request identity.
         request: RunnerEnrollmentRequestId,
     },
+    #[error("runner resume {} identity mismatch: expected enrollment {}, runner {}, authentication {}; observed enrollment {}, runner {}, authentication {}", request.as_uuid(), expected.enrollment().as_uuid(), expected.runner().as_uuid(), expected.authentication().as_uuid(), observed.enrollment().as_uuid(), observed.runner().as_uuid(), observed.authentication().as_uuid())]
     /// Resume supplied identities other than those durably issued for the request.
     ResumeIdentityMismatch {
         /// The stable enrollment request identity.
@@ -7718,6 +7722,7 @@ pub enum RunnerEnrollmentRequestFailure {
         /// The identities supplied by the reconnecting runner.
         observed: IssuedRunnerEnrollmentIdentities,
     },
+    #[error("runner resume {} names revoked enrollment {}", request.as_uuid(), enrollment.as_uuid())]
     /// Resume attempted to use terminally revoked enrollment authority.
     EnrollmentRevoked {
         /// The stable enrollment request identity.
@@ -7725,6 +7730,7 @@ pub enum RunnerEnrollmentRequestFailure {
         /// The terminally revoked enrollment.
         enrollment: RunnerEnrollmentId,
     },
+    #[error("runner resume {} revision mismatch: expected {}, observed {}", request.as_uuid(), expected.get(), observed.get())]
     /// Resume supplied a registration revision other than the durable current head.
     ResumeRevisionMismatch {
         /// The stable enrollment request identity.
@@ -7734,6 +7740,7 @@ pub enum RunnerEnrollmentRequestFailure {
         /// The revision supplied by the reconnecting runner.
         observed: RunnerRegistrationRevision,
     },
+    #[error("runner resume {} at stale revision {} diverges from current registration revision {}", request.as_uuid(), prior.get(), current.get())]
     /// A stale resume also diverged from the durable current advertisement.
     StaleResumeAdvertisement {
         /// The stable enrollment request identity.
@@ -7745,209 +7752,73 @@ pub enum RunnerEnrollmentRequestFailure {
     },
 }
 
-impl fmt::Display for RunnerEnrollmentRequestFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ActiveEnrollmentExists {
-                request,
-                active_enrollment,
-            } => write!(
-                formatter,
-                "runner enrollment request {} conflicts with active enrollment {}",
-                request.as_uuid(),
-                active_enrollment.as_uuid()
-            ),
-            Self::ReplayAdvertisementMismatch { request } => write!(
-                formatter,
-                "runner enrollment request {} replayed with different availability",
-                request.as_uuid()
-            ),
-            Self::ReplayPolicyMismatch { request } => write!(
-                formatter,
-                "runner enrollment request {} replayed with different allowed classes",
-                request.as_uuid()
-            ),
-            Self::UnknownRequest { request } => write!(
-                formatter,
-                "runner resume names unknown enrollment request {}",
-                request.as_uuid()
-            ),
-            Self::ResumeIdentityMismatch {
-                request,
-                expected,
-                observed,
-            } => write!(
-                formatter,
-                "runner resume {} identity mismatch: expected enrollment {}, runner {}, authentication {}; observed enrollment {}, runner {}, authentication {}",
-                request.as_uuid(),
-                expected.enrollment().as_uuid(),
-                expected.runner().as_uuid(),
-                expected.authentication().as_uuid(),
-                observed.enrollment().as_uuid(),
-                observed.runner().as_uuid(),
-                observed.authentication().as_uuid()
-            ),
-            Self::EnrollmentRevoked {
-                request,
-                enrollment,
-            } => write!(
-                formatter,
-                "runner resume {} names revoked enrollment {}",
-                request.as_uuid(),
-                enrollment.as_uuid()
-            ),
-            Self::ResumeRevisionMismatch {
-                request,
-                expected,
-                observed,
-            } => write!(
-                formatter,
-                "runner resume {} revision mismatch: expected {}, observed {}",
-                request.as_uuid(),
-                expected.get(),
-                observed.get()
-            ),
-            Self::StaleResumeAdvertisement {
-                request,
-                prior,
-                current,
-            } => write!(
-                formatter,
-                "runner resume {} at stale revision {} diverges from current registration revision {}",
-                request.as_uuid(),
-                prior.get(),
-                current.get()
-            ),
-        }
-    }
-}
-
-impl Error for RunnerEnrollmentRequestFailure {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A durable runner-protocol shape that cannot reconstruct domain state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerProtocolCorruption {
+    #[error("canonical runner enrollment is missing")]
     /// Canonical enrollment state is absent.
     MissingCanonicalEnrollment,
+    #[error("canonical runner audit evidence is missing")]
     /// Canonical audit evidence is absent.
     MissingCanonicalAudit,
+    #[error("canonical runner registration is missing")]
     /// Canonical registration state is absent.
     MissingCanonicalRegistration,
+    #[error("canonical runner connection is missing")]
     /// Canonical physical connection state is absent.
     MissingCanonicalConnection,
+    #[error("canonical runner connection loss is missing")]
     /// Canonical connection-loss state or its propagation cursor is absent.
     MissingCanonicalLoss,
+    #[error("canonical runner lease is missing")]
     /// Canonical runner-lease state is absent.
     MissingCanonicalLease,
+    #[error("canonical runner placement is missing")]
     /// Canonical placement state is absent.
     MissingCanonicalPlacement,
+    #[error("canonical credential grant is missing")]
     /// Canonical credential-grant state is absent.
     MissingCanonicalGrant,
+    #[error("canonical physical tool attempt is missing")]
     /// Canonical tool-attempt state is absent.
     MissingCanonicalAttempt,
+    #[error("stored runner inventory is incomplete")]
     /// A declared count disagrees with its durable members.
     IncompleteInventory,
+    #[error("stored runner references are cross-wired")]
     /// Correlated durable records identify different domain values.
     CrossWiredReference,
+    #[error("stored runner column {field_0} has an invalid value")]
     /// A projected column cannot decode to its expected Rust type.
     InvalidColumn(&'static str),
+    #[error("stored runner encoding is invalid")]
     /// A stored scalar cannot construct its closed domain value.
     InvalidEncoding,
+    #[error("stored runner generation is exhausted")]
     /// A durable generation cannot advance without overflow.
     GenerationExhausted,
 }
 
-impl fmt::Display for RunnerProtocolCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingCanonicalEnrollment => {
-                formatter.write_str("canonical runner enrollment is missing")
-            }
-            Self::MissingCanonicalAudit => {
-                formatter.write_str("canonical runner audit evidence is missing")
-            }
-            Self::MissingCanonicalRegistration => {
-                formatter.write_str("canonical runner registration is missing")
-            }
-            Self::MissingCanonicalConnection => {
-                formatter.write_str("canonical runner connection is missing")
-            }
-            Self::MissingCanonicalLoss => {
-                formatter.write_str("canonical runner connection loss is missing")
-            }
-            Self::MissingCanonicalLease => formatter.write_str("canonical runner lease is missing"),
-            Self::MissingCanonicalPlacement => {
-                formatter.write_str("canonical runner placement is missing")
-            }
-            Self::MissingCanonicalGrant => {
-                formatter.write_str("canonical credential grant is missing")
-            }
-            Self::MissingCanonicalAttempt => {
-                formatter.write_str("canonical physical tool attempt is missing")
-            }
-            Self::IncompleteInventory => {
-                formatter.write_str("stored runner inventory is incomplete")
-            }
-            Self::CrossWiredReference => {
-                formatter.write_str("stored runner references are cross-wired")
-            }
-            Self::InvalidColumn(column) => {
-                write!(
-                    formatter,
-                    "stored runner column {column} has an invalid value"
-                )
-            }
-            Self::InvalidEncoding => formatter.write_str("stored runner encoding is invalid"),
-            Self::GenerationExhausted => {
-                formatter.write_str("stored runner generation is exhausted")
-            }
-        }
-    }
-}
-
-impl Error for RunnerProtocolCorruption {}
-
+#[derive(signalbox_derive::OperatorError)]
 /// A database, durable-shape, or domain-admission failure.
 #[derive(Debug)]
 pub enum RunnerProtocolStoreError {
+    #[error("runner-protocol database failure: {field_0}")]
     /// PostgreSQL failed before a commit could have succeeded.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("runner-protocol commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL obscured whether the requested commit succeeded.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error(transparent)]
     /// Durable records cannot reconstruct the admitted runner state.
-    Corruption(RunnerProtocolCorruption),
+    Corruption(#[source] RunnerProtocolCorruption),
+    #[error("runner-protocol domain failure: {field_0:?}")]
     /// Complete values fail a domain-owned runner transition or invariant.
     Domain(RunnerDomainError),
+    #[error(transparent)]
     /// Enrollment or resume input conflicts with durable request authority.
-    EnrollmentRequest(RunnerEnrollmentRequestFailure),
-}
-
-impl fmt::Display for RunnerProtocolStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database(error) => write!(formatter, "runner-protocol database failure: {error}"),
-            Self::CommitAmbiguous(error) => {
-                write!(
-                    formatter,
-                    "runner-protocol commit outcome is ambiguous: {error}"
-                )
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::Domain(error) => write!(formatter, "runner-protocol domain failure: {error:?}"),
-            Self::EnrollmentRequest(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for RunnerProtocolStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::EnrollmentRequest(error) => Some(error),
-            Self::Domain(_) => None,
-        }
-    }
+    EnrollmentRequest(#[source] RunnerEnrollmentRequestFailure),
 }
 
 impl From<sqlx::Error> for RunnerProtocolStoreError {

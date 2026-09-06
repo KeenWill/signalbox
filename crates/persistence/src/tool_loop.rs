@@ -6,8 +6,6 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
-    error::Error,
-    fmt,
     num::NonZeroU64,
 };
 
@@ -155,13 +153,17 @@ impl BlobReadAdmission {
 
 const STORAGE_VERSION: i16 = 1;
 
+#[derive(signalbox_derive::OperatorError)]
 /// Stored tool-loop facts failed checked domain reconstruction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolLoopCorruption {
+    #[error("missing tool-loop {field_0}")]
     /// A required row or value is absent.
     Missing(&'static str),
+    #[error("inconsistent tool-loop {field_0}")]
     /// Stored facts disagree about an exact relationship.
     Inconsistent(&'static str),
+    #[error("unsupported tool-loop {field}: {value}")]
     /// A closed discriminator has an unknown spelling.
     Unsupported {
         /// Storage field.
@@ -169,26 +171,10 @@ pub enum ToolLoopCorruption {
         /// Unsupported value.
         value: String,
     },
+    #[error("tool batch reconstitution failed: {field_0:?}")]
     /// Complete batch facts failed aggregate reconstruction.
     Batch(ToolBatchReconstitutionFailure),
 }
-
-impl fmt::Display for ToolLoopCorruption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(value) => write!(formatter, "missing tool-loop {value}"),
-            Self::Inconsistent(value) => write!(formatter, "inconsistent tool-loop {value}"),
-            Self::Unsupported { field, value } => {
-                write!(formatter, "unsupported tool-loop {field}: {value}")
-            }
-            Self::Batch(failure) => {
-                write!(formatter, "tool batch reconstitution failed: {failure:?}")
-            }
-        }
-    }
-}
-
-impl Error for ToolLoopCorruption {}
 
 #[derive(signalbox_derive::OperatorError)]
 /// Database, replay, corruption, or rejected transition at the tool boundary.
