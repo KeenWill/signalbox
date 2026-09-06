@@ -78,7 +78,7 @@ jobs:
                 # run the complete bar even though they are Markdown.
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
                   | docs/api/* \
-                  | docs/scenarios.md | docs/style.md)
+                  | docs/style.md)
                   rust=$((rust + 1))
                   ;;
                 docs/* | *.md)
@@ -197,6 +197,8 @@ jobs:
         run: /tmp/mdformat-venv/bin/python scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
         run: /tmp/mdformat-venv/bin/python scripts/test_postgres_integration_suites.py
+      - name: Test the convergence reconciler
+        run: python3 tooling/convergence-reconciler/test_reconcile.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
       - name: Test the lifecycle watchdog

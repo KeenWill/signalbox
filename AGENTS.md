@@ -97,7 +97,7 @@ owner's private repositories may be named as provenance, not cited as rules.
   rationale.
 - Keep domain types distinct from storage records, protocol messages, and
   framework types.
-- Name tests for the scenario they exercise when the connection is meaningful.
+- Name tests for the behavior they enforce.
 - Update directly affected documentation in the implementing pull request. Do
   not reword, restructure, or reformat unrelated text.
 - Do not add `Co-Authored-By`, session, or URL trailers to commits or
