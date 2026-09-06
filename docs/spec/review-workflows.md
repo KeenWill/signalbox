@@ -243,9 +243,6 @@ The orchestration loaders derive the current stage only from durable records;
 missing ancestry, an unknown closed value, a noncanonical count, or
 contradictory evidence is corruption and never an inferred result.
 
-The reviewer-verdict and usage-limit evidence rules belong to
-[tool loop](tool-loop.md).
-
 `signalbox-convergence` evaluates complete GitHub snapshots with an explicit
 reviewer and check policy. Its verdict combines thread dispositions,
 authenticated quiet reviews and exempt head changes, retained review waves,

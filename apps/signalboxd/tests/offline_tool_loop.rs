@@ -80,20 +80,18 @@ use signalboxd::{
     CHANGE_REQUEST_THREAD_RESOLVE_NAME, ChangeRequestCommentResult, ChangeRequestSummaryFields,
     ChangeRequestSummaryResult, ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult,
     CiJobLogResult, CodeHostNumericBounds, CodeHostOperation, CodeHostResult,
-    CodeHostResultCompleteness, CodeHostTransport, CodeHostTransportFailure,
-    ConvergenceStateFields, ConvergenceStateResult, ConversationIntrospectionPort,
-    ConversationListPage, ConversationListRequest, ConversationTranscriptRead,
-    ConversationTranscriptRequest, DaemonTools, DaemonToolsConstructionError, FilePatchResult,
-    GitHubEgressPolicy, GitHubOperation, GitHubResult, GitHubTransport, GitHubTransportFailure,
-    HubModelConfiguration, ImportedTranscriptRequest, LocalProcessListener,
-    LocalWorkspaceFileSystem, MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME,
-    PULL_REQUEST_PUBLISH_REVIEW_NAME, PostgresConversationIntrospection,
-    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
-    ProcessRuntime, READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult,
-    ReviewAuthorClass, ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose,
+    CodeHostResultCompleteness, CodeHostTransport, CodeHostTransportFailure, ConvergenceReadResult,
+    ConversationIntrospectionPort, ConversationListPage, ConversationListRequest,
+    ConversationTranscriptRead, ConversationTranscriptRequest, DaemonTools,
+    DaemonToolsConstructionError, FilePatchResult, GitHubEgressPolicy, GitHubOperation,
+    GitHubResult, GitHubTransport, GitHubTransportFailure, HubModelConfiguration,
+    ImportedTranscriptRequest, LocalProcessListener, LocalWorkspaceFileSystem,
+    MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
+    PostgresConversationIntrospection, PostgresProviderModelExecution,
+    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
+    REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass,
     ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
-    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
-    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
+    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult, SessionStatusWrite,
     SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
     ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME,
     WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
@@ -1658,7 +1656,6 @@ enum ExpectedCodeHostOperation {
     ReviewGateCheck {
         repository: &'static str,
         number: u32,
-        purpose: ReviewGatePurpose,
     },
     ThreadReply {
         repository: &'static str,
@@ -1772,15 +1769,10 @@ fn assert_code_host_operation(actual: &CodeHostOperation, expected: ExpectedCode
         }
         (
             CodeHostOperation::ReviewGateCheck(arguments),
-            ExpectedCodeHostOperation::ReviewGateCheck {
-                repository,
-                number,
-                purpose,
-            },
+            ExpectedCodeHostOperation::ReviewGateCheck { repository, number },
         ) => {
             assert_eq!(arguments.repository().as_str(), repository);
             assert_eq!(arguments.number().get(), number);
-            assert_eq!(arguments.purpose(), purpose);
         }
         (
             CodeHostOperation::ThreadReply(arguments),
@@ -2058,51 +2050,28 @@ fn rerun_failed_jobs_result() -> CodeHostResult {
 
 const REVIEW_SLOG_HEAD_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const REVIEW_SLOG_BASE_REVISION: &str = "1111111111111111111111111111111111111111";
-const REVIEW_SLOG_REVIEWED_AT: &str = "2026-07-27T10:00:00Z";
 const REVIEW_SLOG_REPOSITORY: &str = "owner/repository";
 const REVIEW_SLOG_NUMBER: u32 = 17;
 const REVIEW_SLOG_BASE_REF: &str = "main";
 const REVIEW_SLOG_HEAD_REF: &str = "feature";
 
-fn reviewer_verdict_result() -> ReviewerVerdictEvidence {
-    ReviewerVerdictEvidence::try_new(
-        code_host_bounds(),
-        ReviewerVerdictFields {
-            status: ReviewerVerdictStatus::CurrentHead,
-            reviewed_revision: Some(String::from(REVIEW_SLOG_HEAD_REVISION)),
-            reviewed_at: Some(String::from(REVIEW_SLOG_REVIEWED_AT)),
-            starvation_after_verdict: false,
-            latest_starvation_at: None,
-            latest_review_request_at: None,
-            review_request_in_flight: false,
-            source_truncated: false,
-            comments_previous_cursor: None,
-            reviews_previous_cursor: None,
-        },
+fn convergence_state_evidence() -> ConvergenceReadResult {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/convergence");
+    let policy =
+        signalbox_convergence::ConvergencePolicy::read(&root.join("examples/repository.toml"))
+            .expect("recorded policy parses");
+    let recording =
+        signalbox_convergence::Recording::read(&root.join("fixtures/mutations/settled.json"))
+            .expect("recorded fixture loads");
+    let evaluation = signalbox_convergence::evaluate(
+        &recording
+            .snapshot(&policy)
+            .expect("recorded snapshot is complete"),
+        &policy,
     )
-    .expect("fixture reviewer verdict is bounded")
-}
-
-fn convergence_state_evidence() -> ConvergenceStateResult {
-    ConvergenceStateResult::try_new(
-        code_host_bounds(),
-        ConvergenceStateFields {
-            head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
-            mergeable_state: String::from("MERGEABLE"),
-            ci_rollup_state: Some(String::from("SUCCESS")),
-            checks: Vec::new(),
-            checks_truncated: false,
-            checks_next_cursor: None,
-            unresolved_threads: Vec::new(),
-            open_escalations: Vec::new(),
-            buried_escalations: Vec::new(),
-            undispositioned_threads: Vec::new(),
-            threads_truncated: false,
-            threads_next_cursor: None,
-            reviewer: reviewer_verdict_result(),
-        },
-    )
-    .expect("fixture convergence state is bounded")
+    .expect("recorded evidence evaluates");
+    ConvergenceReadResult::try_new(code_host_bounds(), evaluation)
+        .expect("recorded verdict fits the tool bounds")
 }
 
 fn convergence_state_result() -> CodeHostResult {
@@ -2165,15 +2134,7 @@ fn thread_inventory_result() -> CodeHostResult {
 }
 
 fn review_gate_result() -> CodeHostResult {
-    let convergence = convergence_state_evidence();
-    let stack = stack_state_evidence();
-    let inventory = thread_inventory_evidence();
-    CodeHostResult::ReviewGateCheck(ReviewGateCheckResult::compose(
-        ReviewGatePurpose::DeclareConvergence,
-        &convergence,
-        &stack,
-        &inventory,
-    ))
+    CodeHostResult::ReviewGateCheck(convergence_state_evidence())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3766,34 +3727,8 @@ async fn tier_one_change_request_convergence_state_completes_offline_tool_loop()
             .to_string(),
         convergence_state_result(),
         serde_json::json!({
-            "buried_escalations": [],
-            "checks": [],
-            "checks_next_cursor": null,
-            "checks_truncated": false,
-            "ci_green": true,
-            "ci_rollup_state": "SUCCESS",
-            "head_revision": REVIEW_SLOG_HEAD_REVISION,
-            "mergeable_state": "MERGEABLE",
-            "open_escalations": [],
-            "reviewer_verdict": {
-                "comments_previous_cursor": null,
-                "latest_starvation_at": null,
-                "latest_review_request_at": null,
-                "review_request_in_flight": false,
-                "reviewed_at": REVIEW_SLOG_REVIEWED_AT,
-                "reviewed_revision": REVIEW_SLOG_HEAD_REVISION,
-                "reviews_previous_cursor": null,
-                "source_truncated": false,
-                "starvation_after_verdict": false,
-                "status": "current_head",
-            },
-            "threads_next_cursor": null,
-            "threads_truncated": false,
-            "unresolved_thread_count": 0,
-            "undispositioned_thread_count": 0,
-            "undispositioned_threads": [],
-            "unresolved_threads": [],
-            "verdict": "converged",
+            "head_revision":"417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+            "convergence":{"verdict":"Converged"},
         }),
         ExpectedCodeHostOperation::ConvergenceState {
             repository: REVIEW_SLOG_REPOSITORY,
@@ -3885,8 +3820,7 @@ async fn tier_one_change_request_thread_inventory_completes_offline_tool_loop()
     .await
 }
 
-/// Tier 1 review gating persists the pure composition result while its fresh
-/// evidence reads cross only the typed mocked transport boundary.
+/// Tier 1 review gating persists the recorded convergence verdict through the tool loop.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn tier_one_review_gate_check_completes_offline_tool_loop() -> Result<(), Box<dyn Error>> {
@@ -3894,21 +3828,17 @@ async fn tier_one_review_gate_check_completes_offline_tool_loop() -> Result<(), 
         REVIEW_GATE_CHECK_NAME,
         serde_json::json!({
             "number": REVIEW_SLOG_NUMBER,
-            "purpose": "declare_convergence",
             "repository": REVIEW_SLOG_REPOSITORY,
         })
         .to_string(),
         review_gate_result(),
         serde_json::json!({
-            "blockers": [],
-            "head_revision": REVIEW_SLOG_HEAD_REVISION,
-            "purpose": "declare_convergence",
-            "ready": true,
+            "head_revision":"417a88fd53464ef0783ec39f5c4da3c50a3ef5e2",
+            "convergence":{"verdict":"Converged"},
         }),
         ExpectedCodeHostOperation::ReviewGateCheck {
             repository: REVIEW_SLOG_REPOSITORY,
             number: REVIEW_SLOG_NUMBER,
-            purpose: ReviewGatePurpose::DeclareConvergence,
         },
         ExpectedCodeHostApproval::Auto,
     )

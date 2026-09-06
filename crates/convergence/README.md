@@ -111,5 +111,5 @@ findings invalidate earlier quiet reviews on the same head; an escalation must
 follow the latest reviewer edit. The harness applies these disposition and
 revalidation contracts while keeping the reference implementation frozen.
 
-Not built: consumer changes, provider abstractions, new convergence gates,
-schedulers, storage tables, or migrations.
+Not built: provider abstractions, new convergence gates, schedulers, storage
+tables, or migrations.

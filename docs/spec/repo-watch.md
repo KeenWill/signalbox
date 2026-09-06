@@ -108,14 +108,14 @@ dispatch, obligation, webhook, and commissioned records.
 
 The convergence sweep is a periodic pass that runs beside repository watch.
 Repository watch owns event-driven dispatch; the sweep supplies liveness for
-watched pull requests whose provider events stopped arriving. It owns its
-convergence predicate, its fenced commission, its durable retry and park
-records, and its configuration throttle. It is opt-in twice:
+watched pull requests whose provider events stopped arriving. It uses
+`signalbox-convergence` for its predicate and owns its fenced commission,
+durable retry and park records, and configuration throttle. It is opt-in twice:
 `[repository_watch.convergence_sweep]` supplies one review-response session
 template and the timing policy, and each repository lists its
-`convergence_pull_requests`. A census snapshot is converged exactly when no
-review thread is unresolved, the status rollup belongs to the current head,
-every gating check is green, and mergeability is `mergeable`.
+`convergence_pull_requests`. The `[convergence]` policy supplies the shared
+predicate described in [review workflows](review-workflows.md). The sweep
+evaluates one revalidated snapshot and uses that verdict for its decision.
 
 ## Design decisions
 
