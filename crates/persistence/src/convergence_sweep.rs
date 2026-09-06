@@ -554,24 +554,10 @@ impl PostgresConvergenceSweepStore {
                                SELECT 1 FROM model_call AS call
                                 WHERE call.session_id = source.session_id
                            ) AS has_model_activity
-                      FROM (
-                           SELECT dispatch.dispatch_id, dispatch.session_id,
-                                  dispatch.recorded_at
-                             FROM commissioned_dispatch AS dispatch
-                            WHERE dispatch.target_kind = 'pull_request'
-                              AND dispatch.repository = target.repository
-                              AND dispatch.pull_request_number = target.pull_request_number
-                           UNION ALL
-                           SELECT action.dispatch_id, action.session_id,
-                                  batch.admitted_at AS recorded_at
-                             FROM repo_watch_dispatch_action AS action
-                             JOIN repo_watch_event AS event ON event.event_id = action.event_id
-                             JOIN repo_watch_dispatch_batch AS batch
-                               ON batch.dispatch_id = action.dispatch_id
-                            WHERE event.target_kind = 'pull_request'
-                              AND event.repository = target.repository
-                              AND event.pull_request_number = target.pull_request_number
-                      ) AS source
+                      FROM commissioned_dispatch AS source
+                     WHERE source.target_kind = 'pull_request'
+                       AND source.repository = target.repository
+                       AND source.pull_request_number = target.pull_request_number
                      ORDER BY source.recorded_at DESC, source.dispatch_id DESC,
                               live DESC, has_model_activity DESC, source.session_id DESC
                      LIMIT 1
@@ -829,25 +815,13 @@ impl PostgresConvergenceSweepStore {
                     census_dispatch_head_sha = $3,
                     census_dispatch_unresolved_threads = $4
               WHERE repository = $1 AND pull_request_number = $2
-                AND (
-                    EXISTS (
-                        SELECT 1 FROM commissioned_dispatch AS dispatch
-                         WHERE dispatch.dispatch_id = $5
-                           AND dispatch.session_id = $6
-                           AND dispatch.target_kind = 'pull_request'
-                           AND dispatch.repository = $1
-                           AND dispatch.pull_request_number = $2
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                          FROM repo_watch_dispatch_action AS action
-                          JOIN repo_watch_event AS event ON event.event_id = action.event_id
-                         WHERE action.dispatch_id = $5
-                           AND action.session_id = $6
-                           AND event.target_kind = 'pull_request'
-                           AND event.repository = $1
-                           AND event.pull_request_number = $2
-                    )
+                AND EXISTS (
+                    SELECT 1 FROM commissioned_dispatch AS dispatch
+                     WHERE dispatch.dispatch_id = $5
+                       AND dispatch.session_id = $6
+                       AND dispatch.target_kind = 'pull_request'
+                       AND dispatch.repository = $1
+                       AND dispatch.pull_request_number = $2
                 )",
         )
         .bind(repository.as_str())
@@ -982,17 +956,6 @@ impl PostgresConvergenceSweepStore {
                      WHERE dispatch.target_kind = 'pull_request'
                        AND dispatch.repository = $1
                        AND dispatch.pull_request_number = $2
-                    UNION ALL
-                    SELECT action.dispatch_id, action.session_id,
-                           batch.admitted_at AS recorded_at
-                      FROM repo_watch_dispatch_action AS action
-                      JOIN repo_watch_event AS event
-                        ON event.event_id = action.event_id
-                      JOIN repo_watch_dispatch_batch AS batch
-                        ON batch.dispatch_id = action.dispatch_id
-                     WHERE event.target_kind = 'pull_request'
-                       AND event.repository = $1
-                       AND event.pull_request_number = $2
                 ), latest_dispatch AS (
                     SELECT dispatch_id, recorded_at
                       FROM target_dispatch
@@ -1050,23 +1013,10 @@ impl PostgresConvergenceSweepStore {
                            SELECT 1 FROM model_call AS call
                             WHERE call.session_id = target.session_id
                        ) AS has_model_activity
-                  FROM (
-                       SELECT dispatch.session_id, dispatch.recorded_at, dispatch.dispatch_id
-                         FROM commissioned_dispatch AS dispatch
-                        WHERE dispatch.target_kind = 'pull_request'
-                          AND dispatch.repository = $1
-                          AND dispatch.pull_request_number = $2
-                       UNION ALL
-                       SELECT action.session_id, batch.admitted_at AS recorded_at,
-                              action.dispatch_id
-                         FROM repo_watch_dispatch_action AS action
-                         JOIN repo_watch_event AS event ON event.event_id = action.event_id
-                         JOIN repo_watch_dispatch_batch AS batch
-                           ON batch.dispatch_id = action.dispatch_id
-                        WHERE event.target_kind = 'pull_request'
-                          AND event.repository = $1
-                          AND event.pull_request_number = $2
-                  ) AS target
+                  FROM commissioned_dispatch AS target
+                 WHERE target.target_kind = 'pull_request'
+                   AND target.repository = $1
+                   AND target.pull_request_number = $2
              ), latest_dispatch AS (
                 SELECT dispatch_id, recorded_at
                   FROM target_dispatch

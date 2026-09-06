@@ -1,4 +1,4 @@
--- The public schema retains commissioned-session census records and their validators.
+-- The public schema retains shared convergence-sweep state and repository/branch validators.
 
 DROP TRIGGER commissioned_dispatch_counts_pull_request_session
     ON commissioned_dispatch;
@@ -31,6 +31,8 @@ DROP TABLE repo_watch_achieved_dispatch_settlement,
            repo_watch_current_singleton_cooldown,
            repo_watch_dispatch_delivery,
            repo_watch_dispatch_delivery_intent,
+           repo_watch_dispatch_action,
+           repo_watch_dispatch_batch,
            repo_watch_dispatch_obligation,
            repo_watch_dispatch_obligation_park,
            repo_watch_dispatch_release,
@@ -47,6 +49,7 @@ DROP TABLE repo_watch_achieved_dispatch_settlement,
            repo_watch_rule_deactivation,
            repo_watch_rule_evaluation,
            repo_watch_rule_field_fingerprint,
+           repo_watch_event,
            repo_watch_stale_review_clearance_claim,
            repo_watch_stale_review_clearance_recovery_cursor,
            repo_watch_webhook_delivery,
