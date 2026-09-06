@@ -311,10 +311,9 @@ successor attempt that fails as its predecessor did.
 
 Settings whose effect the daemon cannot supply are typed startup failures rather
 than retained and inert: `round_robin`, `least_used`, any headroom reserve, a
-non-`stay` `on_headroom_low`, and a `switch_now` for quota, rate limit or
-overload whose adapter cannot prove non-acceptance for that trigger's cause.
-Why: a configured protection that silently never fires reads as one the
-deployment has.
+non-`stay` `on_headroom_low`, and a `switch_now` whose adapter cannot prove
+non-acceptance for that trigger's cause. Why: a configured protection that
+silently never fires reads as one the deployment has.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
@@ -327,10 +326,9 @@ account holds different ranks in different pools.
 commits alone, so the default configuration can still commit a terminal
 observation.
 
-`switch_now` is refused on `on_headroom_low`, because low headroom is not a
-failure. Credential rejection needs no separate adapter non-acceptance proof and
-follows its configured action;
-[credential availability](credential-availability.md) owns the resulting ending.
+`switch_now` is refused on `on_credential_rejected` and `on_headroom_low`,
+because a rejected credential is deployment misconfiguration that substitution
+would hide and low headroom is not a failure.
 
 A `codex_home` refresh race gets no delivery-layer bypass, because the Codex CLI
 reports one undifferentiated authentication failure the adapter cannot split;
