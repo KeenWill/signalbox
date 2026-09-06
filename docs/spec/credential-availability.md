@@ -96,13 +96,13 @@ evidence naming what failed. The rotation test in
 pins this ending.
 
 Successor: the adapter supplied pre-stream proof that the provider never
-accepted the request, a stop was not requested, and either a transient cause has
-same-credential attempts remaining or the pinned action is `switch_now` and a
-member remains. The turn stays active and keeps its slot; the predecessor
-attempt ends KnownFailure without terminalizing, and the same commit prepares a
-successor attempt. That commit appends no `TurnFailed`: one commit never both
-terminalizes the turn and authorizes a successor. The rotation and transient
-retry tests pin this ending.
+accepted the request, except that `CredentialRejected` needs no proof; a stop
+was not requested; and either a transient cause has same-credential attempts
+remaining or the pinned action is `switch_now` and a member remains. The turn
+stays active and keeps its slot; the predecessor attempt ends KnownFailure
+without terminalizing, and the same commit prepares a successor attempt. That
+commit appends no `TurnFailed`: one commit never both terminalizes the turn and
+authorizes a successor. The rotation and transient retry tests pin this ending.
 
 A transient exclusion is the successor's durable retry deadline; after its reset
 the failed member is admitted again. A chain exclusion is written when a failure
@@ -123,9 +123,10 @@ one credential in one turn. At the bound a transient failure applies its pinned
 action instead of readmitting that credential.
 
 Terminal: a known failure no successor is authorized to follow terminalizes the
-turn Failed exactly as it would with no pool. A stop request, missing pre-stream
-proof, non-transient cause without `switch_now`, or transient cause at its bound
-without `switch_now` authorizes no successor.
+turn Failed exactly as it would with no pool. A stop request, missing required
+pre-stream proof (`CredentialRejected` needs none), non-transient cause without
+`switch_now`, or transient cause at its bound without `switch_now` authorizes no
+successor.
 
 ## Planned
 
