@@ -4,8 +4,7 @@ This is the inventory of unresolved foundational questions. A "leaning" guides
 exploration but is not a decision. Closing a question requires an
 maintainer-accepted pull request or, at foundation weight, a foundation
 specification diff. Accepted cross-component and wire contracts live in the
-[living specification](spec/README.md); scenario identifiers refer to
-[scenarios.md](scenarios.md).
+[living specification](spec/README.md).
 
 ## Identity representation
 
@@ -13,8 +12,7 @@ specification diff. Accepted cross-component and wire contracts live in the
   [identity-and-commands](spec/identity-and-commands.md) closes generation,
   supply, minting authority, and baseline PostgreSQL encoding; the local
   [process protocol](spec/process-protocol.md) closes its version-one wire
-  fields. Browser and other public URL forms remain open. (S01, S02, S04, S08,
-  S10, S12, S24)
+  fields. Browser and other public URL forms remain open.
 - **Semantic transcript-entry extensions and rendering.**
   [sessions-and-transcript](spec/sessions-and-transcript.md) fixes
   origin-accepted-input and failed-turn payloads plus their eligibility and
@@ -26,12 +24,12 @@ specification diff. Accepted cross-component and wire contracts live in the
   [Tool safety](#tool-safety). The steering payload and stop marker are fixed by
   the steering and stop decision. Imported semantic history is owned separately
   by [conversation-import](spec/conversation-import.md). Blocks only those later
-  native semantic-history slices. (S02–S04, S08, S09, S17)
+  native semantic-history slices.
 - **Selectable native transcript-frontier boundaries.** Which terminal native
   semantic boundaries a client may select as a `TranscriptFrontier` remains
   open; imported-frontier selection is already owned by
   [conversation-import](spec/conversation-import.md). Blocks native fork
-  selection. (S17)
+  selection.
 
 ## Accepted-input content
 
@@ -40,7 +38,7 @@ specification diff. Accepted cross-component and wire contracts live in the
   rendering, and model-visible stubs are decided and specified by
   [blob storage](spec/blob-storage.md). Any non-text content variant beyond
   attachment parts and provider-native media rendering remain open. Blocks only
-  those further extensions. (S01, S03, S08)
+  those further extensions.
 
 ## Model-input projection
 
@@ -103,7 +101,7 @@ also require owner rulings:
   frontier extension gate owned by
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
-  extensions. (S02, S17, S28)
+  extensions.
 
 ### Workspace instructions and skills
 
@@ -141,7 +139,7 @@ per-turn provenance. The following extensions remain undecided:
 - **Exact mappings for additional source formats.** Older backup formats have no
   converter. A later slice must select each source format's exact mapping and
   converter version, with synthetic fixtures and persistence round-trip
-  coverage. The accepted format-versioned converter seam remains fixed. (S28)
+  coverage. The accepted format-versioned converter seam remains fixed.
 - **Import operational surfaces beyond explicit file and directory scans.** The
   user terminal's explicit-format, one-file and recursive directory-scan
   operations are implemented in
@@ -152,26 +150,25 @@ per-turn provenance. The following extensions remain undecided:
   authorization beyond the owner-private local socket remain undecided. Listing
   across imported conversations is implemented by the unified conversation
   listing in [process protocol](spec/process-protocol.md); filesystem discovery
-  of unimported sources beyond the explicit directory scan is not. (S28)
+  of unimported sources beyond the explicit directory scan is not.
 
 ## Transcript ancestry
 
 - **Multi-source or merged transcript ancestry.** Accepted baseline is none or
   one immutable source frontier with an explicit extension boundary. Deferrable.
-  (S17)
 
 ## Queue management
 
 - **Editing, canceling, reordering, or changing delivery policy of queued
   input.** Excluded from the accepted input-delivery baseline; any addition
-  needs explicit dispositions. Later scope. (S09)
+  needs explicit dispositions. Later scope.
 
 ## Turn lifecycle
 
 - **Standalone active-turn cancellation.** Not a baseline feature: the accepted
   turn lifecycle defines cancellation authority only through applied interrupts,
   and adding a standalone command requires a future foundation decision with its
-  own proof and disposition rules. Later scope. (S07)
+  own proof and disposition rules. Later scope.
 - **Ambiguous provider-call recovery.** A restart-recovered unstopped in-flight
   call parks its turn in the awaiting-recovery wait
   ([model-call-execution](spec/model-call-execution.md)). The daemon now spends
@@ -182,18 +179,17 @@ per-turn provenance. The following extensions remain undecided:
   what the provider actually did. Whether a provider request-status API can
   replace the conservative ambiguous outcome with trustworthy evidence,
   including its polling posture and evidence classes, remains undecided. Later
-  scope. (S02)
+  scope.
 - **Per-session scheduler scan gating and fairness.** Deployment configuration
   now owns the scheduler sweep and turn-liveness cadences
   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). What
   remains undecided is whether one session may tune its own scan gate and how
-  contending sessions share a deployment-wide pass budget. Later scope. (S01,
-  S02)
+  contending sessions share a deployment-wide pass budget. Later scope.
 - **Direct interrupt-only reconciliation from a running attempt.**
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;
   whether an interrupt-only path may bypass `StopRequested` remains undecided.
-  Later scope. (S07)
+  Later scope.
 
 ## Session organization, visibility, and retention
 
@@ -213,14 +209,13 @@ per-turn provenance. The following extensions remain undecided:
   conversation records have a distinct non-destructive archive state, and how
   that state affects discovery, remains undecided.
 - **Destructive retention or purge beyond ordinary archive.** Kept separate from
-  ordinary archive; exact policy undefined. Later scope. (S17, S25)
+  ordinary archive; exact policy undefined. Later scope.
 
 ## Regeneration
 
 - **Regeneration command acceptance, queue placement, source frontier, and
   relation representation.** The identity rule is accepted (always new logical
   work; never reopen the original); the rest blocks the regeneration feature.
-  (S26)
 
 ## Configuration categories
 
@@ -241,8 +236,7 @@ per-turn provenance. The following extensions remain undecided:
   deferred here for a separate follow-on slice. Static copy-on-create session
   templates compose model selection, bounded system prompt, dangerous-tool
   blanket, and the model-settings layer owned by that contract; every other
-  richer composition or configuration category stays blocked here. (S02, S05,
-  S13–S16, S34, S35, S37)
+  richer composition or configuration category stays blocked here.
 
 ## Template storage and authoring
 
@@ -253,7 +247,7 @@ per-turn provenance. The following extensions remain undecided:
   [process protocol](spec/process-protocol.md). Whether templates become durable
   database objects, the exact protocol CRUD and concurrency contract, and agent
   tools that read or edit templates remain undecided. Blocks only those storage
-  and authoring surfaces. (S35)
+  and authoring surfaces.
 
 ## Codex CLI fixture validation
 
@@ -294,13 +288,13 @@ per-turn provenance. The following extensions remain undecided:
   [credential pools and selection](spec/configuration-and-credentials.md#overview).
   What remains open is the client projection: snapshots expose each call's usage
   and the final turn state but not the durable predecessor, cause, and successor
-  relation. Blocks fallback UI, not fallback. (S22)
+  relation. Blocks fallback UI, not fallback.
 - **Whether an automatic successor may cross adapter kinds.** Decided for the
   first slice: no. A pool's members share one adapter, so cross-kind
   substitution is inexpressible rather than merely disabled, and moving a
   session between adapter kinds stays an explicit defaults replacement. Whether
   mixed pools are ever admitted, and what would reconcile two adapters'
-  authentication shapes if they were, remains open. (S22)
+  authentication shapes if they were, remains open.
 - **Provider headroom observation.** Selecting a profile by remaining capacity
   requires an observation surface no adapter currently captures: the Anthropic
   HTTP adapter reads only a request identifier from response headers, and the
@@ -316,7 +310,7 @@ per-turn provenance. The following extensions remain undecided:
   the normalized quantity, observation lifetime, and deterministic secondary
   tie-break a later contract must define before `least_used` is admitted, and
   whether a free probe exists that does not consume the quota it reports. Blocks
-  capacity-aware selection, not availability failover. (S22)
+  capacity-aware selection, not availability failover.
 - **Zero-cost liveness probes.** Operator clear and probe recovery belong to the
   planned credential-exclusion lifecycle in
   [the configuration and credentials design](design/configuration-and-credentials.md),
@@ -324,20 +318,20 @@ per-turn provenance. The following extensions remain undecided:
   is whether any adapter can offer a probe that calls no model. Absent one, an
   operator command or another durable availability update are the clearing paths
   that design admits. Blocks automatic recovery from a rejected credential, not
-  recovery itself. (S22)
+  recovery itself.
 - **Access-token-only Codex CLI conformance evidence.** The committed `oauth`
   delivery contract is owned by
   [credential deliveries](spec/configuration-and-credentials.md#planned). What
   remains open is the minimum supported CLI version and exact live conformance
   check that establish this behavior. The implementing slice cannot land until
   that evidence exists; a current CLI version declining the store blocks that
-  slice rather than making the committed delivery optional. (S22)
+  slice rather than making the committed delivery optional.
 - **Reuse-detection blast radius.** Whether a provider rejecting a reused
   refresh token invalidates only that token or the whole authorization family is
   not determinable from either CLI's source. It does not affect the `oauth`
   delivery, which has exactly one refresher, but it bounds how bad a
   `codex_home` concurrency violation is: single-token rejection is recoverable,
-  family revocation is account loss. (S22)
+  family revocation is account loss.
 - **Detailed provider provenance representation.** Model identifier
   normalization is decided: the
   [provider-target identity rule](spec/model-call-execution.md) accepts an alias
@@ -347,11 +341,11 @@ per-turn provenance. The following extensions remain undecided:
   remains open is the durable per-call provenance schema that would record the
   concrete served identity and a substitution as evidence rather than as
   operator diagnostics and a fail-closed error. Blocks the provider provenance
-  schema. (S20–S23)
+  schema.
 - **Ambiguity-replacement credential authority.** Decide whether a replacement
   call authorized by `DuplicateRiskAccepted` may reuse the ambiguous call's
   credential profile or must select another eligible profile. Blocks ambiguity
-  replacement calls. (S04)
+  replacement calls.
 
 ## Scheduling and runners
 
@@ -415,14 +409,14 @@ questions below remain open.
   is — reprovisioning from durable facts, an explicit transfer, or a shared
   volume the destination binds — before any automated placement across a runner
   family exists. Not a blocker: user-directed moves of a workspace-free session,
-  and of a session whose work is pushed, require none of it. (S16, S30–S32)
+  and of a session whose work is pushed, require none of it.
 - **Automatic scheduling, load balancing, and MCP placement.** Placement selects
   a runner by exact identity or capability class and is never rescheduled; no
   policy chooses among several satisfying runners, balances load, or admits an
   MCP locus. Deciding those requires multiple simultaneously enrolled runners
   plus a stated selection policy and its observability, and it composes with the
   workspace portability question above. Blocks automatic placement, not manual
-  placement. (S16, S30–S32)
+  placement.
 
 ## Goal mode
 
@@ -444,13 +438,11 @@ automatic resumption of an execution-failure block are specified in
   after ambiguity, idempotency-key policy, duplicate-risk controls, and retry
   resource limits beyond the sealed
   [runner lease-loss transitions](spec/runner-protocol.md) remain undecided.
-  (S05, S06, S31)
 - **Ambiguous tool-wait resolution.** Who may record resolving evidence, how an
   exact accepted-risk continuation is represented, and which effects permit it
   beyond the
   [proof-bearing terminal paths](spec/turn-lifecycle-and-scheduling.md) remain
   undecided. Blocks reconciliation and continuation from `AwaitingToolRecovery`.
-  (S06)
 - **Durable tool-definition revisioning.** The implemented compiled catalog is
   immutable for one process lifetime. A dynamic catalog or a deployment that
   changes a definition while requests are outstanding must first decide how the
@@ -555,7 +547,7 @@ automatic resumption of an execution-failure block are specified in
   sessions read across several roots one session holds, and what a rebind owes
   executors already retained against the previous root. Recorded as a design
   question rather than a blocker; the one-root-per-session derivation remains
-  correct until it is answered. (S15)
+  correct until it is answered.
 
 ## Identity, credentials, and resource governance
 
@@ -566,19 +558,19 @@ questions below remain open.
 
 - **User client authentication and revocation.** Keep the daemon's authorization
   model single-user while choosing a remotely safe authentication boundary.
-  Blocks any remote client. (S01, S10, S24, S25)
+  Blocks any remote client.
 - **Runner authentication exchange, rotation, and recovery.** Enrollment,
   runner, and authentication-reference identities plus terminal enrollment
   revocation are fixed by
   [runner protocol and placement](spec/runner-protocol.md). Credential format,
   bootstrap delivery, proof exchange, rotation overlap, compromise recovery,
   channel binding, and authentication failure audit remain undecided. Blocks
-  remote runners. (S05, S06, S12–S16, S30–S32)
+  remote runners.
 - **Credential-scoped runner classes.** Credential profiles are selected only
   after targeting a runner that advertised them. Whether a capability-class
   selector may itself require a profile, and how availability changes affect
   class membership, remains undecided. Blocks profile-aware dynamic runner
-  pools. (S30, S32)
+  pools.
 - **Runner result credential egress beyond exact-value redaction.** Whether
   stronger taint, isolation, or egress controls beyond the
   [runner credential boundary](spec/configuration-and-credentials.md#planned)
@@ -595,7 +587,6 @@ questions below remain open.
   deployments requiring that transport extension.
 - **First-release resource limits.** Leaning: explicit bounded concurrency and
   configurable usage limits at effect boundaries. Blocks public release.
-  (S02–S06, S13–S18)
 
 ## Actor attribution
 
@@ -619,32 +610,32 @@ questions below remain open.
 - **Authenticated transports and remote clients.** The local baseline is owned
   by [process-protocol](spec/process-protocol.md). Remote access still requires
   decisions for client identity, authentication, authorization, revocation, and
-  credential delivery. (S01, S24)
+  credential delivery.
 - **Browser transport.** Settled for the web client: the same-origin browser
   transport merged in PR #1000 and is owned by
   [configuration-and-credentials](spec/configuration-and-credentials.md). It no
   longer blocks the web client; transient model-update streaming remains open
-  below. (S02, S24)
+  below.
 - **Remote runner transport and reconnect.** The dedicated local socket,
   framing, heartbeat, reconnect inventory, and transaction orchestration are
   owned by [runner protocol and placement](spec/runner-protocol.md). Remote
   transport, authentication binding, compatibility negotiation, internet
   backpressure, and cross-host stale-evidence retention remain undecided. Blocks
-  remote dispatch, not the local runner. (S12, S16, S30–S32)
+  remote dispatch, not the local runner.
 - **Compatibility after the process-protocol freeze.** The single pre-deployment
   version and its freeze condition are owned by
   [process-protocol](spec/process-protocol.md). A future compatibility window,
-  negotiation scheme, and generated-client policy remain undecided. (S01, S24)
+  negotiation scheme, and generated-client policy remain undecided.
 - **Transient model-update relay.** Whether provider token deltas cross the
   process boundary, and the required draft identity, sequencing, replacement,
   backpressure, and redaction rules, remain undecided. The implemented durable
   transition relay is owned by [process-protocol](spec/process-protocol.md).
-  Blocks live-token display. (S02, S24)
+  Blocks live-token display.
 - **Process-protocol operation expansion.** The interrupt, canonical tool
   decision, next-safe-point steering, and after-current queue treatments now
   cross the wire ([process-protocol](spec/process-protocol.md)); administrative
   operations still need their owning product slices and exact wire projections.
-  Blocks only those operations. (S01–S10)
+  Blocks only those operations.
 - **Persistence implementation within the accepted relational baseline.**
   [persistence-protocol](spec/persistence-protocol.md) closes the broad
   stable-storage question, selects the driver, pool, migration, runtime, and
@@ -660,30 +651,29 @@ questions below remain open.
   tails. Streaming checkpoints, dispatch-generation placement, archival form,
   and exact cancellation-delivery records remain open. Those remaining questions
   block only their corresponding adapter slices; the generic scaffold and first
-  typed command family are not blocked. (S03, S04, S17, S25, S27)
+  typed command family are not blocked.
 - **Update-event retention across multiple daemon processes.** Version one is
   owned by [process-protocol](spec/process-protocol.md). Follower retention
   guarantees and any later multiple-daemon shared-fan-out mechanism remain
-  undecided. Blocks multi-daemon deployment. (S24)
+  undecided. Blocks multi-daemon deployment.
 - **Swift client type generation.** Leaning: generated boundary types mapped to
-  hand-written client domain types. Deferrable until the Swift client. (S01,
-  S24)
+  hand-written client domain types. Deferrable until the Swift client.
 
 ## Client scope
 
 - **Client forms after the terminal baseline.** The selected baseline is owned
   by [process-protocol](spec/process-protocol.md). Whether a later daily client
-  is a TUI, web app, or native app remains unselected. (S01, S02, S10, S24)
+  is a TUI, web app, or native app remains unselected.
 - **Apple client code organization.** Defer until the protocol and the first
-  native slice are known. (S01, S24)
+  native slice are known.
 - **Web client technology.** Settled: the web campaign uses React and TypeScript
   with TanStack, Redux Toolkit, and Radix. This owner-approved platform choice
-  is no longer open. (S01, S02, S24)
+  is no longer open.
 - **Client approval presentation.** The terminal baseline now surfaces the
   pending request through the transcript's awaiting-turn and tool-use lines and
   collects decisions through `approve`/`deny`
   ([process-protocol](spec/process-protocol.md)); interactive prompting and
-  later client forms remain undesigned. (S10, S11, S24)
+  later client forms remain undesigned.
 
 ## General-purpose artifacts
 
@@ -772,7 +762,7 @@ and ordering.
   review workflows.
 - **Independent session-link relationship.** Links between sessions that
   delegation did not create require their own foundation decision. Blocks
-  session linking and visibility authority. (S18, S19)
+  session linking and visibility authority.
 - **Inter-session messaging actor extension.** Session-actor accepted input
   requires an actor-algebra extension
   ([identity-and-commands](spec/identity-and-commands.md)), explicit
@@ -780,4 +770,4 @@ and ordering.
   [identity, credentials, and resource governance](#identity-credentials-and-resource-governance)
   decisions. Blocks general inter-session messaging routed through
   `SubmitInput`; it does not block the typed, relationship-bound delegation
-  message records committed by S18 and S19.
+  message records.

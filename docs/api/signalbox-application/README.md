@@ -13,13 +13,13 @@
 | create_session_from_imported_frontier | 4 | 2 | 0 | [create_session_from_imported_frontier](create_session_from_imported_frontier.md) |
 | list_conversations | 6 | 2 | 0 | [list_conversations](list_conversations.md) |
 | load_session | 1 | 1 | 0 | [load_session](load_session.md) |
-| model_execution | 32 | 8 | 1 | [types](model_execution/types.md), [functions](model_execution/functions.md), [traits](model_execution/traits.md) |
+| model_execution | 32 | 8 | 1 | [model_execution](model_execution.md) |
 | operator_failure | 1 | 1 | 0 | [operator_failure](operator_failure.md) |
 | replace_session_defaults | 4 | 1 | 0 | [replace_session_defaults](replace_session_defaults.md) |
-| repo_watch | 45 | 4 | 3 | [traits](repo_watch/traits.md), [types](repo_watch/types.md), [functions](repo_watch/functions.md) |
+| repo_watch | 45 | 4 | 3 | [repo_watch](repo_watch.md) |
 | repo_watch_operations | 32 | 1 | 2 | [repo_watch_operations](repo_watch_operations.md) |
 | repo_watch_webhook | 18 | 0 | 2 | [repo_watch_webhook](repo_watch_webhook.md) |
-| review_orchestration | 35 | 2 | 0 | [types](review_orchestration/types.md), [traits](review_orchestration/traits.md) |
+| review_orchestration | 35 | 2 | 0 | [review_orchestration](review_orchestration.md) |
 | review_workflow | 7 | 2 | 0 | [review_workflow](review_workflow.md) |
 | scheduler | 13 | 7 | 1 | [scheduler](scheduler.md) |
 | search | 19 | 2 | 5 | [search](search.md) |

@@ -138,7 +138,7 @@ final class RealServerHarnessTests: XCTestCase {
     XCTAssertEqual(firstFrameAfterReconnect.message, .sessionsStart)
   }
 
-  /// S28: the native client inspects and continues a real daemon import without a model call.
+  /// The native client inspects and continues a real daemon import without a model call.
   func testRealDaemonCompletesImportedTranscriptContinuationWithoutAModelCall() async throws {
     let socketPath = try realServerSocketPath()
     let client = realServerClient(socketPath: socketPath)

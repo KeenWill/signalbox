@@ -24,8 +24,7 @@ open, and the owner's merge is acceptance.
 
 - Keep each pull request narrowly scoped and independently reviewable.
 - Distinguish accepted direction, working terminology, and open questions.
-- Add or update concrete scenarios alongside the decision that changes lifecycle
-  behavior or introduces a new lifecycle edge.
+- Add or update tests for changed lifecycle behavior.
 - Give domain concepts distinct identities; do not reuse wire, storage, or
   framework types as domain types.
 - Do not introduce speculative product code, deployment configuration, or
@@ -97,9 +96,8 @@ covers:
   merges, and one narrow deterministic end-to-end slice per major capability
   covering its defining failure/restart path.
 
-Test names or metadata should reference scenario identifiers when the connection
-is meaningful. The concrete required cases for each slice live with the decision
-that authorizes it and in the tests themselves.
+Name tests for the behavior they enforce. The concrete required cases for each
+slice live with the decision that authorizes it and in the tests themselves.
 
 ## Validation
 

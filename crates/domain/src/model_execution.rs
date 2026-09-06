@@ -1106,7 +1106,8 @@ impl ModelCallExecution {
             || !matches!(
                 observation.provider_failure_cause,
                 Some(
-                    ProviderModelCallFailureCause::RateLimited
+                    ProviderModelCallFailureCause::CredentialRejected
+                        | ProviderModelCallFailureCause::RateLimited
                         | ProviderModelCallFailureCause::QuotaExhausted
                         | ProviderModelCallFailureCause::Overloaded
                         | ProviderModelCallFailureCause::ProviderInternal

@@ -85,7 +85,7 @@ impl SubmitInputIdGenerator for UuidV7SubmitInputIdGenerator {
 
 ```rust
 pub enum SubmitInputOutcome {
-    Recorded(submit_input::SubmitInputResult),
+    Recorded(result::SubmitInputResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -100,7 +100,7 @@ pub trait SubmitInputTransaction {
     type Error;
     fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
         &mut self,
-        command: submit_input::SubmitInput,
+        command: command::SubmitInput,
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: option::Option<signalbox_domain::TurnId>,
         cancellation_identities: model_execution::CancelledModelCallTurnIdentities,
