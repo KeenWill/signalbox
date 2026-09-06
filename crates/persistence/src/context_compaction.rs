@@ -1528,22 +1528,22 @@ fn require_single(
 /// Committed storage facts could not form one exact compaction lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextCompactionCorruption {
-    #[error("context compaction storage is inconsistent")]
+    #[error("context compaction storage is inconsistent: required durable fact is missing")]
     /// Required durable fact was absent.
     Missing(&'static str),
-    #[error("context compaction storage is inconsistent")]
+    #[error("context compaction storage is inconsistent: stored ordinal is outside the u64 range")]
     /// Stored ordinal was outside the admitted u64 range.
     InvalidOrdinal(&'static str),
-    #[error("context compaction storage is inconsistent")]
+    #[error("context compaction storage is inconsistent: related lifecycle facts disagree")]
     /// Related lifecycle facts disagreed.
     Inconsistent(&'static str),
-    #[error("context compaction storage is inconsistent")]
+    #[error("context compaction storage is inconsistent: unknown command result discriminator")]
     /// Stored command result discriminator is unknown.
     UnsupportedResult(String),
-    #[error("context compaction storage is inconsistent")]
+    #[error("context compaction storage is inconsistent: unknown command kind discriminator")]
     /// Stored user-global command-kind discriminator is unknown.
     UnsupportedCommandKind(String),
-    #[error("context compaction storage is inconsistent")]
+    #[error("context compaction storage is inconsistent: summary text is invalid")]
     /// Summary text did not satisfy the semantic entry scalar.
     InvalidSummary,
 }
@@ -1552,17 +1552,17 @@ pub enum ContextCompactionCorruption {
 /// Database, collision, or fail-closed corruption from compaction persistence.
 #[derive(Debug)]
 pub enum ContextCompactionRepositoryError {
-    #[error("context compaction persistence failed")]
+    #[error("context compaction persistence failed: database operation failed")]
     /// Database operation failed before an ambiguous commit boundary.
     Database(#[source] sqlx::Error),
-    #[error("context compaction persistence failed")]
+    #[error("context compaction persistence failed: commit outcome is ambiguous")]
     /// Commit outcome could not be proven.
     CommitAmbiguous(#[source] sqlx::Error),
-    #[error("context compaction persistence failed")]
+    #[error("context compaction persistence failed: generated identity collided")]
     /// A daemon-minted call or result identity collided globally and may be
     /// reminted.
     IdentityCollision,
-    #[error("context compaction persistence failed")]
+    #[error("context compaction persistence failed: durable lifecycle is inconsistent")]
     /// Durable rows contradicted the closed lifecycle.
     Corruption(#[source] ContextCompactionCorruption),
 }
@@ -1611,6 +1611,52 @@ mod tests {
         project_frontier_members,
     };
     use signalbox_domain::{SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId};
+
+    #[test]
+    fn operator_error_messages_distinguish_compaction_storage_failures() {
+        use super::ContextCompactionCorruption;
+
+        let errors = [
+            ContextCompactionCorruption::Missing("frontier"),
+            ContextCompactionCorruption::InvalidOrdinal("position"),
+            ContextCompactionCorruption::Inconsistent("frontier"),
+            ContextCompactionCorruption::UnsupportedResult("unknown".to_owned()),
+            ContextCompactionCorruption::UnsupportedCommandKind("unknown".to_owned()),
+            ContextCompactionCorruption::InvalidSummary,
+        ];
+        let messages = errors.map(|error| error.to_string()).join("\n");
+
+        expect_test::expect![[r#"
+            context compaction storage is inconsistent: required durable fact is missing
+            context compaction storage is inconsistent: stored ordinal is outside the u64 range
+            context compaction storage is inconsistent: related lifecycle facts disagree
+            context compaction storage is inconsistent: unknown command result discriminator
+            context compaction storage is inconsistent: unknown command kind discriminator
+            context compaction storage is inconsistent: summary text is invalid"#]]
+        .assert_eq(&messages);
+    }
+
+    #[test]
+    fn operator_error_messages_distinguish_compaction_persistence_failures() {
+        use super::{ContextCompactionCorruption, ContextCompactionRepositoryError};
+
+        let errors = [
+            ContextCompactionRepositoryError::Database(sqlx::Error::PoolClosed),
+            ContextCompactionRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+            ContextCompactionRepositoryError::IdentityCollision,
+            ContextCompactionRepositoryError::Corruption(
+                ContextCompactionCorruption::InvalidSummary,
+            ),
+        ];
+        let messages = errors.map(|error| error.to_string()).join("\n");
+
+        expect_test::expect![[r#"
+            context compaction persistence failed: database operation failed
+            context compaction persistence failed: commit outcome is ambiguous
+            context compaction persistence failed: generated identity collided
+            context compaction persistence failed: durable lifecycle is inconsistent"#]]
+        .assert_eq(&messages);
+    }
 
     fn entry(value: u128) -> SemanticTranscriptEntryRef {
         SemanticTranscriptEntryRef::from_source(
