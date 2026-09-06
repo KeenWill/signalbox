@@ -102,7 +102,9 @@ with the same command ID and text. Browser submissions use the session model and
 inherit all per-input model settings; replay requires those same choices.
 Accepted browser input nudges the daemon's eligibility work source. Unconfirmed
 commands remain in browser application state by session across navigation until
-acknowledged or rejected.
+acknowledged or rejected. A bounded rates read reports lifecycle state, turn
+outcome counts, the latest failed turn and its provider cause, and goal
+disposition for up to 32 listed sessions.
 
 ## Design decisions
 

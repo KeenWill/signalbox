@@ -7,12 +7,6 @@
 ```rust
 pub struct GitIdentity {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for GitIdentity
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl GitIdentity {
     pub fn try_new(
         name: impl convert::Into<string::String>,
@@ -28,12 +22,6 @@ impl GitIdentity {
 ```rust
 pub struct InvalidGitIdentity;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for InvalidGitIdentity
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for InvalidGitIdentity {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

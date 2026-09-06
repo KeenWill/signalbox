@@ -18,13 +18,6 @@ pub enum SessionStatusToolConstructionError {
     Duplicate,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionStatusToolConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionStatusToolConstructionError {}
 impl fmt::Display for SessionStatusToolConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -38,13 +31,6 @@ impl error::Error for SessionStatusToolConstructionError {
 ```rust
 pub struct SessionStatusTool<Writer> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for SessionStatusTool<Writer>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionStatusTool<Writer> {}
 impl<Writer> signalbox_tool_contract::ToolContract for SessionStatusTool<Writer> {
     type Arguments = session_status::SessionStatusUpdateArguments;
     const NAME: &'static str;
@@ -60,7 +46,7 @@ impl<Writer> SessionStatusTool<Writer> {
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         SessionStatusExecutor<Writer>,
     );
 }
@@ -71,18 +57,11 @@ impl<Writer> SessionStatusTool<Writer> {
 ```rust
 pub struct SessionStatusWrite {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionStatusWrite
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionStatusWrite {}
 impl SessionStatusWrite {
     pub const fn command(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn request(&self) -> signalbox_domain::ToolRequestId;
-    pub const fn replacement(&self) -> &session_metadata::SessionMetadataContent;
+    pub const fn replacement(&self) -> &signalbox_domain::SessionMetadataContent;
 }
 ```
 
@@ -90,25 +69,18 @@ impl SessionStatusWrite {
 
 ```rust
 pub enum SessionStatusWriteOutcome {
-    Applied(session_metadata::SessionMetadataSnapshot),
+    Applied(signalbox_domain::SessionMetadataSnapshot),
     SessionNotFound,
     Ambiguous,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SessionStatusWriteOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionStatusWriteOutcome {}
 ```
 
 ## SessionStatusWriter
 
 ```rust
 pub trait SessionStatusWriter: marker::Send {
-    type Error: operator_failure::ClassifyOperatorFailure;
+    type Error: signalbox_application::ClassifyOperatorFailure;
     fn write(
         &mut self,
         update: SessionStatusWrite,
@@ -123,13 +95,6 @@ pub trait SessionStatusWriter: marker::Send {
 ```rust
 pub struct PostgresSessionStatusWriter {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for PostgresSessionStatusWriter
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for PostgresSessionStatusWriter {}
 impl PostgresSessionStatusWriter {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
 }
@@ -152,21 +117,14 @@ pub enum PostgresSessionStatusWriterError {
     Corruption,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PostgresSessionStatusWriterError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for PostgresSessionStatusWriterError {}
 impl fmt::Display for PostgresSessionStatusWriterError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for PostgresSessionStatusWriterError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for PostgresSessionStatusWriterError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for PostgresSessionStatusWriterError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -175,24 +133,17 @@ impl operator_failure::ClassifyOperatorFailure for PostgresSessionStatusWriterEr
 ```rust
 pub struct SessionStatusExecutor<Writer> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for SessionStatusExecutor<Writer>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for SessionStatusExecutor<Writer> {}
-impl<Writer> tool_loop::ToolExecutor for SessionStatusExecutor<Writer>
+impl<Writer> signalbox_application::ToolExecutor for SessionStatusExecutor<Writer>
 where
     Writer: SessionStatusWriter,
 {
     type Error = SessionStatusExecutorError<<Writer as SessionStatusWriter>::Error>;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -207,7 +158,6 @@ pub enum SessionStatusExecutorError<WriterError> {
     ResultEncoding,
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for SessionStatusExecutorError<WriterError> {}
 impl<WriterError> fmt::Display for SessionStatusExecutorError<WriterError>
 where
     WriterError: fmt::Display,
@@ -220,11 +170,11 @@ where
 {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl<WriterError> operator_failure::ClassifyOperatorFailure
+impl<WriterError> signalbox_application::ClassifyOperatorFailure
     for SessionStatusExecutorError<WriterError>
 where
-    WriterError: operator_failure::ClassifyOperatorFailure,
+    WriterError: signalbox_application::ClassifyOperatorFailure,
 {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```

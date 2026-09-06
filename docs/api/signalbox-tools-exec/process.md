@@ -24,13 +24,6 @@ pub struct ExecArguments {
     pub timeout_seconds: u64,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for ExecArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for ExecArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ExecToolConstructionError
@@ -68,12 +61,6 @@ impl error::Error for ExecToolConstructionError {
 ```rust
 pub struct SandboxedExecTool<Runner> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for SandboxedExecTool<Runner>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Runner: ProcessRunner> SandboxedExecTool<Runner> {
     pub fn try_new(
         runner: Runner,
@@ -87,7 +74,7 @@ impl<Runner: ProcessRunner> SandboxedExecTool<Runner> {
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         ExecExecutor<SandboxedCommandRunner<Runner>>,
     );
 }
@@ -104,12 +91,6 @@ impl SandboxedExecTool<TokioProcessRunner> {
 ```rust
 pub struct UnsandboxedExecTool<Runner> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for UnsandboxedExecTool<Runner>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Runner: ProcessRunner> UnsandboxedExecTool<Runner> {
     pub fn try_new(
         runner: Runner,
@@ -118,7 +99,7 @@ impl<Runner: ProcessRunner> UnsandboxedExecTool<Runner> {
     pub fn into_parts(
         self,
     ) -> (
-        tool_loop::CompiledToolCatalog,
+        signalbox_application::CompiledToolCatalog,
         ExecExecutor<UnsandboxedCommandRunner<Runner>>,
     );
 }
@@ -135,12 +116,6 @@ impl UnsandboxedExecTool<TokioProcessRunner> {
 ```rust
 pub struct InvalidExecArguments;
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for InvalidExecArguments
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for InvalidExecArguments {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -154,20 +129,16 @@ impl error::Error for InvalidExecArguments {
 ```rust
 pub struct ExecExecutor<CommandRunner> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for ExecExecutor<CommandRunner>
-where
-    T: clone::Clone,
+impl<CommandRunner: CommandExecution> signalbox_application::ToolExecutor
+    for ExecExecutor<CommandRunner>
 {
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<CommandRunner: CommandExecution> tool_loop::ToolExecutor for ExecExecutor<CommandRunner> {
     type Error = ExecExecutorError;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -180,20 +151,14 @@ pub enum ExecExecutorError {
     ResultEncoding,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ExecExecutorError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for ExecExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ExecExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl operator_failure::ClassifyOperatorFailure for ExecExecutorError {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+impl signalbox_application::ClassifyOperatorFailure for ExecExecutorError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 
@@ -211,12 +176,6 @@ pub struct ProcessRequest {
     pub status_protocol: ProcessStatusProtocol,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ProcessRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProcessEnvironment
@@ -227,12 +186,6 @@ pub enum ProcessEnvironment {
     Clear,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ProcessEnvironment
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProcessStatusProtocol
@@ -243,12 +196,6 @@ pub enum ProcessStatusProtocol {
     SandboxDispatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ProcessStatusProtocol
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## BwrapAvailability
@@ -261,12 +208,6 @@ pub enum BwrapAvailability {
     TimedOut,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for BwrapAvailability
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProcessRunner
@@ -291,12 +232,6 @@ pub trait ProcessRunner: clone::Clone + marker::Send {
 ```rust
 pub struct TokioProcessRunner {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for TokioProcessRunner
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl TokioProcessRunner {
     pub fn try_new(
         supervisor_program: impl convert::AsRef<path::Path>,
@@ -318,12 +253,6 @@ pub enum SandboxProcessNamespace {
     Container,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for SandboxProcessNamespace
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## SandboxedCommandRunner
@@ -331,12 +260,6 @@ where
 ```rust
 pub struct SandboxedCommandRunner<Runner> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for SandboxedCommandRunner<Runner>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
     pub fn try_new(
         runner: Runner,
@@ -364,12 +287,6 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
 ```rust
 pub struct UnsandboxedCommandRunner<Runner> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for UnsandboxedCommandRunner<Runner>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Runner: ProcessRunner> UnsandboxedCommandRunner<Runner> {
     pub fn try_new(
         runner: Runner,
@@ -388,12 +305,6 @@ pub struct ExecResult {
     pub stderr: OutputCapture,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for ExecResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ExecutionConfinement
@@ -406,12 +317,6 @@ pub enum ExecutionConfinement {
     SandboxSetupFailed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for ExecutionConfinement
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProcessOutcome
@@ -424,12 +329,6 @@ pub enum ProcessOutcome {
     SupervisionFailed { reason: ProcessSupervisionFailure },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for ProcessOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProcessSpawnFailure
@@ -444,12 +343,6 @@ pub enum ProcessSpawnFailure {
     Other,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for ProcessSpawnFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProcessSupervisionFailure
@@ -462,12 +355,6 @@ pub enum ProcessSupervisionFailure {
     Stderr,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for ProcessSupervisionFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## OutputCapture
@@ -479,12 +366,6 @@ pub struct OutputCapture {
     pub encoding: OutputEncoding,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for OutputCapture
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## CaptureCompleteness
@@ -495,12 +376,6 @@ pub enum CaptureCompleteness {
     Truncated,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for CaptureCompleteness
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## OutputEncoding
@@ -511,12 +386,6 @@ pub enum OutputEncoding {
     LossyUtf8,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for OutputEncoding
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProcessRunResult
@@ -528,12 +397,6 @@ pub struct ProcessRunResult {
     pub stderr: ProcessOutput,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ProcessRunResult
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ProcessOutput
@@ -544,10 +407,4 @@ pub struct ProcessOutput {
     pub completeness: CaptureCompleteness,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ProcessOutput
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```

@@ -12,7 +12,6 @@ pub enum ProbeStrength {
     Strong,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, de::Deserialize<'de>, ser::Serialize
-impl<T> de::DeserializeOwned for ProbeStrength where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ProbeDeclaration

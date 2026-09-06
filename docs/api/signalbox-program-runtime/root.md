@@ -12,55 +12,6 @@ pub const PROGRAM_SDK_V1_SPECIFIER: &str;
 
 ```rust
 pub struct signalbox_program_sdk_v1 {}
-impl<T> into_either::IntoEither for signalbox_program_sdk_v1 {}
-impl<T> parse_display::IntoResult<T> for signalbox_program_sdk_v1 {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for signalbox_program_sdk_v1
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> ctx::PathsInErrorsExt for signalbox_program_sdk_v1 where T: ?marker::Sized {}
-impl<T> conv::Conv for signalbox_program_sdk_v1 {}
-impl<T> conv::TryConv for signalbox_program_sdk_v1 {}
-impl<T> pipe::Pipe for signalbox_program_sdk_v1 where T: ?marker::Sized {}
-impl<T> tap::Tap for signalbox_program_sdk_v1 {}
-impl<T> request::IntoRequest<T> for signalbox_program_sdk_v1 {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for signalbox_program_sdk_v1 {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<T> fmt::FmtForward for signalbox_program_sdk_v1 {}
-impl<T> erased::ErasedDestructor for signalbox_program_sdk_v1 where T: 'static {}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for signalbox_program_sdk_v1
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for signalbox_program_sdk_v1
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for signalbox_program_sdk_v1
-where
-    T: ?marker::Sized,
-{
-}
 impl signalbox_program_sdk_v1 {
     pub fn init() -> extensions::Extension;
     pub fn lazy_init() -> extensions::Extension;
@@ -73,64 +24,6 @@ impl signalbox_program_sdk_v1 {
 ```rust
 pub struct ProgramArtifact(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for ProgramArtifact
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for ProgramArtifact
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for ProgramArtifact {}
-impl<T> parse_display::IntoResult<T> for ProgramArtifact {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for ProgramArtifact
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> ctx::PathsInErrorsExt for ProgramArtifact where T: ?marker::Sized {}
-impl<T> conv::Conv for ProgramArtifact {}
-impl<T> conv::TryConv for ProgramArtifact {}
-impl<T> pipe::Pipe for ProgramArtifact where T: ?marker::Sized {}
-impl<T> tap::Tap for ProgramArtifact {}
-impl<T> request::IntoRequest<T> for ProgramArtifact {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramArtifact {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<T> fmt::FmtForward for ProgramArtifact {}
-impl<T> erased::ErasedDestructor for ProgramArtifact where T: 'static {}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit> for ProgramArtifact
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for ProgramArtifact
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive> for ProgramArtifact where
-    T: ?marker::Sized
-{
-}
 impl ProgramArtifact {
     pub fn new(source: impl convert::Into<boxed::Box<str>>) -> Self;
     pub fn source(&self) -> &str;
@@ -143,11 +36,11 @@ impl ProgramArtifact {
 pub trait LiveDeliverySource {
     fn next_delivery<'a>(
         &'a mut self,
-        outstanding: &'a [program_journal::RequestFrame],
+        outstanding: &'a [signalbox_domain::RequestFrame],
     ) -> pin::Pin<
         boxed::Box<
             dyn future::Future<
-                    Output = result::Result<program_journal::DeliveryKind, LiveDeliveryFailure>,
+                    Output = result::Result<signalbox_domain::DeliveryKind, LiveDeliveryFailure>,
                 > + 'a,
         >,
     >;
@@ -159,65 +52,6 @@ pub trait LiveDeliverySource {
 ```rust
 pub struct LiveDeliveryFailure(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for LiveDeliveryFailure
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for LiveDeliveryFailure
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for LiveDeliveryFailure {}
-impl<T> parse_display::IntoResult<T> for LiveDeliveryFailure {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for LiveDeliveryFailure
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> ctx::PathsInErrorsExt for LiveDeliveryFailure where T: ?marker::Sized {}
-impl<T> conv::Conv for LiveDeliveryFailure {}
-impl<T> conv::TryConv for LiveDeliveryFailure {}
-impl<T> pipe::Pipe for LiveDeliveryFailure where T: ?marker::Sized {}
-impl<T> tap::Tap for LiveDeliveryFailure {}
-impl<T> request::IntoRequest<T> for LiveDeliveryFailure {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for LiveDeliveryFailure {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<T> fmt::FmtForward for LiveDeliveryFailure {}
-impl<T> erased::ErasedDestructor for LiveDeliveryFailure where T: 'static {}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for LiveDeliveryFailure
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for LiveDeliveryFailure
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive> for LiveDeliveryFailure where
-    T: ?marker::Sized
-{
-}
 impl LiveDeliveryFailure {
     pub fn new(message: impl convert::Into<boxed::Box<str>>) -> Self;
     pub fn message(&self) -> &str;
@@ -233,143 +67,38 @@ impl error::Error for LiveDeliveryFailure {}
 ```rust
 pub enum ProgramExecutionOutcome {
     Completed,
-    RunCancelled(program_journal::InlineFramePayload),
-    Faulted(program_journal::ProgramFault),
+    RunCancelled(signalbox_domain::InlineFramePayload),
+    Faulted(signalbox_domain::ProgramFault),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for ProgramExecutionOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for ProgramExecutionOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for ProgramExecutionOutcome {}
-impl<T> parse_display::IntoResult<T> for ProgramExecutionOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for ProgramExecutionOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> ctx::PathsInErrorsExt for ProgramExecutionOutcome where T: ?marker::Sized {}
-impl<T> conv::Conv for ProgramExecutionOutcome {}
-impl<T> conv::TryConv for ProgramExecutionOutcome {}
-impl<T> pipe::Pipe for ProgramExecutionOutcome where T: ?marker::Sized {}
-impl<T> tap::Tap for ProgramExecutionOutcome {}
-impl<T> request::IntoRequest<T> for ProgramExecutionOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramExecutionOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<T> fmt::FmtForward for ProgramExecutionOutcome {}
-impl<T> erased::ErasedDestructor for ProgramExecutionOutcome where T: 'static {}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for ProgramExecutionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for ProgramExecutionOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for ProgramExecutionOutcome
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ProgramHostError
 
 ```rust
 pub enum ProgramHostError {
-    Journal(program_journal::ProgramJournalRepositoryError),
+    Journal(signalbox_persistence::program_journal::ProgramJournalRepositoryError),
     JournalMissing(signalbox_domain::ProgramRunId),
     Isolate(error::CoreError),
     LiveDelivery(LiveDeliveryFailure),
     Nondeterminism {
-        expected: boxed::Box<program_journal::RequestFrame>,
-        observed: boxed::Box<program_journal::RequestFrame>,
-        fault: program_journal::DeliveryFrame,
+        expected: boxed::Box<signalbox_domain::RequestFrame>,
+        observed: boxed::Box<signalbox_domain::RequestFrame>,
+        fault: signalbox_domain::DeliveryFrame,
     },
     Protocol(ProgramHostProtocolError),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for ProgramHostError {}
-impl<T> parse_display::IntoResult<T> for ProgramHostError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for ProgramHostError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> ctx::PathsInErrorsExt for ProgramHostError where T: ?marker::Sized {}
-impl<T> conv::Conv for ProgramHostError {}
-impl<T> conv::TryConv for ProgramHostError {}
-impl<T> pipe::Pipe for ProgramHostError where T: ?marker::Sized {}
-impl<T> tap::Tap for ProgramHostError {}
-impl<T> request::IntoRequest<T> for ProgramHostError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramHostError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<T> fmt::FmtForward for ProgramHostError {}
-impl<T> erased::ErasedDestructor for ProgramHostError where T: 'static {}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit> for ProgramHostError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for ProgramHostError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive> for ProgramHostError where
-    T: ?marker::Sized
-{
-}
 impl fmt::Display for ProgramHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for ProgramHostError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl convert::From<program_journal::ProgramJournalRepositoryError> for ProgramHostError {
-    fn from(error: program_journal::ProgramJournalRepositoryError) -> Self;
+impl convert::From<signalbox_persistence::program_journal::ProgramJournalRepositoryError>
+    for ProgramHostError
+{
+    fn from(error: signalbox_persistence::program_journal::ProgramJournalRepositoryError) -> Self;
 }
 impl convert::From<error::CoreError> for ProgramHostError {
     fn from(error: error::CoreError) -> Self;
@@ -398,81 +127,6 @@ pub enum ProgramHostProtocolError {
     Stalled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for ProgramHostProtocolError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for ProgramHostProtocolError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for ProgramHostProtocolError {}
-impl<T> outref::AsOut<T> for ProgramHostProtocolError
-where
-    T: marker::Copy,
-{
-    #[must_use]
-    fn as_out(&mut self) -> outref::Out<'_, T>;
-}
-impl<T> parse_display::IntoResult<T> for ProgramHostProtocolError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for ProgramHostProtocolError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> ctx::PathsInErrorsExt for ProgramHostProtocolError where T: ?marker::Sized {}
-impl<T> conv::Conv for ProgramHostProtocolError {}
-impl<T> conv::TryConv for ProgramHostProtocolError {}
-impl<T> pipe::Pipe for ProgramHostProtocolError where T: ?marker::Sized {}
-impl<T> tap::Tap for ProgramHostProtocolError {}
-impl<T> request::IntoRequest<T> for ProgramHostProtocolError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramHostProtocolError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<F, T, Tag> support::MapFnTo<T, Tag> for ProgramHostProtocolError
-where
-    F: support::UnitType,
-    T: support::MapFnFrom<F, Tag>,
-{
-    fn mapping() -> T;
-}
-impl<T> fmt::FmtForward for ProgramHostProtocolError {}
-impl<T> erased::ErasedDestructor for ProgramHostProtocolError where T: 'static {}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for ProgramHostProtocolError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for ProgramHostProtocolError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for ProgramHostProtocolError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for ProgramHostProtocolError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -484,66 +138,10 @@ impl error::Error for ProgramHostProtocolError {}
 ```rust
 pub struct ProgramHost {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for ProgramHost
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for ProgramHost
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for ProgramHost {}
-impl<T> parse_display::IntoResult<T> for ProgramHost {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for ProgramHost
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> ctx::PathsInErrorsExt for ProgramHost where T: ?marker::Sized {}
-impl<T> conv::Conv for ProgramHost {}
-impl<T> conv::TryConv for ProgramHost {}
-impl<T> pipe::Pipe for ProgramHost where T: ?marker::Sized {}
-impl<T> tap::Tap for ProgramHost {}
-impl<T> request::IntoRequest<T> for ProgramHost {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for ProgramHost {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<T> fmt::FmtForward for ProgramHost {}
-impl<T> erased::ErasedDestructor for ProgramHost where T: 'static {}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit> for ProgramHost
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for ProgramHost
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive> for ProgramHost where
-    T: ?marker::Sized
-{
-}
 impl ProgramHost {
-    pub const fn new(journal: program_journal::ProgramJournalRepository) -> Self;
+    pub const fn new(
+        journal: signalbox_persistence::program_journal::ProgramJournalRepository,
+    ) -> Self;
     pub async fn execute(
         &self,
         run: signalbox_domain::ProgramRunId,

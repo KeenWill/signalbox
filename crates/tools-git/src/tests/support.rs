@@ -463,7 +463,9 @@ fn decode_hex_fixture(bytes: &[u8]) -> Vec<u8> {
         .filter(u8::is_ascii_hexdigit)
         .collect::<Vec<_>>();
     digits
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
         .collect::<Option<Vec<_>>>()
         .expect("real Git hex fixture contains complete byte pairs")

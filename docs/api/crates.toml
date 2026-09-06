@@ -6,7 +6,6 @@ crates = [
     "signalbox-convergence",
     "signalbox-domain",
     "signalbox-egress-transport",
-    "signalbox-expect-table",
     "signalbox-file-media-linux-sandbox",
     "signalbox-file-media-processor-runtime",
     "signalbox-file-media-provider-runtime",

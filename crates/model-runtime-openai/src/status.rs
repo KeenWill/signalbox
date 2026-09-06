@@ -96,16 +96,12 @@ pub(crate) fn classify_error_envelope_with_proof(
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_expect_table::table;
+    use expectable::print;
     use signalbox_model_runtime::ProviderErrorKind;
 
     use super::{classify_error, classify_error_envelope, classify_error_envelope_with_proof};
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct ClassificationRow {
         status: u16,
         code: &'static str,
@@ -228,7 +224,7 @@ mod tests {
             │    429 │ brand_new_code          │ RateLimited        │
             └────────┴─────────────────────────┴────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
     #[test]

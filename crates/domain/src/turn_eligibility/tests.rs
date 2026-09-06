@@ -1,7 +1,7 @@
 //! Turn scheduling eligibility tests for `docs/spec/turn-lifecycle-and-scheduling.md`.
 
 use expect_test::expect;
-use signalbox_expect_table::table;
+use expectable::print;
 
 use super::*;
 use crate::{
@@ -1444,11 +1444,7 @@ fn active_input_after_historical_interrupt(
     )
 }
 
-#[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "the table renderer reads every field through the Debug derive"
-)]
+#[derive(Debug, serde::Serialize)]
 struct ReconstitutionFailureRow {
     perturbed_stored_fact: &'static str,
     failure: String,
@@ -1503,11 +1499,11 @@ fn assert_eligibility_rejects_unchanged(
     failure
 }
 
-/// S01: ancestry-free first eligibility fixes the
+/// ancestry-free first eligibility fixes the
 /// origin-only frontier and enters Running with one Prepared attempt in
 /// the same sealed candidate.
 #[test]
-fn s01_first_eligibility_prepares_one_atomic_activation_candidate() {
+fn first_eligibility_prepares_one_atomic_activation_candidate() {
     let session = current_session();
     let queued = accepted_origin(1);
     let activation = activation(1);
@@ -1558,11 +1554,11 @@ fn s01_first_eligibility_prepares_one_atomic_activation_candidate() {
     ));
 }
 
-/// S28: an imported session's first native activation
+/// an imported session's first native activation
 /// appends its origin to the exact checked seed prefix without changing
 /// first-in-session lineage.
 #[test]
-fn s28_first_native_frontier_appends_to_imported_seed() {
+fn first_native_frontier_appends_to_imported_seed() {
     let imported = imported_session();
     let session = imported.session().clone();
     let seed_entries = imported
@@ -1594,10 +1590,10 @@ fn s28_first_native_frontier_appends_to_imported_seed() {
     );
 }
 
-/// S03: restart returns a queued scheduling projection with no
+/// restart returns a queued scheduling projection with no
 /// manufactured start, and a cross-wired OriginOf fact fails closed.
 #[test]
-fn s03_checked_reconstitution_preserves_queued_state_and_exact_origin() {
+fn checked_reconstitution_preserves_queued_state_and_exact_origin() {
     let session = current_session();
     let origin = accepted_origin(1);
     let queued = origin.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
@@ -1658,11 +1654,11 @@ fn s03_checked_reconstitution_preserves_queued_state_and_exact_origin() {
     );
 }
 
-/// S03: an admitted active restart record owns its exact
+/// an admitted active restart record owns its exact
 /// Prepared attempt, reconstructs Running, and makes that identity
 /// unavailable to a second activation candidate.
 #[test]
-fn s03_active_reconstitution_requires_and_exposes_exact_prepared_attempt() {
+fn active_reconstitution_requires_and_exposes_exact_prepared_attempt() {
     let session = current_session();
     let active_origin = accepted_origin(1);
     let stored_attempt = matching_active_attempt();
@@ -1704,7 +1700,7 @@ fn s03_active_reconstitution_requires_and_exposes_exact_prepared_attempt() {
     );
 }
 
-/// S03: inert prepared facts become a canonical attempt only
+/// inert prepared facts become a canonical attempt only
 /// inside the validated owner projection.
 #[test]
 fn active_reconstitution_derives_prepared_attempt_after_validation() {
@@ -1728,7 +1724,7 @@ fn active_reconstitution_derives_prepared_attempt_after_validation() {
     ));
 }
 
-/// S03: inert running facts traverse the sealed
+/// inert running facts traverse the sealed
 /// prepared-to-running transition only inside the validated owner
 /// projection.
 #[test]
@@ -1757,10 +1753,10 @@ fn active_reconstitution_derives_running_attempt_after_validation() {
     ));
 }
 
-/// S07: a running continuation retains the exact
+/// a running continuation retains the exact
 /// independently checked tool batch correlation needed by interruption.
 #[test]
-fn s07_running_tool_batch_correlation_is_reconstituted() {
+fn running_tool_batch_correlation_is_reconstituted() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
@@ -1870,11 +1866,11 @@ fn s07_running_tool_batch_correlation_is_reconstituted() {
     assert_eq!(current_attempt.state(), &CurrentTurnAttemptState::Prepared);
 }
 
-/// S03: startup recovery consumes the complete active
+/// startup recovery consumes the complete active
 /// projection, ends its exact evidence-free attempt as Lost, and appends
 /// one `TurnFailed` marker to the starting frontier.
 #[test]
-fn s03_prepares_atomic_lost_failed_terminal_candidate() {
+fn prepares_atomic_lost_failed_terminal_candidate() {
     let session = current_session();
     let active = accepted_origin(1);
     let failure_entry = semantic_entry(500);
@@ -2102,11 +2098,11 @@ fn rejects_committed_failure_identities() {
     );
 }
 
-/// S02 / S07 / S11: scheduling
+/// scheduling
 /// reconstitution accepts the exact terminal shape written when an
 /// interrupt closes a yielded tool round.
 #[test]
-fn s02_s07_s11_cancelled_tool_round_reconstitutes() {
+fn cancelled_tool_round_reconstitutes() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -2245,12 +2241,12 @@ fn s02_s07_s11_cancelled_tool_round_reconstitutes() {
     );
 }
 
-/// S02 / S07 / S11: scheduling
+/// scheduling
 /// reconstitution accepts the exact terminal shape written when a stop
 /// request races a tool-using response, which names the batch's completed
 /// producing call.
 #[test]
-fn s02_s07_s11_stopped_tool_round_reconstitutes_from_named_call() {
+fn stopped_tool_round_reconstitutes_from_named_call() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -2389,11 +2385,11 @@ fn s02_s07_s11_stopped_tool_round_reconstitutes_from_named_call() {
     );
 }
 
-/// S02 / S07 / S11: a cancelled terminal
+/// a cancelled terminal
 /// turn naming a completed call that is not the tool round's producing
 /// call fails closed.
 #[test]
-fn s02_s07_s11_cancelled_tool_round_rejects_unrelated_named_call() {
+fn cancelled_tool_round_rejects_unrelated_named_call() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -2535,11 +2531,11 @@ fn s02_s07_s11_cancelled_tool_round_rejects_unrelated_named_call() {
     );
 }
 
-/// S02 / S07 / S11: a cancelled terminal
+/// a cancelled terminal
 /// tool round whose `ToolDenied` result entry names no user denial
 /// resolution fails closed.
 #[test]
-fn s02_s07_s11_cancelled_tool_round_rejects_missing_denial_resolution() {
+fn cancelled_tool_round_rejects_missing_denial_resolution() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -2670,11 +2666,11 @@ fn s02_s07_s11_cancelled_tool_round_rejects_missing_denial_resolution() {
     );
 }
 
-/// S02 / S07 / S11: an approving user
+/// an approving user
 /// resolution cannot back a cancelled terminal tool round's `ToolDenied`
 /// result entry; the round fails closed.
 #[test]
-fn s02_s07_s11_cancelled_tool_round_rejects_approving_resolution() {
+fn cancelled_tool_round_rejects_approving_resolution() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -2809,11 +2805,11 @@ fn s02_s07_s11_cancelled_tool_round_rejects_approving_resolution() {
     );
 }
 
-/// S02 / S03 / S11: scheduling
+/// scheduling
 /// reconstitution accepts the exact terminal shape written when a
 /// crash-lost tool round closes the turn as failed.
 #[test]
-fn s02_s03_s11_failed_tool_round_reconstitutes() {
+fn failed_tool_round_reconstitutes() {
     let session = current_session();
     let failed = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -2994,11 +2990,11 @@ fn s02_s03_s11_failed_tool_round_reconstitutes() {
     );
 }
 
-/// S02 / S11: complete scheduling reconstitution admits every
+/// complete scheduling reconstitution admits every
 /// reference-only tool entry while retaining completed-call provenance
 /// for assistant tool use from an earlier intra-turn round.
 #[test]
-fn s02_s11_scheduling_reconstitutes_tool_round_history() {
+fn scheduling_reconstitutes_tool_round_history() {
     let session = current_session();
     let active = accepted_origin(1);
     let producing_call = model_call_id(90);
@@ -3094,12 +3090,12 @@ fn s02_s11_scheduling_reconstitutes_tool_round_history() {
     ));
 }
 
-/// S02 / S08 / S09: scheduling
+/// scheduling
 /// reconstitution admits consumed steering only when its semantic subject,
 /// accepted lifecycle, source turn, call frontier, and acceptance order
 /// agree exactly.
 #[test]
-fn s02_s08_s09_reconstitution_validates_steering_subjects() {
+fn reconstitution_validates_steering_subjects() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3237,13 +3233,13 @@ fn s02_s08_s09_reconstitution_validates_steering_subjects() {
     );
 }
 
-/// S02 / S08 / S10: scheduling reconstitution admits
+/// scheduling reconstitution admits
 /// the durable shape the continuation transaction commits — a running
 /// continuation attempt owning a prepared steering-consuming call whose
 /// frontier is the round's exact result projection plus the consumed
 /// suffix.
 #[test]
-fn s02_s08_s10_steering_consumed_at_continuation_reconstitutes() {
+fn steering_consumed_at_continuation_reconstitutes() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3253,11 +3249,11 @@ fn s02_s08_s10_steering_consumed_at_continuation_reconstitutes() {
         .expect("continuation-consumed steering reconstructs");
 }
 
-/// S02 / S08: a running attempt owning a prepared
+/// a running attempt owning a prepared
 /// steering-consuming call is legal only with the round's result
 /// evidence.
 #[test]
-fn s02_s08_continuation_pair_requires_round_evidence() {
+fn continuation_pair_requires_round_evidence() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3272,10 +3268,10 @@ fn s02_s08_continuation_pair_requires_round_evidence() {
     );
 }
 
-/// S02 / S08: continuation-round evidence must name a
+/// continuation-round evidence must name a
 /// steering-consuming call.
 #[test]
-fn s02_s08_round_evidence_requires_a_consuming_call() {
+fn round_evidence_requires_a_consuming_call() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3300,10 +3296,10 @@ fn s02_s08_round_evidence_requires_a_consuming_call() {
     );
 }
 
-/// S02 / S08: continuation-round evidence names each
+/// continuation-round evidence names each
 /// consuming call at most once.
 #[test]
-fn s02_s08_round_evidence_names_each_consumer_once() {
+fn round_evidence_names_each_consumer_once() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3321,10 +3317,10 @@ fn s02_s08_round_evidence_names_each_consumer_once() {
     );
 }
 
-/// S02 / S08: the consumed steering entries must be
+/// the consumed steering entries must be
 /// the exact trailing suffix after the round's result window.
 #[test]
-fn s02_s08_consumed_steering_is_the_continuation_trailing_suffix() {
+fn consumed_steering_is_the_continuation_trailing_suffix() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3347,10 +3343,10 @@ fn s02_s08_consumed_steering_is_the_continuation_trailing_suffix() {
     );
 }
 
-/// S02 / S08 / S10: each result entry in the
+/// each result entry in the
 /// continuation window must correlate to its proposal-ordered request.
 #[test]
-fn s02_s08_s10_continuation_results_correlate_to_proposal_order() {
+fn continuation_results_correlate_to_proposal_order() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3376,11 +3372,11 @@ fn s02_s08_s10_continuation_results_correlate_to_proposal_order() {
     );
 }
 
-/// S02 / S08 / S10: the round's tools were issued by
+/// the round's tools were issued by
 /// the same continuation attempt that owns the consuming call; evidence
 /// issued by a foreign attempt fails closed.
 #[test]
-fn s02_s08_s10_continuation_results_bind_to_the_consuming_attempt() {
+fn continuation_results_bind_to_the_consuming_attempt() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3406,10 +3402,10 @@ fn s02_s08_s10_continuation_results_bind_to_the_consuming_attempt() {
     );
 }
 
-/// S02 / S08 / S10: a continuation window forbids
+/// a continuation window forbids
 /// turn-end closures, which exist only in terminal materialization.
 #[test]
-fn s02_s08_s10_continuation_window_forbids_turn_end_closures() {
+fn continuation_window_forbids_turn_end_closures() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3436,10 +3432,10 @@ fn s02_s08_s10_continuation_window_forbids_turn_end_closures() {
     );
 }
 
-/// S02 / S08 / S10: an ambiguous attempt end is a
+/// an ambiguous attempt end is a
 /// turn-level failure and never reaches a continuation window.
 #[test]
-fn s02_s08_s10_continuation_window_rejects_an_ambiguous_attempt_end() {
+fn continuation_window_rejects_an_ambiguous_attempt_end() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3466,10 +3462,10 @@ fn s02_s08_s10_continuation_window_rejects_an_ambiguous_attempt_end() {
     );
 }
 
-/// S02 / S08 / S10: a crash-lost attempt end is a
+/// a crash-lost attempt end is a
 /// turn-level failure and never reaches a continuation window.
 #[test]
-fn s02_s08_s10_continuation_window_rejects_a_crash_lost_attempt_end() {
+fn continuation_window_rejects_a_crash_lost_attempt_end() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3498,11 +3494,11 @@ fn s02_s08_s10_continuation_window_rejects_a_crash_lost_attempt_end() {
     );
 }
 
-/// S02 / S08: only a tool proposal keeps a completed
+/// only a tool proposal keeps a completed
 /// consumer's turn going, so a text-only completed consumer inside an
 /// active turn cannot claim the historical-consumer correlation.
 #[test]
-fn s02_s08_text_only_completed_consumer_fails_closed() {
+fn text_only_completed_consumer_fails_closed() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3536,13 +3532,13 @@ fn s02_s08_text_only_completed_consumer_fails_closed() {
     );
 }
 
-/// S02 / S08 / S10: a steering-consuming call that
+/// a steering-consuming call that
 /// completed by proposing a tool round stays reconstitutable while the
 /// round is parked awaiting approval — the consumer is correlated through
 /// its assistant history and exact frontier window, not the current
 /// phase's attempt.
 #[test]
-fn s02_s08_s10_parked_tool_round_retains_consumed_steering() {
+fn parked_tool_round_retains_consumed_steering() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -3737,11 +3733,11 @@ fn failed_continuation_call_input(
     )
 }
 
-/// S02 / S10 / S11: a failed terminal turn naming its round-two
+/// a failed terminal turn naming its round-two
 /// continuation call reconstitutes when that call's whole frontier is the
 /// completed round's result projection the terminal marker extends.
 #[test]
-fn s02_s10_s11_failed_continuation_call_reconstitutes() {
+fn failed_continuation_call_reconstitutes() {
     let session = current_session();
     let failed = accepted_origin(1);
     failed_continuation_call_input(&session, failed)
@@ -3749,10 +3745,10 @@ fn s02_s10_s11_failed_continuation_call_reconstitutes() {
         .expect("the failed continuation-call terminal shape reconstructs");
 }
 
-/// S02 / S10 / S11: a failed terminal turn naming a
+/// a failed terminal turn naming a
 /// continuation call is accepted only with its round's result evidence.
 #[test]
-fn s02_s10_s11_failed_continuation_call_requires_round_evidence() {
+fn failed_continuation_call_requires_round_evidence() {
     let session = current_session();
     let failed = accepted_origin(1);
     let mut missing_evidence = failed_continuation_call_input(&session, failed);
@@ -3772,10 +3768,10 @@ fn s02_s10_s11_failed_continuation_call_requires_round_evidence() {
     );
 }
 
-/// S02 / S10 / S11: a named continuation call's round
+/// a named continuation call's round
 /// completed, so its window forbids turn-end closures.
 #[test]
-fn s02_s10_s11_failed_continuation_call_window_forbids_turn_end_closures() {
+fn failed_continuation_call_window_forbids_turn_end_closures() {
     let session = current_session();
     let failed = accepted_origin(1);
     let mut closed_request = failed_continuation_call_input(&session, failed);
@@ -3967,13 +3963,13 @@ fn cancelled_continuation_call_input(
     )
 }
 
-/// S02 / S07 / S10: a cancelled terminal turn naming
+/// a cancelled terminal turn naming
 /// its unsent round-two continuation call reconstitutes when provider
 /// compaction precedes the tool proposal and that call's whole frontier is
 /// the completed round's result projection the cancellation marker
 /// extends.
 #[test]
-fn s02_s07_s10_cancelled_continuation_call_reconstitutes() {
+fn cancelled_continuation_call_reconstitutes() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -3982,10 +3978,10 @@ fn s02_s07_s10_cancelled_continuation_call_reconstitutes() {
         .expect("the cancelled continuation-call terminal shape reconstructs");
 }
 
-/// S02 / S07 / S10: a cancelled terminal turn naming
+/// a cancelled terminal turn naming
 /// a continuation call is accepted only with its round's result evidence.
 #[test]
-fn s02_s07_s10_cancelled_continuation_call_requires_round_evidence() {
+fn cancelled_continuation_call_requires_round_evidence() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -4108,12 +4104,12 @@ fn refused_continuation_call_input(
     )])
 }
 
-/// S02 / S10: a refused terminal turn naming its round-two
+/// a refused terminal turn naming its round-two
 /// continuation call reconstitutes when that call's whole frontier is the
 /// completed round's result projection the equal-content terminal
 /// frontier repeats.
 #[test]
-fn s02_s10_refused_continuation_call_reconstitutes() {
+fn refused_continuation_call_reconstitutes() {
     let session = current_session();
     let refused = accepted_origin(1);
     refused_continuation_call_input(&session, refused)
@@ -4121,10 +4117,10 @@ fn s02_s10_refused_continuation_call_reconstitutes() {
         .expect("the refused continuation-call terminal shape reconstructs");
 }
 
-/// S02 / S10: a refused terminal turn naming a continuation
+/// a refused terminal turn naming a continuation
 /// call is accepted only with its round's result evidence.
 #[test]
-fn s02_s10_refused_continuation_call_requires_round_evidence() {
+fn refused_continuation_call_requires_round_evidence() {
     let session = current_session();
     let refused = accepted_origin(1);
     let mut missing_evidence = refused_continuation_call_input(&session, refused);
@@ -4137,10 +4133,10 @@ fn s02_s10_refused_continuation_call_requires_round_evidence() {
     );
 }
 
-/// S02 / S10: a named refused continuation call's round
+/// a named refused continuation call's round
 /// completed, so its window forbids turn-end closures.
 #[test]
-fn s02_s10_refused_continuation_call_window_forbids_turn_end_closures() {
+fn refused_continuation_call_window_forbids_turn_end_closures() {
     let session = current_session();
     let refused = accepted_origin(1);
     let mut closed_request = refused_continuation_call_input(&session, refused);
@@ -4164,10 +4160,10 @@ fn s02_s10_refused_continuation_call_window_forbids_turn_end_closures() {
     );
 }
 
-/// S02 / S10: gate-named continuation-round evidence names each
+/// gate-named continuation-round evidence names each
 /// call at most once.
 #[test]
-fn s02_s10_continuation_round_evidence_names_each_call_once() {
+fn continuation_round_evidence_names_each_call_once() {
     let session = current_session();
     let refused = accepted_origin(1);
     let mut duplicate_evidence = refused_continuation_call_input(&session, refused);
@@ -4181,10 +4177,10 @@ fn s02_s10_continuation_round_evidence_names_each_call_once() {
     );
 }
 
-/// S02 / S10: gate-named continuation-round evidence must name
+/// gate-named continuation-round evidence must name
 /// a call a terminal or recovery gate proves against it.
 #[test]
-fn s02_s10_continuation_round_evidence_requires_a_naming_gate() {
+fn continuation_round_evidence_requires_a_naming_gate() {
     let session = current_session();
     let refused = accepted_origin(1);
     let mut dangling_evidence = refused_continuation_call_input(&session, refused);
@@ -4337,12 +4333,12 @@ fn reconciliation_required_continuation_call_input(
     )])
 }
 
-/// S04 / S07: a reconciliation-required terminal turn
+/// a reconciliation-required terminal turn
 /// naming its interrupted round-two continuation call reconstitutes when
 /// that call's whole frontier is the completed round's result projection
 /// the equal-content terminal frontier repeats.
 #[test]
-fn s04_s07_reconciliation_required_continuation_call_reconstitutes() {
+fn reconciliation_required_continuation_call_reconstitutes() {
     let session = current_session();
     let reconciled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -4351,11 +4347,11 @@ fn s04_s07_reconciliation_required_continuation_call_reconstitutes() {
         .expect("the reconciliation-required continuation-call terminal shape reconstructs");
 }
 
-/// S04 / S07: a reconciliation-required terminal turn
+/// a reconciliation-required terminal turn
 /// naming a continuation call is accepted only with its round's result
 /// evidence.
 #[test]
-fn s04_s07_reconciliation_required_continuation_call_requires_round_evidence() {
+fn reconciliation_required_continuation_call_requires_round_evidence() {
     let session = current_session();
     let reconciled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -4471,12 +4467,12 @@ fn recovery_wait_continuation_call_input(
     )])
 }
 
-/// S04: an active turn parked on the ambiguous
+/// an active turn parked on the ambiguous
 /// round-two continuation call of a completed tool round reconstitutes
 /// the exact recovery wait when that call's whole frontier is the
 /// completed round's result projection.
 #[test]
-fn s04_recovery_wait_continuation_call_reconstitutes() {
+fn recovery_wait_continuation_call_reconstitutes() {
     let session = current_session();
     let active = accepted_origin(1);
     let projection = recovery_wait_continuation_call_input(&session, active)
@@ -4496,10 +4492,10 @@ fn s04_recovery_wait_continuation_call_reconstitutes() {
     ));
 }
 
-/// S04: a recovery wait naming a continuation call is
+/// a recovery wait naming a continuation call is
 /// accepted only with its round's result evidence.
 #[test]
-fn s04_recovery_wait_continuation_call_requires_round_evidence() {
+fn recovery_wait_continuation_call_requires_round_evidence() {
     let session = current_session();
     let active = accepted_origin(1);
     let mut missing_evidence = recovery_wait_continuation_call_input(&session, active);
@@ -4512,7 +4508,7 @@ fn s04_recovery_wait_continuation_call_requires_round_evidence() {
     );
 }
 
-/// S03 / S08: an active scheduling projection
+/// an active scheduling projection
 /// requires the exact session-scoped interval anchored at its origin; a
 /// missing, cross-session, or cross-wired interval fails closed.
 #[test]
@@ -4573,7 +4569,7 @@ fn active_reconstitution_requires_exact_session_acceptance_tail_identity() {
             │ tail anchor cross-wired  │ AcceptanceTailAnchorMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe), expected: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe), actual: AcceptedInputId(00000000-0000-0000-0000-000000000063) } │
             └──────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "active tail omitted",
                 failure: format!("{missing:?}"),
@@ -4589,7 +4585,7 @@ fn active_reconstitution_requires_exact_session_acceptance_tail_identity() {
         ]));
 }
 
-/// S03 / S08: every position from the active origin through
+/// every position from the active origin through
 /// the observed session tail is present exactly once and every
 /// pending-steering disposition remains bound to that active turn.
 #[test]
@@ -4724,7 +4720,7 @@ fn active_reconstitution_rejects_gapped_or_misbound_acceptance_tail() {
             │ origin position cross-wired        │ AcceptanceTailDispositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd) }                                                                  │
             └────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "interior position omitted",
                 failure: format!("{gapped:?}"),
@@ -4740,11 +4736,11 @@ fn active_reconstitution_rejects_gapped_or_misbound_acceptance_tail() {
         ]));
 }
 
-/// S03: a newly active queued origin retains later acceptance
+/// a newly active queued origin retains later acceptance
 /// positions already consumed by its terminal predecessor, while only its
 /// own consumed steering reaches the active execution aggregate.
 #[test]
-fn s03_active_tail_retains_predecessor_consumed_steering() {
+fn active_tail_retains_predecessor_consumed_steering() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let active = accepted_origin(2);
@@ -4889,11 +4885,11 @@ fn s03_active_tail_retains_predecessor_consumed_steering() {
     );
 }
 
-/// S03: later-accepted interrupt work executes before the
+/// later-accepted interrupt work executes before the
 /// ordinary origin it displaced, so steering consumed by that interrupt
 /// remains historical rather than becoming active execution input.
 #[test]
-fn s03_active_tail_rejects_unproven_historical_consumed_steering() {
+fn active_tail_rejects_unproven_historical_consumed_steering() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let active = accepted_origin(2);
@@ -4930,7 +4926,7 @@ fn s03_active_tail_rejects_unproven_historical_consumed_steering() {
     );
 }
 
-/// S03 / S09: a scheduler-gap start remains
+/// a scheduler-gap start remains
 /// a valid ordinary origin after an earlier queued turn becomes active.
 #[test]
 fn active_reconstitution_preserves_post_anchor_scheduler_gap_start() {
@@ -4954,7 +4950,7 @@ fn active_reconstitution_preserves_post_anchor_scheduler_gap_start() {
     .expect("the later origin was accepted during a valid scheduler gap");
 }
 
-/// S03 / S09: an ordinary queued origin
+/// an ordinary queued origin
 /// retains the historical active target named at acceptance.
 #[test]
 fn active_reconstitution_preserves_post_anchor_historical_target() {
@@ -4979,7 +4975,7 @@ fn active_reconstitution_preserves_post_anchor_historical_target() {
     .expect("the later origin retains its exact previously active target");
 }
 
-/// S03 / S09: after-current delivery must
+/// after-current delivery must
 /// name an earlier nonqueued target in the complete turn inventory.
 #[test]
 fn active_reconstitution_rejects_missing_historical_delivery_target() {
@@ -5010,7 +5006,7 @@ fn active_reconstitution_rejects_missing_historical_delivery_target() {
     );
 }
 
-/// S03 / S07: an interrupt delivery must
+/// an interrupt delivery must
 /// agree with the origin record's durable interrupt-priority relation.
 #[test]
 fn active_reconstitution_rejects_delivery_priority_mismatch() {
@@ -5041,10 +5037,10 @@ fn active_reconstitution_rejects_delivery_priority_mismatch() {
     );
 }
 
-/// S01: origin delivery and queue facts
+/// origin delivery and queue facts
 /// are validated even when no active turn requires an acceptance tail.
 #[test]
-fn s01_queued_reconstitution_rejects_delivery_order_mismatch() {
+fn queued_reconstitution_rejects_delivery_order_mismatch() {
     let session = current_session();
     let queued = accepted_origin(1);
     let no_semantic_entries = Vec::new();
@@ -5078,10 +5074,10 @@ fn s01_queued_reconstitution_rejects_delivery_order_mismatch() {
     );
 }
 
-/// S01: a configured origin's
+/// a configured origin's
 /// accepted defaults version must equal its frozen provenance version.
 #[test]
-fn s01_queued_origin_rejects_defaults_version_mismatch() {
+fn queued_origin_rejects_defaults_version_mismatch() {
     let session = current_session();
     let queued = accepted_origin(1);
     let mismatched_version = SessionConfigurationDefaultsVersion::try_from_u64(2)
@@ -5120,10 +5116,10 @@ fn s01_queued_origin_rejects_defaults_version_mismatch() {
     );
 }
 
-/// S01: an explicit accepted
+/// an explicit accepted
 /// model request must equal the request retained by frozen provenance.
 #[test]
-fn s01_queued_origin_rejects_explicit_request_mismatch() {
+fn queued_origin_rejects_explicit_request_mismatch() {
     let session = current_session();
     let queued = accepted_origin(1);
     let requested = ModelSelectionRequest::Direct(direct(99));
@@ -5161,7 +5157,7 @@ fn s01_queued_origin_rejects_explicit_request_mismatch() {
     );
 }
 
-/// S03: the tail repeats the exact
+/// the tail repeats the exact
 /// immutable versioned delivery stored for its origin rather than
 /// supplying an independently plausible configuration choice.
 #[test]
@@ -5191,7 +5187,7 @@ fn active_reconstitution_rejects_origin_delivery_configuration_mismatch() {
     );
 }
 
-/// S03 / S07: an accepted interrupt
+/// an accepted interrupt
 /// against the current owner prevents evidence-free phase reconstruction.
 #[test]
 fn active_reconstitution_rejects_interrupt_evidence_for_evidence_free_phase() {
@@ -5233,10 +5229,10 @@ fn active_reconstitution_rejects_interrupt_evidence_for_evidence_free_phase() {
     );
 }
 
-/// S03 / S07: a historical interrupt in the active
+/// a historical interrupt in the active
 /// acceptance tail retains the target terminal's exact stop proof.
 #[test]
-fn s03_s07_historical_interrupt_requires_target_stop_proof() {
+fn historical_interrupt_requires_target_stop_proof() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let active = accepted_origin(2);
@@ -5265,7 +5261,7 @@ fn s03_s07_historical_interrupt_requires_target_stop_proof() {
     );
 }
 
-/// S03 / S08: one accepted input cannot
+/// one accepted input cannot
 /// be both pending steering and a turn origin in the scheduling inventory.
 #[test]
 fn active_reconstitution_rejects_pending_identity_that_is_also_an_origin() {
@@ -5308,11 +5304,11 @@ fn active_reconstitution_rejects_pending_identity_that_is_also_an_origin() {
     );
 }
 
-/// S02 / S08: a prepared call consumes the complete
+/// a prepared call consumes the complete
 /// pending prefix; durable history cannot claim that it skipped an earlier
 /// pending input and consumed a later one.
 #[test]
-fn s02_s08_active_tail_rejects_consumed_after_pending() {
+fn active_tail_rejects_consumed_after_pending() {
     let session = current_session();
     let active = accepted_origin(1);
     let pending = accepted_origin(2);
@@ -5359,7 +5355,7 @@ fn s02_s08_active_tail_rejects_consumed_after_pending() {
     );
 }
 
-/// S03 / S08: a pending tail entry cannot
+/// a pending tail entry cannot
 /// replace a different origin that owns the same acceptance position.
 #[test]
 fn active_reconstitution_rejects_pending_position_owned_by_an_origin() {
@@ -5399,7 +5395,7 @@ fn active_reconstitution_rejects_pending_position_owned_by_an_origin() {
     );
 }
 
-/// S03: the last represented position must equal
+/// the last represented position must equal
 /// the authoritative session tail observed by the same read.
 #[test]
 fn active_reconstitution_rejects_incomplete_claimed_acceptance_tail() {
@@ -5420,10 +5416,10 @@ fn active_reconstitution_rejects_incomplete_claimed_acceptance_tail() {
     );
 }
 
-/// S03: the claimed session observation
+/// the claimed session observation
 /// cannot end before a later origin supplied by the same scheduling read.
 #[test]
-fn s03_active_tail_reaches_every_known_origin() {
+fn active_tail_reaches_every_known_origin() {
     let session = current_session();
     let origins = PostAnchorOrigins {
         active: accepted_origin(1),
@@ -5458,10 +5454,10 @@ fn s03_active_tail_reaches_every_known_origin() {
     );
 }
 
-/// S03: a current attempt owned by another turn cannot
+/// a current attempt owned by another turn cannot
 /// reconstruct an active aggregate.
 #[test]
-fn s03_active_reconstitution_rejects_cross_wired_attempt_owner() {
+fn active_reconstitution_rejects_cross_wired_attempt_owner() {
     let session = current_session();
     let active = accepted_origin(1);
     let other_turn = turn_id(99);
@@ -5480,10 +5476,10 @@ fn s03_active_reconstitution_rejects_cross_wired_attempt_owner() {
     );
 }
 
-/// S03: eligibility derives the target from complete durable
+/// eligibility derives the target from complete durable
 /// order and cannot be directed to skip earlier queued work.
 #[test]
-fn s03_eligibility_consumes_the_earliest_queued_origin() {
+fn eligibility_consumes_the_earliest_queued_origin() {
     let session = current_session();
     let later = accepted_origin(2);
     let earlier = accepted_origin(1);
@@ -5512,12 +5508,12 @@ fn s03_eligibility_consumes_the_earliest_queued_origin() {
     );
 }
 
-/// S09: the earliest queued successor starts only
+/// the earliest queued successor starts only
 /// after the exact immediately preceding failed turn and retains its
 /// complete origin-then-failure terminal prefix before appending its own
 /// origin.
 #[test]
-fn s09_successor_uses_exact_failed_predecessor_terminal_frontier() {
+fn successor_uses_exact_failed_predecessor_terminal_frontier() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -5581,11 +5577,11 @@ fn s09_successor_uses_exact_failed_predecessor_terminal_frontier() {
     );
 }
 
-/// S33: an actual frozen direct-model transition
+/// an actual frozen direct-model transition
 /// inserts exactly one typed identity boundary between the predecessor
 /// terminal frontier and the successor origin.
 #[test]
-fn s33_model_transition_extends_frontier_before_origin() {
+fn model_transition_extends_frontier_before_origin() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -5755,11 +5751,11 @@ fn legacy_start_grandfathers_its_historical_frontier() {
         .expect("the durable legacy bit retains the historical marker-free frontier");
 }
 
-/// S08 / S09: terminally reclassified
+/// terminally reclassified
 /// steering becomes ordinary queued work at its original position and
 /// inherits the source turn's canonical configuration.
 #[test]
-fn s08_s09_reclassified_steering_becomes_eligible_work() {
+fn reclassified_steering_becomes_eligible_work() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -5948,11 +5944,11 @@ fn assert_failed_terminal_call_provenance_is_complete(
     );
 }
 
-/// S02 / S03: failed-terminal reconstitution
+/// failed-terminal reconstitution
 /// preserves all three accepted execution shapes and any steering already
 /// committed in an ended call's source frontier.
 #[test]
-fn s02_s03_failed_terminal_execution_provenance_is_complete() {
+fn failed_terminal_execution_provenance_is_complete() {
     let session = current_session();
     let failed = accepted_origin(1);
     let attempt = turn_attempt_id(60);
@@ -5994,11 +5990,11 @@ fn s02_s03_failed_terminal_execution_provenance_is_complete() {
     );
 }
 
-/// S02 / S07: a proof-bearing known-failure attempt
+/// a proof-bearing known-failure attempt
 /// can only correlate a physically known-failed call. Confirmed physical
 /// cancellation remains the cancelled terminal outcome.
 #[test]
-fn s02_s07_stopped_failure_rejects_cancelled_call() {
+fn stopped_failure_rejects_cancelled_call() {
     let session = current_session();
     let failed = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -6071,10 +6067,10 @@ fn s02_s07_stopped_failure_rejects_cancelled_call() {
     );
 }
 
-/// S02 / S03: failed-terminal attempt provenance fails closed
+/// failed-terminal attempt provenance fails closed
 /// when either ownership or the allowed terminal end is contradicted.
 #[test]
-fn s02_s03_failed_terminal_attempt_provenance_fails_closed() {
+fn failed_terminal_attempt_provenance_fails_closed() {
     let session = current_session();
     let failed = accepted_origin(1);
     let attempt = turn_attempt_id(60);
@@ -6156,11 +6152,11 @@ fn s02_s03_failed_terminal_attempt_provenance_fails_closed() {
     );
 }
 
-/// S02: a failed terminal call must match the ended
+/// a failed terminal call must match the ended
 /// attempt and the turn's selection, target, starting frontier, and
 /// KnownFailed-or-Cancelled physical disposition.
 #[test]
-fn s02_failed_terminal_call_provenance_fails_closed() {
+fn failed_terminal_call_provenance_fails_closed() {
     let session = current_session();
     let failed = accepted_origin(1);
     let attempt = turn_attempt_id(60);
@@ -6197,13 +6193,12 @@ fn s02_failed_terminal_call_provenance_fails_closed() {
     );
 }
 
-/// S02 / S04 / S07 / S09 /
 /// a live or startup-recovered completed response validates the
 /// producing call's steering-extended source, stop provenance, and final
 /// marker before the exact terminal frontier becomes the successor's
 /// starting prefix.
 #[test]
-fn s02_s04_s09_completed_frontier_becomes_successor_prefix() {
+fn completed_frontier_becomes_successor_prefix() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -6399,10 +6394,10 @@ fn s02_s04_s09_completed_frontier_becomes_successor_prefix() {
     );
 }
 
-/// S02 / S04: one physical attempt identity cannot
+/// one physical attempt identity cannot
 /// back terminal outcomes for two different turns.
 #[test]
-fn s02_s04_terminal_turns_reject_shared_attempt_identity() {
+fn terminal_turns_reject_shared_attempt_identity() {
     let session = current_session();
     let completed = accepted_origin(1);
     let refused = accepted_origin(2);
@@ -6545,13 +6540,12 @@ fn s02_s04_terminal_turns_reject_shared_attempt_identity() {
     );
 }
 
-/// S02 / S04 / S07 / S09 /
 /// a live or startup-recovered refusal validates the producing
 /// call's steering-extended source and stop provenance, releases the slot,
 /// and preserves its equal-content terminal frontier as the successor's
 /// exact prefix.
 #[test]
-fn s02_s04_s09_refused_frontier_becomes_successor_prefix() {
+fn refused_frontier_becomes_successor_prefix() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -6704,10 +6698,10 @@ fn s02_s04_s09_refused_frontier_becomes_successor_prefix() {
     );
 }
 
-/// S02: assistant text cannot name a refused call because only
+/// assistant text cannot name a refused call because only
 /// completed physical calls can produce semantic assistant content.
 #[test]
-fn s02_refused_call_rejects_assistant_content() {
+fn refused_call_rejects_assistant_content() {
     let session = current_session();
     let origin = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -6853,10 +6847,10 @@ fn refused_compaction_suffix_reconstitutes_exact_terminal_frontier() {
     .expect("a refusal reload accepts its exact provider-compaction suffix");
 }
 
-/// S02: a terminal refusal must be backed by the
+/// a terminal refusal must be backed by the
 /// stored ended-attempt refusal disposition, not only a matching identity.
 #[test]
-fn s02_refused_turn_rejects_attempt_disposition_mismatch() {
+fn refused_turn_rejects_attempt_disposition_mismatch() {
     let session = current_session();
     let origin = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -6921,11 +6915,11 @@ fn s02_refused_turn_rejects_attempt_disposition_mismatch() {
     );
 }
 
-/// S07: a terminal-cancelled projection
+/// a terminal-cancelled projection
 /// validates the stored attempt end rather than inferring it from the
 /// separately supplied interrupt result.
 #[test]
-fn s07_cancelled_turn_rejects_attempt_end_mismatch() {
+fn cancelled_turn_rejects_attempt_end_mismatch() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -7010,11 +7004,11 @@ fn s07_cancelled_turn_rejects_attempt_end_mismatch() {
     );
 }
 
-/// S07: a cancelled call frontier must
+/// a cancelled call frontier must
 /// preserve the starting frontier rather than substituting unrelated
 /// semantic history before the cancellation marker.
 #[test]
-fn s07_cancelled_turn_rejects_unrelated_call_frontier() {
+fn cancelled_turn_rejects_unrelated_call_frontier() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -7118,10 +7112,10 @@ fn s07_cancelled_turn_rejects_unrelated_call_frontier() {
     );
 }
 
-/// S04: complete ambiguous-call facts reconstruct the
+/// complete ambiguous-call facts reconstruct the
 /// exact recovery wait and preserve the active progressing slot.
 #[test]
-fn s04_ambiguous_call_reconstructs_recovery_wait() {
+fn ambiguous_call_reconstructs_recovery_wait() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -7183,11 +7177,11 @@ fn s04_ambiguous_call_reconstructs_recovery_wait() {
     ));
 }
 
-/// S06 / S07: an opaque wait from
+/// an opaque wait from
 /// a completely validated ambiguous tool batch reconstructs the exact
 /// typed recovery subject and preserves it through interruption.
 #[test]
-fn s06_s07_ambiguous_tool_recovery_and_interrupt() {
+fn interrupting_tool_recovery_preserves_exact_ambiguity() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -7448,10 +7442,10 @@ fn s06_s07_ambiguous_tool_recovery_and_interrupt() {
     );
 }
 
-/// S07: a later interrupt supplies terminal authority
+/// a later interrupt supplies terminal authority
 /// without being rewritten into an already ambiguous attempt end.
 #[test]
-fn s07_tool_reconciliation_retains_without_stop_attempt_end() {
+fn tool_reconciliation_retains_without_stop_attempt_end() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -7477,10 +7471,10 @@ fn s07_tool_reconciliation_retains_without_stop_attempt_end() {
     ));
 }
 
-/// S09: a predecessor snapshot that omits its required failed
+/// a predecessor snapshot that omits its required failed
 /// marker is not a terminal frontier and cannot authorize a successor.
 #[test]
-fn s09_incomplete_failed_terminal_frontier_fails_closed() {
+fn incomplete_failed_terminal_frontier_fails_closed() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -7520,10 +7514,10 @@ fn s09_incomplete_failed_terminal_frontier_fails_closed() {
     );
 }
 
-/// S28: imported ancestry is admitted only together
+/// imported ancestry is admitted only together
 /// with its exact complete independently checked seed projection.
 #[test]
-fn s28_imported_scheduling_requires_exact_seed_projection() {
+fn imported_scheduling_requires_exact_seed_projection() {
     let imported = imported_session();
     let session = imported.session().clone();
     let queued = accepted_origin(1);
@@ -7551,11 +7545,11 @@ fn s28_imported_scheduling_requires_exact_seed_projection() {
     );
 }
 
-/// S03: this closed slice still cannot resolve a first frontier
+/// this closed slice still cannot resolve a first frontier
 /// from native session ancestry, so an otherwise-valid queued projection
 /// for a native ancestral session fails closed.
 #[test]
-fn s03_reconstitution_rejects_ancestral_session() {
+fn reconstitution_rejects_ancestral_session() {
     let ancestral = session_id(1);
     let version = SessionConfigurationDefaultsVersion::first();
     let defaults = SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct(1)));
@@ -7595,11 +7589,11 @@ fn s03_reconstitution_rejects_ancestral_session() {
     );
 }
 
-/// S03: every stored session and turn correlation on one
+/// every stored session and turn correlation on one
 /// scheduling record must repeat the owning identities exactly; each
 /// cross-wired stored identity fails closed with its own failure.
 #[test]
-fn s03_reconstitution_rejects_cross_wired_record_identities() {
+fn reconstitution_rejects_cross_wired_record_identities() {
     let session = current_session();
     let queued = accepted_origin(1);
     let other_session = session_id(2);
@@ -7655,7 +7649,7 @@ fn s03_reconstitution_rejects_cross_wired_record_identities() {
             │ queue record turn cross-wired             │ QueueTurnMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }            │
             └───────────────────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "turn record session cross-wired",
                 failure: format!("{turn_session:?}"),
@@ -7675,10 +7669,10 @@ fn s03_reconstitution_rejects_cross_wired_record_identities() {
         ]));
 }
 
-/// S03: two turn records cannot both claim one
+/// two turn records cannot both claim one
 /// accepted input as their typed durable origin.
 #[test]
-fn s03_reconstitution_rejects_shared_accepted_input_identity() {
+fn reconstitution_rejects_shared_accepted_input_identity() {
     let session = current_session();
     let first = accepted_origin(1);
     let second = accepted_origin(2);
@@ -7701,10 +7695,10 @@ fn s03_reconstitution_rejects_shared_accepted_input_identity() {
     );
 }
 
-/// S03: a delegation-origin turn fact cannot also be represented
+/// a delegation-origin turn fact cannot also be represented
 /// by an accepted-input lifecycle record.
 #[test]
-fn s03_reconstitution_rejects_delegated_accepted_turn_fact() {
+fn reconstitution_rejects_delegated_accepted_turn_fact() {
     let session = current_session();
     let queued = accepted_origin(1);
     let input = queued_input(&session, queued).with_delegated_turn_facts(vec![
@@ -7726,10 +7720,10 @@ fn s03_reconstitution_rejects_delegated_accepted_turn_fact() {
     );
 }
 
-/// S03: complete delegation-origin turn facts cannot duplicate
+/// complete delegation-origin turn facts cannot duplicate
 /// the same stored turn identity.
 #[test]
-fn s03_reconstitution_rejects_duplicate_delegated_turn_fact() {
+fn reconstitution_rejects_duplicate_delegated_turn_fact() {
     let session = current_session();
     let queued = accepted_origin(1);
     let delegated = turn_id(99);
@@ -7749,10 +7743,10 @@ fn s03_reconstitution_rejects_duplicate_delegated_turn_fact() {
     );
 }
 
-/// S18: a delegated model-identity entry must match
+/// a delegated model-identity entry must match
 /// the exact configuration frozen by its stored turn origin.
 #[test]
-fn s18_delegated_model_identity_requires_stored_configuration() {
+fn delegated_model_identity_requires_stored_configuration() {
     let session = current_session();
     let queued = accepted_origin(1);
     let delegated = turn_id(99);
@@ -7787,10 +7781,10 @@ fn s18_delegated_model_identity_requires_stored_configuration() {
     );
 }
 
-/// S18: a delegated terminal semantic entry must match the
+/// a delegated terminal semantic entry must match the
 /// independently stored delegated lifecycle state.
 #[test]
-fn s18_delegated_terminal_entry_requires_stored_lifecycle() {
+fn delegated_terminal_entry_requires_stored_lifecycle() {
     let session = current_session();
     let queued = accepted_origin(1);
     let delegated = turn_id(99);
@@ -7821,10 +7815,10 @@ fn s18_delegated_terminal_entry_requires_stored_lifecycle() {
     );
 }
 
-/// S03: immutable queue facts that cannot form one
+/// immutable queue facts that cannot form one
 /// durable total order fail closed with the exact derivation error.
 #[test]
-fn s03_reconstitution_rejects_underivable_queue_order() {
+fn reconstitution_rejects_underivable_queue_order() {
     let session = current_session();
     let first = accepted_origin(1);
     let second = accepted_origin(2);
@@ -7850,10 +7844,10 @@ fn s03_reconstitution_rejects_underivable_queue_order() {
     );
 }
 
-/// S03: a stored semantic entry must name the scheduling
+/// a stored semantic entry must name the scheduling
 /// session as its source session.
 #[test]
-fn s03_reconstitution_rejects_cross_session_semantic_entry() {
+fn reconstitution_rejects_cross_session_semantic_entry() {
     let session = current_session();
     let active = accepted_origin(1);
     let other_session = session_id(2);
@@ -7877,10 +7871,10 @@ fn s03_reconstitution_rejects_cross_session_semantic_entry() {
     );
 }
 
-/// S03: the same source-qualified semantic entry cannot appear
+/// the same source-qualified semantic entry cannot appear
 /// twice in the complete entry collection.
 #[test]
-fn s03_reconstitution_rejects_duplicate_semantic_entry() {
+fn reconstitution_rejects_duplicate_semantic_entry() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
@@ -7899,10 +7893,10 @@ fn s03_reconstitution_rejects_duplicate_semantic_entry() {
     );
 }
 
-/// S03: a failed marker naming a turn absent from the complete
+/// a failed marker naming a turn absent from the complete
 /// scheduling inventory fails closed.
 #[test]
-fn s03_reconstitution_rejects_semantic_entry_without_subject() {
+fn reconstitution_rejects_semantic_entry_without_subject() {
     let session = current_session();
     let queued = accepted_origin(1);
     let unknown_turn = turn_id(99);
@@ -7926,10 +7920,10 @@ fn s03_reconstitution_rejects_semantic_entry_without_subject() {
     );
 }
 
-/// S03: an origin entry for a turn whose stored lifecycle is
+/// an origin entry for a turn whose stored lifecycle is
 /// still queued contradicts that turn's state and fails closed.
 #[test]
-fn s03_reconstitution_rejects_origin_entry_for_queued_turn() {
+fn reconstitution_rejects_origin_entry_for_queued_turn() {
     let session = current_session();
     let queued = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -7948,10 +7942,10 @@ fn s03_reconstitution_rejects_origin_entry_for_queued_turn() {
     );
 }
 
-/// S03: one started turn owns exactly one origin entry; a
+/// one started turn owns exactly one origin entry; a
 /// second origin entry naming the same accepted input fails closed.
 #[test]
-fn s03_reconstitution_rejects_second_origin_entry_for_one_turn() {
+fn reconstitution_rejects_second_origin_entry_for_one_turn() {
     let session = current_session();
     let active = accepted_origin(1);
     let second_origin_entry = semantic_entry(31);
@@ -7970,10 +7964,10 @@ fn s03_reconstitution_rejects_second_origin_entry_for_one_turn() {
     );
 }
 
-/// S03: a started turn requires its exact origin entry; an
+/// a started turn requires its exact origin entry; an
 /// absent origin fails closed instead of deriving a start without one.
 #[test]
-fn s03_reconstitution_rejects_started_turn_without_origin_entry() {
+fn reconstitution_rejects_started_turn_without_origin_entry() {
     let session = current_session();
     let active = accepted_origin(1);
     let mut facts = ActiveReconstitutionFacts::matching(&session, active);
@@ -7993,11 +7987,11 @@ fn s03_reconstitution_rejects_started_turn_without_origin_entry() {
     );
 }
 
-/// S09: a failed turn requires its exact failed
+/// a failed turn requires its exact failed
 /// marker; an absent marker fails closed instead of accepting the
 /// stored terminal frontier on faith.
 #[test]
-fn s09_reconstitution_rejects_failed_turn_without_failure_marker() {
+fn reconstitution_rejects_failed_turn_without_failure_marker() {
     let session = current_session();
     let failed = accepted_origin(1);
     let origin_entry = FailedTerminalReconstitutionFacts::matching_origin_entry();
@@ -8022,10 +8016,10 @@ fn s09_reconstitution_rejects_failed_turn_without_failure_marker() {
     );
 }
 
-/// S03: a supplied acceptance tail requires an active turn; a
+/// a supplied acceptance tail requires an active turn; a
 /// tail alongside a queued-only projection fails closed.
 #[test]
-fn s03_reconstitution_rejects_tail_without_active_turn() {
+fn reconstitution_rejects_tail_without_active_turn() {
     let session = current_session();
     let queued = accepted_origin(1);
     let mut input = queued_input(&session, queued);
@@ -8039,7 +8033,7 @@ fn s03_reconstitution_rejects_tail_without_active_turn() {
     );
 }
 
-/// S03 / S08: every tail entry belongs to the
+/// every tail entry belongs to the
 /// scheduling session and appears exactly once; a cross-session entry or
 /// a repeated accepted-input identity fails closed.
 #[test]
@@ -8101,7 +8095,7 @@ fn active_reconstitution_rejects_cross_session_or_repeated_tail_entries() {
             │ tail entry identity repeated   │ DuplicateAcceptanceTailEntry { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe) }       │
             └────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "tail entry session cross-wired",
                 failure: format!("{cross_session:?}"),
@@ -8113,11 +8107,11 @@ fn active_reconstitution_rejects_cross_session_or_repeated_tail_entries() {
         ]));
 }
 
-/// S03: every stored snapshot is owned by the
+/// every stored snapshot is owned by the
 /// scheduling session, unique, duplicate-free, and backed by supplied
 /// entries; each malformed snapshot collection fails closed.
 #[test]
-fn s03_reconstitution_rejects_malformed_snapshot_collection() {
+fn reconstitution_rejects_malformed_snapshot_collection() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
@@ -8183,7 +8177,7 @@ fn s03_reconstitution_rejects_malformed_snapshot_collection() {
             │ snapshot entry unsupplied          │ SnapshotEntryMissing { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028), entry: SemanticTranscriptEntryRef { source_session: SessionId(00000000-0000-0000-0000-000000000001), entry: SemanticTranscriptEntryId(00000000-0000-0000-0000-000000000063) } } │
             └────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "snapshot owner cross-wired",
                 failure: format!("{cross_session:?}"),
@@ -8203,7 +8197,7 @@ fn s03_reconstitution_rejects_malformed_snapshot_collection() {
         ]));
 }
 
-/// S03 / S09: a stored start or failed terminal must
+/// a stored start or failed terminal must
 /// name a snapshot present in the complete supplied set; an absent
 /// snapshot fails closed. Together with the frontier-exactness
 /// rejections, this validated precondition backs eligibility's
@@ -8243,7 +8237,7 @@ fn reconstitution_rejects_absent_starting_or_terminal_snapshot() {
             │ stored terminal snapshot absent │ TerminalSnapshotMissing { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) } │
             └─────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "stored starting snapshot absent",
                 failure: format!("{starting:?}"),
@@ -8255,12 +8249,12 @@ fn reconstitution_rejects_absent_starting_or_terminal_snapshot() {
         ]));
 }
 
-/// S03: a supplied snapshot that no stored lifecycle
+/// a supplied snapshot that no stored lifecycle
 /// fact references cannot ride along; the complete collection fails
 /// closed. This is the read-side rejection recorded for orphan committed
 /// snapshot headers.
 #[test]
-fn s03_reconstitution_rejects_unreferenced_snapshot() {
+fn reconstitution_rejects_unreferenced_snapshot() {
     let session = current_session();
     let active = accepted_origin(1);
     let stray_frontier = frontier(90);
@@ -8280,12 +8274,12 @@ fn s03_reconstitution_rejects_unreferenced_snapshot() {
     );
 }
 
-/// S03: durable total order admits only a failed-terminal
+/// durable total order admits only a failed-terminal
 /// prefix, at most one active slot, and a queued suffix; every
 /// out-of-order stored lifecycle fails closed on the first offending
 /// turn.
 #[test]
-fn s03_reconstitution_rejects_out_of_order_lifecycle_states() {
+fn reconstitution_rejects_out_of_order_lifecycle_states() {
     let session = current_session();
     let earlier = accepted_origin(1);
     let later = accepted_origin(2);
@@ -8364,7 +8358,7 @@ fn s03_reconstitution_rejects_out_of_order_lifecycle_states() {
             │ failed terminal after the active slot │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
             └───────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
         "#]]
-        .assert_eq(&table([
+        .assert_eq(&print(&[
             ReconstitutionFailureRow {
                 perturbed_stored_fact: "active slot after queued work",
                 failure: format!("{active_after_queued:?}"),
@@ -8384,11 +8378,11 @@ fn s03_reconstitution_rejects_out_of_order_lifecycle_states() {
         ]));
 }
 
-/// S03: the stored starting lineage must equal the
+/// the stored starting lineage must equal the
 /// lineage derived from durable total order; a first-in-session active
 /// turn cannot claim a predecessor.
 #[test]
-fn s03_reconstitution_rejects_stored_lineage_disagreeing_with_order() {
+fn reconstitution_rejects_stored_lineage_disagreeing_with_order() {
     let session = current_session();
     let active = accepted_origin(1);
     let claimed_lineage = AcceptedInputStartingLineage::After {
@@ -8465,11 +8459,11 @@ fn rendered_frontier_origins_exclude_compacted_input() {
     );
 }
 
-/// S03: the stored starting snapshot must be exactly
+/// the stored starting snapshot must be exactly
 /// the predecessor prefix plus the turn's origin entry; a snapshot
 /// omitting the origin fails closed.
 #[test]
-fn s03_reconstitution_rejects_starting_snapshot_omitting_origin() {
+fn reconstitution_rejects_starting_snapshot_omitting_origin() {
     let session = current_session();
     let active = accepted_origin(1);
     let mut facts = ActiveReconstitutionFacts::matching(&session, active);
@@ -8486,11 +8480,11 @@ fn s03_reconstitution_rejects_starting_snapshot_omitting_origin() {
     );
 }
 
-/// S03: after a completed compaction, the exact compacted
+/// after a completed compaction, the exact compacted
 /// result followed by the next turn's origin is a valid starting
 /// frontier even though the predecessor frontier remains complete.
 #[test]
-fn s03_reconstitution_accepts_exact_compaction_result_then_origin() {
+fn reconstitution_accepts_exact_compaction_result_then_origin() {
     let session = current_session();
     let predecessor_turn = turn_id(1);
     let active_turn = turn_id(2);
@@ -8749,13 +8743,13 @@ fn s03_reconstitution_accepts_exact_compaction_result_then_origin() {
     );
 }
 
-/// S03 / S09: each start owns a distinct snapshot; a
+/// each start owns a distinct snapshot; a
 /// successor start naming its predecessor's already-referenced starting
 /// snapshot fails closed. With the content-exactness rejection, this
 /// backs eligibility's expectation that fresh snapshot identities
 /// preserve the validated prefix.
 #[test]
-fn s09_reconstitution_rejects_starting_frontier_reused_from_predecessor() {
+fn reconstitution_rejects_starting_frontier_reused_from_predecessor() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let active = accepted_origin(2);
@@ -8817,10 +8811,10 @@ fn s09_reconstitution_rejects_starting_frontier_reused_from_predecessor() {
     );
 }
 
-/// S09: an all-terminal projection holds no queued work;
+/// an all-terminal projection holds no queued work;
 /// eligibility rejects instead of manufacturing a candidate.
 #[test]
-fn s09_eligibility_rejects_projection_without_queued_work() {
+fn eligibility_rejects_projection_without_queued_work() {
     let session = current_session();
     let failed = accepted_origin(1);
     let activation = activation(1);
@@ -8834,7 +8828,7 @@ fn s09_eligibility_rejects_projection_without_queued_work() {
     assert_eq!(failure, AcceptedInputEligibilityFailure::NoQueuedTurn);
 }
 
-/// S01 / S09: a proposed origin-entry identity colliding with
+/// a proposed origin-entry identity colliding with
 /// a committed semantic entry fails closed before any candidate is
 /// prepared.
 #[test]
@@ -8864,7 +8858,7 @@ fn eligibility_rejects_committed_origin_entry_identity() {
     );
 }
 
-/// S01 / S09: a proposed starting-snapshot identity
+/// a proposed starting-snapshot identity
 /// colliding with a committed session-scoped snapshot fails closed
 /// before any candidate is prepared.
 #[test]
@@ -8894,10 +8888,10 @@ fn eligibility_rejects_committed_starting_frontier_identity() {
     );
 }
 
-/// S03: a prepared standalone compaction call survives complete
+/// a prepared standalone compaction call survives complete
 /// reconstitution and prevents queued-turn activation until recovery.
 #[test]
-fn s03_prepared_compaction_call_blocks_activation_after_reconstitution() {
+fn prepared_compaction_call_blocks_activation_after_reconstitution() {
     let session = current_session();
     let source = ResolvedContextFrontierReconstitutionInput::new(
         session.id(),
@@ -8937,10 +8931,10 @@ fn s03_prepared_compaction_call_blocks_activation_after_reconstitution() {
     );
 }
 
-/// S03: an authorized standalone compaction call remains
+/// an authorized standalone compaction call remains
 /// recoverable and owns the execution slot after restart reconstitution.
 #[test]
-fn s03_in_flight_compaction_call_blocks_activation_after_reconstitution() {
+fn in_flight_compaction_call_blocks_activation_after_reconstitution() {
     let session = current_session();
     let source = ResolvedContextFrontierReconstitutionInput::new(
         session.id(),
@@ -8980,10 +8974,10 @@ fn s03_in_flight_compaction_call_blocks_activation_after_reconstitution() {
     );
 }
 
-/// S03: a terminal non-completed dedicated call is retained as
+/// a terminal non-completed dedicated call is retained as
 /// historical recovery evidence without requiring a compaction result.
 #[test]
-fn s03_known_failed_compaction_call_is_legal_standalone_evidence() {
+fn known_failed_compaction_call_is_legal_standalone_evidence() {
     let session = current_session();
     let source = ResolvedContextFrontierReconstitutionInput::new(
         session.id(),

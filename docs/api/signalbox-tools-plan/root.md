@@ -55,12 +55,6 @@ pub const MAX_PLAN_HISTORY_EVENTS: usize;
 ```rust
 pub struct PlanEventOrdinal(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> dyn_clone::DynClone for PlanEventOrdinal
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanEventOrdinal {
     pub const MIN: Self;
     pub const fn new(value: nonzero::NonZeroU64) -> Self;
@@ -75,12 +69,6 @@ impl PlanEventOrdinal {
 ```rust
 pub struct PlanEntryId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
-impl<T> dyn_clone::DynClone for PlanEntryId
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanEntryId {
     pub const fn creation_ordinal(self) -> PlanEventOrdinal;
 }
@@ -101,13 +89,6 @@ pub enum PlanStatus {
     Abandoned,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq, de::Deserialize<'de>, ser::Serialize, schemars::JsonSchema
-impl<T> dyn_clone::DynClone for PlanStatus
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> de::DeserializeOwned for PlanStatus where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## PlanText
@@ -115,12 +96,6 @@ impl<T> de::DeserializeOwned for PlanStatus where T: for<'de> de::Deserialize<'d
 ```rust
 pub struct PlanText(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanText
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanText {
     pub fn as_str(&self) -> &str;
 }
@@ -139,12 +114,6 @@ pub enum PlanTextError {
     TooLong { characters: usize },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanTextError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for PlanTextError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -174,12 +143,6 @@ pub enum PlanEventDraft {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanEventDraft
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PlanEventProvenance
@@ -187,18 +150,13 @@ where
 ```rust
 pub struct PlanEventProvenance(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanEventProvenance
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
+impl PlanEventProvenance {
+    pub const fn correlation(self) -> signalbox_domain::ToolAttemptDispatchCorrelation;
 }
 impl PlanEventProvenance {
-    pub const fn correlation(self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-}
-impl PlanEventProvenance {
-    pub const fn from_invocation(correlation: tool_attempt::ToolAttemptDispatchCorrelation)
-        -> Self;
+    pub const fn from_invocation(
+        correlation: signalbox_domain::ToolAttemptDispatchCorrelation,
+    ) -> Self;
     pub const fn session(self) -> signalbox_domain::SessionId;
 }
 ```
@@ -224,12 +182,6 @@ pub enum PlanEventKind {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanEventKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PlanDependencyCycle
@@ -237,12 +189,6 @@ where
 ```rust
 pub struct PlanDependencyCycle {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanDependencyCycle
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanDependencyCycle {
     pub fn path(&self) -> &[PlanEntryId];
 }
@@ -262,12 +208,6 @@ impl PlanDependencyCycle {
 ```rust
 pub struct PlanEvent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanEvent
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanEvent {
     pub const fn kind(&self) -> &PlanEventKind;
 }
@@ -287,12 +227,6 @@ impl PlanEvent {
 ```rust
 pub struct PlanEntry {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanEntry
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanEntry {
     pub const fn text(&self) -> &PlanText;
     pub fn dependencies(&self) -> &[PlanEntryId];
@@ -320,12 +254,6 @@ pub enum PlanReadiness {
     Waiting,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
-impl<T> dyn_clone::DynClone for PlanReadiness
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## FoldedPlan
@@ -333,12 +261,6 @@ where
 ```rust
 pub struct FoldedPlan {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for FoldedPlan
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl FoldedPlan {
     pub fn entries(&self) -> &[PlanEntry];
 }
@@ -358,12 +280,6 @@ pub enum PlanFoldError {
     DependencyLimitExceeded { entry: PlanEntryId },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanFoldError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for PlanFoldError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -383,12 +299,6 @@ pub fn fold_plan_events(events: &[PlanEvent]) -> result::Result<FoldedPlan, Plan
 ```rust
 pub struct PlanAppendRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanAppendRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanAppendRequest {
     pub const fn draft(&self) -> &PlanEventDraft;
 }
@@ -408,12 +318,6 @@ pub enum PlanAppendRejection {
     DependencyLimitReached { entry: PlanEntryId },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanAppendRejection
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PlanAppendOutcome
@@ -424,12 +328,6 @@ pub enum PlanAppendOutcome {
     Rejected(PlanAppendRejection),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanAppendOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## PlanReadRequest
@@ -437,12 +335,6 @@ where
 ```rust
 pub struct PlanReadRequest {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanReadRequest
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanReadRequest {
     pub const fn new(
         session: signalbox_domain::SessionId,
@@ -464,12 +356,6 @@ pub enum PlanPageCompleteness {
     Truncated,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanPageCompleteness
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanPageCompleteness {
     pub const fn is_truncated(self) -> bool;
 }
@@ -480,12 +366,6 @@ impl PlanPageCompleteness {
 ```rust
 pub struct PlanHistoryPage {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanHistoryPage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanHistoryPage {
     pub fn events(&self) -> &[PlanEvent];
 }
@@ -500,12 +380,6 @@ impl PlanHistoryPage {
 ```rust
 pub struct PlanReadPage {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanReadPage
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl PlanReadPage {
     pub fn entries(&self) -> &[PlanEntry];
 }
@@ -526,7 +400,7 @@ impl PlanReadPage {
 
 ```rust
 pub trait SessionPlanPort: marker::Send {
-    type Error: operator_failure::ClassifyOperatorFailure + error::Error + 'static;
+    type Error: signalbox_application::ClassifyOperatorFailure + error::Error + 'static;
     fn append_plan_event(
         &mut self,
         request: PlanAppendRequest,
@@ -551,7 +425,6 @@ pub enum PlanWriteArguments {
     DependsOn { entry_id: u64, dependency_id: u64 },
 }
 // derives: fmt::Debug, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for PlanWriteArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## PlanReadArguments
@@ -562,7 +435,6 @@ pub struct PlanReadArguments {
     pub include_history: bool,
 }
 // derives: fmt::Debug, default::Default, de::Deserialize<'de>, schemars::JsonSchema
-impl<T> de::DeserializeOwned for PlanReadArguments where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## PlanToolConstructionError
@@ -575,12 +447,6 @@ pub enum PlanToolConstructionError {
     Duplicate,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> dyn_clone::DynClone for PlanToolConstructionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl fmt::Display for PlanToolConstructionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -594,15 +460,14 @@ impl error::Error for PlanToolConstructionError {
 ```rust
 pub struct PlanTools<Port> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for PlanTools<Port>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Port> PlanTools<Port> {
     pub fn try_new(port: Port) -> result::Result<Self, PlanToolConstructionError>;
-    pub fn into_parts(self) -> (tool_loop::CompiledToolCatalog, PlanExecutor<Port>);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_application::CompiledToolCatalog,
+        PlanExecutor<Port>,
+    );
 }
 ```
 
@@ -611,23 +476,17 @@ impl<Port> PlanTools<Port> {
 ```rust
 pub struct PlanExecutor<Port> {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> dyn_clone::DynClone for PlanExecutor<Port>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 impl<Port> PlanExecutor<Port> {
     pub fn into_port(self) -> Port;
 }
-impl<Port: SessionPlanPort> tool_loop::ToolExecutor for PlanExecutor<Port> {
+impl<Port: SessionPlanPort> signalbox_application::ToolExecutor for PlanExecutor<Port> {
     type Error = PlanExecutorError<<Port as SessionPlanPort>::Error>;
     async fn execute(
         &mut self,
-        invocation: tool_loop::ToolExecutionInvocation,
+        invocation: signalbox_application::ToolExecutionInvocation,
     ) -> result::Result<
-        tool_loop::CorrelatedToolExecutorEvidence,
-        <Self as tool_loop::ToolExecutor>::Error,
+        signalbox_application::CorrelatedToolExecutorEvidence,
+        <Self as signalbox_application::ToolExecutor>::Error,
     >;
 }
 ```
@@ -654,9 +513,9 @@ where
 {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl<PortError: operator_failure::ClassifyOperatorFailure> operator_failure::ClassifyOperatorFailure
-    for PlanExecutorError<PortError>
+impl<PortError: signalbox_application::ClassifyOperatorFailure>
+    signalbox_application::ClassifyOperatorFailure for PlanExecutorError<PortError>
 {
-    fn operator_failure_class(&self) -> operator_failure::OperatorFailureClass;
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```

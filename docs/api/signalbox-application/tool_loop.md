@@ -19,7 +19,7 @@ impl ToolInputSchema {
 pub enum ToolInputSchemaFailure {
     NotJson,
     NotObject,
-    OutsideArgumentBound(arguments::ToolArgumentsFailure),
+    OutsideArgumentBound(signalbox_domain::ToolArgumentsFailure),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -43,19 +43,22 @@ pub struct ToolDefinition {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ToolDefinition {
     pub const fn new(
-        name: name::ToolName,
+        name: signalbox_domain::ToolName,
         description: string::String,
         input_schema: ToolInputSchema,
-        permission_default: policy::ToolPermissionDefault,
-        effect_class: policy::ToolEffectClass,
+        permission_default: signalbox_domain::ToolPermissionDefault,
+        effect_class: signalbox_domain::ToolEffectClass,
     ) -> Self;
-    pub const fn name(&self) -> &name::ToolName;
+    pub const fn name(&self) -> &signalbox_domain::ToolName;
     pub fn description(&self) -> &str;
     pub const fn input_schema(&self) -> &ToolInputSchema;
-    pub const fn permission_default(&self) -> policy::ToolPermissionDefault;
-    pub const fn with_approval_posture(self, posture: policy::ToolApprovalPosture) -> Self;
-    pub const fn approval_posture(&self) -> option::Option<policy::ToolApprovalPosture>;
-    pub const fn effect_class(&self) -> policy::ToolEffectClass;
+    pub const fn permission_default(&self) -> signalbox_domain::ToolPermissionDefault;
+    pub const fn with_approval_posture(
+        self,
+        posture: signalbox_domain::ToolApprovalPosture,
+    ) -> Self;
+    pub const fn approval_posture(&self) -> option::Option<signalbox_domain::ToolApprovalPosture>;
+    pub const fn effect_class(&self) -> signalbox_domain::ToolEffectClass;
 }
 ```
 
@@ -65,27 +68,27 @@ impl ToolDefinition {
 pub trait ToolArgumentValidator: marker::Send + marker::Sync {
     fn validate(
         &self,
-        arguments: &arguments::NormalizedToolArguments,
-    ) -> result::Result<(), tool_attempt::ToolExecutionErrorDetail>;
+        arguments: &signalbox_domain::NormalizedToolArguments,
+    ) -> result::Result<(), signalbox_domain::ToolExecutionErrorDetail>;
     fn preauthorization(
         &self,
-        _arguments: &arguments::NormalizedToolArguments,
-    ) -> result::Result<ToolPreauthorization, tool_attempt::ToolExecutionErrorDetail> {
+        _arguments: &signalbox_domain::NormalizedToolArguments,
+    ) -> result::Result<ToolPreauthorization, signalbox_domain::ToolExecutionErrorDetail> {
         /* provided */
     }
 }
 impl<Validate> ToolArgumentValidator for Validate
 where
     Validate: function::Fn(
-            &arguments::NormalizedToolArguments,
-        ) -> result::Result<(), tool_attempt::ToolExecutionErrorDetail>
+            &signalbox_domain::NormalizedToolArguments,
+        ) -> result::Result<(), signalbox_domain::ToolExecutionErrorDetail>
         + marker::Send
         + marker::Sync,
 {
     fn validate(
         &self,
-        arguments: &arguments::NormalizedToolArguments,
-    ) -> result::Result<(), tool_attempt::ToolExecutionErrorDetail>;
+        arguments: &signalbox_domain::NormalizedToolArguments,
+    ) -> result::Result<(), signalbox_domain::ToolExecutionErrorDetail>;
 }
 ```
 
@@ -95,10 +98,10 @@ where
 pub enum ToolPreauthorization {
     Unmetered,
     BlobMetadata {
-        digest: blob::BlobDigest,
+        digest: signalbox_domain::BlobDigest,
     },
     BlobRead {
-        digest: blob::BlobDigest,
+        digest: signalbox_domain::BlobDigest,
         decoded_bytes: nonzero::NonZeroU64,
     },
 }
@@ -126,7 +129,7 @@ impl CompiledTool {
 pub struct DuplicateToolDefinition {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl DuplicateToolDefinition {
-    pub const fn name(&self) -> &name::ToolName;
+    pub const fn name(&self) -> &signalbox_domain::ToolName;
 }
 ```
 
@@ -142,16 +145,16 @@ impl CompiledToolCatalog {
 }
 impl ToolCatalog for CompiledToolCatalog {
     fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
-    fn definition(&self, name: &name::ToolName) -> option::Option<ToolDefinition>;
+    fn definition(&self, name: &signalbox_domain::ToolName) -> option::Option<ToolDefinition>;
     fn validate_arguments(
         &self,
-        name: &name::ToolName,
-        arguments: &arguments::NormalizedToolArguments,
+        name: &signalbox_domain::ToolName,
+        arguments: &signalbox_domain::NormalizedToolArguments,
     ) -> result::Result<(), ToolCatalogValidationFailure>;
     fn preauthorization(
         &self,
-        name: &name::ToolName,
-        arguments: &arguments::NormalizedToolArguments,
+        name: &signalbox_domain::ToolName,
+        arguments: &signalbox_domain::NormalizedToolArguments,
     ) -> result::Result<ToolPreauthorization, ToolCatalogValidationFailure>;
 }
 ```
@@ -161,16 +164,16 @@ impl ToolCatalog for CompiledToolCatalog {
 ```rust
 pub trait ToolCatalog: marker::Send + marker::Sync {
     fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
-    fn definition(&self, name: &name::ToolName) -> option::Option<ToolDefinition>;
+    fn definition(&self, name: &signalbox_domain::ToolName) -> option::Option<ToolDefinition>;
     fn validate_arguments(
         &self,
-        name: &name::ToolName,
-        arguments: &arguments::NormalizedToolArguments,
+        name: &signalbox_domain::ToolName,
+        arguments: &signalbox_domain::NormalizedToolArguments,
     ) -> result::Result<(), ToolCatalogValidationFailure>;
     fn preauthorization(
         &self,
-        _name: &name::ToolName,
-        _arguments: &arguments::NormalizedToolArguments,
+        _name: &signalbox_domain::ToolName,
+        _arguments: &signalbox_domain::NormalizedToolArguments,
     ) -> result::Result<ToolPreauthorization, ToolCatalogValidationFailure> {
         /* provided */
     }
@@ -184,11 +187,11 @@ pub struct NoToolCatalog;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
 impl ToolCatalog for NoToolCatalog {
     fn definitions(&self) -> boxed::Box<[ToolDefinition]>;
-    fn definition(&self, _name: &name::ToolName) -> option::Option<ToolDefinition>;
+    fn definition(&self, _name: &signalbox_domain::ToolName) -> option::Option<ToolDefinition>;
     fn validate_arguments(
         &self,
-        _name: &name::ToolName,
-        _arguments: &arguments::NormalizedToolArguments,
+        _name: &signalbox_domain::ToolName,
+        _arguments: &signalbox_domain::NormalizedToolArguments,
     ) -> result::Result<(), ToolCatalogValidationFailure>;
 }
 ```
@@ -199,7 +202,7 @@ impl ToolCatalog for NoToolCatalog {
 pub enum ToolCatalogValidationFailure {
     UnknownTool,
     InvalidArguments {
-        detail: option::Option<tool_attempt::ToolExecutionErrorDetail>,
+        detail: option::Option<signalbox_domain::ToolExecutionErrorDetail>,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -211,10 +214,10 @@ pub enum ToolCatalogValidationFailure {
 pub struct ToolExecutionInvocation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ToolExecutionInvocation {
-    pub const fn request(&self) -> &request::ToolRequest;
-    pub const fn dispatch_authority(&self) -> &tool_attempt::ToolDispatchAuthority;
+    pub const fn request(&self) -> &signalbox_domain::ToolRequest;
+    pub const fn dispatch_authority(&self) -> &signalbox_domain::ToolDispatchAuthority;
     pub const fn definition(&self) -> &ToolDefinition;
-    pub const fn correlation(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
+    pub const fn correlation(&self) -> signalbox_domain::ToolAttemptDispatchCorrelation;
     pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
     pub fn durable_completion(self) -> CorrelatedDurableToolCompletion;
 }
@@ -226,7 +229,7 @@ impl ToolExecutionInvocation {
 pub enum ToolExecutorEvidence {
     CompletedText(string::String),
     KnownFailed {
-        detail: option::Option<tool_attempt::ToolExecutionErrorDetail>,
+        detail: option::Option<signalbox_domain::ToolExecutionErrorDetail>,
     },
     Ambiguous,
 }
@@ -239,7 +242,7 @@ pub enum ToolExecutorEvidence {
 pub struct CorrelatedToolExecutorEvidence {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CorrelatedToolExecutorEvidence {
-    pub const fn correlation(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
+    pub const fn correlation(&self) -> signalbox_domain::ToolAttemptDispatchCorrelation;
     pub const fn evidence(&self) -> &ToolExecutorEvidence;
 }
 ```
@@ -250,7 +253,7 @@ impl CorrelatedToolExecutorEvidence {
 pub struct CorrelatedDurableToolCompletion {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CorrelatedDurableToolCompletion {
-    pub const fn correlation(self) -> tool_attempt::ToolAttemptDispatchCorrelation;
+    pub const fn correlation(self) -> signalbox_domain::ToolAttemptDispatchCorrelation;
 }
 ```
 
@@ -261,12 +264,12 @@ pub struct CorrelatedDurableChildWait {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CorrelatedDurableChildWait {
     pub fn try_new(
-        correlation: tool_attempt::ToolAttemptDispatchCorrelation,
-        wait: wait::DelegationWait,
+        correlation: signalbox_domain::ToolAttemptDispatchCorrelation,
+        wait: signalbox_domain::DelegationWait,
     ) -> option::Option<Self>;
-    pub const fn correlation(self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-    pub const fn wait(self) -> wait::DelegationWait;
-    pub const fn child_wait(self) -> wait::ChildWait;
+    pub const fn correlation(self) -> signalbox_domain::ToolAttemptDispatchCorrelation;
+    pub const fn wait(self) -> signalbox_domain::DelegationWait;
+    pub const fn child_wait(self) -> signalbox_domain::ChildWait;
 }
 ```
 
@@ -320,8 +323,8 @@ pub trait ToolApprovalIdGenerator {
 pub trait ToolExecutionIdGenerator {
     fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
     fn next_tool_attempt_id(&mut self) -> signalbox_domain::ToolAttemptId;
-    fn next_tool_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_tool_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_tool_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_tool_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
     fn next_tool_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
     fn next_tool_turn_id(&mut self) -> signalbox_domain::TurnId;
 }
@@ -338,8 +341,8 @@ impl ToolApprovalIdGenerator for UuidV7ToolLoopIdGenerator {
 impl ToolExecutionIdGenerator for UuidV7ToolLoopIdGenerator {
     fn next_tool_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
     fn next_tool_attempt_id(&mut self) -> signalbox_domain::ToolAttemptId;
-    fn next_tool_semantic_entry_id(&mut self) -> context_frontier::SemanticTranscriptEntryId;
-    fn next_tool_context_frontier_id(&mut self) -> context_frontier::ContextFrontierId;
+    fn next_tool_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_tool_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
     fn next_tool_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
     fn next_tool_turn_id(&mut self) -> signalbox_domain::TurnId;
 }
@@ -360,9 +363,9 @@ where
 {
     pub async fn execute(
         &mut self,
-        command: decide::DecideToolRequest,
+        command: signalbox_domain::DecideToolRequest,
     ) -> result::Result<
-        decide::PreparedDecideToolRequest,
+        signalbox_domain::PreparedDecideToolRequest,
         <Transaction as DecideToolRequestTransaction>::Error,
     >;
 }
@@ -382,9 +385,9 @@ where
 {
     pub async fn execute(
         &mut self,
-        command: override_denial::OverrideDeniedToolRequest,
+        command: signalbox_domain::OverrideDeniedToolRequest,
     ) -> result::Result<
-        override_denial::PreparedOverrideDeniedToolRequest,
+        signalbox_domain::PreparedOverrideDeniedToolRequest,
         <Transaction as OverrideDeniedToolRequestTransaction>::Error,
     >;
 }
@@ -407,17 +410,17 @@ pub enum ToolExecutionServiceOutcome {
     AwaitingApproval(signalbox_domain::ToolRequestId),
     AwaitingRecovery(signalbox_domain::ToolAttemptId),
     ChildWaitResumed(signalbox_domain::TurnAttemptId),
-    ChildWaitParked(wait::ChildWait),
+    ChildWaitParked(signalbox_domain::ChildWait),
     AttemptCheckpointed(signalbox_domain::ToolAttemptId),
-    PreflightFailed(boxed::Box<tool_attempt::EndedToolAttempt>),
-    ObservationCommitted(boxed::Box<tool_attempt::EndedToolAttempt>),
+    PreflightFailed(boxed::Box<signalbox_domain::EndedToolAttempt>),
+    ObservationCommitted(boxed::Box<signalbox_domain::EndedToolAttempt>),
     ObservationAlreadyCommitted(signalbox_domain::ToolAttemptId),
-    CrashClassified(boxed::Box<tool_attempt::ToolAttemptCrashOutcome>),
+    CrashClassified(boxed::Box<signalbox_domain::ToolAttemptCrashOutcome>),
     ContinuationCheckpointed(signalbox_domain::ModelCallId),
-    ContinuationTargetUnavailable(boxed::Box<model_execution::FailedModelCallTurn>),
-    ContinuationPoolExhausted(boxed::Box<model_execution::CredentialPoolExhaustedModelCallTurn>),
+    ContinuationTargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),
+    ContinuationPoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
     ContinuationContextCompactionRequired(
-        boxed::Box<model_execution::ContextHeadroomExhaustedModelCallTurn>,
+        boxed::Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>,
     ),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq

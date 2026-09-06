@@ -11,18 +11,18 @@ impl ReplaceSessionMetadataRequest {
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
-        replacement: session_metadata::SessionMetadataContent,
+        replacement: signalbox_domain::SessionMetadataContent,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     pub fn try_new_for_tool(
         command_id: signalbox_domain::DurableCommandId,
         session: signalbox_domain::SessionId,
         request: signalbox_domain::ToolRequestId,
-        replacement: session_metadata::SessionMetadataContent,
+        replacement: signalbox_domain::SessionMetadataContent,
     ) -> result::Result<Self, InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub const fn actor(&self) -> actor::Actor;
-    pub const fn replacement(&self) -> &session_metadata::SessionMetadataContent;
+    pub const fn actor(&self) -> signalbox_domain::Actor;
+    pub const fn replacement(&self) -> &signalbox_domain::SessionMetadataContent;
 }
 ```
 
@@ -30,7 +30,7 @@ impl ReplaceSessionMetadataRequest {
 
 ```rust
 pub enum ReplaceSessionMetadataOutcome {
-    Recorded(session_metadata::ReplaceSessionMetadataResult),
+    Recorded(signalbox_domain::ReplaceSessionMetadataResult),
     ConflictingReuse {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -45,7 +45,7 @@ pub trait ReplaceSessionMetadataTransaction {
     type Error;
     fn handle(
         &mut self,
-        command: session_metadata::ReplaceSessionMetadata,
+        command: signalbox_domain::ReplaceSessionMetadata,
     ) -> impl future::Future<
         Output = result::Result<
             ReplaceSessionMetadataOutcome,
@@ -88,7 +88,7 @@ pub trait SessionMetadataReader {
         session: signalbox_domain::SessionId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<session_metadata::SessionMetadataSnapshot>,
+            option::Option<signalbox_domain::SessionMetadataSnapshot>,
             <Self as SessionMetadataReader>::Error,
         >,
     > + marker::Send;
@@ -112,7 +112,7 @@ where
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<
-        option::Option<session_metadata::SessionMetadataSnapshot>,
+        option::Option<signalbox_domain::SessionMetadataSnapshot>,
         <Reader as SessionMetadataReader>::Error,
     >;
 }
@@ -182,19 +182,20 @@ pub struct SessionMetadataListItem {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl SessionMetadataListItem {
     pub fn new(
-        snapshot: &session_metadata::SessionMetadataSnapshot,
-        defaults_version: configuration::SessionConfigurationDefaultsVersion,
-        model_selection: configuration::ModelSelectionRequest,
-        dangerous_tool_auto_approval: policy::DangerousToolAutoApproval,
+        snapshot: &signalbox_domain::SessionMetadataSnapshot,
+        defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+        model_selection: signalbox_domain::ModelSelectionRequest,
+        dangerous_tool_auto_approval: signalbox_domain::DangerousToolAutoApproval,
     ) -> Self;
     pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub const fn defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
-    pub const fn model_selection(&self) -> configuration::ModelSelectionRequest;
-    pub const fn dangerous_tool_auto_approval(&self) -> policy::DangerousToolAutoApproval;
+    pub const fn defaults_version(&self) -> signalbox_domain::SessionConfigurationDefaultsVersion;
+    pub const fn model_selection(&self) -> signalbox_domain::ModelSelectionRequest;
+    pub const fn dangerous_tool_auto_approval(&self)
+        -> signalbox_domain::DangerousToolAutoApproval;
     pub fn title(&self) -> option::Option<&str>;
     pub fn tags(&self) -> impl exact_size::ExactSizeIterator<Item = &str>;
     pub const fn archived(&self) -> bool;
-    pub const fn last_writer(&self) -> option::Option<session_metadata::SessionMetadataLastWriter>;
+    pub const fn last_writer(&self) -> option::Option<signalbox_domain::SessionMetadataLastWriter>;
 }
 ```
 

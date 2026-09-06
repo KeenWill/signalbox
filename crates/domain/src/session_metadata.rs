@@ -1007,7 +1007,7 @@ mod tests {
         assert_eq!(snapshot.last_writer(), None);
     }
 
-    /// S25: archive is metadata on the same durable session identity.
+    /// archive is metadata on the same durable session identity.
     #[test]
     fn recorded_snapshot_preserves_identity_and_archive_state() {
         let session = session_id(1);

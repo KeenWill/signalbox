@@ -1956,6 +1956,43 @@ pub enum WebAttentionStreamEvent {
     },
 }
 
+/// Turn outcomes over a bounded set of listed sessions.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionRates {
+    #[schemars(length(max = 32))]
+    pub sessions: Vec<WebSessionRate>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionRate {
+    pub session_id: WebSessionId,
+    pub lifecycle_state: WebAttentionLifecycleState,
+    pub turn_count: WebU64,
+    pub failed_turn_count: WebU64,
+    pub retired_turn_count: WebU64,
+    pub completed_turn_count: WebU64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure_sequence: Option<WebU64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_provider_cause: Option<WebProviderModelCallFailureCause>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_disposition: Option<WebSessionGoalDisposition>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionGoalDisposition {
+    SessionClosed,
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionCatalogActivity {
@@ -2227,6 +2264,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebAttentionStreamEvent",
             decoder: "decodeWebAttentionStreamEvent",
             schema: attention_event_schema,
+        },
+        ContractSchema {
+            name: "WebSessionRates",
+            decoder: "decodeWebSessionRates",
+            schema: canonical_schema(schemars::schema_for!(WebSessionRates).to_value()),
         },
         ContractSchema {
             name: "WebSessionCatalogSnapshot",
@@ -3875,6 +3917,17 @@ mod tests {
             .expect("generated web-contract artifact is checked in");
 
         assert_eq!(checked_in, artifact.contents);
+    }
+
+    #[test]
+    fn rates_decode_a_session_closed_with_a_live_goal() {
+        let rates: super::WebSessionRates =
+            serde_json::from_str(include_str!("../tests/fixtures/session-closed-rates.json"))
+                .expect("stored session-closed disposition is a valid browser fact");
+        assert_eq!(
+            rates.sessions[0].goal_disposition,
+            Some(super::WebSessionGoalDisposition::SessionClosed)
+        );
     }
 
     #[test]

@@ -7,82 +7,28 @@
 ```rust
 pub struct ReviewWorkflowStore {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewWorkflowStore
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for review_workflow::ReviewWorkflowStore
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_workflow::ReviewWorkflowStore {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowStore {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReviewWorkflowStore
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowStore {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowStore {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReviewWorkflowStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReviewWorkflowStore
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReviewWorkflowStore
-where
-    T: ?marker::Sized,
-{
-}
 impl review_workflow::ReviewWorkflowStore {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn insert_target(
         &self,
-        target: &review_workflow::ReviewTarget,
+        target: &signalbox_domain::ReviewTarget,
     ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
     pub async fn load_target(
         &self,
         target: signalbox_domain::ReviewTargetId,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewTarget>,
+        option::Option<signalbox_domain::ReviewTarget>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn insert_run(
         &self,
-        run: &review_workflow::ReviewRun,
+        run: &signalbox_domain::ReviewRun,
     ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
     pub async fn load_run(
         &self,
         run: signalbox_domain::ReviewRunId,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewRun>,
+        option::Option<signalbox_domain::ReviewRun>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn load_run_with_pass(
@@ -90,33 +36,33 @@ impl review_workflow::ReviewWorkflowStore {
         run: signalbox_domain::ReviewRunId,
     ) -> result::Result<
         option::Option<(
-            review_workflow::ReviewRun,
-            option::Option<review_workflow::ReviewPass>,
+            signalbox_domain::ReviewRun,
+            option::Option<signalbox_domain::ReviewPass>,
         )>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn transition_run(
         &self,
         run: signalbox_domain::ReviewRunId,
-        next: review_workflow::ReviewRunState,
+        next: signalbox_domain::ReviewRunState,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewRun>,
+        option::Option<signalbox_domain::ReviewRun>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn insert_pass(
         &self,
-        pass: &review_workflow::ReviewPass,
+        pass: &signalbox_domain::ReviewPass,
     ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
     pub async fn insert_run_and_pass(
         &self,
-        run: &review_workflow::ReviewRun,
-        pass: &review_workflow::ReviewPass,
+        run: &signalbox_domain::ReviewRun,
+        pass: &signalbox_domain::ReviewPass,
     ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
     pub async fn load_pass(
         &self,
         pass: signalbox_domain::ReviewPassId,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewPass>,
+        option::Option<signalbox_domain::ReviewPass>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn load_accepted_input_origin(
@@ -137,53 +83,53 @@ impl review_workflow::ReviewWorkflowStore {
         &self,
         run: signalbox_domain::ReviewRunId,
         pass: signalbox_domain::ReviewPassId,
-        next_run: review_workflow::ReviewRunState,
-        next_pass: review_workflow::ReviewPassState,
+        next_run: signalbox_domain::ReviewRunState,
+        next_pass: signalbox_domain::ReviewPassState,
     ) -> result::Result<
-        option::Option<(review_workflow::ReviewRun, review_workflow::ReviewPass)>,
+        option::Option<(signalbox_domain::ReviewRun, signalbox_domain::ReviewPass)>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn insert_finding(
         &self,
-        finding: &review_workflow::ReviewFinding,
+        finding: &signalbox_domain::ReviewFinding,
     ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
     pub async fn insert_findings(
         &self,
-        pass: &review_workflow::ReviewPassEvidence,
-        findings: &[review_workflow::ReviewFinding],
+        pass: &signalbox_domain::ReviewPassEvidence,
+        findings: &[signalbox_domain::ReviewFinding],
     ) -> result::Result<(), review_workflow::ReviewWorkflowStoreError>;
     pub async fn append_finding_event(
         &self,
         finding: signalbox_domain::ReviewFindingId,
-        event: review_workflow::ReviewFindingEvent,
+        event: signalbox_domain::ReviewFindingEvent,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewFinding>,
+        option::Option<signalbox_domain::ReviewFinding>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn load_finding(
         &self,
         finding: signalbox_domain::ReviewFindingId,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewFinding>,
+        option::Option<signalbox_domain::ReviewFinding>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn load_findings(
         &self,
         findings: &[signalbox_domain::ReviewFindingId],
     ) -> result::Result<
-        map::BTreeMap<signalbox_domain::ReviewFindingId, review_workflow::ReviewFinding>,
+        map::BTreeMap<signalbox_domain::ReviewFindingId, signalbox_domain::ReviewFinding>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn list_findings(
         &self,
         run: signalbox_domain::ReviewRunId,
     ) -> result::Result<
-        vec::Vec<review_workflow::ReviewFinding>,
+        vec::Vec<signalbox_domain::ReviewFinding>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn reserve_external_link(
         &self,
-        requested: review_workflow::ReviewExternalLink,
+        requested: signalbox_domain::ReviewExternalLink,
     ) -> result::Result<
         review_workflow::ReserveExternalLinkOutcome,
         review_workflow::ReviewWorkflowStoreError,
@@ -191,82 +137,82 @@ impl review_workflow::ReviewWorkflowStore {
     pub async fn attach_external_link(
         &self,
         link: signalbox_domain::ReviewExternalLinkId,
-        attachment: review_workflow::ReviewExternalLinkAttachment,
+        attachment: signalbox_domain::ReviewExternalLinkAttachment,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewExternalLink>,
+        option::Option<signalbox_domain::ReviewExternalLink>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn append_external_observation(
         &self,
         link: signalbox_domain::ReviewExternalLinkId,
-        observation: review_workflow::ReviewExternalLinkObservation,
+        observation: signalbox_domain::ReviewExternalLinkObservation,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewExternalLink>,
+        option::Option<signalbox_domain::ReviewExternalLink>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn block_external_link_publication(
         &self,
         link: signalbox_domain::ReviewExternalLinkId,
-        pass: review_workflow::ReviewPassEvidence,
-        run: review_workflow::ReviewRunEvidence,
+        pass: signalbox_domain::ReviewPassEvidence,
+        run: signalbox_domain::ReviewRunEvidence,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewExternalLink>,
+        option::Option<signalbox_domain::ReviewExternalLink>,
         review_workflow::ReviewWorkflowStoreError,
     >;
     pub async fn load_external_link(
         &self,
         link: signalbox_domain::ReviewExternalLinkId,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewExternalLink>,
+        option::Option<signalbox_domain::ReviewExternalLink>,
         review_workflow::ReviewWorkflowStoreError,
     >;
 }
-impl review_workflow::ReviewWorkflowReader for review_workflow::ReviewWorkflowStore {
+impl signalbox_application::ReviewWorkflowReader for review_workflow::ReviewWorkflowStore {
     type Error = review_workflow::ReviewWorkflowStoreError;
     async fn load_target(
         &self,
         target: signalbox_domain::ReviewTargetId,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewTarget>,
-        <Self as review_workflow::ReviewWorkflowReader>::Error,
+        option::Option<signalbox_domain::ReviewTarget>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
     >;
     async fn load_run(
         &self,
         run: signalbox_domain::ReviewRunId,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewRun>,
-        <Self as review_workflow::ReviewWorkflowReader>::Error,
+        option::Option<signalbox_domain::ReviewRun>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
     >;
     async fn load_run_with_pass(
         &self,
         run: signalbox_domain::ReviewRunId,
     ) -> result::Result<
         option::Option<(
-            review_workflow::ReviewRun,
-            option::Option<review_workflow::ReviewPass>,
+            signalbox_domain::ReviewRun,
+            option::Option<signalbox_domain::ReviewPass>,
         )>,
-        <Self as review_workflow::ReviewWorkflowReader>::Error,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
     >;
     async fn load_pass(
         &self,
         pass: signalbox_domain::ReviewPassId,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewPass>,
-        <Self as review_workflow::ReviewWorkflowReader>::Error,
+        option::Option<signalbox_domain::ReviewPass>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
     >;
     async fn load_finding(
         &self,
         finding: signalbox_domain::ReviewFindingId,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewFinding>,
-        <Self as review_workflow::ReviewWorkflowReader>::Error,
+        option::Option<signalbox_domain::ReviewFinding>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
     >;
     async fn list_findings(
         &self,
         run: signalbox_domain::ReviewRunId,
     ) -> result::Result<
-        vec::Vec<review_workflow::ReviewFinding>,
-        <Self as review_workflow::ReviewWorkflowReader>::Error,
+        vec::Vec<signalbox_domain::ReviewFinding>,
+        <Self as signalbox_application::ReviewWorkflowReader>::Error,
     >;
 }
 impl review_workflow::ReviewWorkflowStore {
@@ -274,20 +220,20 @@ impl review_workflow::ReviewWorkflowStore {
         &self,
         command_id: signalbox_domain::DurableCommandId,
         semantic_digest: [u8; 32],
-        operation_kind: review_workflow::ReviewWorkflowOperationKind,
+        operation_kind: signalbox_application::ReviewWorkflowOperationKind,
     ) -> result::Result<
-        option::Option<review_workflow::ReviewWorkflowCommandOutcome>,
+        option::Option<signalbox_application::ReviewWorkflowCommandOutcome>,
         review_workflow::ReviewWorkflowStoreError,
     >;
 }
-impl review_workflow::ReviewWorkflowTransaction for review_workflow::ReviewWorkflowStore {
+impl signalbox_application::ReviewWorkflowTransaction for review_workflow::ReviewWorkflowStore {
     type Error = review_workflow::ReviewWorkflowStoreError;
     async fn handle(
         &mut self,
-        command: review_workflow::ReviewWorkflowCommand,
+        command: signalbox_application::ReviewWorkflowCommand,
     ) -> result::Result<
-        review_workflow::ReviewWorkflowCommandOutcome,
-        <Self as review_workflow::ReviewWorkflowTransaction>::Error,
+        signalbox_application::ReviewWorkflowCommandOutcome,
+        <Self as signalbox_application::ReviewWorkflowTransaction>::Error,
     >;
 }
 ```
@@ -297,60 +243,6 @@ impl review_workflow::ReviewWorkflowTransaction for review_workflow::ReviewWorkf
 ```rust
 pub struct ReviewAcceptedInputOrigin {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewAcceptedInputOrigin
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for review_workflow::ReviewAcceptedInputOrigin
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_workflow::ReviewAcceptedInputOrigin {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewAcceptedInputOrigin {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReviewAcceptedInputOrigin
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewAcceptedInputOrigin {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewAcceptedInputOrigin {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReviewAcceptedInputOrigin
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReviewAcceptedInputOrigin
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReviewAcceptedInputOrigin
-where
-    T: ?marker::Sized,
-{
-}
 impl review_workflow::ReviewAcceptedInputOrigin {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn origin_turn(&self) -> option::Option<signalbox_domain::TurnId>;
@@ -363,63 +255,9 @@ impl review_workflow::ReviewAcceptedInputOrigin {
 pub enum ReviewTurnLifecycleState {
     Queued,
     Active,
-    Terminal(review_workflow::ReviewPassTurnOutcome),
+    Terminal(signalbox_domain::ReviewPassTurnOutcome),
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewTurnLifecycleState
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for review_workflow::ReviewTurnLifecycleState
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_workflow::ReviewTurnLifecycleState {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewTurnLifecycleState {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReviewTurnLifecycleState
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewTurnLifecycleState {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewTurnLifecycleState {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReviewTurnLifecycleState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReviewTurnLifecycleState
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReviewTurnLifecycleState
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ReviewTurnLifecycle
@@ -427,65 +265,11 @@ where
 ```rust
 pub struct ReviewTurnLifecycle {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewTurnLifecycle
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for review_workflow::ReviewTurnLifecycle
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_workflow::ReviewTurnLifecycle {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewTurnLifecycle {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReviewTurnLifecycle
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewTurnLifecycle {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewTurnLifecycle {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReviewTurnLifecycle
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReviewTurnLifecycle
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReviewTurnLifecycle
-where
-    T: ?marker::Sized,
-{
-}
 impl review_workflow::ReviewTurnLifecycle {
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn accepted_input(&self) -> option::Option<signalbox_domain::AcceptedInputId>;
     pub const fn state(&self) -> review_workflow::ReviewTurnLifecycleState;
-    pub const fn terminal_frontier(&self) -> option::Option<context_frontier::ContextFrontierId>;
+    pub const fn terminal_frontier(&self) -> option::Option<signalbox_domain::ContextFrontierId>;
 }
 ```
 
@@ -493,64 +277,10 @@ impl review_workflow::ReviewTurnLifecycle {
 
 ```rust
 pub enum ReserveExternalLinkOutcome {
-    Inserted(review_workflow::ReviewExternalLink),
-    Existing(review_workflow::ReviewExternalLink),
+    Inserted(signalbox_domain::ReviewExternalLink),
+    Existing(signalbox_domain::ReviewExternalLink),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReserveExternalLinkOutcome
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for review_workflow::ReserveExternalLinkOutcome
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_workflow::ReserveExternalLinkOutcome {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReserveExternalLinkOutcome {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReserveExternalLinkOutcome
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReserveExternalLinkOutcome {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReserveExternalLinkOutcome {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReserveExternalLinkOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReserveExternalLinkOutcome
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReserveExternalLinkOutcome
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## ReviewExternalLinkReservationConflict
@@ -558,63 +288,9 @@ where
 ```rust
 pub struct ReviewExternalLinkReservationConflict {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewExternalLinkReservationConflict
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for review_workflow::ReviewExternalLinkReservationConflict
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_workflow::ReviewExternalLinkReservationConflict {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewExternalLinkReservationConflict {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReviewExternalLinkReservationConflict
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewExternalLinkReservationConflict {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewExternalLinkReservationConflict {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReviewExternalLinkReservationConflict
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReviewExternalLinkReservationConflict
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReviewExternalLinkReservationConflict
-where
-    T: ?marker::Sized,
-{
-}
 impl review_workflow::ReviewExternalLinkReservationConflict {
-    pub fn existing(&self) -> &review_workflow::ReviewExternalLink;
-    pub fn requested(&self) -> &review_workflow::ReviewExternalLink;
+    pub fn existing(&self) -> &signalbox_domain::ReviewExternalLink;
+    pub fn requested(&self) -> &signalbox_domain::ReviewExternalLink;
 }
 impl fmt::Display for review_workflow::ReviewExternalLinkReservationConflict {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -626,8 +302,8 @@ impl review_workflow::ReviewExternalLinkReservationConflict {
     pub fn into_parts(
         self,
     ) -> (
-        review_workflow::ReviewExternalLink,
-        review_workflow::ReviewExternalLink,
+        signalbox_domain::ReviewExternalLink,
+        signalbox_domain::ReviewExternalLink,
     );
 }
 ```
@@ -637,72 +313,18 @@ impl review_workflow::ReviewExternalLinkReservationConflict {
 ```rust
 pub enum ReviewWorkflowInsertionError {
     RunNotQueued {
-        state: boxed::Box<review_workflow::ReviewRunState>,
+        state: boxed::Box<signalbox_domain::ReviewRunState>,
     },
     PassNotQueued {
-        state: boxed::Box<review_workflow::ReviewPassState>,
+        state: boxed::Box<signalbox_domain::ReviewPassState>,
     },
     RunPassMismatch,
     FindingNotOpen {
-        status: review_workflow::ReviewFindingStatus,
+        status: signalbox_domain::ReviewFindingStatus,
     },
     ExternalLinkNotPending,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewWorkflowInsertionError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for review_workflow::ReviewWorkflowInsertionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_workflow::ReviewWorkflowInsertionError {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowInsertionError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReviewWorkflowInsertionError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowInsertionError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowInsertionError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReviewWorkflowInsertionError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReviewWorkflowInsertionError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReviewWorkflowInsertionError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for review_workflow::ReviewWorkflowInsertionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -715,66 +337,12 @@ impl error::Error for review_workflow::ReviewWorkflowInsertionError {
 
 ```rust
 pub enum ReviewWorkflowTransitionError {
-    Run(review_workflow::ReviewRunTransitionError),
-    Pass(review_workflow::ReviewPassTransitionError),
-    Finding(review_workflow::ReviewFindingTransitionError),
-    ExternalLink(review_workflow::ReviewExternalLinkTransitionError),
+    Run(signalbox_domain::ReviewRunTransitionError),
+    Pass(signalbox_domain::ReviewPassTransitionError),
+    Finding(signalbox_domain::ReviewFindingTransitionError),
+    ExternalLink(signalbox_domain::ReviewExternalLinkTransitionError),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewWorkflowTransitionError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for review_workflow::ReviewWorkflowTransitionError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_workflow::ReviewWorkflowTransitionError {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowTransitionError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReviewWorkflowTransitionError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowTransitionError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowTransitionError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReviewWorkflowTransitionError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReviewWorkflowTransitionError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReviewWorkflowTransitionError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for review_workflow::ReviewWorkflowTransitionError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -788,60 +356,6 @@ impl error::Error for review_workflow::ReviewWorkflowTransitionError {
 ```rust
 pub struct ReviewWorkflowCorruption {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for review_workflow::ReviewWorkflowCorruption
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for review_workflow::ReviewWorkflowCorruption
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for review_workflow::ReviewWorkflowCorruption {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowCorruption {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReviewWorkflowCorruption
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowCorruption {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowCorruption {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReviewWorkflowCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReviewWorkflowCorruption
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReviewWorkflowCorruption
-where
-    T: ?marker::Sized,
-{
-}
 impl review_workflow::ReviewWorkflowCorruption {
     pub fn detail(&self) -> &str;
 }
@@ -871,48 +385,6 @@ pub enum ReviewWorkflowStoreError {
     ReservationConflict(review_workflow::ReviewExternalLinkReservationConflict),
 }
 // derives: fmt::Debug
-impl<T> into_either::IntoEither for review_workflow::ReviewWorkflowStoreError {}
-impl<T> parse_display::IntoResult<T> for review_workflow::ReviewWorkflowStoreError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for review_workflow::ReviewWorkflowStoreError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for review_workflow::ReviewWorkflowStoreError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for review_workflow::ReviewWorkflowStoreError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for review_workflow::ReviewWorkflowStoreError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for review_workflow::ReviewWorkflowStoreError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for review_workflow::ReviewWorkflowStoreError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for review_workflow::ReviewWorkflowStoreError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

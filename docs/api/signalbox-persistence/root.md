@@ -79,17 +79,20 @@ pub fn disposable_test_container_labels_for_command(
 ## disposable_postgres_server_args
 
 ```rust
+#[cfg(feature = "postgres-integration")]
 pub fn disposable_postgres_server_args() -> [&'static str; 6];
 ```
 
 ## disposable_postgres_state_tmpfs
 
 ```rust
+#[cfg(feature = "postgres-integration")]
 pub fn disposable_postgres_state_tmpfs(ceiling_bytes: option::Option<i64>) -> mounts::Mount;
 ```
 
 ## disposable_postgres_state_tmpfs_from_example
 
 ```rust
+#[cfg(feature = "postgres-integration")]
 pub fn disposable_postgres_state_tmpfs_from_example() -> error::Result<mounts::Mount>;
 ```

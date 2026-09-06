@@ -12,39 +12,37 @@ pub const PROTOCOL_VERSION: u64;
 
 ```rust
 pub struct LeaseCorrelation {
-    pub registration_revision: value::PositiveU64,
-    pub lease_id: value::CanonicalUuid,
-    pub lease_generation: value::PositiveU64,
-    pub runner_id: value::CanonicalUuid,
-    pub tool_name: value::WireToolName,
-    pub session_id: value::CanonicalUuid,
-    pub turn_id: value::CanonicalUuid,
-    pub tool_request_id: value::CanonicalUuid,
-    pub tool_attempt_id: value::CanonicalUuid,
-    pub issuing_turn_attempt_id: value::CanonicalUuid,
-    pub tool_dispatch_generation: value::PositiveU64,
+    pub registration_revision: PositiveU64,
+    pub lease_id: CanonicalUuid,
+    pub lease_generation: PositiveU64,
+    pub runner_id: CanonicalUuid,
+    pub tool_name: WireToolName,
+    pub session_id: CanonicalUuid,
+    pub turn_id: CanonicalUuid,
+    pub tool_request_id: CanonicalUuid,
+    pub tool_attempt_id: CanonicalUuid,
+    pub issuing_turn_attempt_id: CanonicalUuid,
+    pub tool_dispatch_generation: PositiveU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::LeaseCorrelation where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ProvisionCorrelation
 
 ```rust
 pub struct ProvisionCorrelation {
-    pub authorization_id: value::CanonicalUuid,
-    pub session_id: value::CanonicalUuid,
-    pub placement_revision: value::PositiveU64,
-    pub runner_id: value::CanonicalUuid,
-    pub registration_revision: value::PositiveU64,
-    pub repository: option::Option<value::RepositoryKey>,
-    pub sandbox_profile: value::SandboxProfile,
-    pub credential_profile: option::Option<value::ProfileName>,
+    pub authorization_id: CanonicalUuid,
+    pub session_id: CanonicalUuid,
+    pub placement_revision: PositiveU64,
+    pub runner_id: CanonicalUuid,
+    pub registration_revision: PositiveU64,
+    pub repository: option::Option<RepositoryKey>,
+    pub sandbox_profile: SandboxProfile,
+    pub credential_profile: option::Option<ProfileName>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ProvisionCorrelation where T: for<'de> de::Deserialize<'de> {}
-impl frame::ProvisionCorrelation {
-    pub fn validate(&self) -> result::Result<(), value::ValueError>;
+impl ProvisionCorrelation {
+    pub fn validate(&self) -> result::Result<(), ValueError>;
 }
 ```
 
@@ -52,25 +50,23 @@ impl frame::ProvisionCorrelation {
 
 ```rust
 pub struct ReleaseCorrelation {
-    pub session_id: value::CanonicalUuid,
-    pub placement_revision: value::PositiveU64,
-    pub runner_id: value::CanonicalUuid,
-    pub manifest_id: value::CanonicalUuid,
+    pub session_id: CanonicalUuid,
+    pub placement_revision: PositiveU64,
+    pub runner_id: CanonicalUuid,
+    pub manifest_id: CanonicalUuid,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ReleaseCorrelation where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## LeakPageCorrelation
 
 ```rust
 pub struct LeakPageCorrelation {
-    pub registration_revision: value::PositiveU64,
-    pub report_digest: value::Digest,
-    pub page: value::PositiveU64,
+    pub registration_revision: PositiveU64,
+    pub report_digest: Digest,
+    pub page: PositiveU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::LeakPageCorrelation where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## LeasePhaseKind
@@ -82,18 +78,16 @@ pub enum LeasePhaseKind {
     ExecutionMayHaveStarted,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::LeasePhaseKind where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## LeasePhase
 
 ```rust
 pub struct LeasePhase {
-    pub correlation: frame::LeaseCorrelation,
-    pub phase: frame::LeasePhaseKind,
+    pub correlation: LeaseCorrelation,
+    pub phase: LeasePhaseKind,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::LeasePhase where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ProvisionPhase
@@ -104,7 +98,6 @@ pub enum ProvisionPhase {
     ReadyUnrecorded,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ProvisionPhase where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReleasePhase
@@ -115,7 +108,6 @@ pub enum ReleasePhase {
     ReleaseCompleted,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ReleasePhase where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceOperation
@@ -123,28 +115,26 @@ impl<T> de::DeserializeOwned for frame::ReleasePhase where T: for<'de> de::Deser
 ```rust
 pub enum WorkspaceOperation {
     Provision {
-        correlation: frame::ProvisionCorrelation,
-        phase: frame::ProvisionPhase,
+        correlation: ProvisionCorrelation,
+        phase: ProvisionPhase,
     },
     Release {
-        correlation: frame::ReleaseCorrelation,
-        phase: frame::ReleasePhase,
+        correlation: ReleaseCorrelation,
+        phase: ReleasePhase,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceOperation where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## OperationCorrelation
 
 ```rust
 pub enum OperationCorrelation {
-    Provision(frame::ProvisionCorrelation),
-    Release(frame::ReleaseCorrelation),
-    LeaseOffer(frame::LeaseCorrelation),
+    Provision(ProvisionCorrelation),
+    Release(ReleaseCorrelation),
+    LeaseOffer(LeaseCorrelation),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::OperationCorrelation where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## FailureCategory
@@ -159,7 +149,6 @@ pub enum FailureCategory {
     LeaseAdmissionRefused,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::FailureCategory where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## MAX_FAILURE_DETAIL_BYTES
@@ -196,21 +185,20 @@ pub const MAX_FAILURE_DETAIL_DEPTH: usize;
 
 ```rust
 pub struct FailureDetail {
-    pub code: value::DetailName,
+    pub code: DetailName,
     pub message: string::String,
     pub payload: value::Value,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::FailureDetail where T: for<'de> de::Deserialize<'de> {}
-impl frame::FailureDetail {
+impl FailureDetail {
     pub const fn payload(&self) -> &value::Value;
 }
-impl frame::FailureDetail {
+impl FailureDetail {
     pub fn try_new(
-        code: value::DetailName,
+        code: DetailName,
         message: string::String,
         payload: value::Value,
-    ) -> result::Result<Self, value::ValueError>;
+    ) -> result::Result<Self, ValueError>;
 }
 ```
 
@@ -218,14 +206,13 @@ impl frame::FailureDetail {
 
 ```rust
 pub struct OperationFailure {
-    pub correlation: frame::OperationCorrelation,
-    pub category: frame::FailureCategory,
-    pub detail: frame::FailureDetail,
+    pub correlation: OperationCorrelation,
+    pub category: FailureCategory,
+    pub detail: FailureDetail,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::OperationFailure where T: for<'de> de::Deserialize<'de> {}
-impl frame::OperationFailure {
-    pub fn validate(&self) -> result::Result<(), value::ValueError>;
+impl OperationFailure {
+    pub fn validate(&self) -> result::Result<(), ValueError>;
 }
 ```
 
@@ -233,27 +220,25 @@ impl frame::OperationFailure {
 
 ```rust
 pub struct RetainedResult {
-    pub correlation: frame::LeaseCorrelation,
-    pub result: value::TerminalResult,
+    pub correlation: LeaseCorrelation,
+    pub result: TerminalResult,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::RetainedResult where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## LeakPage
 
 ```rust
 pub struct LeakPage {
-    pub correlation: frame::LeakPageCorrelation,
-    pub prior_page_digest: option::Option<value::Digest>,
+    pub correlation: LeakPageCorrelation,
+    pub prior_page_digest: option::Option<Digest>,
     pub final_page: bool,
-    pub facts: vec::Vec<digest::LeakFact>,
-    pub page_digest: value::Digest,
+    pub facts: vec::Vec<LeakFact>,
+    pub page_digest: Digest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::LeakPage where T: for<'de> de::Deserialize<'de> {}
-impl frame::LeakPage {
-    pub fn validate(&self) -> result::Result<(), value::ValueError>;
+impl LeakPage {
+    pub fn validate(&self) -> result::Result<(), ValueError>;
 }
 ```
 
@@ -261,14 +246,13 @@ impl frame::LeakPage {
 
 ```rust
 pub struct ReconnectInventory {
-    pub lease: option::Option<frame::LeasePhase>,
-    pub result: option::Option<frame::RetainedResult>,
-    pub workspace_operation: option::Option<frame::WorkspaceOperation>,
-    pub operation_failure: option::Option<frame::OperationFailure>,
-    pub leak_page: option::Option<frame::LeakPage>,
+    pub lease: option::Option<LeasePhase>,
+    pub result: option::Option<RetainedResult>,
+    pub workspace_operation: option::Option<WorkspaceOperation>,
+    pub operation_failure: option::Option<OperationFailure>,
+    pub leak_page: option::Option<LeakPage>,
 }
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ReconnectInventory where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## DirectiveAction
@@ -281,7 +265,6 @@ pub enum DirectiveAction {
     FailStale,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::DirectiveAction where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Directive
@@ -289,29 +272,27 @@ impl<T> de::DeserializeOwned for frame::DirectiveAction where T: for<'de> de::De
 ```rust
 pub struct Directive<T> {
     pub correlation: T,
-    pub action: frame::DirectiveAction,
+    pub action: DirectiveAction,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Directive<T> where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReconnectDirectives
 
 ```rust
 pub struct ReconnectDirectives {
-    pub lease: option::Option<frame::Directive<frame::LeaseCorrelation>>,
-    pub result: option::Option<frame::Directive<frame::LeaseCorrelation>>,
-    pub workspace_operation: option::Option<frame::Directive<frame::OperationCorrelation>>,
-    pub operation_failure: option::Option<frame::Directive<frame::OperationCorrelation>>,
-    pub leak_page: option::Option<frame::Directive<frame::LeakPageCorrelation>>,
+    pub lease: option::Option<Directive<LeaseCorrelation>>,
+    pub result: option::Option<Directive<LeaseCorrelation>>,
+    pub workspace_operation: option::Option<Directive<OperationCorrelation>>,
+    pub operation_failure: option::Option<Directive<OperationCorrelation>>,
+    pub leak_page: option::Option<Directive<LeakPageCorrelation>>,
 }
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ReconnectDirectives where T: for<'de> de::Deserialize<'de> {}
-impl frame::ReconnectDirectives {
+impl ReconnectDirectives {
     pub fn validate_against(
         &self,
-        inventory: &frame::ReconnectInventory,
-    ) -> result::Result<(), value::ValueError>;
+        inventory: &ReconnectInventory,
+    ) -> result::Result<(), ValueError>;
 }
 ```
 
@@ -319,14 +300,10 @@ impl frame::ReconnectDirectives {
 
 ```rust
 pub enum WorkspaceFailureCorrelation {
-    Provision(frame::ProvisionCorrelation),
-    Release(frame::ReleaseCorrelation),
+    Provision(ProvisionCorrelation),
+    Release(ReleaseCorrelation),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceFailureCorrelation where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## HeartbeatWorkspacePhase
@@ -334,26 +311,22 @@ impl<T> de::DeserializeOwned for frame::WorkspaceFailureCorrelation where
 ```rust
 pub enum HeartbeatWorkspacePhase {
     Provisioning {
-        correlation: frame::ProvisionCorrelation,
+        correlation: ProvisionCorrelation,
     },
     ReadyUnrecorded {
-        correlation: frame::ProvisionCorrelation,
+        correlation: ProvisionCorrelation,
     },
     ReleaseAccepted {
-        correlation: frame::ReleaseCorrelation,
+        correlation: ReleaseCorrelation,
     },
     ReleaseCompleted {
-        correlation: frame::ReleaseCorrelation,
+        correlation: ReleaseCorrelation,
     },
     FailureUnrecorded {
-        correlation: frame::WorkspaceFailureCorrelation,
+        correlation: WorkspaceFailureCorrelation,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::HeartbeatWorkspacePhase where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## AvailableCorrelation
@@ -361,17 +334,16 @@ impl<T> de::DeserializeOwned for frame::HeartbeatWorkspacePhase where
 ```rust
 pub enum AvailableCorrelation {
     None,
-    Enrollment(value::CanonicalUuid),
-    Registration(value::PositiveU64),
-    ConnectionEpoch(value::PositiveU64),
-    Lease(frame::LeaseCorrelation),
-    Provision(frame::ProvisionCorrelation),
-    Release(frame::ReleaseCorrelation),
-    LeakPage(frame::LeakPageCorrelation),
-    OperationFailure(frame::OperationCorrelation),
+    Enrollment(CanonicalUuid),
+    Registration(PositiveU64),
+    ConnectionEpoch(PositiveU64),
+    Lease(LeaseCorrelation),
+    Provision(ProvisionCorrelation),
+    Release(ReleaseCorrelation),
+    LeakPage(LeakPageCorrelation),
+    OperationFailure(OperationCorrelation),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::AvailableCorrelation where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## RejectionCode
@@ -393,7 +365,6 @@ pub enum RejectionCode {
     ShuttingDown,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::RejectionCode where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ShutdownReason
@@ -404,328 +375,294 @@ pub enum ShutdownReason {
     RunnerShutdown,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ShutdownReason where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReadyManifest
 
 ```rust
 pub struct ReadyManifest {
-    pub manifest: digest::WorkspaceManifest,
-    pub manifest_digest: value::Digest,
+    pub manifest: WorkspaceManifest,
+    pub manifest_digest: Digest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ReadyManifest where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Enroll
 
 ```rust
 pub struct Enroll {
-    pub request_id: value::CanonicalUuid,
+    pub request_id: CanonicalUuid,
     pub digest_version: u64,
-    pub advertisement: digest::Advertisement,
+    pub advertisement: Advertisement,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Enroll where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Enrolled
 
 ```rust
 pub struct Enrolled {
-    pub request_id: value::CanonicalUuid,
-    pub enrollment_id: value::CanonicalUuid,
-    pub runner_id: value::CanonicalUuid,
-    pub authentication_id: value::CanonicalUuid,
-    pub registration_revision: value::PositiveU64,
-    pub connection_epoch: value::PositiveU64,
-    pub advertisement_digest: value::Digest,
+    pub request_id: CanonicalUuid,
+    pub enrollment_id: CanonicalUuid,
+    pub runner_id: CanonicalUuid,
+    pub authentication_id: CanonicalUuid,
+    pub registration_revision: PositiveU64,
+    pub connection_epoch: PositiveU64,
+    pub advertisement_digest: Digest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Enrolled where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Resume
 
 ```rust
 pub struct Resume {
-    pub request_id: value::CanonicalUuid,
+    pub request_id: CanonicalUuid,
     pub digest_version: u64,
-    pub enrollment_id: value::CanonicalUuid,
-    pub runner_id: value::CanonicalUuid,
-    pub authentication_id: value::CanonicalUuid,
-    pub advertisement: digest::Advertisement,
-    pub prior_registration_revision: value::PositiveU64,
-    pub inventory: frame::ReconnectInventory,
+    pub enrollment_id: CanonicalUuid,
+    pub runner_id: CanonicalUuid,
+    pub authentication_id: CanonicalUuid,
+    pub advertisement: Advertisement,
+    pub prior_registration_revision: PositiveU64,
+    pub inventory: ReconnectInventory,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Resume where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Resumed
 
 ```rust
 pub struct Resumed {
-    pub registration_revision: value::PositiveU64,
-    pub connection_epoch: value::PositiveU64,
-    pub directives: frame::ReconnectDirectives,
+    pub registration_revision: PositiveU64,
+    pub connection_epoch: PositiveU64,
+    pub directives: ReconnectDirectives,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Resumed where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ReplacementPending
 
 ```rust
 pub struct ReplacementPending {
-    pub request_id: value::CanonicalUuid,
-    pub enrollment_id: value::CanonicalUuid,
-    pub runner_id: value::CanonicalUuid,
-    pub authentication_id: value::CanonicalUuid,
-    pub registration_revision: value::PositiveU64,
-    pub connection_epoch: value::PositiveU64,
-    pub advertisement_digest: value::Digest,
+    pub request_id: CanonicalUuid,
+    pub enrollment_id: CanonicalUuid,
+    pub runner_id: CanonicalUuid,
+    pub authentication_id: CanonicalUuid,
+    pub registration_revision: PositiveU64,
+    pub connection_epoch: PositiveU64,
+    pub advertisement_digest: Digest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ReplacementPending where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Advertise
 
 ```rust
 pub struct Advertise {
-    pub enrollment_id: value::CanonicalUuid,
-    pub runner_id: value::CanonicalUuid,
-    pub authentication_id: value::CanonicalUuid,
-    pub registration_revision: value::PositiveU64,
-    pub advertisement: digest::Advertisement,
+    pub enrollment_id: CanonicalUuid,
+    pub runner_id: CanonicalUuid,
+    pub authentication_id: CanonicalUuid,
+    pub registration_revision: PositiveU64,
+    pub advertisement: Advertisement,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Advertise where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Registered
 
 ```rust
 pub struct Registered {
-    pub registration_revision: value::PositiveU64,
-    pub advertisement_digest: value::Digest,
+    pub registration_revision: PositiveU64,
+    pub advertisement_digest: Digest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Registered where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Heartbeat
 
 ```rust
 pub struct Heartbeat {
-    pub sequence: value::PositiveU64,
+    pub sequence: PositiveU64,
     pub last_accepted_peer_sequence: u64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Heartbeat where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## HeartbeatAck
 
 ```rust
 pub struct HeartbeatAck {
-    pub challenge_sequence: value::PositiveU64,
-    pub runner_sequence: value::PositiveU64,
-    pub lease_phase: option::Option<frame::LeasePhase>,
-    pub workspace_phase: option::Option<frame::HeartbeatWorkspacePhase>,
+    pub challenge_sequence: PositiveU64,
+    pub runner_sequence: PositiveU64,
+    pub lease_phase: option::Option<LeasePhase>,
+    pub workspace_phase: option::Option<HeartbeatWorkspacePhase>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::HeartbeatAck where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceLeakPage
 
 ```rust
 pub struct WorkspaceLeakPage {
-    pub page: frame::LeakPage,
+    pub page: LeakPage,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceLeakPage where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceLeakRecorded
 
 ```rust
 pub struct WorkspaceLeakRecorded {
-    pub correlation: frame::LeakPageCorrelation,
-    pub page_digest: value::Digest,
+    pub correlation: LeakPageCorrelation,
+    pub page_digest: Digest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceLeakRecorded where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceProvision
 
 ```rust
 pub struct WorkspaceProvision {
-    pub correlation: frame::ProvisionCorrelation,
+    pub correlation: ProvisionCorrelation,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceProvision where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceReady
 
 ```rust
 pub struct WorkspaceReady {
-    pub correlation: frame::ProvisionCorrelation,
-    pub ready: frame::ReadyManifest,
+    pub correlation: ProvisionCorrelation,
+    pub ready: ReadyManifest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceReady where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceRecorded
 
 ```rust
 pub struct WorkspaceRecorded {
-    pub correlation: frame::ProvisionCorrelation,
-    pub manifest_id: value::CanonicalUuid,
-    pub manifest_digest: value::Digest,
+    pub correlation: ProvisionCorrelation,
+    pub manifest_id: CanonicalUuid,
+    pub manifest_digest: Digest,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceRecorded where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceRelease
 
 ```rust
 pub struct WorkspaceRelease {
-    pub correlation: frame::ReleaseCorrelation,
+    pub correlation: ReleaseCorrelation,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceRelease where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceReleased
 
 ```rust
 pub struct WorkspaceReleased {
-    pub correlation: frame::ReleaseCorrelation,
+    pub correlation: ReleaseCorrelation,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceReleased where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## WorkspaceReleaseRecorded
 
 ```rust
 pub struct WorkspaceReleaseRecorded {
-    pub correlation: frame::ReleaseCorrelation,
+    pub correlation: ReleaseCorrelation,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::WorkspaceReleaseRecorded where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## LeaseOffer
 
 ```rust
 pub struct LeaseOffer {
-    pub correlation: frame::LeaseCorrelation,
-    pub effect_class: value::EffectClass,
-    pub credential_profile: option::Option<value::ProfileName>,
-    pub grant_revision: option::Option<value::PositiveU64>,
+    pub correlation: LeaseCorrelation,
+    pub effect_class: EffectClass,
+    pub credential_profile: option::Option<ProfileName>,
+    pub grant_revision: option::Option<PositiveU64>,
     pub normalized_arguments: value::Value,
-    pub result_bounds: value::ResultBounds,
+    pub result_bounds: ResultBounds,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::LeaseOffer where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## LeaseClaim
 
 ```rust
 pub struct LeaseClaim {
-    pub correlation: frame::LeaseCorrelation,
+    pub correlation: LeaseCorrelation,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::LeaseClaim where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## LeaseClaimed
 
 ```rust
 pub struct LeaseClaimed {
-    pub correlation: frame::LeaseCorrelation,
+    pub correlation: LeaseCorrelation,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::LeaseClaimed where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Dispatch
 
 ```rust
 pub struct Dispatch {
-    pub correlation: frame::LeaseCorrelation,
+    pub correlation: LeaseCorrelation,
     pub normalized_arguments: value::Value,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Dispatch where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ResultFrame
 
 ```rust
 pub struct ResultFrame {
-    pub correlation: frame::LeaseCorrelation,
-    pub result: value::TerminalResult,
+    pub correlation: LeaseCorrelation,
+    pub result: TerminalResult,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ResultFrame where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## ResultRecorded
 
 ```rust
 pub struct ResultRecorded {
-    pub correlation: frame::LeaseCorrelation,
+    pub correlation: LeaseCorrelation,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::ResultRecorded where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## OperationFailed
 
 ```rust
 pub struct OperationFailed {
-    pub failure: frame::OperationFailure,
+    pub failure: OperationFailure,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::OperationFailed where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## OperationFailureRecorded
 
 ```rust
 pub struct OperationFailureRecorded {
-    pub correlation: frame::OperationCorrelation,
+    pub correlation: OperationCorrelation,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::OperationFailureRecorded where
-    T: for<'de> de::Deserialize<'de>
-{
-}
 ```
 
 ## Shutdown
 
 ```rust
 pub struct Shutdown {
-    pub connection_epoch: value::PositiveU64,
-    pub reason: frame::ShutdownReason,
+    pub connection_epoch: PositiveU64,
+    pub reason: ShutdownReason,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Shutdown where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Rejected
@@ -733,48 +670,46 @@ impl<T> de::DeserializeOwned for frame::Shutdown where T: for<'de> de::Deseriali
 ```rust
 pub struct Rejected {
     pub offending_kind: string::String,
-    pub available_correlation: frame::AvailableCorrelation,
-    pub code: frame::RejectionCode,
+    pub available_correlation: AvailableCorrelation,
+    pub code: RejectionCode,
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Rejected where T: for<'de> de::Deserialize<'de> {}
 ```
 
 ## Message
 
 ```rust
 pub enum Message {
-    Enroll(frame::Enroll),
-    Enrolled(frame::Enrolled),
-    Resume(boxed::Box<frame::Resume>),
-    Resumed(boxed::Box<frame::Resumed>),
-    ReplacementPending(frame::ReplacementPending),
-    Advertise(frame::Advertise),
-    Registered(frame::Registered),
-    Heartbeat(frame::Heartbeat),
-    HeartbeatAck(frame::HeartbeatAck),
-    WorkspaceLeakPage(frame::WorkspaceLeakPage),
-    WorkspaceLeakRecorded(frame::WorkspaceLeakRecorded),
-    WorkspaceProvision(frame::WorkspaceProvision),
-    WorkspaceReady(frame::WorkspaceReady),
-    WorkspaceRecorded(frame::WorkspaceRecorded),
-    WorkspaceRelease(frame::WorkspaceRelease),
-    WorkspaceReleased(frame::WorkspaceReleased),
-    WorkspaceReleaseRecorded(frame::WorkspaceReleaseRecorded),
-    LeaseOffer(frame::LeaseOffer),
-    LeaseClaim(frame::LeaseClaim),
-    LeaseClaimed(frame::LeaseClaimed),
-    Dispatch(frame::Dispatch),
-    Result(frame::ResultFrame),
-    ResultRecorded(frame::ResultRecorded),
-    OperationFailed(frame::OperationFailed),
-    OperationFailureRecorded(frame::OperationFailureRecorded),
-    Shutdown(frame::Shutdown),
-    Rejected(frame::Rejected),
+    Enroll(Enroll),
+    Enrolled(Enrolled),
+    Resume(boxed::Box<Resume>),
+    Resumed(boxed::Box<Resumed>),
+    ReplacementPending(ReplacementPending),
+    Advertise(Advertise),
+    Registered(Registered),
+    Heartbeat(Heartbeat),
+    HeartbeatAck(HeartbeatAck),
+    WorkspaceLeakPage(WorkspaceLeakPage),
+    WorkspaceLeakRecorded(WorkspaceLeakRecorded),
+    WorkspaceProvision(WorkspaceProvision),
+    WorkspaceReady(WorkspaceReady),
+    WorkspaceRecorded(WorkspaceRecorded),
+    WorkspaceRelease(WorkspaceRelease),
+    WorkspaceReleased(WorkspaceReleased),
+    WorkspaceReleaseRecorded(WorkspaceReleaseRecorded),
+    LeaseOffer(LeaseOffer),
+    LeaseClaim(LeaseClaim),
+    LeaseClaimed(LeaseClaimed),
+    Dispatch(Dispatch),
+    Result(ResultFrame),
+    ResultRecorded(ResultRecorded),
+    OperationFailed(OperationFailed),
+    OperationFailureRecorded(OperationFailureRecorded),
+    Shutdown(Shutdown),
+    Rejected(Rejected),
 }
 // derives: clone::Clone, fmt::Debug, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for frame::Message where T: for<'de> de::Deserialize<'de> {}
-impl frame::Message {
-    pub fn validate(&self) -> result::Result<(), value::ValueError>;
+impl Message {
+    pub fn validate(&self) -> result::Result<(), ValueError>;
 }
 ```

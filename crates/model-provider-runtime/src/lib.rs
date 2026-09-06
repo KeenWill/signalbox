@@ -2243,6 +2243,7 @@ mod tests {
     };
 
     use expect_test::expect;
+    use expectable::print;
     use signalbox_application::{
         ClassifyOperatorFailure, ModelConversationMessage, ModelToolResultContent,
     };
@@ -2258,7 +2259,6 @@ mod tests {
         ToolExecutionErrorKind, ToolRequest, ToolRequestId, ToolRequestOrdinal,
         ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
     };
-    use signalbox_expect_table::table;
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
         CompletionFinish, ConversationMessage, CredentialAccessError, CredentialAccessFailure,
@@ -3494,11 +3494,7 @@ mod tests {
         assert_eq!(classified.concrete_target, None);
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct RelationRow {
         configured: &'static str,
         reported: &'static str,
@@ -3556,17 +3552,13 @@ mod tests {
             │ claude-opus-4            │ claude-opus-4-5             │ DifferentLineage │
             │ claude-opus-4-5          │ claude-opus-4-5-20251101    │ AliasConcretion  │
             │ claude-opus-4-5-20251101 │ claude-opus-4-5             │ DifferentLineage │
-            │ ""                       │ claude-haiku-4-5-20251001   │ DifferentLineage │
+            │                          │ claude-haiku-4-5-20251001   │ DifferentLineage │
             └──────────────────────────┴─────────────────────────────┴──────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct CauseRow {
         outcome: &'static str,
         cause_code: &'static str,
@@ -3663,7 +3655,7 @@ mod tests {
             │ boundary_loss(transport_failed)      │ boundary_loss_transport_failed │
             └──────────────────────────────────────┴────────────────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
     /// a fail-closed substitution carries the same sanitized cause
@@ -3684,11 +3676,7 @@ mod tests {
         assert_eq!(failure.served_target.as_deref(), Some("claude-opus-4-8"));
     }
 
-    #[derive(Debug)]
-    #[allow(
-        dead_code,
-        reason = "the table renderer reads every field through the Debug derive"
-    )]
+    #[derive(Debug, serde::Serialize)]
     struct PreparationRow {
         failure: &'static str,
         cause_code: &'static str,
@@ -3765,7 +3753,7 @@ mod tests {
             │ credential_unusable                 │ credential_unusable    │
             └─────────────────────────────────────┴────────────────────────┘
         "#]]
-        .assert_eq(&table(rows));
+        .assert_eq(&print(&rows));
     }
 
     /// a hostile provider-reported identity is bounded before it can

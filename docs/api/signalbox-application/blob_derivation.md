@@ -27,17 +27,17 @@ pub trait BlobDerivationStore {
     type Error;
     fn find_deterministic(
         &self,
-        key: blob::DeterministicBlobDerivationKey,
+        key: signalbox_domain::DeterministicBlobDerivationKey,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<blob::BlobDerivation>,
+            option::Option<signalbox_domain::BlobDerivation>,
             <Self as BlobDerivationStore>::Error,
         >,
     > + marker::Send;
     fn record_deterministic(
         &self,
-        key: blob::DeterministicBlobDerivationKey,
-        derivation: blob::BlobDerivation,
+        key: signalbox_domain::DeterministicBlobDerivationKey,
+        derivation: signalbox_domain::BlobDerivation,
     ) -> impl future::Future<
         Output = result::Result<BlobDerivationRecordOutcome, <Self as BlobDerivationStore>::Error>,
     > + marker::Send;
@@ -48,8 +48,8 @@ pub trait BlobDerivationStore {
 
 ```rust
 pub enum BlobDerivationRecordOutcome {
-    Recorded(blob::BlobDerivation),
-    Existing(blob::BlobDerivation),
+    Recorded(signalbox_domain::BlobDerivation),
+    Existing(signalbox_domain::BlobDerivation),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -61,17 +61,17 @@ pub trait DeterministicBlobProducer {
     type Error;
     fn produce(
         &mut self,
-        inputs: &[blob::BlobDigest],
-        transformation: &blob::BlobTransformation,
+        inputs: &[signalbox_domain::BlobDigest],
+        transformation: &signalbox_domain::BlobTransformation,
     ) -> impl future::Future<
         Output = result::Result<
-            boxed::Box<[blob::BlobDigest]>,
+            boxed::Box<[signalbox_domain::BlobDigest]>,
             <Self as DeterministicBlobProducer>::Error,
         >,
     > + marker::Send;
     fn outputs_retrievable(
         &mut self,
-        outputs: &[blob::BlobDigest],
+        outputs: &[signalbox_domain::BlobDigest],
     ) -> impl future::Future<Output = result::Result<bool, <Self as DeterministicBlobProducer>::Error>>
            + marker::Send;
 }
@@ -84,14 +84,14 @@ pub struct DeterministicBlobDerivationRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl DeterministicBlobDerivationRequest {
     pub fn try_new(
-        inputs: impl convert::Into<boxed::Box<[blob::BlobDigest]>>,
-        transformation: blob::BlobTransformation,
-        implementation: blob::BlobDigest,
-    ) -> result::Result<Self, blob::BlobDerivationError>;
-    pub fn inputs(&self) -> &[blob::BlobDigest];
-    pub const fn transformation(&self) -> &blob::BlobTransformation;
-    pub const fn implementation(&self) -> blob::BlobDigest;
-    pub const fn key(&self) -> blob::DeterministicBlobDerivationKey;
+        inputs: impl convert::Into<boxed::Box<[signalbox_domain::BlobDigest]>>,
+        transformation: signalbox_domain::BlobTransformation,
+        implementation: signalbox_domain::BlobDigest,
+    ) -> result::Result<Self, signalbox_domain::BlobDerivationError>;
+    pub fn inputs(&self) -> &[signalbox_domain::BlobDigest];
+    pub const fn transformation(&self) -> &signalbox_domain::BlobTransformation;
+    pub const fn implementation(&self) -> signalbox_domain::BlobDigest;
+    pub const fn key(&self) -> signalbox_domain::DeterministicBlobDerivationKey;
 }
 ```
 
@@ -99,8 +99,8 @@ impl DeterministicBlobDerivationRequest {
 
 ```rust
 pub enum BlobDerivationServiceOutcome {
-    Reused(blob::BlobDerivation),
-    Produced(blob::BlobDerivation),
+    Reused(signalbox_domain::BlobDerivation),
+    Produced(signalbox_domain::BlobDerivation),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -111,7 +111,7 @@ pub enum BlobDerivationServiceOutcome {
 pub enum BlobDerivationServiceError<StoreError, ProducerError> {
     Store(StoreError),
     Producer(ProducerError),
-    InvalidProducerOutput(blob::BlobDerivationError),
+    InvalidProducerOutput(signalbox_domain::BlobDerivationError),
 }
 // derives: fmt::Debug
 impl<StoreError, ProducerError> fmt::Display

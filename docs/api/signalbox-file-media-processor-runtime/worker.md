@@ -11,9 +11,11 @@ impl fmt::Debug for WorkerCatalog {
 }
 impl WorkerCatalog {
     pub fn try_new(
-        providers: vec::Vec<boxed::Box<dyn declaration::FileMediaProvider>>,
+        providers: vec::Vec<boxed::Box<dyn signalbox_file_media_runtime::FileMediaProvider>>,
     ) -> result::Result<Self, WorkerCatalogConstructionError>;
-    pub fn declarations(&self) -> vec::Vec<declaration::FileMediaProviderDeclaration>;
+    pub fn declarations(
+        &self,
+    ) -> vec::Vec<signalbox_file_media_runtime::FileMediaProviderDeclaration>;
 }
 ```
 

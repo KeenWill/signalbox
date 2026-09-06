@@ -10,12 +10,6 @@ pub struct Observation<C> {
     pub fact: ObservationFact,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for Observation<C>
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ObservationFact
@@ -42,12 +36,6 @@ pub enum ObservationFact {
     FinishReported(FinishReason),
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
-impl<T> dyn_clone::DynClone for ObservationFact
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
 ```
 
 ## ObservationSink

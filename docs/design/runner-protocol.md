@@ -63,6 +63,11 @@ acknowledged. A runner that cannot perform an admitted operation reports it with
 recorded resolves the corresponding provisioning, release, or lease authority as
 refused, and neither side waits on it further.
 
+The daemon retains runner-authored `operation_failed` detail verbatim and never
+parses or branches on it. Runner inspection returns the detail as bounded
+[diagnostic evidence](../spec/process-protocol.md), without host or credential
+paths.
+
 ### Successor enrollment, promotion, and replacement
 
 Several runners are enrolled with one daemon at once.

@@ -8,6 +8,7 @@ import {
   decodeWebSessionCatalogSnapshot,
   decodeWebSessionLiveSnapshot,
   decodeWebSessionLiveStreamEvent,
+  decodeWebSessionRates,
   decodeWebSessionTimelineDetailPage,
   decodeWebSubmitInputRequest,
   type WebApiErrorResponse,
@@ -1156,4 +1157,30 @@ export async function readSessionTranscript(
   )
     throw new TypeError('Transcript detail belongs to another window')
   return page
+}
+
+export async function readSessionRates(sessionIds: readonly string[], signal?: AbortSignal) {
+  if (sessionIds.length === 0) return decodeWebSessionRates({ sessions: [] })
+  const query = new URLSearchParams(sessionIds.map((id) => ['session_id', id]))
+  const response = await request(`/api/sessions/rates?${query}`, {
+    headers: { accept: 'application/json' },
+    credentials: 'same-origin',
+    signal,
+  })
+  const payload = await readBoundedJson(response)
+  if (!response.ok)
+    throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+  const rates = decodeWebSessionRates(payload)
+  if (
+    rates.sessions.length !== sessionIds.length ||
+    new Set(rates.sessions.map((row) => row.session_id)).size !== sessionIds.length ||
+    rates.sessions.some(
+      (row) =>
+        !sessionIds.includes(row.session_id) ||
+        BigInt(row.failed_turn_count) > BigInt(row.turn_count),
+    )
+  ) {
+    throw new TypeError('session rates do not match the listed sessions')
+  }
+  return rates
 }

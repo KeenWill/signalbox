@@ -7,7 +7,7 @@
 ```rust
 pub fn instruction_root_kind_from_str(
     value: &str,
-) -> option::Option<workspace_instruction::InstructionDiscoveryRootKind>;
+) -> option::Option<signalbox_domain::InstructionDiscoveryRootKind>;
 ```
 
 ## instruction_bundle_kind_from_str
@@ -15,7 +15,7 @@ pub fn instruction_root_kind_from_str(
 ```rust
 pub fn instruction_bundle_kind_from_str(
     value: &str,
-) -> option::Option<workspace_instruction::InstructionBundleKind>;
+) -> option::Option<signalbox_domain::InstructionBundleKind>;
 ```
 
 ## instruction_finding_kind_from_str
@@ -23,7 +23,7 @@ pub fn instruction_bundle_kind_from_str(
 ```rust
 pub fn instruction_finding_kind_from_str(
     value: &str,
-) -> option::Option<workspace_instructions::InstructionDiscoveryFindingKind>;
+) -> option::Option<signalbox_application::InstructionDiscoveryFindingKind>;
 ```
 
 ## DelegationPolicyStorageKind
@@ -34,60 +34,6 @@ pub enum DelegationPolicyStorageKind {
     Bound,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for mapping::DelegationPolicyStorageKind
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for mapping::DelegationPolicyStorageKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for mapping::DelegationPolicyStorageKind {}
-impl<T> parse_display::IntoResult<T> for mapping::DelegationPolicyStorageKind {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for mapping::DelegationPolicyStorageKind
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for mapping::DelegationPolicyStorageKind {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for mapping::DelegationPolicyStorageKind {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for mapping::DelegationPolicyStorageKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for mapping::DelegationPolicyStorageKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for mapping::DelegationPolicyStorageKind
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## delegation_policy_kind_to_str
@@ -109,7 +55,8 @@ pub fn delegation_policy_kind_from_str(
 ## turn_terminal_cause_to_str
 
 ```rust
-pub const fn turn_terminal_cause_to_str(value: turn_lifecycle::TurnTerminalCause) -> &'static str;
+pub const fn turn_terminal_cause_to_str(value: signalbox_domain::TurnTerminalCause)
+    -> &'static str;
 ```
 
 ## turn_terminal_cause_from_str
@@ -117,7 +64,7 @@ pub const fn turn_terminal_cause_to_str(value: turn_lifecycle::TurnTerminalCause
 ```rust
 pub fn turn_terminal_cause_from_str(
     value: &str,
-) -> option::Option<turn_lifecycle::TurnTerminalCause>;
+) -> option::Option<signalbox_domain::TurnTerminalCause>;
 ```
 
 ## DelegationUpdateStorageKind
@@ -131,60 +78,6 @@ pub enum DelegationUpdateStorageKind {
     SessionMessage,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for mapping::DelegationUpdateStorageKind
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for mapping::DelegationUpdateStorageKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for mapping::DelegationUpdateStorageKind {}
-impl<T> parse_display::IntoResult<T> for mapping::DelegationUpdateStorageKind {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for mapping::DelegationUpdateStorageKind
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for mapping::DelegationUpdateStorageKind {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for mapping::DelegationUpdateStorageKind {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for mapping::DelegationUpdateStorageKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for mapping::DelegationUpdateStorageKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for mapping::DelegationUpdateStorageKind
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## delegation_update_kind_to_str
@@ -211,60 +104,6 @@ pub enum DelegationWakeStorageKind {
     Message,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for mapping::DelegationWakeStorageKind
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for mapping::DelegationWakeStorageKind
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for mapping::DelegationWakeStorageKind {}
-impl<T> parse_display::IntoResult<T> for mapping::DelegationWakeStorageKind {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for mapping::DelegationWakeStorageKind
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for mapping::DelegationWakeStorageKind {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for mapping::DelegationWakeStorageKind {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for mapping::DelegationWakeStorageKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for mapping::DelegationWakeStorageKind
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for mapping::DelegationWakeStorageKind
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## delegation_wake_subject_to_str
@@ -296,60 +135,6 @@ pub enum GoalEventDiscriminator {
     SessionClosed,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for mapping::GoalEventDiscriminator
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for mapping::GoalEventDiscriminator
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for mapping::GoalEventDiscriminator {}
-impl<T> parse_display::IntoResult<T> for mapping::GoalEventDiscriminator {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for mapping::GoalEventDiscriminator
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for mapping::GoalEventDiscriminator {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for mapping::GoalEventDiscriminator {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for mapping::GoalEventDiscriminator
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for mapping::GoalEventDiscriminator
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for mapping::GoalEventDiscriminator
-where
-    T: ?marker::Sized,
-{
-}
 ```
 
 ## PositiveOrdinalMappingError
@@ -361,60 +146,6 @@ pub enum PositiveOrdinalMappingError {
     OutOfRange,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for mapping::PositiveOrdinalMappingError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for mapping::PositiveOrdinalMappingError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for mapping::PositiveOrdinalMappingError {}
-impl<T> parse_display::IntoResult<T> for mapping::PositiveOrdinalMappingError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for mapping::PositiveOrdinalMappingError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for mapping::PositiveOrdinalMappingError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for mapping::PositiveOrdinalMappingError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for mapping::PositiveOrdinalMappingError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for mapping::PositiveOrdinalMappingError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for mapping::PositiveOrdinalMappingError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for mapping::PositiveOrdinalMappingError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -427,7 +158,7 @@ impl error::Error for mapping::PositiveOrdinalMappingError {
 
 ```rust
 pub fn defaults_version_to_numeric(
-    value: configuration::SessionConfigurationDefaultsVersion,
+    value: signalbox_domain::SessionConfigurationDefaultsVersion,
 ) -> decimal::Decimal;
 ```
 
@@ -437,7 +168,7 @@ pub fn defaults_version_to_numeric(
 pub fn defaults_version_from_numeric(
     value: decimal::Decimal,
 ) -> result::Result<
-    configuration::SessionConfigurationDefaultsVersion,
+    signalbox_domain::SessionConfigurationDefaultsVersion,
     mapping::PositiveOrdinalMappingError,
 >;
 ```
@@ -445,7 +176,8 @@ pub fn defaults_version_from_numeric(
 ## input_position_to_numeric
 
 ```rust
-pub fn input_position_to_numeric(value: queue_order::SessionInputPosition) -> decimal::Decimal;
+pub fn input_position_to_numeric(value: signalbox_domain::SessionInputPosition)
+    -> decimal::Decimal;
 ```
 
 ## input_position_from_numeric
@@ -453,14 +185,14 @@ pub fn input_position_to_numeric(value: queue_order::SessionInputPosition) -> de
 ```rust
 pub fn input_position_from_numeric(
     value: decimal::Decimal,
-) -> result::Result<queue_order::SessionInputPosition, mapping::PositiveOrdinalMappingError>;
+) -> result::Result<signalbox_domain::SessionInputPosition, mapping::PositiveOrdinalMappingError>;
 ```
 
 ## dangerous_tool_auto_approval_to_str
 
 ```rust
 pub fn dangerous_tool_auto_approval_to_str(
-    value: policy::DangerousToolAutoApproval,
+    value: signalbox_domain::DangerousToolAutoApproval,
 ) -> &'static str;
 ```
 
@@ -469,7 +201,7 @@ pub fn dangerous_tool_auto_approval_to_str(
 ```rust
 pub fn dangerous_tool_auto_approval_from_str(
     value: &str,
-) -> option::Option<policy::DangerousToolAutoApproval>;
+) -> option::Option<signalbox_domain::DangerousToolAutoApproval>;
 ```
 
 ## session_id_to_uuid
@@ -539,60 +271,6 @@ pub enum DurableCommandIdMappingError {
     SentinelUuid,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl<T> from_ref::FromRef<T> for mapping::DurableCommandIdMappingError
-where
-    T: clone::Clone,
-{
-    fn from_ref(input: &T) -> T;
-}
-impl<T> dyn_clone::DynClone for mapping::DurableCommandIdMappingError
-where
-    T: clone::Clone,
-{
-    fn __clone_box(&self, _: sealed::Private) -> *mut ();
-}
-impl<T> into_either::IntoEither for mapping::DurableCommandIdMappingError {}
-impl<T> parse_display::IntoResult<T> for mapping::DurableCommandIdMappingError {
-    type Err = never;
-    fn into_result(self) -> result::Result<T, <T as parse_display::IntoResult<T>>::Err>;
-}
-impl<V, T> types::VZip<V> for mapping::DurableCommandIdMappingError
-where
-    V: types::MultiLane<T>,
-{
-    fn vzip(self) -> V;
-}
-impl<T> request::IntoRequest<T> for mapping::DurableCommandIdMappingError {
-    fn into_request(self) -> request::Request<T>;
-}
-impl<L> layered::LayerExt<L> for mapping::DurableCommandIdMappingError {
-    fn named_layer<S>(
-        &self,
-        service: S,
-    ) -> layered::Layered<<L as tower_layer::Layer<S>>::Service, S>
-    where
-        L: tower_layer::Layer<S>;
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Uninit, invariant::Uninit>
-    for mapping::DurableCommandIdMappingError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<ST, DT> invariant::CastableFrom<ST, invariant::Initialized, invariant::Initialized>
-    for mapping::DurableCommandIdMappingError
-where
-    ST: ?marker::Sized,
-    DT: ?marker::Sized,
-{
-}
-impl<T> invariant::Read<invariant::Exclusive, invariant::BecauseExclusive>
-    for mapping::DurableCommandIdMappingError
-where
-    T: ?marker::Sized,
-{
-}
 impl fmt::Display for mapping::DurableCommandIdMappingError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }

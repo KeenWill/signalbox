@@ -2384,9 +2384,12 @@ kbd {
 }
 
 .catalog-surface {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   min-height: 0;
+}
+.catalog-surface > :not(.catalog-workbench) {
+  flex-shrink: 0;
 }
 .catalog-toolbar {
   display: grid;
@@ -2462,6 +2465,7 @@ kbd {
   cursor: pointer;
 }
 .catalog-workbench {
+  flex: 1;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   min-height: 0;
@@ -2519,10 +2523,7 @@ kbd {
 }
 .catalog-list li > button {
   display: grid;
-  grid-template-columns: minmax(180px, 1.4fr) minmax(90px, 0.6fr) minmax(125px, 0.7fr) minmax(
-      145px,
-      0.8fr
-    ) 18px;
+  grid-template-columns: minmax(125px, 1.4fr) 70px minmax(135px, 1fr) minmax(85px, 0.7fr) 14px;
   align-items: center;
   gap: 0.7rem;
   width: 100%;
@@ -3103,4 +3104,34 @@ kbd {
 }
 .session-workspace-surface > .session-composer {
   border: 1px solid var(--border);
+}
+
+.catalog-rates {
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.catalog-rates p {
+  margin: 0.4rem 0;
+}
+.catalog-rate-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+.catalog-rate-controls select {
+  margin-left: 0.5rem;
+  background: var(--surface-1);
+  color: var(--text);
+}
+.catalog-list small {
+  display: block;
+  margin-top: 0.25rem;
+}
+@media (max-width: 760px) {
+  .catalog-list li > button > span:nth-child(3) {
+    display: block;
+    grid-column: 1 / -1;
+  }
 }
