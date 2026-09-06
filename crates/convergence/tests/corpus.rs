@@ -316,26 +316,6 @@ fn comment_only_head_stays_unreviewed_after_inventory_settles() -> Result<(), Bo
 }
 
 #[test]
-fn selected_differential_fixtures_cannot_replace_the_full_expectations()
--> Result<(), Box<dyn Error>> {
-    let expectations = root().join("fixtures/expected.json");
-    let before = std::fs::read(&expectations)?;
-    let output = std::process::Command::new("python3")
-        .arg(root().join("../../tooling/convergence-reconciler/differential.py"))
-        .args([
-            "--write-expectations",
-            "--binary",
-            "/does-not-exist/signalbox-converge",
-        ])
-        .arg(root().join("fixtures/mutations/settled.json"))
-        .output()?;
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8(output.stderr)?.contains("requires the complete fixture corpus"));
-    assert_eq!(std::fs::read(expectations)?, before);
-    Ok(())
-}
-
-#[test]
 fn refreshed_checks_determine_both_verdict_and_projection() -> Result<(), Box<dyn Error>> {
     let policy = policy()?;
     for (fixture, green) in [

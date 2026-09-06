@@ -258,8 +258,8 @@ pull-request identity during decision revalidation is an error; the predicate
 performs no I/O. Persisted authentication and review waves are bound to the
 complete policy value and requalified when it changes. Exempt head changes are
 rename-only changes and clean base forwards; comment-only changes require a
-fresh quiet review. The Python reconciler delegates evidence evaluation to the crate's CLI and
-retains its loop, dispatch fence, and cool-off state.
+fresh quiet review. The Python reconciler delegates evidence evaluation to the
+crate's CLI and retains its loop, dispatch fence, and cool-off state.
 
 ## Planned
 

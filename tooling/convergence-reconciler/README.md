@@ -163,8 +163,9 @@ service supervision owns that singleton policy.
 
 Driver tests exercise decisions, state persistence, and dispatch fences with
 recorded convergence results. The
-[fixture corpus](../../crates/convergence/fixtures/) and differential harness
-cover evidence rules against the frozen Python reference.
+[fixture corpus](../../crates/convergence/fixtures/) covers evidence rules with
+frozen differential expectations. The CLI regression runner checks those
+verdicts and reason sets without a second predicate implementation.
 
 ```console
 cargo build -p signalbox-convergence --bin signalbox-converge
