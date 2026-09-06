@@ -257,6 +257,56 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             events: Box::new([EventAdmission::Replayed]),
         }
     );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &repository,
+                1,
+                &frontier,
+                &[],
+                observed_at + Duration::from_secs(2),
+                retain_until + Duration::from_secs(2),
+            )
+            .await?,
+        FrontierEventAdmission::Unchanged
+    );
+    let rejected_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(17)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("lint"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let rejected_occurrence = RepoWatchEventOccurrenceV1::from_parts(
+        rejected_event.clone(),
+        RepoWatchEventContentIdentityV1::from_bytes([18; 32]),
+    );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &repository,
+                1,
+                &frontier,
+                std::slice::from_ref(&rejected_occurrence),
+                observed_at + Duration::from_secs(3),
+                retain_until + Duration::from_secs(3),
+            )
+            .await?,
+        FrontierEventAdmission::ConflictingReuse
+    );
+    let unchanged_generation: Decimal = sqlx::query_scalar(
+        "SELECT frontier_generation FROM repository_state WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(unchanged_generation, Decimal::from(1_u64));
+    let rejected_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE event_id = $1")
+            .bind(rejected_event.id().into_uuid())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(rejected_count, 0);
     let incompatible_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
         RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
             [19; 32],
