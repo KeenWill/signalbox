@@ -1301,10 +1301,10 @@ fn decode_dispatch_authority(
 /// an ordinary input submitted into a session that has a goal — and the
 /// generation states nothing about those, so reading one against the session's
 /// lineage would let a goal attached after the turn already existed supply
-/// authority it never covered. Repository-watch dispatch, which is why a
-/// dispatched session's requests reach the judge at all, no longer produces
-/// one: the turn carrying its tagged context is the commissioned generation's
-/// own turn and carries the record.
+/// authority it never covered. A commissioned dispatch supplies its judged
+/// request without such a goal-machinery turn record: the turn carrying its
+/// tagged context is the commissioned generation's own turn and carries the
+/// dispatch authority.
 ///
 /// This is what the judge reads while it is prepared. Completion asks a
 /// different question of the same lineage and uses
