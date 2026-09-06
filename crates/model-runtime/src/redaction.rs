@@ -619,6 +619,7 @@ fn provider_compaction_contains_credential(
         };
         block_json.contains(key)
             || json_escapes_decode_to_credential(block_json, key)
+            || provider_compaction_fields_contain_credential(block_json, key)
             || provider_compaction_suffix_completes_durable_prefix(
                 block_json,
                 &content[..index],
@@ -630,6 +631,27 @@ fn provider_compaction_contains_credential(
                 key,
             )
     })
+}
+
+fn provider_compaction_fields_contain_credential(block_json: &str, credential: &str) -> bool {
+    let Ok(block) = serde_json::from_str::<serde_json::Value>(block_json) else {
+        return false;
+    };
+    let mut pending = String::new();
+    ["content", "encrypted_content"]
+        .into_iter()
+        .filter_map(|field| block.get(field).and_then(serde_json::Value::as_str))
+        .any(|value| {
+            pending.push_str(value);
+            if pending.contains(credential) {
+                return true;
+            }
+            (_, pending) = redact_complete_credentials_and_hold_prefix(
+                std::mem::take(&mut pending),
+                credential,
+            );
+            false
+        })
 }
 
 fn provider_compaction_suffix_completes_durable_prefix(
@@ -1777,6 +1799,36 @@ mod tests {
 
         let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
             panic!("credential-bearing opaque replay evidence is rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_provider_compaction_fields_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: vec![AssistantPart::ProviderCompaction {
+                    block_json:
+                        r#"{"type":"compaction","content":"key_","encrypted_content":"loop"}"#
+                            .to_string(),
+                }],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential spanning ordered compaction fields is rejected");
         };
         assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
         assert_eq!(
