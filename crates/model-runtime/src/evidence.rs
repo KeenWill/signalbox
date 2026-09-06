@@ -253,6 +253,10 @@ pub struct RefusalEvidence {
     /// Any response parts produced before the refusal, in provider order.
     pub content: Vec<AssistantPart>,
     pub usage: TokenUsage,
+    /// Provider-reported input retained after an in-response compaction.
+    pub retained_input_tokens: Option<u64>,
+    /// Provider-reported output from the final physical compaction iteration.
+    pub retained_output_tokens: Option<u64>,
 }
 
 /// Evidence for a complete, correlated definitive provider error response.

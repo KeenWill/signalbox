@@ -1356,7 +1356,12 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     );
 
     let reported = repository
-        .latest_reported_usage(session, resolved_target, terminal_frontier)
+        .latest_reported_usage(
+            session,
+            resolved_target,
+            FastMode::Disabled,
+            terminal_frontier,
+        )
         .await?
         .expect("completed provider compaction reports retained-context semantics");
     assert!(reported.input_is_retained());

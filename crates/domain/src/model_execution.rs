@@ -22,8 +22,8 @@ use crate::{
     EndedToolAttempt, EndedTurnAttempt, FrozenModelSelection, InitialToolApproval,
     ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs,
     OriginConfiguration, PinnedProviderTarget, PinnedProviderTargetReconstitutionInput,
-    PreparedToolResultProjection, ReconciliationMarker, ReconstitutedModelCall,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    PreparedToolResultProjection, ProviderCompactionBlock, ReconciliationMarker,
+    ReconstitutedModelCall, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
     SteeringReclassificationReason, SubmitInputResult, SubmitInputTurnOriginReconstitutionInput,
@@ -2228,7 +2228,8 @@ fn apply_terminal_observation(
                 .map(ModelCallTerminalOutcome::Failed)
             }
         },
-        ModelCallTerminalObservation::Refused => {
+        observation @ ModelCallTerminalObservation::Refused
+        | observation @ ModelCallTerminalObservation::RefusedWithProviderCompaction { .. } => {
             let ModelCallTerminalIdentities::Refused(identities) = identities else {
                 return Err(ModelCallClosureError::IdentityShapeMismatch);
             };
@@ -2248,8 +2249,53 @@ fn apply_terminal_observation(
                     .collect(),
             )
             .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+            let provider_compaction =
+                if let ModelCallTerminalObservation::RefusedWithProviderCompaction {
+                    provider_compaction,
+                    ..
+                } = observation
+                {
+                    provider_compaction
+                } else {
+                    Vec::new()
+                };
+            if provider_compaction.len() != identities.provider_compaction_entries.len() {
+                return Err(ModelCallClosureError::AssistantIdentityCountMismatch);
+            }
+            let mut used = frontier_entries
+                .iter()
+                .map(SemanticTranscriptEntry::identity)
+                .collect::<BTreeSet<_>>();
+            if identities
+                .provider_compaction_entries
+                .iter()
+                .any(|identity| !used.insert(*identity))
+            {
+                return Err(ModelCallClosureError::FrontierDerivationFailed);
+            }
+            let provider_compaction_entries = identities
+                .provider_compaction_entries
+                .into_iter()
+                .zip(provider_compaction)
+                .map(|(identity, block)| {
+                    SemanticTranscriptEntry::from_validated_parts(
+                        identity,
+                        session,
+                        SemanticTranscriptEntryPayload::ProviderCompaction {
+                            producing_call: ended_call.id(),
+                            block,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
             let terminal_snapshot = source
-                .derive_appending_candidate(identities.terminal_frontier, Vec::new())
+                .derive_appending_candidate(
+                    identities.terminal_frontier,
+                    provider_compaction_entries
+                        .iter()
+                        .map(SemanticTranscriptEntry::reference)
+                        .collect(),
+                )
                 .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
             Ok(ModelCallTerminalOutcome::Refused(RefusedModelCallTurn {
                 session,
@@ -2257,6 +2303,7 @@ fn apply_terminal_observation(
                 call: ended_call,
                 attempt: ended_attempt,
                 disposition: TurnDisposition::Refused,
+                provider_compaction_entries: provider_compaction_entries.into_boxed_slice(),
                 terminal_snapshot,
                 reclassified_pending_steering,
             }))
@@ -2351,6 +2398,16 @@ pub enum ModelCallTerminalObservation {
     KnownFailed,
     /// The authenticated complete exchange was explicitly refused.
     Refused,
+    /// A refused exchange that first produced durable provider compaction.
+    RefusedWithProviderCompaction {
+        /// Provider compaction blocks in response order; ordinary refusal text
+        /// remains non-transcript evidence.
+        provider_compaction: Vec<ProviderCompactionBlock>,
+        /// Provider-reported input retained after the final compaction iteration.
+        retained_input_tokens: u64,
+        /// Provider-reported output from the final physical iteration.
+        retained_output_tokens: u64,
+    },
     /// The physical provider interaction definitively cancelled.
     Cancelled,
     /// Provider acceptance or completion remains unresolved.
@@ -2370,6 +2427,10 @@ impl ModelCallTerminalObservation {
                 retained_input_tokens,
                 ..
             } => *retained_input_tokens,
+            Self::RefusedWithProviderCompaction {
+                retained_input_tokens,
+                ..
+            } => Some(*retained_input_tokens),
             _ => None,
         }
     }
@@ -2386,6 +2447,10 @@ impl ModelCallTerminalObservation {
                 retained_output_tokens,
                 ..
             } => *retained_output_tokens,
+            Self::RefusedWithProviderCompaction {
+                retained_output_tokens,
+                ..
+            } => Some(*retained_output_tokens),
             _ => None,
         }
     }
@@ -2397,7 +2462,9 @@ impl ModelCallTerminalObservation {
             | Self::CompletedWithProviderCompaction { .. }
             | Self::CompletedWithTools { .. } => ModelCallDisposition::Completed,
             Self::KnownFailed => ModelCallDisposition::KnownFailed,
-            Self::Refused => ModelCallDisposition::Refused,
+            Self::Refused | Self::RefusedWithProviderCompaction { .. } => {
+                ModelCallDisposition::Refused
+            }
             Self::Cancelled => ModelCallDisposition::Cancelled,
             Self::Ambiguous => ModelCallDisposition::Ambiguous,
         }
@@ -2776,6 +2843,7 @@ impl CancelledModelCallTurnIdentities {
 /// Fresh identity for a refusal terminal frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefusedModelCallTurnIdentities {
+    provider_compaction_entries: Vec<SemanticTranscriptEntryId>,
     terminal_frontier: ContextFrontierId,
     pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
 }
@@ -2784,9 +2852,19 @@ impl RefusedModelCallTurnIdentities {
     /// Supplies the new equal-content terminal frontier identity.
     pub fn new(terminal_frontier: ContextFrontierId) -> Self {
         Self {
+            provider_compaction_entries: Vec::new(),
             terminal_frontier,
             pending_steering_reclassifications: Vec::new(),
         }
+    }
+
+    /// Supplies one semantic identity per retained provider compaction block.
+    pub fn with_provider_compaction_entries(
+        mut self,
+        identities: Vec<SemanticTranscriptEntryId>,
+    ) -> Self {
+        self.provider_compaction_entries = identities;
+        self
     }
 
     /// Supplies one fresh successor identity per pending steering input, in
@@ -3376,6 +3454,7 @@ pub struct RefusedModelCallTurn {
     call: EndedModelCall,
     attempt: EndedTurnAttempt,
     disposition: TurnDisposition,
+    provider_compaction_entries: Box<[SemanticTranscriptEntry]>,
     terminal_snapshot: ResolvedContextFrontierSnapshot,
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 }
@@ -3400,6 +3479,10 @@ impl RefusedModelCallTurn {
     /// Borrows the refused turn disposition.
     pub const fn disposition(&self) -> &TurnDisposition {
         &self.disposition
+    }
+    /// Returns provider compaction entries retained before refusal.
+    pub fn provider_compaction_entries(&self) -> &[SemanticTranscriptEntry] {
+        &self.provider_compaction_entries
     }
     /// Borrows the terminal frontier.
     pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {

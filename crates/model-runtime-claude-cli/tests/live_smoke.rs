@@ -1716,6 +1716,8 @@ fn decoded_response_accepts_refusal_without_completion_material() {
         reported_model: Some(fixture_reported_model()),
         content: Vec::new(),
         usage: fixture_usage(),
+        retained_input_tokens: None,
+        retained_output_tokens: None,
     });
 
     let decoded = require_decoded_response(evidence);

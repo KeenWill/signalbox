@@ -561,6 +561,9 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     let has_tool_calls = content
         .iter()
         .any(|part| matches!(part, AssistantPart::ToolCall(_)));
+    let has_provider_compaction = content
+        .iter()
+        .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. }));
     if matches!(finish, FinishReason::ToolUse) && !has_tool_calls {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::ResponseUnintelligible {
@@ -573,6 +576,24 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             usage,
         });
     }
+    let retained_iteration_usage = if has_provider_compaction {
+        let (Some(input), Some(output)) = (retained_input_tokens, retained_output_tokens) else {
+            return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause: LossCause::ResponseUnintelligible {
+                    detail: "provider compaction response omits final-iteration retained usage"
+                        .to_string(),
+                },
+                exchange,
+                reported_model,
+                finish_reported: Some(finish),
+                tool_calls: classified_tool_calls(opened_tool_calls),
+                usage,
+            });
+        };
+        Some((input, output))
+    } else {
+        None
+    };
     match finish.completion_finish() {
         None => TerminalEvidence::Refused(RefusalEvidence {
             exchange,
@@ -580,11 +601,10 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             reported_model,
             content,
             usage,
+            retained_input_tokens: retained_iteration_usage.map(|(input, _)| input),
+            retained_output_tokens: retained_iteration_usage.map(|(_, output)| output),
         }),
         Some(finish) => {
-            let has_provider_compaction = content
-                .iter()
-                .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. }));
             let completion = CompletionEvidence {
                 exchange,
                 message_id,
@@ -593,23 +613,8 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 content,
                 usage,
             };
-            if has_provider_compaction {
-                let (Some(retained_input_tokens), Some(retained_output_tokens)) =
-                    (retained_input_tokens, retained_output_tokens)
-                else {
-                    return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
-                        cause: LossCause::ResponseUnintelligible {
-                            detail:
-                                "provider compaction response omits final-iteration retained usage"
-                                    .to_string(),
-                        },
-                        exchange: completion.exchange,
-                        reported_model: completion.reported_model,
-                        finish_reported: Some(completion.finish.into()),
-                        tool_calls: classified_tool_calls(opened_tool_calls),
-                        usage: completion.usage,
-                    });
-                };
+            if let Some((retained_input_tokens, retained_output_tokens)) = retained_iteration_usage
+            {
                 TerminalEvidence::CompletedWithProviderCompaction {
                     completion,
                     retained_input_tokens,
@@ -941,6 +946,37 @@ mod tests {
         assert_eq!(
             refusal.reported_model,
             Some(ProviderReportedModel::new("model-exact-1"))
+        );
+    }
+
+    #[test]
+    fn refusal_preserves_prior_provider_compaction_and_retained_usage() {
+        let raw_block =
+            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque=="}"#;
+        let body = format!(
+            r#"{{
+                "id":"msg_compact","type":"message","role":"assistant","model":"model-exact-1",
+                "content":[{raw_block},{{"type":"text","text":"I cannot continue."}}],
+                "stop_reason":"refusal","usage":{{
+                    "input_tokens":5,"output_tokens":4,
+                    "iterations":[
+                        {{"input_tokens":10,"output_tokens":2}},
+                        {{"input_tokens":5,"output_tokens":4,"cache_read_input_tokens":3}}
+                    ]
+                }}
+            }}"#
+        );
+
+        let TerminalEvidence::Refused(refusal) = decode(&body).0 else {
+            panic!("a refusal after compaction must retain refusal evidence");
+        };
+        assert_eq!(refusal.retained_input_tokens, Some(8));
+        assert_eq!(refusal.retained_output_tokens, Some(4));
+        assert_eq!(
+            refusal.content[0],
+            AssistantPart::ProviderCompaction {
+                block_json: raw_block.to_string(),
+            }
         );
     }
 

@@ -986,6 +986,8 @@ impl StreamDecoder {
                 reported_model: self.reported_model.clone(),
                 content: std::mem::take(&mut self.closed).into_values().collect(),
                 usage: self.usage,
+                retained_input_tokens: self.retained_input_tokens,
+                retained_output_tokens: self.retained_output_tokens,
             }),
             Some(finish) => {
                 let completion = CompletionEvidence {
@@ -1338,6 +1340,35 @@ mod tests {
                 "encrypted_content": "opaque==",
             })
         );
+    }
+
+    #[test]
+    fn streamed_refusal_retains_prior_compaction_and_iteration_usage() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"compaction\",\"content\":null,\"encrypted_content\":null}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"compaction_delta\",\"content\":\"summary\",\"encrypted_content\":\"opaque==\"}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\
+              \"usage\":{\"output_tokens\":7,\"iterations\":[{\"input_tokens\":25,\"output_tokens\":7}]}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::Refused(refusal)) = terminal else {
+            panic!("a refusal after compaction must retain refusal evidence");
+        };
+        assert_eq!(refusal.retained_input_tokens, Some(25));
+        assert_eq!(refusal.retained_output_tokens, Some(7));
+        assert!(matches!(
+            refusal.content.as_slice(),
+            [AssistantPart::ProviderCompaction { .. }]
+        ));
     }
 
     #[test]

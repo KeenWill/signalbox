@@ -2649,6 +2649,17 @@ where
             ModelCallTerminalObservation::Refused => ModelCallTerminalIdentities::Refused(
                 RefusedModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
+            ModelCallTerminalObservation::RefusedWithProviderCompaction {
+                provider_compaction,
+                ..
+            } => ModelCallTerminalIdentities::Refused(
+                RefusedModelCallTurnIdentities::new(self.ids.next_context_frontier_id())
+                    .with_provider_compaction_entries(
+                        (0..provider_compaction.len())
+                            .map(|_| self.ids.next_semantic_entry_id())
+                            .collect(),
+                    ),
+            ),
             ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous(
                 AmbiguousModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),

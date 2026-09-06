@@ -693,6 +693,8 @@ impl<C: Clone> EventDecoder<C> {
                 reported_model: self.reported_model,
                 content,
                 usage: self.usage,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
             });
         }
         let has_proposals = !self.proposal_indexes.is_empty();

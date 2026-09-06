@@ -366,16 +366,20 @@ admit a successor, because the physical result has not proven cancellation.
 blocks are dropped, while thinking with text and redacted thinking fail the
 adapter stage closed as unsupported material, because no durable semantic
 representation exists for either. Tool content and a tool-use finish must agree;
-either one without the other is a known failure. An Anthropic completion that
+either one without the other is a known failure. An Anthropic response that
 contains provider compaction carries the final physical iteration's retained
 input count, including cache axes, and output count, and persists both on the
-model call separately from the all-iteration usage retained for billing. The
-context guard uses those retained-iteration measures as its post-compaction
-baseline; it never treats billed iteration input or aggregate multi-iteration
-output as model-visible retained usage. The dedicated compaction call rejects
-every tool and suppressed-tool part and accepts a summary only from a completion
-that ended by end turn or stop sequence, because its completion must be whole
-summary text. Classification is an adapter contract consuming the
+model call separately from the all-iteration usage retained for billing. A
+completed response retains compaction among its ordered assistant parts; a
+refused response retains only its compaction parts and omits ordinary refusal
+text. The context guard uses those retained-iteration measures as its
+post-compaction baseline; it never treats billed iteration input or aggregate
+multi-iteration output as model-visible retained usage. A retained baseline is
+eligible only when its call used the same effective target the next request will
+use after applying fast-mode target mapping. The dedicated compaction call
+rejects every tool and suppressed-tool part and accepts a summary only from a
+completion that ended by end turn or stop sequence, because its completion must
+be whole summary text. Classification is an adapter contract consuming the
 full-request-send boundary; the daemon never reinterprets SDK errors by
 retryability or exception type. The identity relation applies to every identity
 the exchange reported, early observations and terminal evidence alike, because

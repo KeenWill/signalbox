@@ -4711,6 +4711,10 @@ impl PhysicalCancellationModelCallTurnIdentities {
 pub struct RefusedModelCallTurnIdentities { /* private */ }
 impl RefusedModelCallTurnIdentities {
     pub fn new(terminal_frontier: ContextFrontierId) -> Self;
+    pub fn with_provider_compaction_entries(
+        self,
+        identities: Vec<SemanticTranscriptEntryId>,
+    ) -> Self;
     pub fn with_pending_steering_reclassifications(
         self,
         identities: Vec<PendingSteeringReclassificationIdentity>,
@@ -4776,7 +4780,7 @@ pub struct StopRequestedModelCallTurn { /* private */ }
 pub struct RefusedModelCallTurn { /* private */ }
 impl RefusedModelCallTurn {
     // accessors: session(), turn(), call(), attempt(), disposition(),
-    // terminal_snapshot(), reclassified_pending_steering()
+    // provider_compaction_entries(), terminal_snapshot(), reclassified_pending_steering()
 }
 pub struct ReconciliationRequiredModelCallTurn { /* private */ }
 // sealed: AcceptedInputSchedulingProjection::apply_interrupt_to_model_call_recovery,

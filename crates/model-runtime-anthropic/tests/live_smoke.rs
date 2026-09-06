@@ -551,6 +551,8 @@ mod require_decoded_response_tests {
                 reported_model: None,
                 content: Vec::new(),
                 usage: usage(),
+                retained_input_tokens: None,
+                retained_output_tokens: None,
             }),
             &refusal_observed(),
         );

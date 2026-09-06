@@ -691,7 +691,7 @@ impl PostgresModelCallRepository {
     }
 
     /// Reads the newest ordinary or dedicated-compaction call with reported input
-    /// usage for one exact target.
+    /// usage for one exact target and effective fast mode.
     ///
     /// A later failed call with no usage does not erase the last provider-confirmed
     /// context size. Callers may use this only as a lower bound: later transcript
@@ -705,6 +705,7 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         target: ResolvedProviderTarget,
+        fast_mode: FastMode,
         prospective: impl Into<ProspectiveModelInput<'a>>,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         let (projected_members, uncommitted_content_bytes) = match prospective.into() {
@@ -769,7 +770,8 @@ impl PostgresModelCallRepository {
                        true AS input_is_retained,
                        model_call.retained_input_tokens,
                        model_call.retained_output_tokens,
-                       model_call.terminal_disposition_kind = 'completed' AS output_is_retained,
+                       (model_call.terminal_disposition_kind = 'completed'
+                        OR model_call.retained_output_tokens IS NOT NULL) AS output_is_retained,
                        model_call.usage_input_tokens,
                        model_call.usage_output_tokens,
                        model_call.usage_cache_creation_input_tokens,
@@ -785,6 +787,9 @@ impl PostgresModelCallRepository {
                        headroom.projected_result_content_bytes AS
                            proven_unreported_content_bytes
                   FROM model_call
+                  JOIN turn_model_settings_resolved AS settings
+                    ON settings.session_id = model_call.session_id
+                   AND settings.turn_id = model_call.turn_id
                   LEFT JOIN tool_continuation_context_headroom AS headroom
                     ON headroom.session_id = model_call.session_id
                    AND headroom.producing_model_call_id = model_call.model_call_id
@@ -792,6 +797,7 @@ impl PostgresModelCallRepository {
                    AND model_call.resolved_provider_model_identity_id = $2
                    AND model_call.state_kind = 'terminal'
                    AND model_call.usage_input_tokens IS NOT NULL
+                   AND settings.resolved_model_settings #>> '{effective,fast_mode}' = $6
                    AND NOT EXISTS (
                        SELECT 1
                          FROM latest_compaction AS latest
@@ -1026,6 +1032,10 @@ impl PostgresModelCallRepository {
         .bind(&member_sessions)
         .bind(&member_entries)
         .bind(Decimal::from(uncommitted_content_bytes))
+        .bind(match fast_mode {
+            FastMode::Disabled => "disabled",
+            FastMode::Enabled => "enabled",
+        })
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -2817,7 +2827,9 @@ async fn delegated_observation_result_matches(
                 Err(_) => ExpectedDelegatedChildResult::ResultUnavailable,
             }
         }
-        ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Refused => {
+        ModelCallTerminalObservation::KnownFailed
+        | ModelCallTerminalObservation::Refused
+        | ModelCallTerminalObservation::RefusedWithProviderCompaction { .. } => {
             ExpectedDelegatedChildResult::Failed
         }
         ModelCallTerminalObservation::Cancelled => {
@@ -4043,7 +4055,14 @@ async fn terminal_observation_closure_matches(
             }
         }
         ModelCallTerminalObservation::Refused => {
-            refused_terminal_closure_matches(connection, session, observation).await
+            refused_terminal_closure_matches(connection, session, observation, &[]).await
+        }
+        ModelCallTerminalObservation::RefusedWithProviderCompaction {
+            provider_compaction,
+            ..
+        } => {
+            refused_terminal_closure_matches(connection, session, observation, provider_compaction)
+                .await
         }
         ModelCallTerminalObservation::Ambiguous => {
             ambiguous_terminal_closure_matches(connection, session, observation).await
@@ -4578,6 +4597,7 @@ async fn refused_terminal_closure_matches(
     connection: &mut PgConnection,
     session: SessionId,
     observation: &CorrelatedModelCallTerminalObservation,
+    provider_compaction: &[signalbox_domain::ProviderCompactionBlock],
 ) -> Result<bool, ModelCallRepositoryError> {
     let correlation = observation.correlation();
     let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
@@ -4622,11 +4642,28 @@ async fn refused_terminal_closure_matches(
     let source_frontier =
         load_frontier_members(connection, session, correlation.frontier().into_uuid()).await?;
     let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
-    if terminal_members.len() != source_frontier.len()
+    if terminal_members.len() != source_frontier.len() + provider_compaction.len()
         || terminal_members
             .iter()
             .zip(&source_frontier)
             .any(|(stored, expected)| (stored.source_session, stored.entry) != *expected)
+    {
+        return Ok(false);
+    }
+    let session_uuid = session_id_to_uuid(session);
+    let call = observation.call().into_uuid();
+    if terminal_members[source_frontier.len()..]
+        .iter()
+        .zip(provider_compaction)
+        .any(|(stored, expected)| {
+            stored.source_session != session_uuid
+                || stored.payload_kind != "provider_compaction"
+                || stored.assistant_text.as_deref() != Some(expected.as_json())
+                || stored.producing_call != Some(call)
+                || stored.completed_turn.is_some()
+                || stored.failed_turn.is_some()
+                || stored.cancelled_turn.is_some()
+        })
     {
         return Ok(false);
     }
@@ -8048,7 +8085,14 @@ async fn persist_terminal_outcome_with_usage(
         ModelCallTerminalOutcome::Refused(refused) => {
             lock_delegated_child_result_frontier(connection, refused.session(), refused.turn())
                 .await?;
-            persist_refused(connection, refused, usage).await?;
+            persist_refused(
+                connection,
+                refused,
+                usage,
+                retained_input_tokens,
+                retained_output_tokens,
+            )
+            .await?;
             persist_delegated_child_result(
                 connection,
                 &DelegationOutcome::from_refused_child(refused),
@@ -9588,13 +9632,17 @@ async fn persist_refused(
     connection: &mut PgConnection,
     refused: &RefusedModelCallTurn,
     usage: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call(
+    persist_ended_call_with_retained_usage(
         connection,
         refused.session(),
         refused.turn(),
         refused.call(),
         usage,
+        retained_input_tokens,
+        retained_output_tokens,
     )
     .await?;
     persist_ended_attempt(
@@ -9604,6 +9652,35 @@ async fn persist_refused(
         refused.attempt(),
     )
     .await?;
+    for (response_part_ordinal, entry) in refused.provider_compaction_entries().iter().enumerate() {
+        let SemanticTranscriptEntryPayload::ProviderCompaction {
+            producing_call,
+            block,
+        } = entry.payload()
+        else {
+            return Err(
+                ModelCallCorruption::Inconsistent("refused provider compaction payload").into(),
+            );
+        };
+        let ordinal = Decimal::from(
+            u64::try_from(response_part_ordinal)
+                .map_err(|_| ModelCallCorruption::Inconsistent("refused response part ordinal"))?,
+        );
+        sqlx::query(
+            "INSERT INTO semantic_transcript_entry
+                (source_session_id, semantic_entry_id, payload_kind,
+                 assistant_text_value, producing_model_call_id,
+                 assistant_response_part_ordinal)
+             VALUES ($1, $2, 'provider_compaction', $3, $4, $5)",
+        )
+        .bind(session_id_to_uuid(entry.source_session()))
+        .bind(entry.identity().into_uuid())
+        .bind(block.as_json())
+        .bind(producing_call.into_uuid())
+        .bind(ordinal)
+        .execute(&mut *connection)
+        .await?;
+    }
     insert_snapshot(connection, refused.terminal_snapshot()).await?;
     persist_reclassified_pending_steering(
         connection,

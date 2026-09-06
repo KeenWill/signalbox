@@ -2140,10 +2140,50 @@ fn classify_terminal(
                 )
             }
         }
-        TerminalEvidence::Refused(_) => classify(
-            ModelCallTerminalObservation::Refused,
-            ModelCallCauseCode::Refused,
-        ),
+        TerminalEvidence::Refused(refusal) => {
+            let provider_compaction = refusal
+                .content
+                .into_iter()
+                .filter_map(|part| match part {
+                    AssistantPart::ProviderCompaction { block_json } => Some(block_json),
+                    AssistantPart::Text(_)
+                    | AssistantPart::Thinking { .. }
+                    | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::ToolCall(_)
+                    | AssistantPart::SuppressedToolCall(_) => None,
+                })
+                .map(|block_json| {
+                    ProviderCompactionBlock::try_new(block_json).map_err(|_| {
+                        ClassificationFailure::bare(
+                            RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if provider_compaction.is_empty() {
+                classify(
+                    ModelCallTerminalObservation::Refused,
+                    ModelCallCauseCode::Refused,
+                )
+            } else {
+                let (Some(retained_input_tokens), Some(retained_output_tokens)) = (
+                    refusal.retained_input_tokens,
+                    refusal.retained_output_tokens,
+                ) else {
+                    return Err(ClassificationFailure::bare(
+                        RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                    ));
+                };
+                classify(
+                    ModelCallTerminalObservation::RefusedWithProviderCompaction {
+                        provider_compaction,
+                        retained_input_tokens,
+                        retained_output_tokens,
+                    },
+                    ModelCallCauseCode::Refused,
+                )
+            }
+        }
         TerminalEvidence::ProviderError(error) => classify(
             ModelCallTerminalObservation::KnownFailed,
             ModelCallCauseCode::ProviderError(error.kind),
@@ -2869,6 +2909,8 @@ mod tests {
                     reported_model: None,
                     content: Vec::new(),
                     usage: TokenUsage::unreported(),
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
                 }),
                 &[],
                 &configured("model-exact"),
@@ -3024,6 +3066,43 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn refused_provider_compaction_is_retained_without_refusal_text() {
+        let classified = classify_terminal(
+            TerminalEvidence::Refused(RefusalEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: Some(ProviderReportedModel::new("model-exact")),
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json: String::from(
+                            r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                        ),
+                    },
+                    AssistantPart::Text(String::from("I cannot continue.")),
+                ],
+                usage: TokenUsage::unreported(),
+                retained_input_tokens: Some(37),
+                retained_output_tokens: Some(8),
+            }),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("provider compaction before refusal is representable");
+
+        let ModelCallTerminalObservation::RefusedWithProviderCompaction {
+            provider_compaction,
+            retained_input_tokens,
+            retained_output_tokens,
+        } = classified.observation
+        else {
+            panic!("compacting refusal must retain its semantic block");
+        };
+        assert_eq!(provider_compaction.len(), 1);
+        assert_eq!(retained_input_tokens, 37);
+        assert_eq!(retained_output_tokens, 8);
     }
 
     #[test]
@@ -3527,6 +3606,8 @@ mod tests {
                     reported_model: None,
                     content: Vec::new(),
                     usage: TokenUsage::unreported(),
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
                 }),
             ),
             (

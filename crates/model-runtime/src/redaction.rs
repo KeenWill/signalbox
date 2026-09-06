@@ -1262,6 +1262,8 @@ mod tests {
                 signature: Some("signature-key_loop".to_string()),
             }],
             usage: TokenUsage::unreported(),
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         });
 
         let TerminalEvidence::Refused(refusal) = redact_evidence(evidence, &key) else {

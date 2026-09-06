@@ -527,10 +527,12 @@ terminal frontier extends its latest call or starting frontier by the exact
 terminal tool-result suffix when one exists and then by exactly its own marker.
 A completed turn's terminal frontier extends its call frontier by that call's
 ordered assistant entries and then the completion marker. A refused turn's
-terminal frontier is a distinct equal-content copy of its latest call frontier;
-a reconciliation-required turn over a model call carries the same distinct copy,
-and one over a tool attempt extends the producing call's frontier by its
-terminal tool-result suffix.
+terminal frontier is a distinct copy of its latest call frontier, extended in
+provider order by any provider-compaction entries the refused response produced;
+ordinary refusal text is not transcript content. A reconciliation-required turn
+over a model call carries the same distinct equal-content copy, and one over a
+tool attempt extends the producing call's frontier by its terminal tool-result
+suffix.
 
 The failed-turn marker has four producers: the model-call known-failure closure,
 startup recovery, headless approval escalation, and pre-call credential-pool

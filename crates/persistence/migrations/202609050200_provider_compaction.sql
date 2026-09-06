@@ -6,15 +6,15 @@ ALTER TABLE model_call
     ADD CONSTRAINT model_call_retained_input_tokens_u64
         CHECK (retained_input_tokens IS NULL OR
                retained_input_tokens BETWEEN 0 AND 18446744073709551615),
-    ADD CONSTRAINT model_call_retained_input_tokens_is_terminal_completion
+    ADD CONSTRAINT model_call_retained_input_tokens_is_terminal_compaction_outcome
         CHECK (retained_input_tokens IS NULL OR
-               (state_kind = 'terminal' AND terminal_disposition_kind = 'completed')),
+               (state_kind = 'terminal' AND terminal_disposition_kind IN ('completed', 'refused'))),
     ADD CONSTRAINT model_call_retained_output_tokens_u64
         CHECK (retained_output_tokens IS NULL OR
                retained_output_tokens BETWEEN 0 AND 18446744073709551615),
-    ADD CONSTRAINT model_call_retained_output_tokens_is_terminal_completion
+    ADD CONSTRAINT model_call_retained_output_tokens_is_terminal_compaction_outcome
         CHECK (retained_output_tokens IS NULL OR
-               (state_kind = 'terminal' AND terminal_disposition_kind = 'completed')),
+               (state_kind = 'terminal' AND terminal_disposition_kind IN ('completed', 'refused'))),
     ADD CONSTRAINT model_call_retained_iteration_usage_is_paired
         CHECK ((retained_input_tokens IS NULL) = (retained_output_tokens IS NULL));
 
@@ -83,6 +83,42 @@ BEGIN
     IF revised_definition = definition THEN
         RAISE EXCEPTION 'turn final-state definition has no assistant response predicate';
     END IF;
+    definition := revised_definition;
+    revised_definition := replace(
+        definition,
+        $needle$           OR checked_terminal_frontier = checked_starting_frontier
+           OR terminal_member_count IS DISTINCT FROM starting_member_count
+           OR prefix_mismatch_count <> 0$needle$,
+        $replacement$           OR checked_terminal_frontier = checked_starting_frontier
+           OR terminal_member_count IS DISTINCT FROM starting_member_count + (
+                SELECT count(*)
+                  FROM semantic_transcript_entry
+                 WHERE source_session_id = checked_session_id
+                   AND payload_kind = 'provider_compaction'
+                   AND producing_model_call_id = checked_terminal_call
+           )
+           OR EXISTS (
+                SELECT 1
+                  FROM semantic_transcript_entry AS entry
+                 WHERE entry.source_session_id = checked_session_id
+                   AND entry.payload_kind = 'provider_compaction'
+                   AND entry.producing_model_call_id = checked_terminal_call
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM context_frontier_member AS member
+                         WHERE member.owning_session_id = checked_session_id
+                           AND member.context_frontier_id = checked_terminal_frontier
+                           AND member.member_position = starting_member_count
+                                + entry.assistant_response_part_ordinal + 1
+                           AND member.source_session_id = entry.source_session_id
+                           AND member.semantic_entry_id = entry.semantic_entry_id
+                   )
+           )
+           OR prefix_mismatch_count <> 0$replacement$
+    );
+    IF revised_definition = definition THEN
+        RAISE EXCEPTION 'turn final-state definition has no refusal frontier predicate';
+    END IF;
     EXECUTE revised_definition;
 
     SELECT pg_get_functiondef(
@@ -135,7 +171,7 @@ BEGIN
           FROM model_call
          WHERE model_call_id = entry.producing_model_call_id
            AND state_kind = 'terminal'
-           AND terminal_disposition_kind = 'completed';
+           AND terminal_disposition_kind IN ('completed', 'refused');
     END IF;
 
     CASE entry.payload_kind$replacement$

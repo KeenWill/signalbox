@@ -499,7 +499,7 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
     assert_eq!(required.producing_call(), fixture.call);
     assert_eq!(required.failed().turn(), fixture.turn);
     let reported = model_repository
-        .latest_reported_usage(fixture.session, target, result_frontier)
+        .latest_reported_usage(fixture.session, target, FastMode::Disabled, result_frontier)
         .await?
         .expect("the producing call reported input usage");
     assert_eq!(
@@ -518,6 +518,7 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
         .latest_reported_usage(
             fixture.session,
             target,
+            FastMode::Disabled,
             ContextFrontierId::from_uuid(producing_frontier),
         )
         .await?
@@ -592,6 +593,7 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
         .latest_reported_usage(
             fixture.session,
             target,
+            FastMode::Disabled,
             ContextFrontierId::from_uuid(disjoint_frontier),
         )
         .await?
@@ -1067,7 +1069,7 @@ async fn inv014_tool_continuation_headroom_counts_delegation_results() -> Result
     .await?;
     assert_eq!(stored_bytes, Decimal::from(36 + 44_u64));
     let reported = model_repository
-        .latest_reported_usage(fixture.session, target, result_frontier)
+        .latest_reported_usage(fixture.session, target, FastMode::Disabled, result_frontier)
         .await?
         .expect("the producing call reported input usage");
     assert_eq!(

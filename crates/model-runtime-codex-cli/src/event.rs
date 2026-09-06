@@ -626,6 +626,8 @@ impl<C: Clone> EventDecoder<C> {
                 reported_model: None,
                 content,
                 usage: self.usage,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
             }),
             EnvelopeOutcome::Completed => {
                 let finish = if envelope.tool_calls.is_empty() {

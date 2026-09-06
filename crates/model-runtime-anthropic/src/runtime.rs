@@ -28,8 +28,10 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
+use signalbox_model_runtime::{
+    AssistantPart, FastMode, ModelCapabilityCatalog, ModelCapabilityError,
+};
 use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
-use signalbox_model_runtime::{FastMode, ModelCapabilityCatalog, ModelCapabilityError};
 
 use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
@@ -860,6 +862,19 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicR
 
 fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
     match evidence {
+        TerminalEvidence::Refused(refusal)
+            if refusal.retained_input_tokens.is_some()
+                && refusal.retained_output_tokens.is_some()
+                && refusal
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. })) =>
+        {
+            // A completed provider-compaction block proves the provider
+            // processed and replaced request context even when the final stop
+            // reason is refusal. Preserve that durable replay evidence.
+            TerminalEvidence::Refused(refusal)
+        }
         TerminalEvidence::Refused(refusal) => {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: refusal.exchange,
@@ -1016,8 +1031,8 @@ fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
 #[cfg(test)]
 mod tests {
     use signalbox_model_runtime::{
-        CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts, FastMode,
-        LossCause, Observation, ObservationFact, ObservationSink, PreparationDefect,
+        AssistantPart, CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts,
+        FastMode, LossCause, Observation, ObservationFact, ObservationSink, PreparationDefect,
         RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
     };
 
@@ -1058,6 +1073,8 @@ mod tests {
                 cache_creation_input_tokens: Some(2),
                 cache_read_input_tokens: Some(3),
             },
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         });
 
         let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
@@ -1066,6 +1083,32 @@ mod tests {
         assert_eq!(error.native.error_token.as_deref(), Some("refusal"));
         assert_eq!(error.usage.input_tokens, Some(13));
         assert_eq!(error.usage.output_tokens, Some(5));
+    }
+
+    #[test]
+    fn refusal_after_provider_compaction_is_preserved() {
+        let refusal = TerminalEvidence::Refused(RefusalEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: vec![AssistantPart::ProviderCompaction {
+                block_json: String::from(
+                    r#"{"type":"compaction","content":"summary","encrypted_content":"opaque"}"#,
+                ),
+            }],
+            usage: TokenUsage::unreported(),
+            retained_input_tokens: Some(21),
+            retained_output_tokens: Some(3),
+        });
+
+        assert!(matches!(
+            without_unproven_refusal(refusal),
+            TerminalEvidence::Refused(RefusalEvidence {
+                retained_input_tokens: Some(21),
+                retained_output_tokens: Some(3),
+                ..
+            })
+        ));
     }
 
     #[test]
