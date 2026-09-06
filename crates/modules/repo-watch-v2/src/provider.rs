@@ -202,7 +202,10 @@ pub async fn fetch_observation(
                 .iter()
                 .find(|p| p.context().number() == number)
         });
-        pulls.push(fetch_pull(io, &root, repository, number, reviewers, prior).await?);
+        let merged = merged_baselines
+            .iter()
+            .find(|baseline| baseline.number() == number);
+        pulls.push(fetch_pull(io, &root, repository, number, reviewers, prior, merged).await?);
     }
     let workflow_runs = fetch_workflows(io, &root, repository, &branch_heads, previous).await?;
     let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
@@ -255,12 +258,15 @@ async fn fetch_pull(
     number: PullRequestNumber,
     reviewers: &[RepoWatchAuthorLogin],
     previous: Option<&RepoWatchPullRequestState>,
+    merged: Option<&RepoWatchMergedPullRequestBaselineV1>,
 ) -> Result<RepoWatchPullRequestState, ObservationError> {
     let path = format!("{root}/pulls/{}", number.get());
     let (detail, _) = io.page(&path).await?;
     let context = admit(pull_context(
         &detail,
-        previous.map(RepoWatchPullRequestState::context),
+        previous
+            .map(|state| state.context().head_repository())
+            .or_else(|| merged.map(RepoWatchMergedPullRequestBaselineV1::head_repository)),
     ))?;
     if context.number() != number {
         return Err(ObservationError::InvalidResponse);
@@ -348,7 +354,7 @@ async fn fetch_pull(
         ));
     }
     let threads = fetch_threads(io, repository, number).await?;
-    let reactions = fetch_reactions(io, root, number, reviewers, previous).await?;
+    let reactions = fetch_reactions(io, root, number, reviewers).await?;
     RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
         context,
         lifecycle,
@@ -364,10 +370,10 @@ async fn fetch_pull(
 
 fn pull_context(
     v: &Value,
-    previous: Option<&PullRequestEventContext>,
+    previous_head_repository: Option<&RepositorySlug>,
 ) -> Option<PullRequestEventContext> {
     let head_repository = match v["head"]["repo"].is_null() {
-        true => previous?.head_repository().clone(),
+        true => previous_head_repository?.clone(),
         false => RepositorySlug::try_new(text(&v["head"]["repo"]["full_name"])?).ok()?,
     };
     let author = if v["user"].is_null() {
@@ -448,7 +454,6 @@ async fn fetch_reactions(
     root: &str,
     number: PullRequestNumber,
     reviewers: &[RepoWatchAuthorLogin],
-    previous: Option<&RepoWatchPullRequestState>,
 ) -> Result<Vec<RepoWatchReactionObservation>, ObservationError> {
     if reviewers.is_empty() {
         return Ok(Vec::new());
@@ -480,15 +485,6 @@ async fn fetch_reactions(
     let mut reactions = Vec::new();
     for (path, subject) in subjects {
         let values = pages(io, &path, None).await?;
-        if values.iter().any(|v| v["user"].is_null()) {
-            reactions.extend(
-                previous
-                    .into_iter()
-                    .flat_map(|p| p.reactions())
-                    .filter(|r| r.subject() == subject && reviewers.contains(r.reactor()))
-                    .cloned(),
-            );
-        }
         for value in values {
             let Some(login) = value["user"]["login"].as_str() else {
                 continue;
@@ -530,7 +526,7 @@ async fn fetch_workflows(
                 ))
                 .await?;
             for run in admit(value["workflow_runs"].as_array())? {
-                if run["status"] != "completed" {
+                if run["status"] != "completed" || run["head_repository"].is_null() {
                     continue;
                 }
                 let head_repository = admit(
@@ -743,6 +739,8 @@ mod tests {
         detail["merged_at"] = json!("2026-09-06T00:00:00Z");
         let compacted = RepoWatchMergedPullRequestBaselineV1::try_new(
             RepoWatchMergedPullRequestBaselineInputV1 {
+                head_repository: RepositorySlug::try_new(String::from("example/project"))
+                    .expect("head repository"),
                 number: PullRequestNumber::new(
                     std::num::NonZeroU64::new(1).expect("positive fixture number"),
                 ),
@@ -764,6 +762,134 @@ mod tests {
             .await
             .expect("refetch merged subject");
         assert_eq!(observed.observation.state().pull_requests().len(), 1);
+        assert_eq!(
+            observed.observation.state().pull_requests()[0].lifecycle(),
+            RepoWatchPullRequestLifecycle::Merged
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_workflow_without_a_head_repository_does_not_block_watched_runs() {
+        let mut io = fixture();
+        io.pages
+            .get_mut("/repos/example/project/actions/workflows/5/runs?per_page=100&page=1")
+            .expect("workflow page")
+            .0["workflow_runs"]
+            .as_array_mut()
+            .expect("runs")
+            .insert(
+                0,
+                json!({"status": "completed", "head_repository": null, "head_branch": "main"}),
+            );
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("complete observation");
+        assert_eq!(observed.observation.state().workflow_runs().len(), 1);
+        assert_eq!(
+            observed.observation.state().workflow_runs()[0].id().get(),
+            6
+        );
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_reaction_does_not_hide_another_reviewers_removal() {
+        use signalbox_ownership_seam::{
+            ReactionChange, RepoWatchEventIdentityFrontierV1, RepoWatchEventKindV1,
+            UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+        };
+        let mut io = fixture();
+        let reaction_path = "/repos/example/project/issues/1/reactions?per_page=100&page=1";
+        io.pages.get_mut(reaction_path).expect("reaction page").0 = json!([
+            {"user": {"login": "reviewer"}, "content": "+1"},
+            {"user": {"login": "other-reviewer"}, "content": "-1"}
+        ]);
+        let reviewers = [
+            RepoWatchAuthorLogin::try_new(String::from("reviewer")).expect("reviewer"),
+            RepoWatchAuthorLogin::try_new(String::from("other-reviewer")).expect("other reviewer"),
+        ];
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let prior = fetch_observation(&io, &repository, &reviewers, None, &[])
+            .await
+            .expect("prior observation");
+        io.pages.get_mut(reaction_path).expect("reaction page").0 =
+            json!([{"user": null, "content": "+1"}]);
+        let observed =
+            fetch_observation(&io, &repository, &reviewers, Some(&prior.observation), &[])
+                .await
+                .expect("current observation");
+        assert!(
+            observed.observation.state().pull_requests()[0]
+                .reactions()
+                .is_empty()
+        );
+        let events = derive_repo_watch_events(
+            &repository,
+            Some(&prior.observation),
+            &observed.observation,
+            &mut RepoWatchEventIdentityFrontierV1::default(),
+            &mut UuidV7RepoWatchEventIdGenerator,
+        )
+        .expect("diff");
+        let removal = RepoWatchEventKindV1::ReactionChanged {
+            subject: ReactionSubject::PullRequestBody,
+            reactor: reviewers[1].clone(),
+            content: ReactionContent::try_new(String::from("-1")).expect("removed content"),
+            change: ReactionChange::Removed,
+        };
+        assert!(
+            events
+                .iter()
+                .any(|occurrence| occurrence.event().kind() == &removal)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_compacted_merged_pull_request_retains_its_deleted_fork_identity() {
+        let mut io = fixture();
+        let fork = RepositorySlug::try_new(String::from("example/fork")).expect("fork");
+        let detail = &mut io
+            .pages
+            .get_mut("/repos/example/project/pulls/1")
+            .expect("pull detail")
+            .0;
+        detail["state"] = json!("closed");
+        detail["merged_at"] = json!("2026-09-06T00:00:00Z");
+        detail["head"]["repo"]["full_name"] = json!(fork.as_str());
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let prior = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("merged observation");
+        let compact = RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+            &prior.observation.state().pull_requests()[0],
+            &[],
+        )
+        .expect("compact state")
+        .expect("merged baseline");
+        let empty = RepoWatchObservation::new(Vec::new(), RepoWatchRepositoryState::default());
+        let stored = crate::baseline::observation_payload(&empty, &[compact]);
+        let restored = crate::observation_decode::merged_baselines(&stored)
+            .expect("restored compact baseline");
+        assert_eq!(restored[0].head_repository(), &fork);
+        *io.pages
+            .get_mut("/repos/example/project/pulls?state=open&per_page=100&page=1")
+            .expect("pull page") = (json!([]), false);
+        io.pages
+            .get_mut("/repos/example/project/pulls/1")
+            .expect("pull detail")
+            .0["head"]["repo"] = Value::Null;
+        let observed = fetch_observation(&io, &repository, &[], None, &restored)
+            .await
+            .expect("deleted fork observation");
+        assert_eq!(
+            observed.observation.state().pull_requests()[0]
+                .context()
+                .head_repository(),
+            &fork
+        );
         assert_eq!(
             observed.observation.state().pull_requests()[0].lifecycle(),
             RepoWatchPullRequestLifecycle::Merged
