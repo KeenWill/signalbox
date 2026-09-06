@@ -9,22 +9,24 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     DirectModelSelection, ModelSelectionRequest, ModuleDispatch, SessionConfigurationDefaults,
-    SessionCreationProvenance,
+    SessionCreationCause, SessionCreationProvenance,
 };
 use signalbox_module_repo_watch_v2::{
     CreateSessionCommandFactory, DispatchAdmission, DispatchReferenceGenerator, EventAdmission,
     FrontierEventAdmission, PullRequestLifecycle, PullRequestState, RepoWatchStore,
-    RepositoryState, RuleAdmission, WebhookAdmission, WebhookDelivery, WebhookDisposition,
-    matching_rules, plan_repository_event,
+    RepositoryState, RuleAdmission, SessionCommandCodec, WebhookAdmission, WebhookDelivery,
+    WebhookDisposition, matching_rules, plan_lifecycle_reaction_for_test, plan_repository_event,
 };
 use signalbox_ownership_seam::{
-    BranchName, CommitSha, CreateSession, DurableCommandId, OffsetDateTime, PullRequestBody,
-    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent,
-    RepoWatchEventContentIdentityV1, RepoWatchEventId, RepoWatchEventIdentityFrontierEntryV1,
-    RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1,
-    RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
-    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepositorySlug, SessionTemplateName, StartGate, WorkflowName,
+    BranchName, CommitSha, CreateSession, DescendantTerminationScope, DurableCommandId,
+    FinishCondition, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
+    RepoWatchAuthorLogin, RepoWatchDispatchId, RepoWatchEvent, RepoWatchEventContentIdentityV1,
+    RepoWatchEventId, RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
+    RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1, RepoWatchLabelMatcher,
+    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope, RepositorySlug, SessionCommand,
+    SessionCommandPayload, SessionId, SessionLifecycleCommand, SessionLifecycleOperation,
+    SessionOwnership, SessionTemplateName, StartGate, StopStickiness, WorkflowName,
 };
 use signalbox_persistence::{
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
@@ -57,6 +59,7 @@ impl DispatchReferenceGenerator for FixedDispatchIds {
 
 struct FixtureSessionFactory {
     next_command: u128,
+    model: u128,
 }
 
 impl CreateSessionCommandFactory for FixtureSessionFactory {
@@ -76,9 +79,106 @@ impl CreateSessionCommandFactory for FixtureSessionFactory {
                 dispatch,
             }),
             SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
-                DirectModelSelection::from_uuid(Uuid::from_u128(18)),
+                DirectModelSelection::from_uuid(Uuid::from_u128(self.model)),
             )),
         ))
+    }
+}
+
+struct FixtureCommandCodec;
+
+impl SessionCommandCodec for FixtureCommandCodec {
+    fn encode(&mut self, command: &SessionCommand) -> Option<Vec<u8>> {
+        match command.clone().into_payload() {
+            SessionCommandPayload::CreateSession(command) => {
+                let SessionCreationCause::ModuleDispatched {
+                    dispatch: ModuleDispatch::RepositoryWatch { dispatch },
+                } = command.provenance().cause()
+                else {
+                    return None;
+                };
+                let ModelSelectionRequest::Direct(model) =
+                    command.initial_configuration_defaults().model()
+                else {
+                    return None;
+                };
+                let mut encoded = Vec::with_capacity(49);
+                encoded.push(1);
+                encoded.extend_from_slice(command.command_id().as_uuid().as_bytes());
+                encoded.extend_from_slice(dispatch.as_uuid().as_bytes());
+                encoded.extend_from_slice(model.as_uuid().as_bytes());
+                Some(encoded)
+            }
+            SessionCommandPayload::Lifecycle(command) => {
+                let operation = match command.operation() {
+                    SessionLifecycleOperation::ReleaseStart => 0,
+                    SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Sticky,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    } => 1,
+                    SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Sticky,
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    } => 2,
+                    _ => return None,
+                };
+                let mut encoded = Vec::with_capacity(34);
+                encoded.push(2);
+                encoded.extend_from_slice(command.command_id().as_uuid().as_bytes());
+                encoded.extend_from_slice(command.session().as_uuid().as_bytes());
+                encoded.push(operation);
+                Some(encoded)
+            }
+            SessionCommandPayload::SubmitInput(_) | SessionCommandPayload::Goal(_) => None,
+        }
+    }
+
+    fn decode(&mut self, payload: &[u8]) -> Option<SessionCommand> {
+        let uuid = |start| {
+            let bytes: [u8; 16] = payload.get(start..start + 16)?.try_into().ok()?;
+            Some(Uuid::from_bytes(bytes))
+        };
+        match payload.first().copied()? {
+            1 if payload.len() == 49 => {
+                let command = DurableCommandId::from_uuid(uuid(1)?);
+                let dispatch = RepoWatchDispatchId::from_uuid(uuid(17)?);
+                let model = DirectModelSelection::from_uuid(uuid(33)?);
+                SessionCommand::create_session(
+                    CreateSession::new(
+                        command,
+                        SessionCreationProvenance::module_dispatched(
+                            ModuleDispatch::RepositoryWatch { dispatch },
+                        ),
+                        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(model)),
+                    )
+                    .with_lifecycle(
+                        StartGate::Held,
+                        SessionOwnership::Owned,
+                        Some(FinishCondition::ExternalGate),
+                    ),
+                )
+                .ok()
+            }
+            2 if payload.len() == 34 => {
+                let command = DurableCommandId::from_uuid(uuid(1)?);
+                let session = SessionId::from_uuid(uuid(17)?);
+                let operation = match payload[33] {
+                    0 => SessionLifecycleOperation::ReleaseStart,
+                    1 => SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Sticky,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                    2 => SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Sticky,
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                    _ => return None,
+                };
+                SessionCommand::lifecycle(SessionLifecycleCommand::new(command, session, operation))
+                    .ok()
+            }
+            _ => None,
+        }
     }
 }
 
@@ -307,6 +407,56 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             events: Box::new([EventAdmission::Replayed]),
         }
     );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &repository,
+                1,
+                &frontier,
+                &[],
+                observed_at + Duration::from_secs(2),
+                retain_until + Duration::from_secs(2),
+            )
+            .await?,
+        FrontierEventAdmission::Unchanged
+    );
+    let rejected_event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(17)),
+        repository.clone(),
+        default_branch.clone(),
+        WorkflowName::try_new(String::from("lint"))?,
+        signalbox_ownership_seam::CheckConclusion::Success,
+    );
+    let rejected_occurrence = RepoWatchEventOccurrenceV1::from_parts(
+        rejected_event.clone(),
+        RepoWatchEventContentIdentityV1::from_bytes([18; 32]),
+    );
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &repository,
+                1,
+                &frontier,
+                std::slice::from_ref(&rejected_occurrence),
+                observed_at + Duration::from_secs(3),
+                retain_until + Duration::from_secs(3),
+            )
+            .await?,
+        FrontierEventAdmission::ConflictingReuse
+    );
+    let unchanged_generation: Decimal = sqlx::query_scalar(
+        "SELECT frontier_generation FROM repository_state WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&module_pool)
+    .await?;
+    assert_eq!(unchanged_generation, Decimal::from(1_u64));
+    let rejected_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM gh_event WHERE event_id = $1")
+            .bind(rejected_event.id().into_uuid())
+            .fetch_one(&module_pool)
+            .await?;
+    assert_eq!(rejected_count, 0);
     let incompatible_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
         RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
             [19; 32],
@@ -331,7 +481,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         value: 16,
         calls: 0,
     };
-    let mut factory = FixtureSessionFactory { next_command: 17 };
+    let mut factory = FixtureSessionFactory {
+        next_command: 17,
+        model: 18,
+    };
     let plan_batches =
         plan_repository_event(std::slice::from_ref(&rule), &event, &mut ids, &mut factory)?;
     assert_eq!(plan_batches.len(), 1);
@@ -360,7 +513,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         value: 40,
         calls: 0,
     };
-    let mut grouped_factory = FixtureSessionFactory { next_command: 42 };
+    let mut grouped_factory = FixtureSessionFactory {
+        next_command: 42,
+        model: 18,
+    };
     let grouped = plan_repository_event(
         &[rule.clone(), second_rule.clone()],
         &event,
@@ -382,32 +538,13 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         .iter()
         .map(|planned| planned.command().command_id())
         .collect::<Vec<_>>();
+    let mut command_codec = FixtureCommandCodec;
     assert!(matches!(
-        store.record_commands(plans, observed_at).await?,
+        store
+            .record_commands(plans, observed_at, &mut command_codec)
+            .await?,
         DispatchAdmission::Inserted
     ));
-    let lifecycle_command_id = Uuid::from_u128(81);
-    sqlx::query(
-        "INSERT INTO dispatch_ledger
-            (dispatch_ref, action_ordinal, command_id, repository, rule_id,
-             rule_revision, event_id, trigger_sequence, command_kind, status, issued_at)
-         SELECT dispatch_ref, 1, $2, repository, rule_id, rule_revision, event_id,
-                42, 'lifecycle', 'pending', $3
-           FROM dispatch_ledger WHERE command_id = $1",
-    )
-    .bind(retained_command_ids[0].into_uuid())
-    .bind(lifecycle_command_id)
-    .bind(observed_at)
-    .execute(&module_pool)
-    .await?;
-    let retained_reaction: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM dispatch_ledger
-          WHERE dispatch_ref = $1 AND trigger_sequence = 42",
-    )
-    .bind(retained_dispatch.into_uuid())
-    .fetch_one(&module_pool)
-    .await?;
-    assert_eq!(retained_reaction, 1);
     assert_eq!(
         store
             .record_rule(&repository, &second_rule, observed_at)
@@ -418,7 +555,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         value: 16,
         calls: 0,
     };
-    let mut colliding_factory = FixtureSessionFactory { next_command: 80 };
+    let mut colliding_factory = FixtureSessionFactory {
+        next_command: 80,
+        model: 18,
+    };
     let colliding_batches = plan_repository_event(
         std::slice::from_ref(&second_rule),
         &event,
@@ -427,7 +567,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     )?;
     assert!(matches!(
         store
-            .record_commands(&colliding_batches[0], observed_at)
+            .record_commands(&colliding_batches[0], observed_at, &mut command_codec)
             .await?,
         DispatchAdmission::ConflictingReuse
     ));
@@ -435,7 +575,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         value: 30,
         calls: 0,
     };
-    let mut replay_factory = FixtureSessionFactory { next_command: 31 };
+    let mut replay_factory = FixtureSessionFactory {
+        next_command: 31,
+        model: 99,
+    };
     let replay_batches = plan_repository_event(
         std::slice::from_ref(&rule),
         &event,
@@ -446,7 +589,9 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let replay_plans = &replay_batches[0];
     let DispatchAdmission::Replayed {
         commands: recovered,
-    } = store.record_commands(replay_plans, observed_at).await?
+    } = store
+        .record_commands(replay_plans, observed_at, &mut command_codec)
+        .await?
     else {
         panic!("equal replay must return its retained command batch");
     };
@@ -463,6 +608,17 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .collect::<Vec<_>>(),
         retained_command_ids
     );
+    for recovered in &recovered {
+        let SessionCommandPayload::CreateSession(command) =
+            recovered.command().clone().into_payload()
+        else {
+            panic!("retained dispatch command must remain create_session");
+        };
+        assert_eq!(
+            command.initial_configuration_defaults().model(),
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(18)))
+        );
+    }
     let retained_commands: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM dispatch_ledger
           WHERE repository = $1 AND rule_id = $2 AND event_id = $3
@@ -481,7 +637,9 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     );
     let DispatchAdmission::Replayed {
         commands: recovered,
-    } = store.record_commands(replay_plans, observed_at).await?
+    } = store
+        .record_commands(replay_plans, observed_at, &mut command_codec)
+        .await?
     else {
         panic!("retained commands remain recoverable after deactivation");
     };
@@ -493,6 +651,56 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         retained_command_ids
     );
     let created_session = Uuid::from_u128(82);
+    let lifecycle_command_id = Uuid::from_u128(81);
+    let trigger_sequence = NonZeroU64::new(42).expect("forty-two is positive");
+    let reaction_session = SessionId::from_uuid(created_session);
+    let reaction_commands = [
+        plan_lifecycle_reaction_for_test(
+            trigger_sequence,
+            retained_dispatch,
+            &rule,
+            &event,
+            NonZeroU64::MIN,
+            SessionLifecycleCommand::new(
+                DurableCommandId::from_uuid(lifecycle_command_id),
+                reaction_session,
+                SessionLifecycleOperation::ReleaseStart,
+            ),
+        )?,
+        plan_lifecycle_reaction_for_test(
+            trigger_sequence,
+            retained_dispatch,
+            &rule,
+            &event,
+            NonZeroU64::new(2).expect("two is positive"),
+            SessionLifecycleCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(83)),
+                reaction_session,
+                SessionLifecycleOperation::Stop {
+                    sticky: StopStickiness::Sticky,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+        )?,
+    ];
+    assert!(matches!(
+        store
+            .record_commands(&reaction_commands, observed_at, &mut command_codec)
+            .await?,
+        DispatchAdmission::Inserted
+    ));
+    let retained_reaction_ordinals: Vec<Decimal> = sqlx::query_scalar(
+        "SELECT action_ordinal FROM dispatch_ledger
+          WHERE dispatch_ref = $1 AND trigger_sequence = 42
+          ORDER BY action_ordinal",
+    )
+    .bind(retained_dispatch.into_uuid())
+    .fetch_all(&module_pool)
+    .await?;
+    assert_eq!(
+        retained_reaction_ordinals,
+        [Decimal::from(1_u64), Decimal::from(2_u64)]
+    );
     sqlx::query(
         "UPDATE dispatch_ledger
             SET status = 'applied', settled_at = $2, created_session_id = $3

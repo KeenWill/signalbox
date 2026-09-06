@@ -17,6 +17,7 @@ CREATE TABLE dispatch_ledger (
     event_id uuid NOT NULL,
     trigger_sequence numeric(20,0),
     command_kind text NOT NULL,
+    command_payload bytea NOT NULL,
     created_session_id uuid,
     status text NOT NULL,
     rejection_kind text,

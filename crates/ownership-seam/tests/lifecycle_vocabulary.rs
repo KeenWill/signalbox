@@ -1,8 +1,9 @@
 use signalbox_ownership_seam::{
     CoreAgency, DispatchingModule, GoalBlockedReasonKind, SessionFailureCause,
     SessionLifecycleState, SessionParkCause, SessionParkResponder, SessionRecoveryOperation,
-    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause, SessionTerminalOutcome,
-    SessionWait, ToolRequestId,
+    SessionRetirementCause, SessionRetryableCause, SessionStructuralCause,
+    SessionTemplateContentDigest, SessionTemplateProvenance, SessionTerminalOutcome, SessionWait,
+    ToolRequestId,
 };
 
 fn assert_nameable<T>() {}
@@ -20,6 +21,8 @@ fn lifecycle_event_vocabulary_is_nameable_from_the_seam() {
     assert_nameable::<SessionRetirementCause>();
     assert_nameable::<SessionRetryableCause>();
     assert_nameable::<SessionStructuralCause>();
+    assert_nameable::<SessionTemplateContentDigest>();
+    assert_nameable::<SessionTemplateProvenance>();
     assert_nameable::<SessionTerminalOutcome>();
     assert_nameable::<SessionWait>();
     assert_nameable::<ToolRequestId>();
