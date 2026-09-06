@@ -134,6 +134,7 @@ jobs:
         env:
           DOMAIN_SPINE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
+          export PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin"
           command -v cargo-public-api || cargo install cargo-public-api --locked
           python3 scripts/domain_spine_digest.py >> "$GITHUB_STEP_SUMMARY"
       - name: Check documentation consistency
