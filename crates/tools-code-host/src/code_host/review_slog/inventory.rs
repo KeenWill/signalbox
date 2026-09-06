@@ -54,9 +54,12 @@ impl ReviewDispositionClass {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded structured review-thread inventory item.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewThreadInventoryItem {
+    /// Borrows the opaque thread identity.
+    #[get(str)]
     id: String,
     path: String,
     line: Option<u64>,
@@ -115,11 +118,6 @@ impl ReviewThreadInventoryItem {
             finding_title: fields.finding_title,
             disposition: fields.disposition,
         })
-    }
-
-    /// Borrows the opaque thread identity.
-    pub fn id(&self) -> &str {
-        &self.id
     }
 
     /// Returns the recorded disposition classification.

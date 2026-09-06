@@ -30,8 +30,10 @@ pub struct CanonicalUuid(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl<T> de::DeserializeOwned for value::CanonicalUuid where T: for<'de> de::Deserialize<'de> {}
 impl value::CanonicalUuid {
-    pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn into_uuid(self) -> uuid::Uuid;
+}
+impl value::CanonicalUuid {
+    pub const fn from_uuid(value: uuid::Uuid) -> Self;
 }
 impl fmt::Display for value::CanonicalUuid {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -58,8 +60,10 @@ pub struct PositiveU64(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
 impl<T> de::DeserializeOwned for value::PositiveU64 where T: for<'de> de::Deserialize<'de> {}
 impl value::PositiveU64 {
-    pub const fn try_new(value: u64) -> result::Result<Self, value::ValueError>;
     pub const fn get(self) -> u64;
+}
+impl value::PositiveU64 {
+    pub const fn try_new(value: u64) -> result::Result<Self, value::ValueError>;
 }
 impl<'de> de::Deserialize<'de> for value::PositiveU64 {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
@@ -75,8 +79,10 @@ pub struct Digest(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl<T> de::DeserializeOwned for value::Digest where T: for<'de> de::Deserialize<'de> {}
 impl value::Digest {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl value::Digest {
+    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
 }
 impl ser::Serialize for value::Digest {
     fn serialize<S>(
@@ -100,8 +106,10 @@ pub struct CapabilityName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
 impl<T> de::DeserializeOwned for value::CapabilityName where T: for<'de> de::Deserialize<'de> {}
 impl value::CapabilityName {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl value::CapabilityName {
+    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
 }
 impl<'de> de::Deserialize<'de> for value::CapabilityName {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
@@ -117,8 +125,10 @@ pub struct DetailName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
 impl<T> de::DeserializeOwned for value::DetailName where T: for<'de> de::Deserialize<'de> {}
 impl value::DetailName {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl value::DetailName {
+    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
 }
 impl<'de> de::Deserialize<'de> for value::DetailName {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
@@ -134,8 +144,10 @@ pub struct WireToolName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
 impl<T> de::DeserializeOwned for value::WireToolName where T: for<'de> de::Deserialize<'de> {}
 impl value::WireToolName {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl value::WireToolName {
+    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
 }
 impl<'de> de::Deserialize<'de> for value::WireToolName {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
@@ -151,8 +163,10 @@ pub struct ProfileName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
 impl<T> de::DeserializeOwned for value::ProfileName where T: for<'de> de::Deserialize<'de> {}
 impl value::ProfileName {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl value::ProfileName {
+    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
 }
 impl<'de> de::Deserialize<'de> for value::ProfileName {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
@@ -168,8 +182,10 @@ pub struct RepositoryKey(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
 impl<T> de::DeserializeOwned for value::RepositoryKey where T: for<'de> de::Deserialize<'de> {}
 impl value::RepositoryKey {
-    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl value::RepositoryKey {
+    pub fn try_new(value: string::String) -> result::Result<Self, value::ValueError>;
 }
 impl<'de> de::Deserialize<'de> for value::RepositoryKey {
     fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>

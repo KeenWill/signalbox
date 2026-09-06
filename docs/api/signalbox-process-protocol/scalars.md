@@ -118,8 +118,10 @@ pub struct CanonicalUuid(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl<T> de::DeserializeOwned for scalars::CanonicalUuid where T: for<'de> de::Deserialize<'de> {}
 impl scalars::CanonicalUuid {
-    pub const fn from_uuid(value: uuid::Uuid) -> Self;
     pub const fn into_uuid(self) -> uuid::Uuid;
+}
+impl scalars::CanonicalUuid {
+    pub const fn from_uuid(value: uuid::Uuid) -> Self;
 }
 impl fmt::Display for scalars::CanonicalUuid {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -178,8 +180,10 @@ pub struct CanonicalU64(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for scalars::CanonicalU64 where T: for<'de> de::Deserialize<'de> {}
 impl scalars::CanonicalU64 {
-    pub const fn new(value: u64) -> Self;
     pub const fn value(self) -> u64;
+}
+impl scalars::CanonicalU64 {
+    pub const fn new(value: u64) -> Self;
 }
 impl convert::TryFrom<string::String> for scalars::CanonicalU64 {
     type Error = scalars::CanonicalValueError;
@@ -198,8 +202,10 @@ pub struct PositiveCanonicalU64(/* private */);
 impl<T> de::DeserializeOwned for scalars::PositiveCanonicalU64 where T: for<'de> de::Deserialize<'de>
 {}
 impl scalars::PositiveCanonicalU64 {
-    pub const fn try_new(value: u64) -> result::Result<Self, scalars::CanonicalValueError>;
     pub const fn value(self) -> u64;
+}
+impl scalars::PositiveCanonicalU64 {
+    pub const fn try_new(value: u64) -> result::Result<Self, scalars::CanonicalValueError>;
 }
 impl convert::TryFrom<string::String> for scalars::PositiveCanonicalU64 {
     type Error = scalars::CanonicalValueError;
@@ -220,8 +226,10 @@ pub struct CanonicalDigest(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for scalars::CanonicalDigest where T: for<'de> de::Deserialize<'de> {}
 impl scalars::CanonicalDigest {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl scalars::CanonicalDigest {
+    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn into_string(self) -> string::String;
 }
 impl convert::TryFrom<string::String> for scalars::CanonicalDigest {
@@ -240,9 +248,11 @@ pub struct CanonicalBlobDigest(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl<T> de::DeserializeOwned for scalars::CanonicalBlobDigest where T: for<'de> de::Deserialize<'de> {}
 impl scalars::CanonicalBlobDigest {
+    pub const fn into_digest(self) -> blob::BlobDigest;
+}
+impl scalars::CanonicalBlobDigest {
     pub const fn from_bytes(bytes: [u8; 32]) -> Self;
     pub const fn from_digest(value: blob::BlobDigest) -> Self;
-    pub const fn into_digest(self) -> blob::BlobDigest;
 }
 impl traits::FromStr for scalars::CanonicalBlobDigest {
     type Err = blob::BlobDigestParseError;
@@ -275,9 +285,11 @@ pub struct RequestId(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for scalars::RequestId where T: for<'de> de::Deserialize<'de> {}
 impl scalars::RequestId {
+    pub const fn value(self) -> u64;
+}
+impl scalars::RequestId {
     pub fn try_new(value: u64) -> result::Result<Self, scalars::CanonicalValueError>;
     pub const fn uncorrelated() -> Self;
-    pub const fn value(self) -> u64;
 }
 impl convert::TryFrom<string::String> for scalars::RequestId {
     type Error = scalars::CanonicalValueError;
@@ -295,8 +307,10 @@ pub struct InputContent(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for scalars::InputContent where T: for<'de> de::Deserialize<'de> {}
 impl scalars::InputContent {
-    pub fn new(value: string::String) -> Self;
     pub fn as_str(&self) -> &str;
+}
+impl scalars::InputContent {
+    pub fn new(value: string::String) -> Self;
     pub fn into_string(self) -> string::String;
 }
 ```
@@ -308,8 +322,10 @@ pub struct ContentFragment(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for scalars::ContentFragment where T: for<'de> de::Deserialize<'de> {}
 impl scalars::ContentFragment {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl scalars::ContentFragment {
+    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
 }
 impl convert::TryFrom<string::String> for scalars::ContentFragment {
     type Error = scalars::CanonicalValueError;
@@ -365,8 +381,10 @@ impl<T> de::DeserializeOwned for scalars::CanonicalDollarAmount where
 {
 }
 impl scalars::CanonicalDollarAmount {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl scalars::CanonicalDollarAmount {
+    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
 }
 impl convert::TryFrom<string::String> for scalars::CanonicalDollarAmount {
     type Error = scalars::CanonicalValueError;
@@ -384,8 +402,10 @@ pub struct BillingRateVersion(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for scalars::BillingRateVersion where T: for<'de> de::Deserialize<'de> {}
 impl scalars::BillingRateVersion {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl scalars::BillingRateVersion {
+    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
 }
 impl convert::TryFrom<string::String> for scalars::BillingRateVersion {
     type Error = scalars::CanonicalValueError;
@@ -415,8 +435,10 @@ pub struct SystemPromptText(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for scalars::SystemPromptText where T: for<'de> de::Deserialize<'de> {}
 impl scalars::SystemPromptText {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl scalars::SystemPromptText {
+    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn into_string(self) -> string::String;
 }
 impl convert::TryFrom<string::String> for scalars::SystemPromptText {
@@ -562,8 +584,10 @@ impl<T> de::DeserializeOwned for scalars::ConversationImportSource where
 {
 }
 impl scalars::ConversationImportSource {
-    pub fn new(bytes: vec::Vec<u8>) -> Self;
     pub fn as_bytes(&self) -> &[u8];
+}
+impl scalars::ConversationImportSource {
+    pub fn new(bytes: vec::Vec<u8>) -> Self;
     pub fn into_bytes(self) -> vec::Vec<u8>;
 }
 impl ser::Serialize for scalars::ConversationImportSource {

@@ -610,39 +610,23 @@ fn provider_compaction_contains_credential(
     credential: &CredentialValue,
 ) -> bool {
     let key = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-    if key.is_empty() {
+    if key.is_empty()
+        || !content
+            .iter()
+            .any(|part| matches!(part, AssistantPart::ProviderCompaction { .. }))
+    {
         return false;
     }
-    content.iter().enumerate().any(|(index, part)| {
-        let AssistantPart::ProviderCompaction { block_json } = part else {
-            return false;
-        };
-        block_json.contains(key)
-            || json_escapes_decode_to_credential(block_json, key)
-            || provider_compaction_fields_contain_credential(block_json, key)
-            || provider_compaction_suffix_completes_durable_prefix(
-                block_json,
-                &content[..index],
-                key,
-            )
-            || provider_compaction_prefix_completed_by_durable_parts(
-                block_json,
-                &content[index + 1..],
-                key,
-            )
-    })
-}
-
-fn provider_compaction_fields_contain_credential(block_json: &str, credential: &str) -> bool {
-    let mut pending = String::new();
-    inspect_provider_compaction_fields(block_json, &mut |value| {
-        pending.push_str(value);
-        if pending.contains(credential) {
+    let mut matcher = CredentialBoundaryMatcher::new(key);
+    content.iter().any(|part| {
+        if let AssistantPart::ProviderCompaction { block_json } = part
+            && (block_json.contains(key) || json_escapes_decode_to_credential(block_json, key))
+        {
             return true;
         }
-        (_, pending) =
-            redact_complete_credentials_and_hold_prefix(std::mem::take(&mut pending), credential);
-        false
+        inspect_durable_assistant_part_fields(part, &mut |value, provider_compaction| {
+            matcher.inspect(value, provider_compaction)
+        })
     })
 }
 
@@ -659,83 +643,66 @@ fn inspect_provider_compaction_fields(
         .any(inspect)
 }
 
-fn provider_compaction_suffix_completes_durable_prefix(
-    block_json: &str,
-    preceding: &[AssistantPart],
-    credential: &str,
-) -> bool {
-    let Ok(block) = serde_json::from_str::<serde_json::Value>(block_json) else {
-        return false;
-    };
-    ["content", "encrypted_content"]
-        .into_iter()
-        .filter_map(|field| block.get(field).and_then(serde_json::Value::as_str))
-        .any(|value| {
-            credential.char_indices().skip(1).any(|(split, _)| {
-                value.starts_with(&credential[split..])
-                    && preceding_durable_parts_end_with(preceding, &credential[..split])
-            })
-        })
+struct CredentialBoundaryMatcher<'a> {
+    credential: &'a str,
+    // Every state is a viable credential-prefix tail plus whether that tail
+    // has consumed provider-compaction material. Keeping prior states lets an
+    // unrelated structured field be skipped without retaining its contents.
+    states: Vec<(usize, bool)>,
 }
 
-fn preceding_durable_parts_end_with(parts: &[AssistantPart], expected: &str) -> bool {
-    // Prefix lengths are the bounded rolling tails of every viable ordered
-    // field path. Retaining earlier lengths lets unrelated structured fields
-    // be skipped without retaining their provider-controlled contents.
-    let mut matched_prefix_lengths = vec![0];
-    parts.iter().any(|part| {
-        let mut inspect = |fragment: &str| {
-            let prior_matches = matched_prefix_lengths.clone();
-            for prior_length in prior_matches {
-                let next_length =
-                    longest_prefix_suffix(&expected[..prior_length], fragment, expected);
-                if next_length == expected.len() {
-                    return true;
-                }
-                if !matched_prefix_lengths.contains(&next_length) {
-                    matched_prefix_lengths.push(next_length);
-                }
-            }
-            false
-        };
-
-        match part {
-            AssistantPart::Text(text) => inspect(text),
-            AssistantPart::Thinking { text, signature } => {
-                inspect(text) || signature.as_deref().is_some_and(&mut inspect)
-            }
-            AssistantPart::RedactedThinking { data } => inspect(data),
-            AssistantPart::ProviderCompaction { block_json } => {
-                inspect_provider_compaction_fields(block_json, &mut inspect)
-            }
-            AssistantPart::ToolCall(proposal) => {
-                inspect(proposal.id.as_str())
-                    || inspect(proposal.name.as_str())
-                    || inspect_raw_json_strings(&proposal.arguments_json, &mut inspect)
-                        .unwrap_or(false)
-            }
-            AssistantPart::SuppressedToolCall(name) => inspect(name.as_str()),
+impl<'a> CredentialBoundaryMatcher<'a> {
+    fn new(credential: &'a str) -> Self {
+        Self {
+            credential,
+            states: vec![(0, false)],
         }
-    })
-}
-
-fn longest_prefix_suffix(prefix: &str, fragment: &str, expected: &str) -> usize {
-    let mut fragment_start = fragment.len().saturating_sub(expected.len());
-    while !fragment.is_char_boundary(fragment_start) {
-        fragment_start += 1;
     }
-    let fragment_tail = &fragment[fragment_start..];
-    let mut candidate = String::with_capacity(prefix.len() + fragment_tail.len());
-    candidate.push_str(prefix);
-    candidate.push_str(fragment_tail);
 
-    expected
-        .char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(expected.len()))
-        .rev()
-        .find(|length| candidate.ends_with(&expected[..*length]))
-        .unwrap_or(0)
+    fn inspect(&mut self, fragment: &str, provider_compaction: bool) -> bool {
+        let prior_states = self.states.clone();
+        for (prior_length, prior_used_compaction) in prior_states {
+            if prior_length > 0
+                && fragment.starts_with(&self.credential[prior_length..])
+                && (prior_used_compaction || provider_compaction)
+            {
+                return true;
+            }
+            let prefix = &self.credential[..prior_length];
+            let mut fragment_start = fragment.len().saturating_sub(self.credential.len());
+            while !fragment.is_char_boundary(fragment_start) {
+                fragment_start += 1;
+            }
+            let fragment_tail = &fragment[fragment_start..];
+            let mut candidate = String::with_capacity(prefix.len() + fragment_tail.len());
+            candidate.push_str(prefix);
+            candidate.push_str(fragment_tail);
+            let field_boundary = prefix.len();
+
+            let next_length = self
+                .credential
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(self.credential.len()))
+                .rev()
+                .find(|length| candidate.ends_with(&self.credential[..*length]))
+                .unwrap_or(0);
+            let match_start = candidate.len() - next_length;
+            let used_compaction = (match_start < field_boundary && prior_used_compaction)
+                || (candidate.len() > field_boundary && provider_compaction);
+            if next_length == self.credential.len() && used_compaction {
+                return true;
+            }
+            if next_length == 0 || next_length == self.credential.len() {
+                continue;
+            }
+            let next = (next_length, used_compaction);
+            if !self.states.contains(&next) {
+                self.states.push(next);
+            }
+        }
+        false
+    }
 }
 
 fn inspect_raw_json_strings(
@@ -758,65 +725,34 @@ fn inspect_raw_json_strings(
     }
 }
 
-fn provider_compaction_prefix_completed_by_durable_parts(
-    block_json: &str,
-    following: &[AssistantPart],
-    credential: &str,
+fn inspect_durable_assistant_part_fields(
+    part: &AssistantPart,
+    inspect: &mut impl FnMut(&str, bool) -> bool,
 ) -> bool {
-    let Ok(block) = serde_json::from_str::<serde_json::Value>(block_json) else {
-        return false;
-    };
-    ["content", "encrypted_content"]
-        .into_iter()
-        .filter_map(|field| block.get(field).and_then(serde_json::Value::as_str))
-        .any(|value| {
-            credential.char_indices().skip(1).any(|(split, _)| {
-                value.ends_with(&credential[..split])
-                    && following_durable_parts_contain(following, &credential[split..])
-            })
-        })
-}
-
-fn following_durable_parts_contain(parts: &[AssistantPart], expected: &str) -> bool {
-    let mut matched_prefix_lengths = vec![0];
-    parts.iter().any(|part| {
-        let mut inspect = |fragment: &str| {
-            let prior_matches = matched_prefix_lengths.clone();
-            for prior_length in prior_matches {
-                if fragment.contains(expected)
-                    || (prior_length > 0 && fragment.starts_with(&expected[prior_length..]))
-                {
-                    return true;
-                }
-                let next_length =
-                    longest_prefix_suffix(&expected[..prior_length], fragment, expected);
-                if !matched_prefix_lengths.contains(&next_length) {
-                    matched_prefix_lengths.push(next_length);
-                }
-            }
-            false
-        };
-
-        match part {
-            AssistantPart::Text(text) => inspect(text),
-            AssistantPart::Thinking { text, signature } => {
-                inspect(text) || signature.as_deref().is_some_and(&mut inspect)
-            }
-            AssistantPart::RedactedThinking { data } => inspect(data),
-            AssistantPart::ProviderCompaction { block_json } => {
-                inspect_provider_compaction_fields(block_json, &mut inspect)
-            }
-            AssistantPart::ToolCall(proposal) => {
-                inspect(proposal.id.as_str())
-                    || inspect(proposal.name.as_str())
-                    || match inspect_raw_json_strings(&proposal.arguments_json, &mut inspect) {
-                        Ok(found) => found,
-                        Err(_) => inspect(&decode_json_escapes(&proposal.arguments_json)),
-                    }
-            }
-            AssistantPart::SuppressedToolCall(name) => inspect(name.as_str()),
+    match part {
+        AssistantPart::Text(text) => inspect(text, false),
+        AssistantPart::Thinking { text, signature } => {
+            inspect(text, false)
+                || signature
+                    .as_deref()
+                    .is_some_and(|signature| inspect(signature, false))
         }
-    })
+        AssistantPart::RedactedThinking { data } => inspect(data, false),
+        AssistantPart::ProviderCompaction { block_json } => {
+            inspect_provider_compaction_fields(block_json, &mut |value| inspect(value, true))
+        }
+        AssistantPart::ToolCall(proposal) => {
+            inspect(proposal.id.as_str(), false)
+                || inspect(proposal.name.as_str(), false)
+                || match inspect_raw_json_strings(&proposal.arguments_json, &mut |value| {
+                    inspect(value, false)
+                }) {
+                    Ok(found) => found,
+                    Err(_) => inspect(&decode_json_escapes(&proposal.arguments_json), false),
+                }
+        }
+        AssistantPart::SuppressedToolCall(name) => inspect(name.as_str(), false),
+    }
 }
 
 fn redact_text(text: String, credential: &CredentialValue) -> String {
@@ -2137,6 +2073,47 @@ mod tests {
 
         let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
             panic!("credential spanning consecutive compaction fields is rejected");
+        };
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_around_provider_compaction_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::ToolUse,
+                content: vec![
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-1"),
+                        name: ToolName::new("key_"),
+                        arguments_json: r#"{"value":"safe"}"#.to_string(),
+                    }),
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"lo","encrypted_content":null}"#
+                                .to_string(),
+                    },
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-2"),
+                        name: ToolName::new("op"),
+                        arguments_json: r#"{"value":"safe"}"#.to_string(),
+                    }),
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential spanning around compaction evidence is rejected");
         };
         assert_eq!(
             error.native.error_token.as_deref(),

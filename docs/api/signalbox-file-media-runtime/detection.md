@@ -91,9 +91,11 @@ impl ValidatedFile {
     pub const fn source(&self) -> &FileUse;
     pub const fn detected_media_type(&self) -> &CanonicalMediaType;
     pub const fn reader(&self) -> &ReaderIdentity;
-    pub const fn validation(&self) -> ValidationEvidence;
     pub const fn metadata(&self) -> &BoundedMetadata;
     pub fn views(&self) -> &[ReadViewDeclaration];
+}
+impl ValidatedFile {
+    pub const fn validation(&self) -> ValidationEvidence;
 }
 ```
 
