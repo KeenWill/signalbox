@@ -246,9 +246,6 @@ contradictory evidence is corruption and never an inferred result.
 The reviewer-verdict and usage-limit evidence rules belong to
 [tool loop](tool-loop.md).
 
-Draft status and description are required typed evidence. Every review thread
-must be resolved, including escalated threads.
-
 `signalbox-convergence` evaluates complete GitHub snapshots with an explicit
 reviewer and check policy. Its verdict combines thread dispositions,
 authenticated quiet reviews and exempt head changes, retained review waves,
