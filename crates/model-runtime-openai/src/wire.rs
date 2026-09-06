@@ -102,6 +102,16 @@ pub(crate) enum WireContent {
     Unknown,
 }
 
+impl WireContent {
+    pub(crate) fn text(&self) -> Option<&str> {
+        match self {
+            Self::OutputText { text } => Some(text),
+            Self::Refusal { refusal } => Some(refusal),
+            Self::Unknown => None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct WireUsage {
     pub input_tokens: Option<u64>,
@@ -163,6 +173,8 @@ pub(crate) struct ResponseEvent {
     pub kind: String,
     pub response: Option<Response>,
     pub output_index: Option<u32>,
+    pub content_index: Option<u32>,
+    pub part: Option<WireContent>,
     pub item_id: Option<String>,
     pub item: Option<Box<RawValue>>,
     pub delta: Option<String>,

@@ -250,21 +250,22 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
                     ),
                 });
             }
-            for result in results {
-                expected.remove(result);
+            for part in &message.parts {
+                match part {
+                    MessagePart::ToolResult(result) => {
+                        expected.remove(result.tool_call_id.as_str());
+                    }
+                    _ if !expected.is_empty() => {
+                        return Err(PreparationFailure::UnsupportedOperation {
+                            detail: "Responses requires every pending tool result before \
+                                     intervening user content"
+                                .to_string(),
+                        });
+                    }
+                    _ => {}
+                }
             }
             if !expected.is_empty() {
-                if message
-                    .parts
-                    .iter()
-                    .any(|part| !matches!(part, MessagePart::ToolResult(_)))
-                {
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "Responses requires every pending tool result before \
-                                 intervening user content"
-                            .to_string(),
-                    });
-                }
                 pending_calls = Some(expected);
                 continue;
             }
@@ -1243,6 +1244,47 @@ mod tests {
             build_request(&operation),
             Err(PreparationFailure::UnsupportedOperation { .. })
         ));
+    }
+
+    #[test]
+    fn the_final_tool_result_must_precede_user_text() {
+        for text_first in [true, false] {
+            let mut candidate = operation("call-final-result-order");
+            let result = MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new("call_pending"),
+                content: "done".to_string(),
+                is_error: false,
+            });
+            let mut parts = vec![result, MessagePart::Text("continue".to_string())];
+            if text_first {
+                parts.swap(0, 1);
+            }
+            candidate.messages = vec![
+                ConversationMessage {
+                    role: ConversationRole::Assistant,
+                    parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call_pending"),
+                        name: ToolName::new("lookup"),
+                        arguments_json: "{}".to_string(),
+                    })],
+                },
+                ConversationMessage {
+                    role: ConversationRole::User,
+                    parts,
+                },
+            ];
+            let request = build_request(&candidate);
+            if text_first {
+                assert!(matches!(
+                    request,
+                    Err(PreparationFailure::UnsupportedOperation { .. })
+                ));
+            } else {
+                let wire = serde_json::to_value(request.unwrap()).unwrap();
+                assert_eq!(wire["input"][1]["type"], "function_call_output");
+                assert_eq!(wire["input"][2]["type"], "message");
+            }
+        }
     }
 
     #[test]

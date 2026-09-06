@@ -31,6 +31,23 @@ pub(crate) fn convert_usage(wire: &WireUsage) -> TokenUsage {
     }
 }
 
+pub(crate) fn output_tool_calls(
+    output: Option<&[Box<serde_json::value::RawValue>]>,
+) -> ToolCallsAtLoss {
+    let Some(items) = output else {
+        return ToolCallsAtLoss::Unobserved;
+    };
+    let mut census = ToolCallsAtLoss::NoneOpened;
+    for raw in items {
+        match serde_json::from_str::<WireOutputItem>(raw.get()) {
+            Ok(item) if item.kind == "function_call" => return ToolCallsAtLoss::Opened,
+            Ok(item) if matches!(item.kind.as_str(), "message" | "reasoning") => {}
+            _ => census = ToolCallsAtLoss::Unobserved,
+        }
+    }
+    census
+}
+
 pub(crate) fn convert_tool_call(item: &WireOutputItem) -> Result<ToolCallProposal, String> {
     let (Some(id), Some(name), Some(arguments)) = (&item.call_id, &item.name, &item.arguments)
     else {
@@ -73,18 +90,10 @@ fn convert_item(item: &WireOutputItem) -> Result<ConvertedItem, String> {
             let mut content = Vec::new();
             let mut refused = false;
             for part in parts {
-                let text = match part {
-                    WireContent::OutputText { text } => text,
-                    WireContent::Refusal { refusal } => {
-                        refused = true;
-                        refusal
-                    }
-                    WireContent::Unknown => {
-                        return Err("unrecognized output content type".to_string());
-                    }
-                };
+                let text = part.text().ok_or("unrecognized output content type")?;
+                refused |= matches!(part, WireContent::Refusal { .. });
                 if !text.is_empty() {
-                    content.push(AssistantPart::Text(text.clone()));
+                    content.push(AssistantPart::Text(text.to_string()));
                 }
             }
             Ok(ConvertedItem {
@@ -181,13 +190,7 @@ pub(crate) fn decode_response<C: Clone>(
         .iter()
         .map(|raw| serde_json::from_str(raw.get()))
         .collect();
-    let tool_calls = match &items {
-        Ok(items) if items.iter().any(|item| item.kind == "function_call") => {
-            ToolCallsAtLoss::Opened
-        }
-        Ok(_) if response.output.is_some() => ToolCallsAtLoss::NoneOpened,
-        _ => ToolCallsAtLoss::Unobserved,
-    };
+    let tool_calls = output_tool_calls(response.output.as_deref());
     let loss = |detail: String, finish_reported: Option<FinishReason>| {
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::ResponseUnintelligible { detail },
@@ -339,6 +342,30 @@ mod tests {
             &mut observations,
         );
         (evidence, observations)
+    }
+
+    #[test]
+    fn unknown_output_kinds_withhold_the_no_tool_claim_but_keep_known_calls_open() {
+        for known_call in [false, true] {
+            let mut value = response();
+            value["output"] = json!([{"type":"web_search_call","id":"ws_fixture"}]);
+            if known_call {
+                value["output"].as_array_mut().unwrap().push(json!({
+                    "type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"
+                }));
+            }
+            let (TerminalEvidence::BoundaryLoss(loss), _) = decode(value) else {
+                panic!("unknown output must fail closed");
+            };
+            assert_eq!(
+                loss.tool_calls,
+                if known_call {
+                    ToolCallsAtLoss::Opened
+                } else {
+                    ToolCallsAtLoss::Unobserved
+                }
+            );
+        }
     }
 
     #[test]

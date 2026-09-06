@@ -131,7 +131,7 @@ pub enum ModelAdapter {
     ClaudeCli,
     /// The Codex CLI adapter.
     CodexCli,
-    /// OpenAI's HTTP Chat Completions adapter.
+    /// OpenAI's HTTP Responses adapter.
     OpenAi,
 }
 
