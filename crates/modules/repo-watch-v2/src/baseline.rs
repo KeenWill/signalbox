@@ -9,6 +9,8 @@ pub(crate) fn observation_payload(
     observation: &RepoWatchObservation,
     merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
 ) -> Value {
+    let mut merged_baselines = merged_baselines.iter().collect::<Vec<_>>();
+    merged_baselines.sort_by_key(|baseline| baseline.number());
     json!({
         "signal_reviewers": observation
             .signal_reviewers()
@@ -44,7 +46,7 @@ pub(crate) fn observation_payload(
             }))
             .collect::<Vec<_>>(),
         "merged_pull_requests": merged_baselines
-            .iter()
+            .into_iter()
             .map(merged_pull_request_payload)
             .collect::<Vec<_>>(),
     })
@@ -238,5 +240,49 @@ fn reaction_subject_payload(value: ReactionSubject) -> Value {
         ReactionSubject::ReviewComment { id } => {
             json!({ "kind": "review_comment", "id": id.get() })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use signalbox_ownership_seam::{
+        CommitSha, MergeableState, PullRequestNumber, RepoWatchMergedPullRequestBaselineInputV1,
+        RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchRepositoryState,
+    };
+
+    use super::observation_payload;
+
+    fn merged_baseline(number: u64) -> RepoWatchMergedPullRequestBaselineV1 {
+        RepoWatchMergedPullRequestBaselineV1::try_new(RepoWatchMergedPullRequestBaselineInputV1 {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(number).expect("fixture number is positive"),
+            ),
+            head_sha: CommitSha::try_new(format!("{number:040x}"))
+                .expect("fixture commit is valid"),
+            signal_reviewers: Vec::new(),
+            labels: Vec::new(),
+            mergeable_state: MergeableState::Mergeable,
+            completed_check_suites: Vec::new(),
+            completed_check_runs: Vec::new(),
+            review_ids: Vec::new(),
+            threads: Vec::new(),
+            reactions: Vec::new(),
+        })
+        .expect("fixture baseline is valid")
+    }
+
+    #[test]
+    fn merged_baseline_collection_order_is_not_projection_identity() {
+        let observation =
+            RepoWatchObservation::new(Vec::new(), RepoWatchRepositoryState::default());
+        let first = merged_baseline(1);
+        let second = merged_baseline(2);
+
+        assert_eq!(
+            observation_payload(&observation, &[first.clone(), second.clone()]),
+            observation_payload(&observation, &[second, first])
+        );
     }
 }
