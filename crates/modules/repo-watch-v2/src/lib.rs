@@ -4,7 +4,12 @@
 //! unqualified and must run on a pool whose effective role and search path are
 //! confined to `mod_repo_watch`.
 
-use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    num::NonZeroU64,
+};
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::{Value, json};
@@ -506,6 +511,20 @@ pub enum RuleReconciliationAdmission {
     ConflictingReuse,
     /// At least one supplied revision was older than retained lineage.
     Stale,
+}
+
+/// One repository in the complete configured rule set.
+#[derive(Clone, Copy, Debug)]
+pub struct RepositoryRuleSet<'a> {
+    repository: &'a RepositorySlug,
+    rules: &'a [RepoWatchRule],
+}
+
+impl<'a> RepositoryRuleSet<'a> {
+    /// Binds one repository to its complete ordered checked rule set.
+    pub const fn new(repository: &'a RepositorySlug, rules: &'a [RepoWatchRule]) -> Self {
+        Self { repository, rules }
+    }
 }
 
 impl WebhookDisposition {
@@ -1090,111 +1109,136 @@ impl RepoWatchStore {
         })
     }
 
-    /// Reconciles one repository's complete checked rule set atomically.
+    /// Reconciles the complete configured repository and rule set atomically.
     pub async fn reconcile_rules(
         &self,
-        repository: &RepositorySlug,
-        rules: &[RepoWatchRule],
+        repositories: &[RepositoryRuleSet<'_>],
         activated_at: OffsetDateTime,
     ) -> Result<RuleReconciliationAdmission, StoreError> {
-        let mut configured_ids = BTreeSet::new();
-        for rule in rules {
-            if !configured_ids.insert(rule.id().as_str()) {
+        let mut configured = BTreeMap::new();
+        for repository in repositories {
+            let mut rule_ids = BTreeSet::new();
+            for rule in repository.rules {
+                if !rule_ids.insert(rule.id().as_str()) {
+                    return Err(StoreError::DuplicateRuleIdentity);
+                }
+            }
+            if configured
+                .insert(repository.repository.as_str(), rule_ids)
+                .is_some()
+            {
                 return Err(StoreError::DuplicateRuleIdentity);
             }
         }
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
-            .bind(repository.as_str())
-            .execute(&mut *transaction)
-            .await?;
-        let active_rules: Vec<(String, Decimal)> = sqlx::query_as(
-            "SELECT rule_id, active_revision FROM rule
-              WHERE repository = $1 ORDER BY rule_id FOR UPDATE",
+        let active_repositories: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT repository FROM rule ORDER BY repository")
+                .fetch_all(&mut *transaction)
+                .await?;
+        let mut locked_repositories = configured.keys().copied().collect::<BTreeSet<_>>();
+        locked_repositories.extend(active_repositories.iter().map(String::as_str));
+        for repository in locked_repositories {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
+                .bind(repository)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        let active_rules: Vec<(String, String, Decimal)> = sqlx::query_as(
+            "SELECT repository, rule_id, active_revision FROM rule
+              ORDER BY repository, rule_id FOR UPDATE",
         )
-        .bind(repository.as_str())
         .fetch_all(&mut *transaction)
         .await?;
-        let activation_tail: Decimal = sqlx::query_scalar(
-            "SELECT COALESCE(max(repository_event_ordinal), 0)
-               FROM gh_event WHERE repository = $1",
-        )
-        .bind(repository.as_str())
-        .fetch_one(&mut *transaction)
-        .await?;
-        let mut plans = Vec::with_capacity(rules.len());
-        for rule in rules {
-            let revision = Decimal::from(rule.version().get());
-            let digest = rule.content_digest();
-            let active: Option<(Decimal, Vec<u8>)> = sqlx::query_as(
-                "SELECT active_revision, content_digest
-                   FROM rule
-                  WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
+        let mut plans = Vec::new();
+        for repository in repositories {
+            let activation_tail: Decimal = sqlx::query_scalar(
+                "SELECT COALESCE(max(repository_event_ordinal), 0)
+                   FROM gh_event WHERE repository = $1",
             )
-            .bind(repository.as_str())
-            .bind(rule.id().as_str())
-            .fetch_optional(&mut *transaction)
-            .await?;
-            let latest_revision: Option<Decimal> = sqlx::query_scalar(
-                "SELECT max(revision) FROM rule_revision
-                  WHERE repository = $1 AND rule_id = $2",
-            )
-            .bind(repository.as_str())
-            .bind(rule.id().as_str())
+            .bind(repository.repository.as_str())
             .fetch_one(&mut *transaction)
             .await?;
-            let historical_digest: Option<Vec<u8>> = sqlx::query_scalar(
-                "SELECT content_digest FROM rule_revision
-                  WHERE repository = $1 AND rule_id = $2 AND revision = $3",
-            )
-            .bind(repository.as_str())
-            .bind(rule.id().as_str())
-            .bind(revision)
-            .fetch_optional(&mut *transaction)
-            .await?;
-            if historical_digest
-                .as_ref()
-                .is_some_and(|historical| historical != digest.as_bytes())
-                || active
+            for rule in repository.rules {
+                let revision = Decimal::from(rule.version().get());
+                let digest = rule.content_digest();
+                let active: Option<(Decimal, Vec<u8>)> = sqlx::query_as(
+                    "SELECT active_revision, content_digest
+                       FROM rule
+                      WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
+                )
+                .bind(repository.repository.as_str())
+                .bind(rule.id().as_str())
+                .fetch_optional(&mut *transaction)
+                .await?;
+                let latest_revision: Option<Decimal> = sqlx::query_scalar(
+                    "SELECT max(revision) FROM rule_revision
+                      WHERE repository = $1 AND rule_id = $2",
+                )
+                .bind(repository.repository.as_str())
+                .bind(rule.id().as_str())
+                .fetch_one(&mut *transaction)
+                .await?;
+                let historical_digest: Option<Vec<u8>> = sqlx::query_scalar(
+                    "SELECT content_digest FROM rule_revision
+                      WHERE repository = $1 AND rule_id = $2 AND revision = $3",
+                )
+                .bind(repository.repository.as_str())
+                .bind(rule.id().as_str())
+                .bind(revision)
+                .fetch_optional(&mut *transaction)
+                .await?;
+                if historical_digest
                     .as_ref()
-                    .is_some_and(|(active_revision, active_digest)| {
-                        *active_revision == revision && active_digest != digest.as_bytes()
-                    })
-            {
-                transaction.rollback().await?;
-                return Ok(RuleReconciliationAdmission::ConflictingReuse);
-            }
-            if historical_digest.is_some() {
+                    .is_some_and(|historical| historical != digest.as_bytes())
+                    || active
+                        .as_ref()
+                        .is_some_and(|(active_revision, active_digest)| {
+                            *active_revision == revision && active_digest != digest.as_bytes()
+                        })
+                {
+                    transaction.rollback().await?;
+                    return Ok(RuleReconciliationAdmission::ConflictingReuse);
+                }
+                if historical_digest.is_some() {
+                    if active
+                        .as_ref()
+                        .is_some_and(|(active_revision, _)| *active_revision == revision)
+                    {
+                        plans.push((
+                            repository.repository,
+                            rule,
+                            active.map(|(revision, _)| revision),
+                            RuleAdmission::Replayed,
+                            activation_tail,
+                        ));
+                        continue;
+                    }
+                    transaction.rollback().await?;
+                    return Ok(RuleReconciliationAdmission::Stale);
+                }
                 if active
                     .as_ref()
-                    .is_some_and(|(active_revision, _)| *active_revision == revision)
+                    .is_some_and(|(active_revision, _)| revision < *active_revision)
+                    || latest_revision.is_some_and(|latest| revision < latest)
                 {
-                    plans.push((
-                        rule,
-                        active.map(|(revision, _)| revision),
-                        RuleAdmission::Replayed,
-                    ));
-                    continue;
+                    transaction.rollback().await?;
+                    return Ok(RuleReconciliationAdmission::Stale);
                 }
-                transaction.rollback().await?;
-                return Ok(RuleReconciliationAdmission::Stale);
+                let admission = if active.is_some() || latest_revision.is_some() {
+                    RuleAdmission::Updated
+                } else {
+                    RuleAdmission::Inserted
+                };
+                plans.push((
+                    repository.repository,
+                    rule,
+                    active.map(|(revision, _)| revision),
+                    admission,
+                    activation_tail,
+                ));
             }
-            if active
-                .as_ref()
-                .is_some_and(|(active_revision, _)| revision < *active_revision)
-                || latest_revision.is_some_and(|latest| revision < latest)
-            {
-                transaction.rollback().await?;
-                return Ok(RuleReconciliationAdmission::Stale);
-            }
-            let admission = if active.is_some() || latest_revision.is_some() {
-                RuleAdmission::Updated
-            } else {
-                RuleAdmission::Inserted
-            };
-            plans.push((rule, active.map(|(revision, _)| revision), admission));
         }
-        for (rule, active_revision, admission) in &plans {
+        for (repository, rule, active_revision, admission, activation_tail) in &plans {
             if *admission == RuleAdmission::Replayed {
                 continue;
             }
@@ -1203,13 +1247,13 @@ impl RepoWatchStore {
                 repository,
                 rule,
                 activated_at,
-                activation_tail,
+                *activation_tail,
             )
             .await?;
             if let Some(active_revision) = active_revision {
                 retire_rule_revision(
                     &mut transaction,
-                    repository,
+                    repository.as_str(),
                     rule.id().as_str(),
                     *active_revision,
                     activated_at,
@@ -1242,20 +1286,23 @@ impl RepoWatchStore {
             }
         }
         let mut deactivated = 0_u64;
-        for (rule_id, active_revision) in active_rules {
-            if configured_ids.contains(rule_id.as_str()) {
+        for (repository, rule_id, active_revision) in active_rules {
+            if configured
+                .get(repository.as_str())
+                .is_some_and(|rule_ids| rule_ids.contains(rule_id.as_str()))
+            {
                 continue;
             }
             retire_rule_revision(
                 &mut transaction,
-                repository,
+                &repository,
                 &rule_id,
                 active_revision,
                 activated_at,
             )
             .await?;
             sqlx::query("DELETE FROM rule WHERE repository = $1 AND rule_id = $2")
-                .bind(repository.as_str())
+                .bind(&repository)
                 .bind(&rule_id)
                 .execute(&mut *transaction)
                 .await?;
@@ -1267,7 +1314,7 @@ impl RepoWatchStore {
         Ok(RuleReconciliationAdmission::Applied {
             rules: plans
                 .into_iter()
-                .map(|(_, _, admission)| admission)
+                .map(|(_, _, _, admission, _)| admission)
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             deactivated,
@@ -1617,7 +1664,7 @@ async fn insert_rule_revision(
 
 async fn retire_rule_revision(
     transaction: &mut Transaction<'_, Postgres>,
-    repository: &RepositorySlug,
+    repository: &str,
     rule_id: &str,
     revision: Decimal,
     retired_at: OffsetDateTime,
@@ -1627,7 +1674,7 @@ async fn retire_rule_revision(
             SET retired_at = GREATEST(activated_at, $4)
           WHERE repository = $1 AND rule_id = $2 AND revision = $3",
     )
-    .bind(repository.as_str())
+    .bind(repository)
     .bind(rule_id)
     .bind(revision)
     .bind(retired_at)
