@@ -3652,8 +3652,8 @@ async fn complete_active_text_turn(
     Ok(())
 }
 
-/// the user-visible operation distinguishes first insertion
-/// from exact-snapshot reimport while retaining the winner's identity.
+/// the user-visible operation distinguishes first insertion from exact-snapshot reimport while
+/// retaining the winner's identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<(), Box<dyn Error>> {
@@ -3871,10 +3871,9 @@ impl ImportedInspectionFixture {
     }
 }
 
-/// the inspection read names every selectable imported position with its
-/// attestation, content kind, and bounded preview, so the ordinal
-/// `create_session_from_imported_frontier` consumes is observable before it is
-/// consumed.
+/// the inspection read names every selectable imported position with its attestation, content kind,
+/// and bounded preview, so the ordinal `create_session_from_imported_frontier` consumes is
+/// observable before it is consumed.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn reads_every_selectable_imported_position() -> Result<(), Box<dyn Error>> {
@@ -3938,8 +3937,8 @@ async fn reads_every_selectable_imported_position() -> Result<(), Box<dyn Error>
     runtime.stop().await
 }
 
-/// an absent imported conversation is a read miss naming an imported
-/// conversation, never the absent-session diagnostic.
+/// an absent imported conversation is a read miss naming an imported conversation, never the
+/// absent-session diagnostic.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn read_names_an_absent_imported_conversation() -> Result<(), Box<dyn Error>> {
@@ -3967,9 +3966,8 @@ async fn read_names_an_absent_imported_conversation() -> Result<(), Box<dyn Erro
     runtime.stop().await
 }
 
-/// a valid imported conversation carrying an out-of-range position is a
-/// rejection naming the selectable range, not a `not_found` claiming the
-/// identity was absent.
+/// a valid imported conversation carrying an out-of-range position is a rejection naming the
+/// selectable range, not a `not_found` claiming the identity was absent.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn continuation_names_the_selectable_position_range() -> Result<(), Box<dyn Error>> {
@@ -4012,8 +4010,8 @@ async fn continuation_names_the_selectable_position_range() -> Result<(), Box<dy
     runtime.stop().await
 }
 
-/// an absent imported conversation on the continuation command names an
-/// imported conversation as the missing target.
+/// an absent imported conversation on the continuation command names an imported conversation as
+/// the missing target.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn continuation_names_an_absent_imported_conversation() -> Result<(), Box<dyn Error>> {
@@ -4054,10 +4052,9 @@ async fn continuation_names_an_absent_imported_conversation() -> Result<(), Box<
     runtime.stop().await
 }
 
-/// the imported wire address resolves against the immutable
-/// aggregate before settings admission, so an absent conversation and an
-/// out-of-range position each win over an explicit setting the selected model
-/// cannot support.
+/// the imported wire address resolves against the immutable aggregate before settings admission, so
+/// an absent conversation and an out-of-range position each win over an explicit setting the
+/// selected model cannot support.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn imported_address_precedes_settings_validation() -> Result<(), Box<dyn Error>> {
@@ -4124,8 +4121,8 @@ async fn imported_address_precedes_settings_validation() -> Result<(), Box<dyn E
     runtime.stop().await
 }
 
-/// the explicit Codex selection reaches the fixed Codex converter rather
-/// than applying format detection or the Claude Code interpretation.
+/// the explicit Codex selection reaches the fixed Codex converter rather than applying format
+/// detection or the Claude Code interpretation.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>> {
@@ -4249,9 +4246,8 @@ async fn process_runtime_reads_an_empty_operator_status_snapshot() -> Result<(),
     runtime.stop().await
 }
 
-/// one complete replacement
-/// request through the durable command boundary and validates catalog input
-/// before claiming a new command identity.
+/// one complete replacement request through the durable command boundary and validates catalog
+/// input before claiming a new command identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn process_runtime_replaces_session_model_defaults() -> Result<(), Box<dyn Error>> {
@@ -4885,9 +4881,8 @@ fn partition_native_and_imported(
     }
 }
 
-/// the unified request lists native sessions and imported conversations in
-/// one unified page whose imported row carries the derived title, entry
-/// count, and stored source format.
+/// the unified request lists native sessions and imported conversations in one unified page whose
+/// imported row carries the derived title, entry count, and stored source format.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn lists_native_and_imported_conversations() -> Result<(), Box<dyn Error>> {
@@ -5464,8 +5459,8 @@ async fn park_turn_on_ambiguous_model_call(
     Ok(())
 }
 
-/// a turn parked on an ambiguous model call refuses
-/// ordinary input until the user reconciliation decision releases the slot.
+/// a turn parked on an ambiguous model call refuses ordinary input until the user reconciliation
+/// decision releases the slot.
 ///
 /// The refusal and the release are one contract: proving the release means
 /// nothing unless the same session is demonstrably wedged first, against the
@@ -5570,11 +5565,9 @@ async fn sole_terminal_call_disposition(
     .await?)
 }
 
-/// a live streamed provider exchange that fails its stream
-/// integrity check parks the turn on an unstopped ambiguous model call —
-/// exactly the wedge a mid-stream protocol violation produces — and the
-/// reconciliation verb releases the session with a queued
-/// successor.
+/// a live streamed provider exchange that fails its stream integrity check parks the turn on an
+/// unstopped ambiguous model call — exactly the wedge a mid-stream protocol violation produces —
+/// and the reconciliation verb releases the session with a queued successor.
 ///
 /// This is the process-level recovery contract for the streamed-delivery
 /// path: the scripted model declares the same boundary-loss evidence the
@@ -5655,9 +5648,8 @@ async fn connection_reconciles_the_parked_turn(
     Ok(())
 }
 
-/// the reconciliation request is refused, without recording a
-/// command, for every turn that owes no reconciliation decision — so the verb
-/// never becomes a general active-turn stop.
+/// the reconciliation request is refused, without recording a command, for every turn that owes no
+/// reconciliation decision — so the verb never becomes a general active-turn stop.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn reconcile_turn_refuses_a_turn_that_owes_no_decision() -> Result<(), Box<dyn Error>> {
@@ -5773,8 +5765,8 @@ async fn reconcile_turn_replays_a_committed_decision() -> Result<(), Box<dyn Err
     runtime.stop().await
 }
 
-/// reconciliation records the explicit per-call contribution
-/// with the successor origin instead of dropping it at the daemon boundary.
+/// reconciliation records the explicit per-call contribution with the successor origin instead of
+/// dropping it at the daemon boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn reconcile_turn_records_its_per_call_model_settings() -> Result<(), Box<dyn Error>> {
@@ -5867,8 +5859,8 @@ async fn overlapping_equal_reconciliations_both_reach_the_committed_decision()
     runtime.stop().await
 }
 
-/// an absent session is left to the authoritative transaction's recorded
-/// `session_not_found`, not collapsed into the precondition refusal.
+/// an absent session is left to the authoritative transaction's recorded `session_not_found`, not
+/// collapsed into the precondition refusal.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn reconcile_turn_reports_an_absent_session_exactly() -> Result<(), Box<dyn Error>> {
@@ -5951,8 +5943,8 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
     runtime.stop().await
 }
 
-/// a follow subscription formed before its snapshot observes
-/// the next committed outbox event strictly above that snapshot's cursor.
+/// a follow subscription formed before its snapshot observes the next committed outbox event
+/// strictly above that snapshot's cursor.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(), Box<dyn Error>> {
@@ -6073,10 +6065,9 @@ async fn inherits_provider_text_streaming() -> Result<(), Box<dyn Error>> {
     runtime.stop().await
 }
 
-/// the provider bridge asks the scripted
-/// runtime for streamed delivery, and three already-attached followers each
-/// observe the exact already-redacted deltas before durable terminal entries
-/// expose the same complete assistant reply.
+/// the provider bridge asks the scripted runtime for streamed delivery, and three already-attached
+/// followers each observe the exact already-redacted deltas before durable terminal entries expose
+/// the same complete assistant reply.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn streamed_reply_reaches_three_followers_then_durable_truth() -> Result<(), Box<dyn Error>> {
@@ -6127,10 +6118,9 @@ async fn streamed_reply_reaches_three_followers_then_durable_truth() -> Result<(
     runtime.stop().await
 }
 
-/// a follower that cannot keep up with ephemeral provider
-/// deltas receives the existing resynchronization error, loses some deltas,
-/// and recovers the exact completed assistant reply from durable transcript
-/// truth without any delta persistence or replay.
+/// a follower that cannot keep up with ephemeral provider deltas receives the existing
+/// resynchronization error, loses some deltas, and recovers the exact completed assistant reply
+/// from durable transcript truth without any delta persistence or replay.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn streaming_lag_resync_loses_deltas_and_reads_complete_transcript()
@@ -6460,9 +6450,9 @@ fn decided_receipt(message: &ServerMessage) -> (CanonicalUuid, ToolDecision) {
     }
 }
 
-/// the stop verb applies the accepted interrupt treatment — a
-/// running turn with no prepared call cancels directly through the existing
-/// lifecycle while the stop's content becomes the queued immediate successor.
+/// the stop verb applies the accepted interrupt treatment — a running turn with no prepared call
+/// cancels directly through the existing lifecycle while the stop's content becomes the queued
+/// immediate successor.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn stop_turn_cancels_the_activated_turn_and_queues_its_successor()
@@ -6511,9 +6501,9 @@ async fn stop_turn_cancels_the_activated_turn_and_queues_its_successor()
     runtime.stop().await
 }
 
-/// stopping an issued call records the durable cancellation
-/// request and retains the slot for lifecycle closure, and a distinct second
-/// stop is refused with the exact prior stop authority named.
+/// stopping an issued call records the durable cancellation request and retains the slot for
+/// lifecycle closure, and a distinct second stop is refused with the exact prior stop authority
+/// named.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn stop_turn_requests_cancellation_of_an_issued_call_exactly_once()
@@ -6758,9 +6748,8 @@ selection_id = "00000000-0000-0000-0000-000000000001"
     runtime.stop().await
 }
 
-/// every stop refusal is a recorded typed rejection — an empty session
-/// records `no_active_turn` and a stale expected turn records
-/// `active_turn_mismatch`.
+/// every stop refusal is a recorded typed rejection — an empty session records `no_active_turn` and
+/// a stale expected turn records `active_turn_mismatch`.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Error>> {
@@ -6863,8 +6852,8 @@ async fn stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn Error>
     runtime.stop().await
 }
 
-/// stopping a turn records the explicit per-call contribution
-/// with the successor origin instead of dropping it at the daemon boundary.
+/// stopping a turn records the explicit per-call contribution with the successor origin instead of
+/// dropping it at the daemon boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn stop_turn_records_its_per_call_model_settings() -> Result<(), Box<dyn Error>> {
@@ -6908,12 +6897,10 @@ async fn stop_turn_records_its_per_call_model_settings() -> Result<(), Box<dyn E
     runtime.stop().await
 }
 
-/// a stop racing an active tool round never wedges the
-/// session. Against the parked approval wait the stop is refused fail-closed
-/// with the wait intact; after the pending request is denied through its
-/// canonical decision command, the stop cancels the turn with the denial
-/// recorded, and the session accepts ordinary later input whose transcript
-/// replays cleanly.
+/// a stop racing an active tool round never wedges the session. Against the parked approval wait
+/// the stop is refused fail-closed with the wait intact; after the pending request is denied
+/// through its canonical decision command, the stop cancels the turn with the denial recorded, and
+/// the session accepts ordinary later input whose transcript replays cleanly.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn stop_against_a_tool_round_stays_fail_closed_then_deny_and_stop_release()
@@ -7039,8 +7026,8 @@ async fn stop_against_a_tool_round_stays_fail_closed_then_deny_and_stop_release(
     runtime.stop().await
 }
 
-/// a decision naming a later request while an earlier one is undecided
-/// records the exact proposal-order rejection.
+/// a decision naming a later request while an earlier one is undecided records the exact
+/// proposal-order rejection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn decide_tool_request_refuses_a_later_request_first() -> Result<(), Box<dyn Error>> {
@@ -7116,9 +7103,8 @@ async fn decide_tool_request_reports_an_unknown_request() -> Result<(), Box<dyn 
     runtime.stop().await
 }
 
-/// the session-correlation precondition refuses a decision whose named
-/// session does not own the named request, before any durable command is
-/// recorded.
+/// the session-correlation precondition refuses a decision whose named session does not own the
+/// named request, before any durable command is recorded.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn decide_tool_request_refuses_a_misrouted_session_without_recording()
@@ -7167,8 +7153,8 @@ async fn decide_tool_request_refuses_a_misrouted_session_without_recording()
     runtime.stop().await
 }
 
-/// a denial reason outside the domain contract is refused as an invalid
-/// request before any durable command is recorded.
+/// a denial reason outside the domain contract is refused as an invalid request before any durable
+/// command is recorded.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn decide_tool_request_refuses_an_unsafe_denial_reason_before_recording()
@@ -7430,8 +7416,8 @@ async fn decide_tool_request_survives_a_drain_and_restart() -> Result<(), Box<dy
     runtime.stop().await
 }
 
-/// a request that already has a terminal resolution records the exact
-/// already-resolved rejection for a later distinct decision.
+/// a request that already has a terminal resolution records the exact already-resolved rejection
+/// for a later distinct decision.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn decide_tool_request_refuses_an_already_resolved_request() -> Result<(), Box<dyn Error>> {
@@ -7544,8 +7530,8 @@ async fn activate_expected_turn(
     }
 }
 
-/// steering against an idle session is a durable-submit
-/// refusal with the exact expected turn, never an internal daemon error.
+/// steering against an idle session is a durable-submit refusal with the exact expected turn, never
+/// an internal daemon error.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn steering_without_an_active_turn_is_a_typed_rejection() -> Result<(), Box<dyn Error>> {
@@ -7626,9 +7612,9 @@ async fn queued_inputs_deliver_in_acceptance_order_after_the_active_turn()
     runtime.stop().await
 }
 
-/// an acknowledged after-current-turn input remains durable across an
-/// actual process stop, startup scan, and listener restart, then activates as
-/// the exact queued turn after the abandoned active turn is recovered.
+/// an acknowledged after-current-turn input remains durable across an actual process stop, startup
+/// scan, and listener restart, then activates as the exact queued turn after the abandoned active
+/// turn is recovered.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn queued_input_survives_process_restart_and_startup_scan() -> Result<(), Box<dyn Error>> {
@@ -7656,9 +7642,8 @@ async fn queued_input_survives_process_restart_and_startup_scan() -> Result<(), 
     runtime.stop().await
 }
 
-/// a prompted session exposes exact current
-/// and named defaults epochs and replaces the prompt forward-only with the
-/// complete installed echo.
+/// a prompted session exposes exact current and named defaults epochs and replaces the prompt
+/// forward-only with the complete installed echo.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn process_runtime_carries_the_session_system_prompt() -> Result<(), Box<dyn Error>> {
@@ -7802,8 +7787,8 @@ async fn process_runtime_carries_the_session_system_prompt() -> Result<(), Box<d
     runtime.stop().await
 }
 
-/// an explicit unsupported replacement value is a typed caller
-/// error even when changing models would have adjusted an inherited value.
+/// an explicit unsupported replacement value is a typed caller error even when changing models
+/// would have adjusted an inherited value.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn model_change_rejects_an_explicit_unsupported_setting() -> Result<(), Box<dyn Error>> {
@@ -7853,9 +7838,8 @@ async fn model_change_rejects_an_explicit_unsupported_setting() -> Result<(), Bo
     runtime.stop().await
 }
 
-/// defaults replacement carries the prior session
-/// layer across a model change, clears an inherited incompatible value, and
-/// emits the exact automatic adjustment as durable follower evidence.
+/// defaults replacement carries the prior session layer across a model change, clears an inherited
+/// incompatible value, and emits the exact automatic adjustment as durable follower evidence.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn model_change_clamps_inherited_session_settings() -> Result<(), Box<dyn Error>> {
@@ -7930,8 +7914,8 @@ async fn model_change_clamps_inherited_session_settings() -> Result<(), Box<dyn 
     runtime.stop().await
 }
 
-/// an equal explicit-creation replay is decided from its
-/// durable command before the current deployment revalidates model settings.
+/// an equal explicit-creation replay is decided from its durable command before the current
+/// deployment revalidates model settings.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn create_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>> {
@@ -7990,8 +7974,8 @@ async fn create_session_replays_after_capability_removal() -> Result<(), Box<dyn
     runtime.stop().await
 }
 
-/// an equal imported-continuation replay is decided from its
-/// durable command before the current deployment revalidates model settings.
+/// an equal imported-continuation replay is decided from its durable command before the current
+/// deployment revalidates model settings.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn imported_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>> {
@@ -8051,8 +8035,8 @@ async fn imported_session_replays_after_capability_removal() -> Result<(), Box<d
     runtime.stop().await
 }
 
-/// an equal defaults-replacement replay returns its durable
-/// result before the current deployment revalidates model settings.
+/// an equal defaults-replacement replay returns its durable result before the current deployment
+/// revalidates model settings.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn defaults_replacement_replays_after_capability_removal() -> Result<(), Box<dyn Error>> {
@@ -8121,8 +8105,8 @@ async fn defaults_replacement_replays_after_capability_removal() -> Result<(), B
     runtime.stop().await
 }
 
-/// a stale replacement records and replays its authoritative
-/// version mismatch before current capability validation can reject settings.
+/// a stale replacement records and replays its authoritative version mismatch before current
+/// capability validation can reject settings.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn stale_defaults_replacement_precedes_settings_validation() -> Result<(), Box<dyn Error>> {
@@ -8188,9 +8172,9 @@ async fn stale_defaults_replacement_precedes_settings_validation() -> Result<(),
     runtime.stop().await
 }
 
-/// an unknown replacement selection is the read-only catalog
-/// error even when the same frame names an epoch the session has not reached,
-/// and it leaves the command identity available for the corrected request.
+/// an unknown replacement selection is the read-only catalog error even when the same frame names
+/// an epoch the session has not reached, and it leaves the command identity available for the
+/// corrected request.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn unknown_replacement_model_precedes_defaults_version_mismatch() -> Result<(), Box<dyn Error>>
@@ -8252,8 +8236,8 @@ async fn unknown_replacement_model_precedes_defaults_version_mismatch() -> Resul
     runtime.stop().await
 }
 
-/// an absent session reaches the durable replacement boundary
-/// before compatibility validation and replays its recorded terminal result.
+/// an absent session reaches the durable replacement boundary before compatibility validation and
+/// replays its recorded terminal result.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn absent_defaults_replacement_precedes_settings_validation() -> Result<(), Box<dyn Error>> {
@@ -8287,10 +8271,9 @@ async fn absent_defaults_replacement_precedes_settings_validation() -> Result<()
     runtime.stop().await
 }
 
-/// explicit compaction uses a
-/// dedicated scripted call, retains the complete transcript and exact usage /
-/// range provenance, survives startup scan, and projects summary plus suffix
-/// into the next ordinary scripted call.
+/// explicit compaction uses a dedicated scripted call, retains the complete transcript and exact
+/// usage / range provenance, survives startup scan, and projects summary plus suffix into the next
+/// ordinary scripted call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn explicit_compaction_survives_restart_and_projects() -> Result<(), Box<dyn Error>> {
@@ -8938,10 +8921,9 @@ async fn compaction_preparation_serializes_turn_activation() -> Result<(), Box<d
     runtime.stop().await
 }
 
-/// an exact provider-native count above the
-/// input plus its reserved maximum output above the operator-declared context
-/// window compacts before activation, recounts the
-/// projected summary-plus-suffix input, and sends only that fitting operation.
+/// an exact provider-native count above the input plus its reserved maximum output above the
+/// operator-declared context window compacts before activation, recounts the projected
+/// summary-plus-suffix input, and sends only that fitting operation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn Error>> {
@@ -9069,11 +9051,10 @@ async fn automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn E
     runtime.stop().await
 }
 
-/// provider-reported preflight rechecks the
-/// completed summary and closes the queued candidate call-free when reserved
-/// headroom is still unavailable. The compaction retains its summary output,
-/// not the source input that summary replaced, so a summary larger than the
-/// window is what leaves the queued turn unservable.
+/// provider-reported preflight rechecks the completed summary and closes the queued candidate
+/// call-free when reserved headroom is still unavailable. The compaction retains its summary
+/// output, not the source input that summary replaced, so a summary larger than the window is what
+/// leaves the queued turn unservable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn reported_usage_rechecks_compaction_headroom() -> Result<(), Box<dyn Error>> {
@@ -9190,10 +9171,9 @@ async fn reported_usage_rechecks_compaction_headroom() -> Result<(), Box<dyn Err
     runtime.stop().await
 }
 
-/// the provider-reported preflight scores the
-/// queued turn's own input. Reported usage that fits on its own exhausts the
-/// reserved headroom once the waiting input is counted, and the daemon compacts
-/// that queued turn before activating it.
+/// the provider-reported preflight scores the queued turn's own input. Reported usage that fits on
+/// its own exhausts the reserved headroom once the waiting input is counted, and the daemon
+/// compacts that queued turn before activating it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn reported_usage_preflight_counts_the_queued_input() -> Result<(), Box<dyn Error>> {
@@ -9332,9 +9312,8 @@ async fn reported_usage_preflight_counts_the_queued_input() -> Result<(), Box<dy
     runtime.stop().await
 }
 
-/// a failed automatic compaction closes the
-/// queued candidate call-free, so a later eligibility pass cannot dispatch
-/// the known-oversized ordinary request.
+/// a failed automatic compaction closes the queued candidate call-free, so a later eligibility pass
+/// cannot dispatch the known-oversized ordinary request.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn failed_automatic_compaction_closes_turn_call_free() -> Result<(), Box<dyn Error>> {
@@ -9879,10 +9858,9 @@ async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
     fixture.stop().await
 }
 
-/// the production guarded pass reports post-activation failure
-/// for the declared ambiguous-commit class, so the daemon stops scheduling and
-/// startup recovery regains authority over durable state whose outcome ordinary
-/// scheduler retry cannot decide.
+/// the production guarded pass reports post-activation failure for the declared ambiguous-commit
+/// class, so the daemon stops scheduling and startup recovery regains authority over durable state
+/// whose outcome ordinary scheduler retry cannot decide.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn ambiguous_guarded_stage_raises_the_fatal_recovery_signal() -> Result<(), Box<dyn Error>> {
@@ -9955,12 +9933,11 @@ async fn ambiguous_guarded_stage_raises_the_fatal_recovery_signal() -> Result<()
     drop(connection);
     runtime.stop().await
 }
-/// a daemon-minted compaction result identity that
-/// already names a durable record is reminted before the provider is called,
-/// exactly as a colliding call identity already is. Discovering it in
-/// `complete` instead would cost a paid summary and admit no remint, because
-/// the in-flight lifecycle pins the identities by then. The rejected claim
-/// rolls back so the reminting caller can reuse its user-global command.
+/// a daemon-minted compaction result identity that already names a durable record is reminted
+/// before the provider is called, exactly as a colliding call identity already is. Discovering it
+/// in `complete` instead would cost a paid summary and admit no remint, because the in-flight
+/// lifecycle pins the identities by then. The rejected claim rolls back so the reminting caller can
+/// reuse its user-global command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn taken_compaction_result_identities_remint_before_sending() -> Result<(), Box<dyn Error>> {
@@ -10041,8 +10018,8 @@ async fn taken_compaction_result_identities_remint_before_sending() -> Result<()
     runtime.stop().await
 }
 
-/// a result identity taken after preparation fails the
-/// completion closed rather than surfacing as a retryable database failure.
+/// a result identity taken after preparation fails the completion closed rather than surfacing as a
+/// retryable database failure.
 ///
 /// `complete_context_compaction_until_resolved` retries exactly the database
 /// and ambiguous-commit classes, so classifying this decided uniqueness
