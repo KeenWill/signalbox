@@ -46,10 +46,11 @@ use signalbox_domain::{
     ImportedSourceAttestation, ImportedSpeaker, ImportedText, ImportedTranscriptContent,
     ImportedTranscriptEntryId, InitialToolApproval, ModelCallId, ModelCallTerminalIdentities,
     ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest, RecordedUserOverride,
-    RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId,
-    SessionSystemPrompt, StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
+    PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest, ProviderCompactionBlock,
+    RecordedUserOverride, RefusedModelCallTurnIdentities, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
+    SessionConfigurationDefaultsVersion, SessionId, SessionSystemPrompt,
+    StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
     StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
     ToolExecutionError, ToolRequest, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
     ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent, UserContentPart,
@@ -243,6 +244,15 @@ pub enum ModelConversationMessage {
         producing_call: ModelCallId,
         /// Exact assistant-owned text.
         content: AssistantText,
+    },
+    /// One opaque provider-produced compaction block rendered with the assistant role.
+    ProviderCompaction {
+        /// The source-qualified semantic entry being rendered.
+        source: SemanticTranscriptEntryRef,
+        /// The outcome-authoritative call that produced the block.
+        producing_call: ModelCallId,
+        /// The complete provider block retained for exact replay.
+        block: ProviderCompactionBlock,
     },
     /// One durable assistant tool proposal.
     AssistantToolUse {
@@ -512,6 +522,14 @@ fn render_frontier_messages<'a>(
                 producing_call: *producing_call,
                 content: value.clone(),
             }),
+            SemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call,
+                block,
+            } => messages.push(ModelConversationMessage::ProviderCompaction {
+                source,
+                producing_call: *producing_call,
+                block: block.clone(),
+            }),
             SemanticTranscriptEntryPayload::AssistantToolUse {
                 producing_call,
                 request,
@@ -754,6 +772,9 @@ fn projected_frontier_content_bytes<'a>(
             },
             SemanticTranscriptEntryPayload::ContextSummary { value, .. }
             | SemanticTranscriptEntryPayload::AssistantText { value, .. } => value.as_str().len(),
+            SemanticTranscriptEntryPayload::ProviderCompaction { block, .. } => {
+                block.as_json().len()
+            }
             // Identity-only payloads carry no content of their own. Tool
             // payloads name evidence rather than carrying it, and that
             // evidence is summed below.
@@ -2388,7 +2409,17 @@ where
                     self.ids.next_context_frontier_id(),
                 ))
             }
-            ModelCallTerminalObservation::CompletedWithTools { response } => {
+            ModelCallTerminalObservation::CompletedWithProviderCompaction { response, .. } => {
+                let assistant_entries = (0..response.len())
+                    .map(|_| self.ids.next_semantic_entry_id())
+                    .collect();
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    assistant_entries,
+                    self.ids.next_semantic_entry_id(),
+                    self.ids.next_context_frontier_id(),
+                ))
+            }
+            ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
                 let mut approval_index = 0usize;
                 let mut continuing = Vec::with_capacity(response.parts().len());
                 let mut stopped = Vec::with_capacity(response.parts().len());
@@ -2397,6 +2428,11 @@ where
                     match part {
                         AssistantResponsePart::Text(_) => {
                             continuing.push(ToolResponsePartIdentity::text(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ProviderCompaction(_) => {
+                            continuing.push(ToolResponsePartIdentity::provider_compaction(
                                 self.ids.next_semantic_entry_id(),
                             ));
                         }
@@ -2427,6 +2463,11 @@ where
                     match part {
                         AssistantResponsePart::Text(_) => {
                             stopped.push(StoppedToolResponsePartIdentity::text(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ProviderCompaction(_) => {
+                            stopped.push(StoppedToolResponsePartIdentity::provider_compaction(
                                 self.ids.next_semantic_entry_id(),
                             ));
                         }
@@ -2473,6 +2514,17 @@ where
             ModelCallTerminalObservation::Refused => ModelCallTerminalIdentities::Refused(
                 RefusedModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
+            ModelCallTerminalObservation::RefusedWithProviderCompaction {
+                provider_compaction,
+                ..
+            } => ModelCallTerminalIdentities::Refused(
+                RefusedModelCallTurnIdentities::new(self.ids.next_context_frontier_id())
+                    .with_provider_compaction_entries(
+                        (0..provider_compaction.len())
+                            .map(|_| self.ids.next_semantic_entry_id())
+                            .collect(),
+                    ),
+            ),
             ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous(
                 AmbiguousModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
@@ -2496,7 +2548,7 @@ where
         advertised_tools: &[ToolDefinition],
         recorded_user_overrides: &[RecordedUserOverride],
     ) -> Box<[InitialToolApproval]> {
-        let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
+        let ModelCallTerminalObservation::CompletedWithTools { response, .. } = observation else {
             return Box::new([]);
         };
         let mut remaining_overrides: Vec<&RecordedUserOverride> =
@@ -2505,7 +2557,9 @@ where
             .parts()
             .iter()
             .filter_map(|part| match part {
-                AssistantResponsePart::Text(_) => None,
+                AssistantResponsePart::Text(_) | AssistantResponsePart::ProviderCompaction(_) => {
+                    None
+                }
                 AssistantResponsePart::ToolCall(proposal) => {
                     if proposal.is_suppressed() {
                         return Some(InitialToolApproval::RuntimeSafetyDeny);
@@ -3269,6 +3323,8 @@ mod tests {
         ModelCallTerminalObservation::CompletedWithTools {
             response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
                 .expect("fixture response contains tools"),
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         }
     }
 
@@ -4636,6 +4692,8 @@ mod tests {
         ModelCallTerminalObservation::CompletedWithTools {
             response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
                 .expect("fixture response contains tools"),
+            retained_input_tokens: None,
+            retained_output_tokens: None,
         }
     }
 
@@ -4895,7 +4953,11 @@ mod tests {
             ),
         ])
         .expect("suppressed proposal remains one bounded logical request");
-        let observation = ModelCallTerminalObservation::CompletedWithTools { response };
+        let observation = ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        };
 
         assert_eq!(
             service
@@ -6255,6 +6317,7 @@ mod tests {
             let bytes = match message {
                 ModelConversationMessage::ContextSummary { content, .. }
                 | ModelConversationMessage::Assistant { content, .. } => content.as_str().len(),
+                ModelConversationMessage::ProviderCompaction { block, .. } => block.as_json().len(),
                 // Mirrors `user_content_text_bytes`: attachment stubs carry a
                 // fixed-width digest and bounded declarations held under
                 // `MAX_RENDERED_ATTACHMENT_STUB_BYTES`, so they sit outside the

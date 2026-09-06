@@ -343,16 +343,14 @@ impl ReportedUsageCompaction {
             .render(self.tools.definitions())
             .map_err(|_| ReportedUsageCompactionError::Render(turn))?;
         let target = operation.request().call().target();
+        let fast_mode = operation.request().model_settings().effective().fast_mode();
         let selected = self
             .runtime_models
             .resolve(target)
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
         let definition = self
             .runtime_models
-            .effective_definition(
-                selected,
-                operation.request().model_settings().effective().fast_mode(),
-            )
+            .effective_definition(selected, fast_mode)
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
         if !include_anthropic
             && self
@@ -367,7 +365,13 @@ impl ReportedUsageCompaction {
         // membership resolves.
         let reported = self
             .model_calls
-            .latest_reported_usage(session, target, prospective.prospective_input())
+            .latest_reported_usage(
+                session,
+                target,
+                fast_mode,
+                definition.provider_compaction_supported(),
+                prospective.prospective_input(),
+            )
             .await
             .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
         let reported_requires_compaction = reported.is_some_and(|reported| {
@@ -376,8 +380,14 @@ impl ReportedUsageCompaction {
                 ReportedInputCacheAxes::from_includes_cache_tokens(
                     reported.input_includes_cache_tokens(),
                 ),
-                ReportedInputRetention::from_retained(reported.input_is_retained()),
-                ReportedOutputRetention::from_retained(reported.output_is_retained()),
+                ReportedInputRetention::from_retained(
+                    reported.input_is_retained(),
+                    reported.retained_input_tokens(),
+                ),
+                ReportedOutputRetention::from_retained(
+                    reported.output_is_retained(),
+                    reported.retained_output_tokens(),
+                ),
                 reported.projected_unreported_content_bytes(),
                 u64::from(definition.max_output_tokens()),
                 u64::from(definition.context_window_tokens()),

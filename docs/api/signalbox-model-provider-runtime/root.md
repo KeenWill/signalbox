@@ -53,6 +53,8 @@ impl RuntimeModelDefinition {
     pub fn provider_model(&self) -> &str;
     pub const fn with_fast_target(self, fast_target: model_call::ResolvedProviderTarget) -> Self;
     pub const fn fast_target(&self) -> option::Option<model_call::ResolvedProviderTarget>;
+    pub const fn with_provider_compaction(self) -> Self;
+    pub const fn provider_compaction_supported(&self) -> bool;
     pub const fn max_output_tokens(&self) -> u32;
     pub const fn context_window_tokens(&self) -> u32;
 }

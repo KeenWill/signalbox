@@ -1760,6 +1760,10 @@ pub enum TranscriptEntry {
         defaults_version: scalars::CanonicalU64,
         selected_model_id: scalars::CanonicalUuid,
     },
+    ProviderCompaction {
+        turn_id: scalars::CanonicalUuid,
+        model_call_id: scalars::CanonicalUuid,
+    },
     AssistantToolUse {
         turn_id: scalars::CanonicalUuid,
         model_call_id: scalars::CanonicalUuid,

@@ -32,9 +32,9 @@ use signalbox_domain::{
     NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
     OriginConfigurationReconstitutionInput, OriginModelSettingsError, ParentTerminationKind,
     PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
-    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, RunnerGeneration, RunnerId,
-    SemanticTranscriptEntryId,
+    ProviderCompactionBlock, ProviderModelIdentity, ReconstitutedSubmitInput,
+    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    ResolvedProviderTarget, RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -1972,6 +1972,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
                                 | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
                                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                                | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
                                 | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -2363,6 +2364,7 @@ async fn delegated_parked_attachment_frontier_origins(
                 | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
                 | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                | InitialSemanticTranscriptEntryPayload::ProviderCompaction { .. }
                 | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
                 | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
@@ -4838,7 +4840,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
         "SELECT DISTINCT producing_model_call_id
            FROM semantic_transcript_entry
           WHERE source_session_id = $1
-            AND payload_kind IN ('assistant_text', 'assistant_tool_use')
+            AND payload_kind IN ('assistant_text', 'provider_compaction', 'assistant_tool_use')
           ORDER BY producing_model_call_id",
     )
     .bind(session_id_to_uuid(session_id))
@@ -6031,6 +6033,24 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 })?,
             },
             (
+                "provider_compaction",
+                None,
+                None,
+                None,
+                None,
+                Some(block),
+                Some(call),
+                None,
+                None,
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::ProviderCompaction {
+                producing_call: ModelCallId::from_uuid(call),
+                block: ProviderCompactionBlock::try_new(block).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("provider compaction block")
+                })?,
+            },
+            (
                 "assistant_tool_use",
                 None,
                 None,
@@ -6112,6 +6132,7 @@ async fn load_scheduling_projection_with_semantic_frontiers(
                 | "turn_failed"
                 | "turn_cancelled"
                 | "assistant_text"
+                | "provider_compaction"
                 | "assistant_tool_use"
                 | "tool_execution_result"
                 | "tool_denied"

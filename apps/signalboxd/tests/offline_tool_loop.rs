@@ -881,6 +881,8 @@ fn refusal_script() -> Script {
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
         content: Vec::new(),
         usage: TokenUsage::unreported(),
+        retained_input_tokens: None,
+        retained_output_tokens: None,
     }))
 }
 

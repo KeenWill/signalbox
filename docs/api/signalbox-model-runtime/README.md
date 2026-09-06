@@ -12,7 +12,7 @@
 | input_count | 1 | 1 | 0 | [input_count](input_count.md) |
 | message | 5 | 0 | 0 | [message](message.md) |
 | observation | 2 | 1 | 0 | [observation](observation.md) |
-| operation | 4 | 0 | 0 | [operation](operation.md) |
+| operation | 5 | 0 | 0 | [operation](operation.md) |
 | output | 3 | 1 | 2 | [output](output.md) |
 | preparation | 3 | 0 | 0 | [preparation](preparation.md) |
 | provider_json | 2 | 0 | 2 | [provider_json](provider_json.md) |

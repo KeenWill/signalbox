@@ -68,6 +68,8 @@ impl model_execution::ToolContinuationUsageLimit {
         max_output_tokens: u64,
         context_window_tokens: u64,
     ) -> Self;
+    #[must_use]
+    pub const fn with_provider_compaction_replay(self) -> Self;
 }
 ```
 
@@ -286,6 +288,8 @@ impl model_execution::ReportedModelCallUsage {
     pub const fn usage(self) -> model_execution::ProviderReportedTokenUsage;
     pub const fn input_includes_cache_tokens(self) -> bool;
     pub const fn input_is_retained(self) -> bool;
+    pub const fn retained_input_tokens(self) -> option::Option<u64>;
+    pub const fn retained_output_tokens(self) -> option::Option<u64>;
     pub const fn output_is_retained(self) -> bool;
     pub const fn projected_unreported_content_bytes(self) -> u64;
 }
@@ -895,6 +899,8 @@ impl model_execution::PostgresModelCallRepository {
         &self,
         session: signalbox_domain::SessionId,
         target: model_call::ResolvedProviderTarget,
+        fast_mode: model_settings::FastMode,
+        replays_provider_compaction: bool,
         prospective: impl convert::Into<model_execution::ProspectiveModelInput<'a>>,
     ) -> result::Result<
         option::Option<model_execution::ReportedModelCallUsage>,

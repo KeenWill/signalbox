@@ -496,7 +496,13 @@ async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), B
     assert_eq!(required.producing_call(), fixture.call);
     assert_eq!(required.failed().turn(), fixture.turn);
     let reported = model_repository
-        .latest_reported_usage(fixture.session, target, result_frontier)
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            FastMode::Disabled,
+            false,
+            result_frontier,
+        )
         .await?
         .expect("the producing call reported input usage");
     assert_eq!(
@@ -515,6 +521,8 @@ async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), B
         .latest_reported_usage(
             fixture.session,
             target,
+            FastMode::Disabled,
+            false,
             ContextFrontierId::from_uuid(producing_frontier),
         )
         .await?
@@ -589,6 +597,8 @@ async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), B
         .latest_reported_usage(
             fixture.session,
             target,
+            FastMode::Disabled,
+            false,
             ContextFrontierId::from_uuid(disjoint_frontier),
         )
         .await?
@@ -638,6 +648,287 @@ async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), B
             .as_ref(),
         &[fixture.turn]
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A restarted continuation repository whose target no longer replays provider
+/// compaction measures the preserved pre-compaction history instead of the
+/// retained final iteration.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn disabled_provider_compaction_keeps_tool_continuation_aggregate_headroom()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efa_1800;
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"retained summary"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval_and_usage_and_attachment(
+        &pool,
+        seed,
+        &[("current_time", "{}")],
+        InitialToolApproval::Confirm,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(50)),
+        None,
+        Some(compaction),
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("fixture has one request");
+    };
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                *request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-09-05T00:00:00Z"))
+                            .expect("fixture result is bounded"),
+                    ),
+                }),
+        )
+        .await?;
+
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one target forms a catalog");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                100,
+            )]);
+    let outcome = repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x26,
+                ))],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    let signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(required) =
+        outcome
+    else {
+        panic!("pre-compaction usage must close disabled replay continuation headroom");
+    };
+    assert_eq!(required.producing_call(), fixture.call);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A provider compaction beside a tool proposal occupies its response ordinal
+/// in the committed tool-round boundary frontier.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn provider_compaction_and_tool_proposal_commit_the_ordered_round_frontier()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efa_0800;
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"retained summary"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let (fixture, _, _, _) = checkpoint_tool_batch_with_approval_and_usage_and_attachment(
+        &pool,
+        seed,
+        &[("current_time", "{}")],
+        InitialToolApproval::Confirm,
+        ProviderReportedTokenUsage::unreported(),
+        None,
+        Some(compaction),
+    )
+    .await?;
+
+    let ordered_payloads: Vec<String> = sqlx::query_scalar(
+        "SELECT entry.payload_kind
+           FROM tool_round AS round
+           JOIN context_frontier_member AS member
+             ON member.owning_session_id = round.session_id
+            AND member.context_frontier_id = round.boundary_frontier_id
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+          WHERE round.producing_model_call_id = $1
+            AND entry.producing_model_call_id = $1
+          ORDER BY member.member_position",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        ordered_payloads,
+        [
+            String::from("provider_compaction"),
+            String::from("assistant_tool_use")
+        ]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A provider compaction with retained content replaces the producing call's
+/// pre-compaction input for same-turn continuation headroom.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn provider_compaction_releases_tool_continuation_input_headroom()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efa_1000;
+    let compaction = ProviderCompactionBlock::try_new(String::from(
+        r#"{"type":"compaction","content":"retained summary"}"#,
+    ))
+    .expect("fixture compaction block is valid");
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval_and_usage_and_attachment(
+        &pool,
+        seed,
+        &[("current_time", "{}")],
+        InitialToolApproval::Confirm,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(50)),
+        None,
+        Some(compaction),
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("fixture has one request");
+    };
+    let retained: (Decimal, Decimal) = sqlx::query_as(
+        "SELECT retained_input_tokens, retained_output_tokens
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained, (Decimal::from(10_u64), Decimal::from(5_u64)));
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                *request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-09-05T00:00:00Z"))
+                            .expect("fixture result is bounded"),
+                    ),
+                }),
+        )
+        .await?;
+
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one target forms a catalog");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                100,
+            )
+            .with_provider_compaction_replay()]);
+    let outcome = repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x26,
+                ))],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(_)
+    ));
 
     pool.close().await;
     drop(container);
@@ -894,7 +1185,13 @@ async fn tool_continuation_headroom_counts_delegation_results() -> Result<(), Bo
     .await?;
     assert_eq!(stored_bytes, Decimal::from(36 + 44_u64));
     let reported = model_repository
-        .latest_reported_usage(fixture.session, target, result_frontier)
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            FastMode::Disabled,
+            false,
+            result_frontier,
+        )
         .await?
         .expect("the producing call reported input usage");
     assert_eq!(
@@ -3390,7 +3687,11 @@ async fn stopped_tool_round_closes_requests_and_decision_replay() -> Result<(), 
     .expect("the fixture contains tool proposals");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     let outcome = model_repository
         .apply_terminal_observation(
             fixture.session,
@@ -3598,6 +3899,7 @@ async fn stopped_tool_round_closes_requests_and_decision_replay() -> Result<(), 
 async fn commit_stopped_tool_round(
     pool: &PgPool,
     seed: u128,
+    with_provider_compaction: bool,
 ) -> Result<
     (
         RestartModelCallFixture,
@@ -3627,15 +3929,25 @@ async fn commit_stopped_tool_round(
         )
         .await?;
 
-    let response =
-        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
-            ToolCallProposal::new(
+    let response = ToolUsingAssistantResponse::try_from_parts(
+        with_provider_compaction
+            .then(|| {
+                AssistantResponsePart::ProviderCompaction(
+                    ProviderCompactionBlock::try_new(String::from(
+                        r#"{"type":"compaction","content":"retained summary"}"#,
+                    ))
+                    .expect("fixture compaction block is valid"),
+                )
+            })
+            .into_iter()
+            .chain([AssistantResponsePart::ToolCall(ToolCallProposal::new(
                 ToolName::try_new(String::from("first_tool")).expect("valid fixture tool name"),
                 NormalizedToolArguments::try_from_provider_text(String::from("{}"))
                     .expect("bounded fixture arguments"),
-            ),
-        )])
-        .expect("the fixture contains one tool proposal");
+            ))])
+            .collect(),
+    )
+    .expect("the fixture contains one tool proposal");
     let cancellation_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 29));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30));
     model_repository
@@ -3645,15 +3957,25 @@ async fn commit_stopped_tool_round(
                 .observation_correlation()
                 .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
                     response,
+                    retained_input_tokens: with_provider_compaction.then_some(31),
+                    retained_output_tokens: with_provider_compaction.then_some(7),
                 }),
             ModelCallTerminalIdentities::StoppedToolRound(
                 StoppedToolRoundModelCallIdentities::new(
-                    vec![StoppedToolResponsePartIdentity::tool_call(
-                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
-                        signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 22)),
-                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
-                        InitialToolApproval::Confirm,
-                    )],
+                    with_provider_compaction
+                        .then(|| {
+                            StoppedToolResponsePartIdentity::provider_compaction(
+                                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                            )
+                        })
+                        .into_iter()
+                        .chain([StoppedToolResponsePartIdentity::tool_call(
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
+                            signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 22)),
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
+                            InitialToolApproval::Confirm,
+                        )])
+                        .collect(),
                     cancellation_entry,
                     terminal_frontier,
                 ),
@@ -3663,6 +3985,31 @@ async fn commit_stopped_tool_round(
         .await?;
 
     Ok((fixture, cancellation_entry, terminal_frontier, successor))
+}
+
+/// A compaction block committed through the stopped-tool cancellation path
+/// keeps the final physical iteration's retained token evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stopped_compacting_tool_round_persists_retained_iteration_usage()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7cf0;
+    let (fixture, _, _, _) = commit_stopped_tool_round(&pool, seed, true).await?;
+
+    let retained: (Decimal, Decimal) = sqlx::query_as(
+        "SELECT retained_input_tokens, retained_output_tokens
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained, (Decimal::from(31_u64), Decimal::from(7_u64)));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// S02 / S07 / S11: the terminal shape committed when a
@@ -3676,7 +4023,7 @@ async fn s02_s07_s11_stopped_tool_round_reloads_and_activates_successor()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7d00;
     let (fixture, _cancellation_entry, _terminal_frontier, successor) =
-        commit_stopped_tool_round(&pool, seed).await?;
+        commit_stopped_tool_round(&pool, seed, false).await?;
 
     let activation = StartEligibleTurnRepository::new(pool.clone())
         .handle(
@@ -3708,7 +4055,7 @@ async fn s02_s07_s11_stopped_tool_round_cancellation_dispatches() -> Result<(), 
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7d80;
     let (fixture, cancellation_entry, terminal_frontier, _successor) =
-        commit_stopped_tool_round(&pool, seed).await?;
+        commit_stopped_tool_round(&pool, seed, false).await?;
     let terminal_call_disposition: String = sqlx::query_scalar(
         "SELECT terminal_disposition_kind
            FROM model_call
@@ -3745,7 +4092,7 @@ async fn s02_s07_s11_completed_cancellation_requires_closed_tool_round()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7e00;
     let (fixture, _cancellation_entry, _terminal_frontier, _successor) =
-        commit_stopped_tool_round(&pool, seed).await?;
+        commit_stopped_tool_round(&pool, seed, false).await?;
     let sequence = sqlx::query_scalar(
         "SELECT event_sequence
            FROM turn_terminal_outbox_event

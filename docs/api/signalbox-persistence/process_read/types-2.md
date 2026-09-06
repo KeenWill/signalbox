@@ -74,6 +74,13 @@ pub enum ProcessTranscriptEntry {
         model_call: signalbox_domain::ModelCallId,
         content: string::String,
     },
+    ProviderCompaction {
+        entry_index: u64,
+        source_session: signalbox_domain::SessionId,
+        entry: context_frontier::SemanticTranscriptEntryId,
+        turn: signalbox_domain::TurnId,
+        model_call: signalbox_domain::ModelCallId,
+    },
     AssistantToolUse {
         entry_index: u64,
         source_session: signalbox_domain::SessionId,

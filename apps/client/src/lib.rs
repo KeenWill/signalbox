@@ -5033,7 +5033,16 @@ fn terminal_snapshot_selection(
             tool_attempt_id: *tool_attempt_id,
             terminal_frontier_id: *terminal_frontier_id,
         }),
-        SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
+        SessionEvent::TurnRefused {
+            turn_id,
+            model_call_id,
+            terminal_frontier_id,
+        } => Some(SnapshotSelection::Refused {
+            turn_id: *turn_id,
+            model_call_id: *model_call_id,
+            terminal_frontier_id: *terminal_frontier_id,
+        }),
+        SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::SessionModelSettingsChanged { .. }
         | SessionEvent::TurnModelSettingsResolved { .. }
@@ -8460,17 +8469,23 @@ mod tests {
     }
 
     #[test]
-    fn refused_terminal_event_requests_no_side_reread() {
-        assert!(
+    fn refused_terminal_event_requests_provider_compaction_call_material() {
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let model_call_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        assert_eq!(
             terminal_snapshot_selection(
                 &SessionEvent::TurnRefused {
-                    turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
-                    model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                    turn_id,
+                    model_call_id,
                     terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 },
                 followed_session()
-            )
-            .is_none()
+            ),
+            Some(SnapshotSelection::Refused {
+                turn_id,
+                model_call_id,
+                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            })
         );
     }
 

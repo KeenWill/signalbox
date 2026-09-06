@@ -39,6 +39,22 @@ where
 }
 ```
 
+## ProviderCompactionMode
+
+```rust
+pub enum ProviderCompactionMode {
+    Allowed,
+    Suppressed,
+}
+// derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
+impl<T> dyn_clone::DynClone for ProviderCompactionMode
+where
+    T: clone::Clone,
+{
+    fn __clone_box(&self, _: sealed::Private) -> *mut ();
+}
+```
+
 ## ToolChoice
 
 ```rust
@@ -71,6 +87,8 @@ pub struct ModelOperation<C> {
     pub tool_choice: ToolChoice,
     pub output_contract: option::Option<StructuredOutputContract>,
     pub delivery: DeliveryMode,
+    pub provider_compaction: ProviderCompactionMode,
+    pub provider_compaction_supported: bool,
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq
 impl<T> dyn_clone::DynClone for ModelOperation<C>

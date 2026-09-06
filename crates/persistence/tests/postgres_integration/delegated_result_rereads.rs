@@ -69,7 +69,11 @@ async fn s18_successor_tool_round_rereads_without_delegated_result() -> Result<(
     let observation = fixture
         .authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     fixture
         .repository
         .apply_terminal_observation(
@@ -169,7 +173,11 @@ async fn s18_wake_tool_round_rereads_without_child_result() -> Result<(), Box<dy
     let observation = fixture
         .authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
     fixture
         .repository
         .apply_terminal_observation(

@@ -7098,7 +7098,8 @@ impl OperationTracker {
                 MessagePart::Text(_)
                 | MessagePart::ToolCall(_)
                 | MessagePart::Thinking { .. }
-                | MessagePart::RedactedThinking { .. } => None,
+                | MessagePart::RedactedThinking { .. }
+                | MessagePart::ProviderCompaction { .. } => None,
             })
         });
         self.record_new_results(tool_results);
@@ -10715,6 +10716,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::ContextSummary { .. }
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
+                | ProcessTranscriptEntry::ProviderCompaction { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
                 | ProcessTranscriptEntry::TurnFailed { .. }
@@ -10756,6 +10758,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::ContextSummary { .. }
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
+                | ProcessTranscriptEntry::ProviderCompaction { .. }
                 | ProcessTranscriptEntry::ToolExecutionResult { .. }
                 | ProcessTranscriptEntry::ToolDenied { .. }
                 | ProcessTranscriptEntry::ToolClosed { .. }
@@ -11105,6 +11108,7 @@ fn completed_tool_result_entry_indices(entries: &[ProcessTranscriptEntry]) -> BT
             | ProcessTranscriptEntry::ContextSummary { .. }
             | ProcessTranscriptEntry::User { .. }
             | ProcessTranscriptEntry::Assistant { .. }
+            | ProcessTranscriptEntry::ProviderCompaction { .. }
             | ProcessTranscriptEntry::AssistantToolUse { .. }
             | ProcessTranscriptEntry::ToolDenied { .. }
             | ProcessTranscriptEntry::ToolClosed { .. }
