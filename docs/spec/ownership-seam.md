@@ -15,13 +15,14 @@ off; settlement events remain replayable lifecycle input.
 
 Each module owns reconstructible or module-local state in a `mod_` PostgreSQL
 schema. The schema is owned by a dedicated login role with no membership path
-back to the core identity and no direct privileges on core tables. Resetting the
-active role therefore retains the confined module identity. Module tables may
-use mutable projections or delete releasable state; they do not reference core
-tables and can be rebuilt from core events and the external source.
+back to the core identity and no direct privileges on core tables or functions.
+Resetting the active role therefore retains the confined module identity.
+Module tables may use mutable projections or delete releasable state; they do
+not reference core tables and can be rebuilt from core events and the external
+source.
 
 Module crates depend on `signalbox-ownership-seam`, not the domain, application,
 or persistence crates. The ownership-seam checker rejects those dependency and
 import edges, module SQL that names `public` relations, and core SQL that names
-`mod_` relations. PostgreSQL grants independently deny direct core-table reads
-and cross-schema references.
+`mod_` relations. PostgreSQL grants independently deny direct core-table reads,
+core-function execution, and cross-schema references.
