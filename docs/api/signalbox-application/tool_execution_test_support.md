@@ -48,7 +48,7 @@ pub enum PreparedAttemptApproval {
 pub fn prepared_single_attempt_batch(
     identities: PreparedAttemptIdentities,
     proposal: PreparedAttemptProposal,
-) -> tool_execution::ToolBatch;
+) -> batch::ToolBatch;
 ```
 
 ## FixtureTransactionFailures
@@ -68,12 +68,9 @@ pub struct FixtureToolExecutionTransaction<Error> {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl<Error> FixtureToolExecutionTransaction<Error> {
     #[must_use]
-    pub const fn new(
-        batch: tool_execution::ToolBatch,
-        failures: FixtureTransactionFailures<Error>,
-    ) -> Self;
+    pub const fn new(batch: batch::ToolBatch, failures: FixtureTransactionFailures<Error>) -> Self;
     #[must_use]
-    pub const fn batch(&self) -> &tool_execution::ToolBatch;
+    pub const fn batch(&self) -> &batch::ToolBatch;
 }
 impl<Error> ToolExecutionTransaction for FixtureToolExecutionTransaction<Error>
 where
@@ -98,10 +95,7 @@ where
         &mut self,
         _session: signalbox_domain::SessionId,
         _turn: signalbox_domain::TurnId,
-    ) -> result::Result<
-        option::Option<tool_execution::ToolBatch>,
-        <Self as ToolExecutionTransaction>::Error,
-    >;
+    ) -> result::Result<option::Option<batch::ToolBatch>, <Self as ToolExecutionTransaction>::Error>;
     async fn prepare_next_attempt(
         &mut self,
         _session: signalbox_domain::SessionId,

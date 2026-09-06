@@ -162,7 +162,7 @@ pub trait ToolExecutionTransaction {
         turn: signalbox_domain::TurnId,
     ) -> impl future::Future<
         Output = result::Result<
-            option::Option<tool_execution::ToolBatch>,
+            option::Option<batch::ToolBatch>,
             <Self as ToolExecutionTransaction>::Error,
         >,
     > + marker::Send;
