@@ -1888,6 +1888,17 @@ impl HubModelConfiguration {
             .collect()
     }
 
+    /// Returns the exact targets whose adapters issue prospective count
+    /// interactions before turn activation.
+    pub fn provider_input_count_targets(&self) -> HashSet<ResolvedProviderTarget> {
+        self.target_adapters
+            .iter()
+            .filter_map(|(target, adapter)| {
+                (*adapter == ModelAdapter::Anthropic).then_some(*target)
+            })
+            .collect()
+    }
+
     /// Returns the complete credential snapshot pinned into a new session.
     pub fn session_credential_pin(&self) -> SessionCredentialPin {
         self.session_credential_pin.clone()
