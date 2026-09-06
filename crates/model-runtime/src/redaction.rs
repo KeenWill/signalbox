@@ -2656,16 +2656,19 @@ mod tests {
     /// Scanning string spans rather than parsing the enclosing value matters
     /// three further ways:
     ///
-    /// - A streamed argument can end after a complete string but before its document —
-    ///   `{"k":"\u0066ixture/secret"` with no closing brace. A consumer reassembling the stream
-    ///   still recovers that string, and `redact_json` treats partial JSON as credential-bearing
-    ///   for exactly this reason, so requiring the whole value to parse would let an escaped secret
-    ///   through.
-    /// - Duplicate names survive. Deserializing `{"k":"…","k":"safe"}` into a map drops the first
-    ///   member before anything can inspect it, hiding a credential spelled in the shadowed value.
-    /// - Only quoted spans are read, so bytes outside a string are never unescaped: for the
-    ///   credential `line\n":0` and the document `{"line\n":0}` a consumer reads the key `line\n`
-    ///   and the number `0`, never the secret.
+    /// - A streamed argument can end after a complete string but before its
+    ///   document — `{"k":"\u0066ixture/secret"` with no closing brace. A
+    ///   consumer reassembling the stream still recovers that string, and
+    ///   `redact_json` treats partial JSON as credential-bearing for exactly
+    ///   this reason, so requiring the whole value to parse would let an
+    ///   escaped secret through.
+    /// - Duplicate names survive. Deserializing `{"k":"…","k":"safe"}` into a
+    ///   map drops the first member before anything can inspect it, hiding a
+    ///   credential spelled in the shadowed value.
+    /// - Only quoted spans are read, so bytes outside a string are never
+    ///   unescaped: for the credential `line\n":0` and the document
+    ///   `{"line\n":0}` a consumer reads the key `line\n` and the number `0`,
+    ///   never the secret.
     ///
     /// The scan itself finds boundaries only. Every decode is `serde_json`'s,
     /// deliberately, so this stays an independent oracle rather than a second
