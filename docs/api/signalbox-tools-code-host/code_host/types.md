@@ -1627,6 +1627,9 @@ where
         P: policy::Policy<B, E>;
 }
 impl code_host::result::ChangedFile {
+    pub fn path(&self) -> &str;
+}
+impl code_host::result::ChangedFile {
     pub fn try_new(
         bounds: code_host::CodeHostNumericBounds,
         path: string::String,
@@ -1634,7 +1637,6 @@ impl code_host::result::ChangedFile {
         additions: u64,
         deletions: u64,
     ) -> option::Option<Self>;
-    pub fn path(&self) -> &str;
 }
 ```
 

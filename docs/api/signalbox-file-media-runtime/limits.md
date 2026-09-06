@@ -256,15 +256,17 @@ pub struct FileMediaProcessLimitOverrides {
 pub struct FileMediaProcessCeilings {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl FileMediaProcessCeilings {
-    pub const fn version_one() -> Self;
-    pub const fn try_lower(overrides: FileMediaProcessLimitOverrides) -> option::Option<Self>;
-    pub const fn admits(self, candidate: Self) -> bool;
     pub const fn frame_bytes(self) -> usize;
     pub const fn memory_bytes(self) -> u64;
     pub const fn cpu_seconds(self) -> u64;
     pub const fn wall_seconds(self) -> u64;
     pub const fn file_descriptors(self) -> u64;
     pub const fn stderr_bytes(self) -> usize;
+}
+impl FileMediaProcessCeilings {
+    pub const fn version_one() -> Self;
+    pub const fn try_lower(overrides: FileMediaProcessLimitOverrides) -> option::Option<Self>;
+    pub const fn admits(self, candidate: Self) -> bool;
 }
 impl default::Default for FileMediaProcessCeilings {
     fn default() -> Self;

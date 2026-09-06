@@ -19,19 +19,19 @@ const MAX_METADATA_BYTES: usize = 16_384;
 // numeric-bound: ceiling - bounds retained untrusted continuation state
 const MAX_CONTINUATION_CURSOR_BYTES: usize = 1_024;
 
+#[derive(signalbox_derive::Accessors)]
 /// SHA-256 identity at the provider-neutral boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct FileDigest([u8; 32]);
+pub struct FileDigest(
+    /// Borrows the fixed digest bytes.
+    #[get(as = "as_bytes")]
+    [u8; 32],
+);
 
 impl FileDigest {
     /// Reconstitutes a digest already verified by the blob layer.
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
-    }
-
-    /// Borrows the fixed digest bytes.
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
     }
 }
 
@@ -72,9 +72,14 @@ pub enum AttachmentKind {
     File,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact bounded caller-declared media type.
 #[derive(Clone, Eq, Hash, PartialEq)]
-pub struct DeclaredMediaType(Arc<str>);
+pub struct DeclaredMediaType(
+    /// Borrows the exact caller spelling.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl DeclaredMediaType {
     /// Admits a nonempty visible-ASCII value without normalization.
@@ -91,11 +96,6 @@ impl DeclaredMediaType {
         Ok(Self(value))
     }
 
-    /// Borrows the exact caller spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
     /// Parses only a parameter-free canonical essence.
     pub fn canonical_essence(&self) -> Result<CanonicalMediaType, MediaTypeParseError> {
         CanonicalMediaType::from_str(self.as_str())
@@ -108,9 +108,14 @@ impl fmt::Debug for DeclaredMediaType {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Bounded attachment basename supplied by a caller.
 #[derive(Clone, Eq, Hash, PartialEq)]
-pub struct DisplayFilename(Arc<str>);
+pub struct DisplayFilename(
+    /// Borrows the exact caller spelling.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl DisplayFilename {
     /// Admits one nonempty basename without path or null characters.
@@ -129,11 +134,6 @@ impl DisplayFilename {
             Ok(Self(value))
         }
     }
-
-    /// Borrows the exact caller spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl fmt::Debug for DisplayFilename {
@@ -142,12 +142,15 @@ impl fmt::Debug for DisplayFilename {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One semantic use of immutable file bytes.
 #[derive(Clone, Eq, PartialEq)]
 pub struct FileUse {
     digest: FileDigest,
     byte_length: NonZeroU64,
     attachment_kind: AttachmentKind,
+    /// Borrows the exact declared type.
+    #[get]
     declared_media_type: DeclaredMediaType,
     display_filename: Option<DisplayFilename>,
 }
@@ -185,11 +188,6 @@ impl FileUse {
         self.attachment_kind
     }
 
-    /// Borrows the exact declared type.
-    pub const fn declared_media_type(&self) -> &DeclaredMediaType {
-        &self.declared_media_type
-    }
-
     /// Borrows the optional display basename.
     pub const fn display_filename(&self) -> Option<&DisplayFilename> {
         self.display_filename.as_ref()
@@ -212,16 +210,14 @@ impl fmt::Debug for FileUse {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical lowercase ASCII media-type essence with no parameters.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CanonicalMediaType(Arc<str>);
-
-impl CanonicalMediaType {
+pub struct CanonicalMediaType(
     /// Borrows the canonical `type/subtype` spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl fmt::Display for CanonicalMediaType {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -308,9 +304,14 @@ fn valid_registry_name(value: &str) -> bool {
         })
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Immutable reader implementation revision.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct FileReaderRevision(Arc<str>);
+pub struct FileReaderRevision(
+    /// Borrows the exact revision spelling.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl FileReaderRevision {
     /// Admits one bounded visible-ASCII revision label.
@@ -324,18 +325,20 @@ impl FileReaderRevision {
         }
         Ok(Self(value))
     }
-
-    /// Borrows the exact revision spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Stable provider, reader, and revision tuple.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ReaderIdentity {
+    /// Borrows the provider identity.
+    #[get]
     provider: FileReaderProviderName,
+    /// Borrows the reader identity.
+    #[get]
     reader: FileReaderName,
+    /// Borrows the immutable revision.
+    #[get]
     revision: FileReaderRevision,
 }
 
@@ -352,27 +355,17 @@ impl ReaderIdentity {
             revision,
         }
     }
-
-    /// Borrows the provider identity.
-    pub const fn provider(&self) -> &FileReaderProviderName {
-        &self.provider
-    }
-
-    /// Borrows the reader identity.
-    pub const fn reader(&self) -> &FileReaderName {
-        &self.reader
-    }
-
-    /// Borrows the immutable revision.
-    pub const fn revision(&self) -> &FileReaderRevision {
-        &self.revision
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical compact object-rooted JSON Schema declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CanonicalJsonObjectSchema {
+    /// Borrows the compact canonical JSON spelling.
+    #[get(str, as = "as_str")]
     compact: Arc<str>,
+    /// Borrows the parsed schema object.
+    #[get]
     value: serde_json::Value,
 }
 
@@ -397,22 +390,17 @@ impl CanonicalJsonObjectSchema {
             value: parsed,
         })
     }
-
-    /// Borrows the compact canonical JSON spelling.
-    pub fn as_str(&self) -> &str {
-        &self.compact
-    }
-
-    /// Borrows the parsed schema object.
-    pub const fn value(&self) -> &serde_json::Value {
-        &self.value
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Bounded canonical processor metadata object.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundedMetadata {
+    /// Borrows the compact canonical JSON object.
+    #[get(str, as = "as_str")]
     compact: Arc<str>,
+    /// Borrows the parsed object.
+    #[get]
     value: serde_json::Value,
 }
 
@@ -435,16 +423,6 @@ impl BoundedMetadata {
             compact: Arc::from(compact),
             value: parsed,
         })
-    }
-
-    /// Borrows the compact canonical JSON object.
-    pub fn as_str(&self) -> &str {
-        &self.compact
-    }
-
-    /// Borrows the parsed object.
-    pub const fn value(&self) -> &serde_json::Value {
-        &self.value
     }
 }
 
@@ -650,9 +628,14 @@ impl<'de> Visitor<'de> for DuplicateAwareArrayVisitor<'_> {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Stable visible-part selector for repeated digest uses.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct VisiblePartSelector(Arc<str>);
+pub struct VisiblePartSelector(
+    /// Borrows the opaque selector.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl VisiblePartSelector {
     /// Admits one bounded opaque ASCII selector.
@@ -668,16 +651,16 @@ impl VisiblePartSelector {
         }
         Ok(Self(value))
     }
-
-    /// Borrows the opaque selector.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Checked opaque continuation cursor returned by one bounded read.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ReadContinuationCursor(Arc<str>);
+pub struct ReadContinuationCursor(
+    /// Borrows the opaque cursor spelling.
+    #[get(str, as = "as_str")]
+    Arc<str>,
+);
 
 impl ReadContinuationCursor {
     /// Admits one bounded control-free restart-ephemeral cursor.
@@ -691,11 +674,6 @@ impl ReadContinuationCursor {
             return Err(RegistryValueError::Continuation);
         }
         Ok(Self(value))
-    }
-
-    /// Borrows the opaque cursor spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Returns the owned opaque cursor spelling.

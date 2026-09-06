@@ -49,9 +49,12 @@ const MAX_READ_INPUT_CONTAINERS: u32 = 256;
 const MAX_READ_OPTIONS_NODES: usize = MAX_READ_OPTIONS_BYTES;
 // numeric-bound: ceiling - reserves processor-frame space for structured-body JSON escaping
 const MAX_STRUCTURED_BODY_BYTES: usize = 500 * 1_024;
+#[derive(signalbox_derive::Accessors)]
 /// Immutable process-lifetime registry snapshot.
 #[derive(Clone, Debug)]
 pub struct FileMediaRegistry {
+    /// Borrows canonically ordered provider declarations.
+    #[get(slice)]
     providers: Vec<FileMediaProviderDeclaration>,
     readers: BTreeMap<ReaderIdentity, ReaderDeclaration>,
     media_readers: BTreeMap<CanonicalMediaType, ReaderIdentity>,
@@ -158,11 +161,6 @@ impl FileMediaRegistry {
             streaming_text_reader: None,
             ceilings: FileMediaCeilings::version_one(),
         }
-    }
-
-    /// Borrows canonically ordered provider declarations.
-    pub fn providers(&self) -> &[FileMediaProviderDeclaration] {
-        &self.providers
     }
 
     /// Returns the effective lowerable-only ceiling set.

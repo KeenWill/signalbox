@@ -4574,6 +4574,7 @@ dependencies = [
  "mime",
  "serde",
  "serde_json",
+ "signalbox-derive",
  "tokio",
 ]
 
@@ -4789,6 +4790,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "signalbox-derive",
  "signalbox-domain",
  "uuid",
 ]

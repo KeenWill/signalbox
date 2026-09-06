@@ -21,12 +21,14 @@ impl<T> de::DeserializeOwned for ProbeStrength where T: for<'de> de::Deserialize
 pub struct ProbeDeclaration {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ProbeDeclaration {
-    pub const fn prefix_only(prefix_bytes: u64) -> Self;
-    pub const fn new(input: ProbeDeclarationInput) -> Self;
     pub const fn prefix_bytes(self) -> u64;
     pub const fn suffix_bytes(self) -> u64;
     pub const fn range_count(self) -> u32;
     pub const fn cumulative_bytes(self) -> u64;
+}
+impl ProbeDeclaration {
+    pub const fn prefix_only(prefix_bytes: u64) -> Self;
+    pub const fn new(input: ProbeDeclarationInput) -> Self;
 }
 ```
 
@@ -48,9 +50,11 @@ pub struct ProbeDeclarationInput {
 pub struct ValidationDeclaration {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ValidationDeclaration {
-    pub const fn new(source_bytes: u64, range_count: u32) -> Self;
     pub const fn source_bytes(self) -> u64;
     pub const fn range_count(self) -> u32;
+}
+impl ValidationDeclaration {
+    pub const fn new(source_bytes: u64, range_count: u32) -> Self;
 }
 ```
 
@@ -134,6 +138,11 @@ impl ReadViewBounds {
 pub struct ReadViewDeclaration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReadViewDeclaration {
+    pub const fn name(&self) -> &ReadViewName;
+    pub fn description(&self) -> &str;
+    pub const fn arguments_schema(&self) -> &CanonicalJsonObjectSchema;
+}
+impl ReadViewDeclaration {
     pub fn try_new(
         name: ReadViewName,
         description: string::String,
@@ -141,9 +150,6 @@ impl ReadViewDeclaration {
         access: ReadAccessPattern,
         bounds: ReadViewBounds,
     ) -> result::Result<Self, RegistryDeclarationError>;
-    pub const fn name(&self) -> &ReadViewName;
-    pub fn description(&self) -> &str;
-    pub const fn arguments_schema(&self) -> &CanonicalJsonObjectSchema;
     pub const fn access(&self) -> ReadAccessPattern;
     pub const fn bounds(&self) -> ReadViewBounds;
     pub const fn output_kind(&self) -> ReadOutputKind;
@@ -156,14 +162,16 @@ impl ReadViewDeclaration {
 pub struct ReaderDeclaration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReaderDeclaration {
-    pub fn try_new(input: ReaderDeclarationInput)
-        -> result::Result<Self, RegistryDeclarationError>;
     pub const fn identity(&self) -> &ReaderIdentity;
     pub fn media_types(&self) -> &[CanonicalMediaType];
-    pub const fn probe(&self) -> ProbeDeclaration;
-    pub const fn validation(&self) -> ValidationDeclaration;
     pub fn views(&self) -> &[ReadViewDeclaration];
     pub fn reason_codes(&self) -> &[ReasonCode];
+}
+impl ReaderDeclaration {
+    pub fn try_new(input: ReaderDeclarationInput)
+        -> result::Result<Self, RegistryDeclarationError>;
+    pub const fn probe(&self) -> ProbeDeclaration;
+    pub const fn validation(&self) -> ValidationDeclaration;
     pub const fn streaming_text_fallback(&self) -> StreamingTextFallback;
 }
 ```
@@ -191,6 +199,10 @@ pub struct ReaderDeclarationInput {
 pub struct FileMediaProviderDeclaration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl FileMediaProviderDeclaration {
+    pub const fn provider(&self) -> &FileReaderProviderName;
+    pub fn readers(&self) -> &[ReaderDeclaration];
+}
+impl FileMediaProviderDeclaration {
     pub fn try_new(
         provider: FileReaderProviderName,
         readers: vec::Vec<ReaderDeclaration>,
@@ -200,8 +212,6 @@ impl FileMediaProviderDeclaration {
         readers: vec::Vec<ReaderDeclaration>,
         observed_container_entries: option::Option<u64>,
     ) -> result::Result<Self, RegistryDeclarationError>;
-    pub const fn provider(&self) -> &FileReaderProviderName;
-    pub fn readers(&self) -> &[ReaderDeclaration];
     pub const fn observed_container_entries(&self) -> option::Option<u64>;
 }
 ```

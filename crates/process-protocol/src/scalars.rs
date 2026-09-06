@@ -108,19 +108,19 @@ pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
 // numeric-bound: guard - protects review-request memory and wire size
 pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
 
+#[derive(signalbox_derive::Accessors)]
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CanonicalUuid(Uuid);
+pub struct CanonicalUuid(
+    /// Returns the underlying UUID for an explicit adapter mapping.
+    #[get(copy, as = "into_uuid")]
+    Uuid,
+);
 
 impl CanonicalUuid {
     /// Constructs the canonical wire value from a UUID.
     pub const fn from_uuid(value: Uuid) -> Self {
         Self(value)
-    }
-
-    /// Returns the underlying UUID for an explicit adapter mapping.
-    pub const fn into_uuid(self) -> Uuid {
-        self.0
     }
 
     fn parse(value: &str) -> Result<Self, CanonicalValueError> {
@@ -207,20 +207,20 @@ impl<'de> Deserialize<'de> for CommandId {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A full-range unsigned 64-bit value encoded as its shortest decimal string.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CanonicalU64(u64);
+pub struct CanonicalU64(
+    /// Returns the numeric value after canonical decoding.
+    #[get(copy, as = "value")]
+    u64,
+);
 
 impl CanonicalU64 {
     /// Wraps an unsigned value for precision-safe wire encoding.
     pub const fn new(value: u64) -> Self {
         Self(value)
-    }
-
-    /// Returns the numeric value after canonical decoding.
-    pub const fn value(self) -> u64 {
-        self.0
     }
 }
 
@@ -238,10 +238,15 @@ impl From<CanonicalU64> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A positive unsigned 64-bit value encoded as its shortest decimal string.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct PositiveCanonicalU64(u64);
+pub struct PositiveCanonicalU64(
+    /// Returns the positive numeric value.
+    #[get(copy, as = "value")]
+    u64,
+);
 
 impl PositiveCanonicalU64 {
     /// Checks that the represented wire integer is positive.
@@ -250,11 +255,6 @@ impl PositiveCanonicalU64 {
             return Err(CanonicalValueError::Decimal);
         }
         Ok(Self(value))
-    }
-
-    /// Returns the positive numeric value.
-    pub const fn value(self) -> u64 {
-        self.0
     }
 }
 
@@ -278,10 +278,15 @@ impl From<signalbox_domain::RunnerGeneration> for PositiveCanonicalU64 {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// A lowercase 32-byte digest encoded as exactly 64 hexadecimal characters.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CanonicalDigest(String);
+pub struct CanonicalDigest(
+    /// Borrows the exact canonical hexadecimal spelling.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CanonicalDigest {
     /// Checks the exact lowercase hexadecimal digest spelling.
@@ -291,11 +296,6 @@ impl CanonicalDigest {
             return Err(CanonicalValueError::Digest);
         }
         Ok(Self(value))
-    }
-
-    /// Borrows the exact canonical hexadecimal spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Transfers the exact canonical hexadecimal spelling.
@@ -318,9 +318,14 @@ impl From<CanonicalDigest> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact external blob identity including its fixed SHA-256 algorithm tag.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CanonicalBlobDigest(BlobDigest);
+pub struct CanonicalBlobDigest(
+    /// Returns the validated digest for an explicit adapter mapping.
+    #[get(copy, as = "into_digest")]
+    BlobDigest,
+);
 
 impl CanonicalBlobDigest {
     /// Constructs the exact SHA-256 identity from an already-computed digest.
@@ -331,11 +336,6 @@ impl CanonicalBlobDigest {
     /// Wraps one validated domain digest for the process boundary.
     pub const fn from_digest(value: BlobDigest) -> Self {
         Self(value)
-    }
-
-    /// Returns the validated digest for an explicit adapter mapping.
-    pub const fn into_digest(self) -> BlobDigest {
-        self.0
     }
 }
 
@@ -378,10 +378,15 @@ impl<'de> Deserialize<'de> for CanonicalBlobDigest {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Request correlation identity. Zero is reserved for uncorrelated errors.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RequestId(u64);
+pub struct RequestId(
+    /// Returns the numeric identity after canonical decoding.
+    #[get(copy, as = "value")]
+    u64,
+);
 
 impl RequestId {
     /// Constructs a client-usable nonzero request identity.
@@ -396,11 +401,6 @@ impl RequestId {
     /// Returns the reserved identity for a frame that cannot be correlated.
     pub const fn uncorrelated() -> Self {
         Self(0)
-    }
-
-    /// Returns the numeric identity after canonical decoding.
-    pub const fn value(self) -> u64 {
-        self.0
     }
 
     pub(crate) const fn is_correlated(self) -> bool {
@@ -422,20 +422,20 @@ impl From<RequestId> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact user input content carried to the application admission boundary.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct InputContent(String);
+pub struct InputContent(
+    /// Borrows exact decoded text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl InputContent {
     /// Wraps decoded content without applying application admission policy.
     pub fn new(value: String) -> Self {
         Self(value)
-    }
-
-    /// Borrows exact decoded text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Transfers ownership of the exact decoded text.
@@ -444,10 +444,15 @@ impl InputContent {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded transcript-content fragment.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct ContentFragment(String);
+pub struct ContentFragment(
+    /// Borrows exact fragment text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl ContentFragment {
     /// Applies the per-fragment UTF-8 byte bound.
@@ -457,11 +462,6 @@ impl ContentFragment {
         } else {
             Ok(Self(value))
         }
-    }
-
-    /// Borrows exact fragment text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -507,10 +507,15 @@ pub enum ModelCallCostLabel {
     MeteredEquivalent,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Canonical nonnegative decimal USD text with no exponent or redundant zeroes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CanonicalDollarAmount(String);
+pub struct CanonicalDollarAmount(
+    /// Borrows the canonical decimal spelling.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl CanonicalDollarAmount {
     /// Validates one shortest nonnegative base-ten decimal spelling.
@@ -551,11 +556,6 @@ impl CanonicalDollarAmount {
             Ok(Self(value))
         }
     }
-
-    /// Borrows the canonical decimal spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl TryFrom<String> for CanonicalDollarAmount {
@@ -572,10 +572,15 @@ impl From<CanonicalDollarAmount> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded deployment-owned rate version carried as cost provenance.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct BillingRateVersion(String);
+pub struct BillingRateVersion(
+    /// Borrows the exact rate version.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl BillingRateVersion {
     /// Validates a nonempty, unpadded, NUL-free version spelling.
@@ -589,11 +594,6 @@ impl BillingRateVersion {
         } else {
             Ok(Self(value))
         }
-    }
-
-    /// Borrows the exact rate version.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -637,13 +637,18 @@ impl From<ContentFragment> for String {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One exact session system prompt on the wire.
 ///
 /// A present prompt is nonempty and rejects U+0000; absence is JSON null on
 /// the owning member, never empty text. The daemon applies deployment policy.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct SystemPromptText(String);
+pub struct SystemPromptText(
+    /// Borrows the exact admitted prompt text.
+    #[get(str, as = "as_str")]
+    String,
+);
 
 impl SystemPromptText {
     /// Applies the structural nonempty and U+0000-free admission rules.
@@ -653,11 +658,6 @@ impl SystemPromptText {
         } else {
             Ok(Self(value))
         }
-    }
-
-    /// Borrows the exact admitted prompt text.
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 
     /// Transfers ownership of the exact admitted prompt text.
@@ -868,19 +868,19 @@ pub enum ConversationImportRejectionClass {
     InvalidToolResult,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Exact caller-supplied source bytes carried as canonical padded base64.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConversationImportSource(Vec<u8>);
+pub struct ConversationImportSource(
+    /// Borrows the exact decoded source snapshot.
+    #[get(slice, as = "as_bytes")]
+    Vec<u8>,
+);
 
 impl ConversationImportSource {
     /// Wraps one complete source snapshot without interpreting it.
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
-    }
-
-    /// Borrows the exact decoded source snapshot.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
     }
 
     /// Transfers ownership of the exact decoded source snapshot.

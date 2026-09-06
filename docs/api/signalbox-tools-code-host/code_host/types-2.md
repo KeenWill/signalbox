@@ -264,11 +264,13 @@ where
         P: policy::Policy<B, E>;
 }
 impl code_host::review_slog::inventory::ReviewThreadInventoryItem {
+    pub fn id(&self) -> &str;
+}
+impl code_host::review_slog::inventory::ReviewThreadInventoryItem {
     pub fn try_new(
         bounds: code_host::CodeHostNumericBounds,
         fields: code_host::review_slog::inventory::ReviewThreadInventoryFields,
     ) -> option::Option<Self>;
-    pub fn id(&self) -> &str;
     pub const fn disposition(&self) -> code_host::review_slog::inventory::ReviewDispositionClass;
 }
 ```

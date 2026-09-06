@@ -20,13 +20,15 @@ pub const MAX_REGISTRY_READERS: usize;
 pub struct FileMediaRegistry {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl FileMediaRegistry {
+    pub fn providers(&self) -> &[FileMediaProviderDeclaration];
+}
+impl FileMediaRegistry {
     pub fn try_new(
         providers: vec::Vec<FileMediaProviderDeclaration>,
         ceilings: FileMediaCeilings,
         isolation: ProcessorIsolation,
     ) -> result::Result<Self, FileMediaRegistryConstructionError>;
     pub fn empty() -> Self;
-    pub fn providers(&self) -> &[FileMediaProviderDeclaration];
     pub const fn ceilings(&self) -> FileMediaCeilings;
     pub async fn inspect(
         &self,

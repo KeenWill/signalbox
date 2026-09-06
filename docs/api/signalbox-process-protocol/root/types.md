@@ -41,6 +41,9 @@ impl fmt::Debug for UserInputPart {
 pub struct UserInputContent(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
 impl<T> de::DeserializeOwned for UserInputContent where T: for<'de> de::Deserialize<'de> {}
+impl UserInputContent {
+    pub fn parts(&self) -> &[UserInputPart];
+}
 impl<'de> de::Deserialize<'de> for UserInputContent {
     fn deserialize<DeserializerT>(
         deserializer: DeserializerT,
@@ -51,7 +54,6 @@ impl<'de> de::Deserialize<'de> for UserInputContent {
 impl UserInputContent {
     pub fn text(value: string::String) -> Self;
     pub fn from_parts(parts: vec::Vec<UserInputPart>) -> Self;
-    pub fn parts(&self) -> &[UserInputPart];
     pub fn single_text(&self) -> option::Option<&str>;
     pub fn into_parts(self) -> vec::Vec<UserInputPart>;
 }
@@ -395,9 +397,11 @@ pub struct MetadataLastWriter {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for MetadataLastWriter where T: for<'de> de::Deserialize<'de> {}
 impl MetadataLastWriter {
-    pub const fn new(updated_at_unix_micros: scalars::CanonicalU64, actor: MetadataActor) -> Self;
     pub const fn updated_at_unix_micros(self) -> scalars::CanonicalU64;
     pub const fn actor(self) -> MetadataActor;
+}
+impl MetadataLastWriter {
+    pub const fn new(updated_at_unix_micros: scalars::CanonicalU64, actor: MetadataActor) -> Self;
 }
 ```
 
@@ -458,9 +462,11 @@ pub struct ConversationCursor {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for ConversationCursor where T: for<'de> de::Deserialize<'de> {}
 impl ConversationCursor {
-    pub const fn new(origin: ConversationOrigin, conversation_id: scalars::CanonicalUuid) -> Self;
     pub const fn origin(self) -> ConversationOrigin;
     pub const fn conversation_id(self) -> scalars::CanonicalUuid;
+}
+impl ConversationCursor {
+    pub const fn new(origin: ConversationOrigin, conversation_id: scalars::CanonicalUuid) -> Self;
 }
 ```
 
@@ -1178,6 +1184,9 @@ pub struct ClientFrame {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
 impl<T> de::DeserializeOwned for ClientFrame where T: for<'de> de::Deserialize<'de> {}
 impl ClientFrame {
+    pub const fn request(&self) -> &ClientRequest;
+}
+impl ClientFrame {
     pub fn try_new(
         request_id: scalars::RequestId,
         request: ClientRequest,
@@ -1189,7 +1198,6 @@ impl ClientFrame {
     ) -> result::Result<Self, scalars::FrameValidationError>;
     pub const fn version(&self) -> scalars::ProtocolVersion;
     pub const fn request_id(&self) -> scalars::RequestId;
-    pub const fn request(&self) -> &ClientRequest;
     pub fn into_parts(self) -> (scalars::ProtocolVersion, scalars::RequestId, ClientRequest);
 }
 impl<'de> de::Deserialize<'de> for ClientFrame {
@@ -1455,10 +1463,12 @@ pub struct ErrorDetail(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
 impl<T> de::DeserializeOwned for ErrorDetail where T: for<'de> de::Deserialize<'de> {}
 impl ErrorDetail {
+    pub const fn value(self) -> option::Option<RejectionDetail>;
+}
+impl ErrorDetail {
     pub const fn none() -> Self;
     pub const fn rejected(detail: RejectionDetail) -> Self;
     pub const fn invalid_request(detail: RejectionDetail) -> Self;
-    pub const fn value(self) -> option::Option<RejectionDetail>;
 }
 impl ser::Serialize for ErrorDetail {
     fn serialize<SerializerT>(
@@ -1706,9 +1716,11 @@ pub struct ImportedTextPreview {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for ImportedTextPreview where T: for<'de> de::Deserialize<'de> {}
 impl ImportedTextPreview {
+    pub fn preview(&self) -> &str;
+}
+impl ImportedTextPreview {
     pub fn of_exact_text(text: &str) -> Self;
     pub fn of_exact_text_with_limit(text: &str, limit: option::Option<usize>) -> Self;
-    pub fn preview(&self) -> &str;
     pub const fn truncated(&self) -> bool;
 }
 ```
@@ -1877,8 +1889,10 @@ pub struct RunnerCapabilityClass(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for RunnerCapabilityClass where T: for<'de> de::Deserialize<'de> {}
 impl RunnerCapabilityClass {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl RunnerCapabilityClass {
+    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
 }
 impl convert::TryFrom<string::String> for RunnerCapabilityClass {
     type Error = scalars::CanonicalValueError;
@@ -1896,8 +1910,10 @@ pub struct RunnerCredentialProfileName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for RunnerCredentialProfileName where T: for<'de> de::Deserialize<'de> {}
 impl RunnerCredentialProfileName {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl RunnerCredentialProfileName {
+    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
 }
 impl convert::TryFrom<string::String> for RunnerCredentialProfileName {
     type Error = scalars::CanonicalValueError;
@@ -1915,8 +1931,10 @@ pub struct RunnerRepositoryKey(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for RunnerRepositoryKey where T: for<'de> de::Deserialize<'de> {}
 impl RunnerRepositoryKey {
-    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
     pub fn as_str(&self) -> &str;
+}
+impl RunnerRepositoryKey {
+    pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
 }
 impl convert::TryFrom<string::String> for RunnerRepositoryKey {
     type Error = scalars::CanonicalValueError;
@@ -1963,34 +1981,4 @@ pub enum RunnerProjectionState {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for RunnerProjectionState where T: for<'de> de::Deserialize<'de> {}
-```
-
-## RunnerProjection
-
-```rust
-pub struct RunnerProjection {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
-impl<T> de::DeserializeOwned for RunnerProjection where T: for<'de> de::Deserialize<'de> {}
-impl RunnerProjection {
-    pub fn try_new(
-        selector: RunnerProjectionSelector,
-        runner_id: option::Option<scalars::CanonicalUuid>,
-        placement_revision: RunnerPlacementRevision,
-        sandbox_profile: RunnerSandboxProfile,
-        credential_profile: option::Option<RunnerCredentialProfileName>,
-        repository: option::Option<RunnerRepositoryKey>,
-        working_directory: option::Option<RunnerWorkingDirectory>,
-        connection_health: option::Option<RunnerConnectionHealth>,
-        state: RunnerProjectionState,
-    ) -> result::Result<Self, scalars::CanonicalValueError>;
-    pub const fn selector(&self) -> &RunnerProjectionSelector;
-    pub const fn runner_id(&self) -> option::Option<scalars::CanonicalUuid>;
-    pub const fn placement_revision(&self) -> RunnerPlacementRevision;
-    pub const fn sandbox_profile(&self) -> RunnerSandboxProfile;
-    pub const fn credential_profile(&self) -> option::Option<&RunnerCredentialProfileName>;
-    pub const fn repository(&self) -> option::Option<&RunnerRepositoryKey>;
-    pub const fn working_directory(&self) -> option::Option<&RunnerWorkingDirectory>;
-    pub const fn connection_health(&self) -> option::Option<RunnerConnectionHealth>;
-    pub const fn state(&self) -> RunnerProjectionState;
-}
 ```

@@ -2,6 +2,38 @@
 
 # root: types-2
 
+## RunnerProjection
+
+```rust
+pub struct RunnerProjection {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+impl<T> de::DeserializeOwned for RunnerProjection where T: for<'de> de::Deserialize<'de> {}
+impl RunnerProjection {
+    pub const fn selector(&self) -> &RunnerProjectionSelector;
+}
+impl RunnerProjection {
+    pub fn try_new(
+        selector: RunnerProjectionSelector,
+        runner_id: option::Option<scalars::CanonicalUuid>,
+        placement_revision: RunnerPlacementRevision,
+        sandbox_profile: RunnerSandboxProfile,
+        credential_profile: option::Option<RunnerCredentialProfileName>,
+        repository: option::Option<RunnerRepositoryKey>,
+        working_directory: option::Option<RunnerWorkingDirectory>,
+        connection_health: option::Option<RunnerConnectionHealth>,
+        state: RunnerProjectionState,
+    ) -> result::Result<Self, scalars::CanonicalValueError>;
+    pub const fn runner_id(&self) -> option::Option<scalars::CanonicalUuid>;
+    pub const fn placement_revision(&self) -> RunnerPlacementRevision;
+    pub const fn sandbox_profile(&self) -> RunnerSandboxProfile;
+    pub const fn credential_profile(&self) -> option::Option<&RunnerCredentialProfileName>;
+    pub const fn repository(&self) -> option::Option<&RunnerRepositoryKey>;
+    pub const fn working_directory(&self) -> option::Option<&RunnerWorkingDirectory>;
+    pub const fn connection_health(&self) -> option::Option<RunnerConnectionHealth>;
+    pub const fn state(&self) -> RunnerProjectionState;
+}
+```
+
 ## RunnerWorkingDirectory
 
 ```rust
@@ -9,9 +41,11 @@ pub struct RunnerWorkingDirectory(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize, de::Deserialize<'de>
 impl<T> de::DeserializeOwned for RunnerWorkingDirectory where T: for<'de> de::Deserialize<'de> {}
 impl RunnerWorkingDirectory {
+    pub fn as_str(&self) -> &str;
+}
+impl RunnerWorkingDirectory {
     pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: string::String) -> result::Result<Self, scalars::CanonicalValueError>;
-    pub fn as_str(&self) -> &str;
 }
 impl convert::TryFrom<string::String> for RunnerWorkingDirectory {
     type Error = scalars::CanonicalValueError;
@@ -758,6 +792,9 @@ pub struct ServerFrame {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize
 impl<T> de::DeserializeOwned for ServerFrame where T: for<'de> de::Deserialize<'de> {}
 impl ServerFrame {
+    pub const fn message(&self) -> &ServerMessage;
+}
+impl ServerFrame {
     pub fn try_new(
         request_id: scalars::RequestId,
         message: ServerMessage,
@@ -769,7 +806,6 @@ impl ServerFrame {
     ) -> result::Result<Self, scalars::FrameValidationError>;
     pub const fn version(&self) -> scalars::ProtocolVersion;
     pub const fn request_id(&self) -> scalars::RequestId;
-    pub const fn message(&self) -> &ServerMessage;
 }
 impl<'de> de::Deserialize<'de> for ServerFrame {
     fn deserialize<DeserializerT>(
