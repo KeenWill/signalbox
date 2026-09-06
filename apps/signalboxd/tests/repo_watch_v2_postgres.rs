@@ -13,12 +13,20 @@ use signalbox_module_repo_watch_v2::{
     WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules,
 };
 use signalbox_ownership_seam::{
-    BranchName, CommitSha, OffsetDateTime, PullRequestBody, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventContentIdentityV1, RepoWatchEventId,
-    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1, RepoWatchLabelMatcher,
-    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
-    RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope, RepositorySlug,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
+    MergeableState, OffsetDateTime, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionContent,
+    ReactionSubject, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCheckCompletionGeneration,
+    RepoWatchCheckRunObservation, RepoWatchCheckSuiteObservation, RepoWatchEvent,
+    RepoWatchEventContentIdentityV1, RepoWatchEventId, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventKindNameV1, RepoWatchEventOccurrenceV1,
+    RepoWatchLabelMatcher, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState as ComparisonPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+    RepoWatchWorkflowRunObservation, RepositorySlug, ReviewState, ReviewThreadId,
     SessionTemplateName, WorkflowName,
 };
 use signalbox_persistence::{
@@ -119,6 +127,70 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let title = PullRequestTitle::try_new(String::from("A bounded rewrite"))?;
     let body = PullRequestBody::try_new(String::from("Current provider state"))?;
     let author = RepoWatchAuthorLogin::try_new(String::from("octocat"))?;
+    let label = LabelName::try_new(String::from("ready"))?;
+    let comparison_pull_request =
+        ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            context: PullRequestEventContext::new(PullRequestEventContextInput {
+                number: PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
+                head_sha: default_head.clone(),
+                head_repository: repository.clone(),
+                base_branch: default_branch.clone(),
+                head_branch: default_branch.clone(),
+                title: title.clone(),
+                body: body.clone(),
+                labels: vec![label],
+                draft: false,
+                author: Some(author.clone()),
+            }),
+            lifecycle: RepoWatchPullRequestLifecycle::Open,
+            mergeable_state: MergeableState::Mergeable,
+            completed_check_suites: vec![RepoWatchCheckSuiteObservation::new(
+                GitHubObjectId::new(NonZeroU64::new(20).expect("twenty is positive")),
+                RepoWatchCheckCompletionGeneration::try_new(String::from("suite-1"))?,
+                ChecksOutcome::Success,
+            )],
+            completed_check_runs: vec![RepoWatchCheckRunObservation::new(
+                GitHubObjectId::new(NonZeroU64::new(21).expect("twenty-one is positive")),
+                RepoWatchCheckCompletionGeneration::try_new(String::from("run-1"))?,
+                CheckRunName::try_new(String::from("test"))?,
+                CheckConclusion::Success,
+            )],
+            reviews: vec![RepoWatchReviewObservation::new(
+                GitHubObjectId::new(NonZeroU64::new(22).expect("twenty-two is positive")),
+                author.clone(),
+                Some(ReviewState::Approved),
+                default_head.clone(),
+            )],
+            threads: vec![RepoWatchThreadObservation::new(
+                ReviewThreadId::try_new(String::from("thread-1"))?,
+                RepoWatchThreadState::Resolved,
+            )],
+            reactions: vec![RepoWatchReactionObservation::new(
+                ReactionSubject::ReviewComment {
+                    id: GitHubObjectId::new(NonZeroU64::new(23).expect("twenty-three is positive")),
+                },
+                author.clone(),
+                ReactionContent::try_new(String::from("+1"))?,
+            )],
+        })?;
+    let comparison_baseline = RepoWatchObservation::new(
+        vec![author.clone()],
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![comparison_pull_request],
+            workflow_runs: vec![RepoWatchWorkflowRunObservation::new(
+                GitHubObjectId::new(NonZeroU64::new(24).expect("twenty-four is positive")),
+                GitHubObjectId::new(NonZeroU64::new(25).expect("twenty-five is positive")),
+                RepoWatchWorkflowRunAttempt::new(NonZeroU64::new(2).expect("two is positive")),
+                default_branch.clone(),
+                WorkflowName::try_new(String::from("ci"))?,
+                CheckConclusion::Success,
+            )],
+            branch_heads: vec![RepoWatchBranchHead::new(
+                default_branch.clone(),
+                default_head.clone(),
+            )],
+        })?,
+    );
     let pull_request_state = PullRequestState {
         repository: &repository,
         number: PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
@@ -136,6 +208,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let mut projection = RepositoryProjection {
         repository: repository_state,
         pull_requests: vec![pull_request_state],
+        comparison_baseline: &comparison_baseline,
+        merged_baselines: &[],
     };
 
     let stream = [13; 32];
@@ -234,6 +308,30 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             events: Box::new([EventAdmission::Inserted]),
         }
     );
+    let complete_baseline_retained: bool = sqlx::query_scalar(
+        "SELECT comparison_baseline @> $2::jsonb
+           FROM repository_state WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .bind(
+        r#"{
+          "signal_reviewers":["octocat"],
+          "pull_requests":[{
+            "context":{"labels":["ready"]},
+            "mergeable_state":"mergeable",
+            "completed_check_suites":[{"completion_generation":"suite-1"}],
+            "completed_check_runs":[{"completion_generation":"run-1"}],
+            "reviews":[{"reviewer":"octocat","state":"approved"}],
+            "threads":[{"thread":"thread-1","state":"resolved"}],
+            "reactions":[{"reactor":"octocat","content":"+1"}]
+          }],
+          "workflow_runs":[{"workflow":"ci","attempt":2}],
+          "branch_heads":[{"branch":"main"}]
+        }"#,
+    )
+    .fetch_one(&module_pool)
+    .await?;
+    assert!(complete_baseline_retained);
     let replayed_event = RepoWatchEvent::branch_workflow(
         RepoWatchEventId::from_uuid(Uuid::from_u128(16)),
         repository.clone(),
@@ -413,6 +511,10 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?;
     assert_eq!(rejected_count, 0);
     let complete_repository = RepositorySlug::try_new(String::from("complete/repository"))?;
+    let complete_comparison_baseline = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())?,
+    );
     let complete_projection = RepositoryProjection {
         repository: RepositoryState {
             repository: &complete_repository,
@@ -421,6 +523,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             observed_at,
         },
         pull_requests: Vec::new(),
+        comparison_baseline: &complete_comparison_baseline,
+        merged_baselines: &[],
     };
     let complete_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
         RepoWatchEventIdentityFrontierEntryV1::new([20; 32], NonZeroU64::MIN),
@@ -586,6 +690,21 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         FrontierEventAdmission::Stale
     );
+    let second_reviewer = RepoWatchAuthorLogin::try_new(String::from("hubot"))?;
+    let changed_comparison_baseline = RepoWatchObservation::new(
+        vec![author.clone(), second_reviewer],
+        comparison_baseline.state().clone(),
+    );
+    projection.comparison_baseline = &changed_comparison_baseline;
+    assert_eq!(
+        store
+            .commit_frontier_candidate(&projection, 3, &frontier, &[], observed_at, retain_until,)
+            .await?,
+        FrontierEventAdmission::Committed {
+            generation: 4,
+            events: Box::new([]),
+        }
+    );
     let committed_digest: Vec<u8> = sqlx::query_scalar(
         "SELECT last_frontier_commit_digest
            FROM repository_state WHERE repository = $1",
@@ -594,7 +713,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(
-        store.release_frontier(&repository, 2, &stream).await?,
+        store.release_frontier(&repository, 3, &stream).await?,
         FrontierReleaseAdmission::Stale
     );
     let sequence_after_stale_release: Decimal = sqlx::query_scalar(
@@ -607,8 +726,8 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .await?;
     assert_eq!(sequence_after_stale_release, Decimal::from(2_u64));
     assert_eq!(
-        store.release_frontier(&repository, 3, &stream).await?,
-        FrontierReleaseAdmission::Released { generation: 4 }
+        store.release_frontier(&repository, 4, &stream).await?,
+        FrontierReleaseAdmission::Released { generation: 5 }
     );
     let (released_generation, released_digest): (Decimal, Vec<u8>) = sqlx::query_as(
         "SELECT frontier_generation, last_frontier_commit_digest
@@ -617,7 +736,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .bind(repository.as_str())
     .fetch_one(&module_pool)
     .await?;
-    assert_eq!(released_generation, Decimal::from(4_u64));
+    assert_eq!(released_generation, Decimal::from(5_u64));
     assert_ne!(released_digest, committed_digest);
     assert_eq!(
         store
@@ -626,11 +745,11 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         FrontierEventAdmission::Stale
     );
     assert_eq!(
-        store.release_frontier(&repository, 3, &stream).await?,
-        FrontierReleaseAdmission::Replayed { generation: 4 }
+        store.release_frontier(&repository, 4, &stream).await?,
+        FrontierReleaseAdmission::Replayed { generation: 5 }
     );
     assert_eq!(
-        store.release_frontier(&repository, 4, &[99; 32]).await?,
+        store.release_frontier(&repository, 5, &[99; 32]).await?,
         FrontierReleaseAdmission::Absent
     );
 
