@@ -538,49 +538,28 @@ impl Error for SessionPlanCorruption {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// PostgreSQL plan storage failure.
 #[derive(Debug)]
 pub enum SessionPlanRepositoryError {
+    #[error("session plan database failure: {source}")]
     /// PostgreSQL failed before or during commit.
     Database {
+        #[source]
         /// Source database error.
         source: sqlx::Error,
         /// Whether the final commit outcome is unknown.
         commit_ambiguous: bool,
     },
+    #[error(transparent)]
     /// Durable rows cannot satisfy the port contract.
-    Corruption(SessionPlanCorruption),
+    Corruption(#[source] SessionPlanCorruption),
+    #[error("session plan append provenance is not active")]
     /// The caller supplied provenance that is not an active plan-write attempt.
     InvalidAppendProvenance,
+    #[error("session plan append attempt was already used")]
     /// One physical plan-write attempt was submitted more than once.
     DuplicateAppendAttempt,
-}
-
-impl fmt::Display for SessionPlanRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Database { source, .. } => {
-                write!(formatter, "session plan database failure: {source}")
-            }
-            Self::Corruption(error) => error.fmt(formatter),
-            Self::InvalidAppendProvenance => {
-                formatter.write_str("session plan append provenance is not active")
-            }
-            Self::DuplicateAppendAttempt => {
-                formatter.write_str("session plan append attempt was already used")
-            }
-        }
-    }
-}
-
-impl Error for SessionPlanRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
-            Self::InvalidAppendProvenance | Self::DuplicateAppendAttempt => None,
-        }
-    }
 }
 
 impl From<sqlx::Error> for SessionPlanRepositoryError {

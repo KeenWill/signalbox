@@ -1564,18 +1564,23 @@ impl fmt::Display for ContextCompactionCorruption {
 
 impl Error for ContextCompactionCorruption {}
 
+#[derive(signalbox_derive::OperatorError)]
 /// Database, collision, or fail-closed corruption from compaction persistence.
 #[derive(Debug)]
 pub enum ContextCompactionRepositoryError {
+    #[error("context compaction persistence failed")]
     /// Database operation failed before an ambiguous commit boundary.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("context compaction persistence failed")]
     /// Commit outcome could not be proven.
-    CommitAmbiguous(sqlx::Error),
+    CommitAmbiguous(#[source] sqlx::Error),
+    #[error("context compaction persistence failed")]
     /// A daemon-minted call or result identity collided globally and may be
     /// reminted.
     IdentityCollision,
+    #[error("context compaction persistence failed")]
     /// Durable rows contradicted the closed lifecycle.
-    Corruption(ContextCompactionCorruption),
+    Corruption(#[source] ContextCompactionCorruption),
 }
 
 impl ContextCompactionRepositoryError {
@@ -1584,22 +1589,6 @@ impl ContextCompactionRepositoryError {
             Self::CommitAmbiguous(error)
         } else {
             Self::Database(error)
-        }
-    }
-}
-
-impl fmt::Display for ContextCompactionRepositoryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("context compaction persistence failed")
-    }
-}
-
-impl Error for ContextCompactionRepositoryError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Corruption(error) => Some(error),
-            Self::IdentityCollision => None,
         }
     }
 }
