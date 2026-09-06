@@ -1,0 +1,17 @@
+{
+  "source": "settled.json",
+  "edge": "check present on one observation and absent before the decision",
+  "mutations": [
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup/contexts",
+      "value": {
+        "totalCount": 0,
+        "nodes": [],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    }
+  ]
+}

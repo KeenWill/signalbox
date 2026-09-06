@@ -940,7 +940,7 @@ fn incompatible_overlapping_rate_is_rejected() {
 }
 
 #[test]
-fn inv_077_reference_catalog_has_no_workspace_dependency_edge() {
+fn reference_catalog_has_no_workspace_dependency_edge() {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))

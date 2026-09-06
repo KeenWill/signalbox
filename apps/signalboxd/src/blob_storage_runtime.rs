@@ -212,6 +212,16 @@ impl BlobStoreRegistry {
         self.stores.get(name).cloned()
     }
 
+    /// Replaces one configured adapter in a composed conformance fixture.
+    #[cfg(feature = "test-support")]
+    pub fn replace_store_for_conformance(
+        &mut self,
+        name: &BlobStoreName,
+        replacement: Arc<dyn BlobStore>,
+    ) -> bool {
+        self.stores.insert(name.clone(), replacement).is_some()
+    }
+
     /// Returns the deployment ceiling for one stored object.
     pub const fn max_blob_bytes(&self) -> u64 {
         self.max_blob_bytes

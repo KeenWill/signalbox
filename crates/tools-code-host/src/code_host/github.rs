@@ -19,21 +19,17 @@ use super::repository_result::{
     MAX_OBSERVED_DIRECTORY_ENTRIES, MAX_REPOSITORY_FILE_SCAN_BYTES, is_immediate_repository_child,
 };
 use super::result::{MAX_ENCODED_RESULT_BYTES, absolute_https_url};
-use super::review_slog::{
-    ReviewerActivity, author_class, authorized_association, disposition_class, finding_title,
-    reviewer_verdict_evidence,
-};
+use super::review_slog::{author_class, disposition_class, finding_title};
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
     ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, ChildStackState,
     CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCursor, CodeHostNumericBounds,
     CodeHostOperation, CodeHostRepository, CodeHostResult, CodeHostResultCompleteness,
-    CodeHostTransport, CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceStateFields,
-    ConvergenceStateResult, FilePatchResult, RepositoryDirectoryEntry, RepositoryFileContentFields,
-    RepositoryLineRange, RepositoryListDirectoryResult, RepositoryObjectKind,
-    RepositoryReadFileResult, RerunFailedJobsResult, ReviewCheck, ReviewDispositionClass,
-    ReviewGateCheckArguments, ReviewGateCheckResult, ReviewThread, ReviewThreadComment,
-    ReviewThreadFields, ReviewThreadIdentity, ReviewThreadInventoryFields,
+    CodeHostTransport, CodeHostTransportFailure, ConvergenceReadResult, ConvergenceStateArguments,
+    FilePatchResult, RepositoryDirectoryEntry, RepositoryFileContentFields, RepositoryLineRange,
+    RepositoryListDirectoryResult, RepositoryObjectKind, RepositoryReadFileResult,
+    RerunFailedJobsResult, ReviewDispositionClass, ReviewGateCheckArguments, ReviewThread,
+    ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
     ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult, StackStateArguments,
     StackStateFields, StackStateResult, ThreadInventoryArguments, ThreadInventoryResult,
     ThreadReplyResult, ThreadResolveResult,
@@ -101,53 +97,6 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!) {
           }
         }
         pageInfo { hasNextPage }
-      }
-    }
-  }
-}
-"#;
-
-const CONVERGENCE_QUERY: &str = r#"
-query Convergence($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      headRefOid
-      mergeable
-      comments(last: 100) {
-        nodes { author { login __typename } authorAssociation body createdAt }
-        pageInfo { hasPreviousPage startCursor }
-      }
-      reviews(last: 100) {
-        nodes { author { login __typename } authorAssociation body createdAt }
-        pageInfo { hasPreviousPage startCursor }
-      }
-      reviewThreads(first: 100) {
-        nodes {
-          id isResolved isOutdated path line
-          comments(first: 100) {
-            nodes { author { login __typename } authorAssociation body }
-            pageInfo { hasNextPage }
-          }
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-      commits(last: 1) {
-        nodes {
-          commit {
-            oid
-            statusCheckRollup {
-              state
-              contexts(first: 100) {
-                nodes {
-                  __typename
-                  ... on CheckRun { name status conclusion }
-                  ... on StatusContext { context state }
-                }
-                pageInfo { hasNextPage endCursor }
-              }
-            }
-          }
-        }
       }
     }
   }
@@ -236,9 +185,37 @@ query ThreadOwnership($thread: ID!) {
 }
 "#;
 
+type ConvergenceHistoryEntry = std::sync::Arc<tokio::sync::Mutex<serde_json::Value>>;
+type ConvergenceHistory =
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, ConvergenceHistoryEntry>>>;
+
+struct CensusHistory {
+    histories: ConvergenceHistory,
+    key: String,
+}
+
+impl Drop for CensusHistory {
+    fn drop(&mut self) {
+        let mut histories = self
+            .histories
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Waiting censuses share this entry. Only its last user may remove an
+        // empty history, including when cancellation drops the pending future.
+        if histories.get(&self.key).is_some_and(|entry| {
+            std::sync::Arc::strong_count(entry) == 1
+                && entry.try_lock().is_ok_and(|state| state.is_null())
+        }) {
+            histories.remove(&self.key);
+        }
+    }
+}
+
 /// Production GitHub transport with fixed endpoints and deployment-supplied policy.
 #[derive(Clone, Debug)]
 pub struct GitHubCodeHostTransport {
+    convergence_policy: Option<signalbox_convergence::ConvergencePolicy>,
+    convergence_history: ConvergenceHistory,
     client: Client,
     rest_base: Url,
     graphql_url: Url,
@@ -286,11 +263,22 @@ impl GitHubCodeHostTransport {
         let rest_base = Url::parse(REST_BASE_URL).map_err(|_| GitHubCodeHostConstructionError)?;
         let graphql_url = Url::parse(GRAPHQL_URL).map_err(|_| GitHubCodeHostConstructionError)?;
         Ok(Self {
+            convergence_policy: None,
+            convergence_history: Default::default(),
             client,
             rest_base,
             graphql_url,
             bounds,
         })
+    }
+
+    /// Installs the operator's convergence policy for both convergence reads.
+    pub fn with_convergence_policy(
+        mut self,
+        policy: Option<signalbox_convergence::ConvergencePolicy>,
+    ) -> Self {
+        self.convergence_policy = policy;
+        self
     }
 
     async fn summary(
@@ -840,103 +828,95 @@ impl GitHubCodeHostTransport {
         repository: &CodeHostRepository,
         number: CodeHostChangeRequestNumber,
         credential: &CredentialValue,
-    ) -> Result<ConvergenceStateResult, CodeHostTransportFailure> {
-        let value = self
-            .graphql_read(
-                CONVERGENCE_QUERY,
-                serde_json::json!({
-                    "name": repository.name(),
-                    "number": number.get(),
-                    "owner": repository.owner(),
-                }),
-                credential,
-            )
-            .await?;
-        let request = nested(&value, &["data", "repository", "pullRequest"])?;
-        let request = required_object(request)?;
-        let head_revision = required_string(request, "headRefOid")?;
-        let mergeable_state = required_string(request, "mergeable")?;
-
-        let comments = required_object(required(request, "comments")?)?;
-        let reviews = required_object(required(request, "reviews")?)?;
-        let mut activities = parse_reviewer_activities(comments)?;
-        activities.extend(parse_reviewer_activities(reviews)?);
-        let (comments_truncated, comments_previous_cursor) = previous_page(comments)?;
-        let (reviews_truncated, reviews_previous_cursor) = previous_page(reviews)?;
-        let reviewer = reviewer_verdict_evidence(
-            self.bounds,
-            &head_revision,
-            activities,
-            comments_truncated || reviews_truncated,
-            comments_previous_cursor,
-            reviews_previous_cursor,
-        )
-        .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-
-        let thread_connection = required_object(required(request, "reviewThreads")?)?;
-        let thread_nodes = required(thread_connection, "nodes")?
-            .as_array()
+    ) -> Result<ConvergenceReadResult, CodeHostTransportFailure> {
+        let policy = self
+            .convergence_policy
+            .as_ref()
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let parsed_threads = thread_nodes
-            .iter()
-            .map(|value| parse_slog_thread(self.bounds, value))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut unresolved_threads = Vec::new();
-        let mut open_escalations = Vec::new();
-        let mut buried_escalations = Vec::new();
-        let mut undispositioned_threads = Vec::new();
-        for thread in parsed_threads {
-            if thread.inventory.disposition() == ReviewDispositionClass::Undispositioned {
-                undispositioned_threads.push(thread.identity.clone());
-            }
-            if !thread.resolved {
-                unresolved_threads.push(thread.identity.clone());
-            }
-            if thread.escalated && thread.resolved {
-                buried_escalations.push(thread.identity);
-            } else if thread.escalated {
-                open_escalations.push(thread.identity);
-            }
-        }
-        let (threads_truncated, threads_next_cursor) = next_page(thread_connection)?;
-
-        let commits = required_object(required(request, "commits")?)?;
-        let commit_nodes = required(commits, "nodes")?
-            .as_array()
-            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let commit = commit_nodes
-            .last()
-            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let commit = required_object(
-            required_object(commit)?
-                .get("commit")
-                .ok_or(CodeHostTransportFailure::InvalidResponse)?,
-        )?;
-        if required_string(commit, "oid")? != head_revision {
+        if !repository.as_str().eq_ignore_ascii_case(&policy.repository) {
             return Err(CodeHostTransportFailure::InvalidResponse);
         }
-        let (ci_rollup_state, checks, checks_truncated, checks_next_cursor) =
-            parse_check_rollup(self.bounds, commit)?;
-
-        ConvergenceStateResult::try_new(
-            self.bounds,
-            ConvergenceStateFields {
-                head_revision,
-                mergeable_state,
-                ci_rollup_state,
-                checks,
-                checks_truncated,
-                checks_next_cursor,
-                unresolved_threads,
-                open_escalations,
-                buried_escalations,
-                threads_truncated,
-                undispositioned_threads,
-                threads_next_cursor,
-                reviewer,
-            },
+        let key = format!(
+            "{}#{}",
+            repository.as_str().to_ascii_lowercase(),
+            number.get()
+        );
+        // Declare the cleanup guard before the entry so the caller's strong
+        // reference drops before cleanup checks for the last census.
+        let census_history = CensusHistory {
+            histories: self.convergence_history.clone(),
+            key,
+        };
+        let entry = self
+            .convergence_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(census_history.key.clone())
+            .or_insert_with(|| {
+                std::sync::Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null))
+            })
+            .clone();
+        let mut history = entry.lock().await;
+        let previous = history.clone();
+        let repository_name = format!("{}/{}", repository.owner(), repository.name());
+        let transport_failure = std::sync::Mutex::new(None);
+        let failure = &transport_failure;
+        let mut send = |request| -> signalbox_convergence::fetch::RequestFuture<'_> {
+            Box::pin(async move {
+                let result = match request {
+                    signalbox_convergence::fetch::GitHubRequest::GraphQl { query, variables } => {
+                        self.graphql_read(&query, variables, credential).await
+                    }
+                    signalbox_convergence::fetch::GitHubRequest::Rest { path } => {
+                        let url = self.rest_base.join(&path).map_err(|_| {
+                            signalbox_convergence::Error::Evidence("invalid GitHub path".into())
+                        })?;
+                        match self
+                            .send_authenticated(Method::GET, url, None, credential)
+                            .await
+                        {
+                            Ok(response) if response.status() == StatusCode::NOT_FOUND => {
+                                Ok(serde_json::Value::Null)
+                            }
+                            Ok(response) => self.json_response(response, StatusCode::OK).await,
+                            Err(error) => Err(error),
+                        }
+                    }
+                };
+                result.map_err(|error| {
+                    *failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                    signalbox_convergence::Error::Evidence(
+                        "GitHub convergence request failed".into(),
+                    )
+                })
+            })
+        };
+        let recording = signalbox_convergence::fetch::record_with(
+            &mut send,
+            previous,
+            &repository_name,
+            u64::from(number.get()),
+            policy,
         )
-        .ok_or(CodeHostTransportFailure::InvalidResponse)
+        .await
+        .map_err(|_| {
+            transport_failure
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or(CodeHostTransportFailure::InvalidResponse)
+        })?;
+        let snapshot = recording
+            .snapshot(policy)
+            .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        let evaluation = signalbox_convergence::evaluate(&snapshot, policy)
+            .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        let next_state = evaluation.state.clone();
+        let result = ConvergenceReadResult::try_new(self.bounds, evaluation)
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        *history = next_state;
+        Ok(result)
     }
 
     async fn thread_inventory(
@@ -1219,42 +1199,9 @@ impl GitHubCodeHostTransport {
         arguments: ReviewGateCheckArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
-        with_read_operation_timeout(
-            self.bounds.request_timeout(),
-            self.review_gate_transaction(arguments, credential),
-        )
-        .await
-    }
-
-    async fn review_gate_transaction(
-        &self,
-        arguments: ReviewGateCheckArguments,
-        credential: &CredentialValue,
-    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
-        let initial_stack = self
-            .stack_state_for(arguments.repository(), arguments.number(), None, credential)
-            .await?;
-        let inventory = self
-            .thread_inventory_for(arguments.repository(), arguments.number(), None, credential)
-            .await?;
-        let initial_convergence = self
-            .convergence_state_for(arguments.repository(), arguments.number(), credential)
-            .await?;
-        let stack = self
-            .stack_state_for(arguments.repository(), arguments.number(), None, credential)
-            .await?;
-        let convergence = self
-            .convergence_state_for(arguments.repository(), arguments.number(), credential)
-            .await?;
-        ensure_review_gate_snapshot_unchanged(
-            &initial_stack,
-            &stack,
-            &initial_convergence,
-            &convergence,
-        )?;
-        Ok(CodeHostResult::ReviewGateCheck(
-            ReviewGateCheckResult::compose(arguments.purpose(), &convergence, &stack, &inventory),
-        ))
+        self.convergence_state_for(arguments.repository(), arguments.number(), credential)
+            .await
+            .map(CodeHostResult::ReviewGateCheck)
     }
 
     async fn compare_behind_by(
@@ -2196,18 +2143,6 @@ fn omitted_optional_u64(
     }
 }
 
-fn ensure_review_gate_snapshot_unchanged(
-    initial_stack: &StackStateResult,
-    current_stack: &StackStateResult,
-    initial_convergence: &ConvergenceStateResult,
-    current_convergence: &ConvergenceStateResult,
-) -> Result<(), CodeHostTransportFailure> {
-    if initial_stack != current_stack || initial_convergence != current_convergence {
-        return Err(CodeHostTransportFailure::InvalidResponse);
-    }
-    Ok(())
-}
-
 #[derive(signalbox_derive::OperatorError)]
 #[error("GitHub code-host transport construction failed")]
 /// The fixed GitHub client or endpoint could not be constructed.
@@ -2443,7 +2378,6 @@ fn parse_review_thread_comment(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ParsedSlogThread {
-    identity: ReviewThreadIdentity,
     inventory: ReviewThreadInventoryItem,
     resolved: bool,
     escalated: bool,
@@ -2474,7 +2408,10 @@ fn parse_slog_thread(
             comment.and_then(|comment| {
                 Ok((
                     required_string(comment, "body")?,
-                    authorized_association(&required_string(comment, "authorAssociation")?),
+                    matches!(
+                        required_string(comment, "authorAssociation")?.as_str(),
+                        "OWNER" | "MEMBER" | "COLLABORATOR"
+                    ),
                 ))
             })
         })
@@ -2497,8 +2434,6 @@ fn parse_slog_thread(
     let path = required_string(object, "path")?;
     let resolved = required_bool(object, "isResolved")?;
     let disposition = disposition_class(&reply_evidence);
-    let identity = ReviewThreadIdentity::try_new(bounds, id.clone(), path.clone(), title.clone())
-        .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     let inventory = ReviewThreadInventoryItem::try_new(
         bounds,
         ReviewThreadInventoryFields {
@@ -2515,51 +2450,10 @@ fn parse_slog_thread(
     )
     .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     Ok(ParsedSlogThread {
-        identity,
         inventory,
         resolved,
         escalated: disposition == ReviewDispositionClass::EscalationMarker,
     })
-}
-
-fn parse_reviewer_activities(
-    connection: &serde_json::Map<String, serde_json::Value>,
-) -> Result<Vec<ReviewerActivity>, CodeHostTransportFailure> {
-    required(connection, "nodes")?
-        .as_array()
-        .ok_or(CodeHostTransportFailure::InvalidResponse)?
-        .iter()
-        .map(|value| {
-            let object = required_object(value)?;
-            let (author, actor_type) = match required(object, "author")? {
-                serde_json::Value::Null => (None, None),
-                serde_json::Value::Object(author) => (
-                    Some(required_string(author, "login")?),
-                    Some(required_string(author, "__typename")?),
-                ),
-                _ => return Err(CodeHostTransportFailure::InvalidResponse),
-            };
-            Ok(ReviewerActivity {
-                author,
-                author_association: required_string(object, "authorAssociation")?,
-                actor_type,
-                body: required_string(object, "body")?,
-                created_at: required_string(object, "createdAt")?,
-            })
-        })
-        .collect()
-}
-
-fn next_page(
-    connection: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(bool, Option<String>), CodeHostTransportFailure> {
-    page(connection, "hasNextPage", "endCursor")
-}
-
-fn previous_page(
-    connection: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(bool, Option<String>), CodeHostTransportFailure> {
-    page(connection, "hasPreviousPage", "startCursor")
 }
 
 fn page(
@@ -2578,54 +2472,10 @@ fn page(
     Ok((false, None))
 }
 
-type CheckRollup = (Option<String>, Vec<ReviewCheck>, bool, Option<String>);
-
-fn parse_check_rollup(
-    bounds: CodeHostNumericBounds,
-    commit: &serde_json::Map<String, serde_json::Value>,
-) -> Result<CheckRollup, CodeHostTransportFailure> {
-    let Some(rollup) = commit.get("statusCheckRollup") else {
-        return Err(CodeHostTransportFailure::InvalidResponse);
-    };
-    let serde_json::Value::Object(rollup) = rollup else {
-        if rollup.is_null() {
-            return Ok((None, Vec::new(), false, None));
-        }
-        return Err(CodeHostTransportFailure::InvalidResponse);
-    };
-    let state = required_string(rollup, "state")?;
-    let contexts = required_object(required(rollup, "contexts")?)?;
-    let checks = required(contexts, "nodes")?
-        .as_array()
-        .ok_or(CodeHostTransportFailure::InvalidResponse)?
-        .iter()
-        .map(|value| parse_rollup_context(bounds, value))
-        .collect::<Result<Vec<_>, _>>()?;
-    let (truncated, cursor) = next_page(contexts)?;
-    Ok((Some(state), checks, truncated, cursor))
-}
-
-fn parse_rollup_context(
-    bounds: CodeHostNumericBounds,
-    value: &serde_json::Value,
-) -> Result<ReviewCheck, CodeHostTransportFailure> {
-    let object = required_object(value)?;
-    match required_string(object, "__typename")?.as_str() {
-        "CheckRun" => ReviewCheck::try_new(
-            bounds,
-            required_string(object, "name")?,
-            required_string(object, "status")?,
-            optional_string(object, "conclusion")?,
-        ),
-        "StatusContext" => ReviewCheck::try_new(
-            bounds,
-            required_string(object, "context")?,
-            String::from("completed"),
-            Some(required_string(object, "state")?),
-        ),
-        _ => None,
-    }
-    .ok_or(CodeHostTransportFailure::InvalidResponse)
+fn next_page(
+    connection: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(bool, Option<String>), CodeHostTransportFailure> {
+    page(connection, "hasNextPage", "endCursor")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3072,9 +2922,7 @@ fn required_bool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        CodeHostRepository, ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus,
-    };
+    use crate::CodeHostRepository;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     const FILE_PATCH_REPOSITORY: &str = "owner/repository";
@@ -3133,65 +2981,254 @@ mod tests {
             .expect("fixture repository is admitted")
     }
 
-    fn gate_stack_state() -> StackStateResult {
-        const BASE_REVISION: &str = "1111111111111111111111111111111111111111";
-        const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
-        StackStateResult::try_new(
-            crate::code_host::test_numeric_bounds(),
-            StackStateFields {
-                number: 17,
-                base_ref: String::from("main"),
-                base_revision: String::from(BASE_REVISION),
-                head_ref: String::from("feature"),
-                head_revision: String::from(HEAD_REVISION),
-                default_ref: String::from("main"),
-                default_revision: String::from(BASE_REVISION),
-                base_commits_not_in_head: 0,
-                main_commits_not_in_base: 0,
-                children: Vec::new(),
-                children_truncated: false,
-                children_next_cursor: None,
-            },
+    #[tokio::test]
+    async fn convergence_fetch_preserves_credential_and_dispatch_failures() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
         )
-        .expect("fixture stack evidence is admitted")
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let repository = CodeHostRepository::try_new(recording.repository)
+            .expect("the recorded repository is admitted");
+        let number = CodeHostChangeRequestNumber::try_new(recording.number)
+            .expect("the recorded number is admitted");
+        let (transport, listener) = repository_test_transport().await;
+        let mut transport = transport.with_convergence_policy(Some(policy));
+        transport.graphql_url = transport
+            .rest_base
+            .join("graphql")
+            .expect("local URL joins");
+        // Closing the listener exercises a real connection failure without provider responses.
+        drop(listener);
+        for (credential, expected) in [
+            (
+                CredentialValue::new(b"invalid\nheader".to_vec()),
+                CodeHostTransportFailure::InvalidCredential,
+            ),
+            (test_credential(), CodeHostTransportFailure::DispatchUnknown),
+        ] {
+            assert_eq!(
+                transport
+                    .convergence_state_for(&repository, number, &credential)
+                    .await
+                    .err(),
+                Some(expected)
+            );
+            assert!(
+                transport
+                    .convergence_history
+                    .lock()
+                    .expect("history map locks")
+                    .is_empty(),
+                "failed censuses must not retain empty entries"
+            );
+        }
     }
 
-    fn gate_convergence_state(thread: Option<ReviewThreadIdentity>) -> ConvergenceStateResult {
-        let reviewer = ReviewerVerdictEvidence::try_new(
-            crate::code_host::test_numeric_bounds(),
-            ReviewerVerdictFields {
-                status: ReviewerVerdictStatus::Missing,
-                reviewed_revision: None,
-                reviewed_at: None,
-                starvation_after_verdict: false,
-                latest_starvation_at: None,
-                latest_review_request_at: None,
-                review_request_in_flight: false,
-                source_truncated: false,
-                comments_previous_cursor: None,
-                reviews_previous_cursor: None,
-            },
+    #[tokio::test]
+    async fn both_convergence_tools_wait_for_history_outside_the_request_timeout() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
         )
-        .expect("fixture reviewer evidence is admitted");
-        ConvergenceStateResult::try_new(
-            crate::code_host::test_numeric_bounds(),
-            ConvergenceStateFields {
-                head_revision: String::from("2222222222222222222222222222222222222222"),
-                mergeable_state: String::from("MERGEABLE"),
-                ci_rollup_state: Some(String::from("SUCCESS")),
-                checks: Vec::new(),
-                checks_truncated: false,
-                checks_next_cursor: None,
-                unresolved_threads: thread.clone().into_iter().collect(),
-                open_escalations: Vec::new(),
-                buried_escalations: Vec::new(),
-                undispositioned_threads: thread.into_iter().collect(),
-                threads_truncated: false,
-                threads_next_cursor: None,
-                reviewer,
-            },
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let arguments = serde_json::json!({
+            "repository": recording.repository,
+            "number": recording.number,
+        });
+        let bounds = CodeHostNumericBounds::new(
+            Some(Duration::from_millis(5)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let transport = GitHubCodeHostTransport::try_new(bounds)
+            .expect("transport constructs")
+            .with_convergence_policy(Some(policy));
+        let credential = CredentialValue::new(b"invalid\nheader".to_vec());
+        let key = format!(
+            "{}#{}",
+            recording.repository.to_ascii_lowercase(),
+            recording.number
+        );
+        let entry = std::sync::Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null));
+        transport
+            .convergence_history
+            .lock()
+            .expect("history map locks")
+            .insert(key, entry.clone());
+        for review_gate in [false, true] {
+            let history = entry.lock().await;
+            let release = async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                drop(history);
+            };
+            let census = async {
+                if review_gate {
+                    transport
+                        .review_gate_check(
+                            serde_json::from_value(arguments.clone())
+                                .expect("recorded arguments decode"),
+                            &credential,
+                        )
+                        .await
+                } else {
+                    transport
+                        .convergence_state(
+                            serde_json::from_value(arguments.clone())
+                                .expect("recorded arguments decode"),
+                            &credential,
+                        )
+                        .await
+                }
+            };
+            let (_, result) = tokio::join!(release, census);
+            assert_eq!(
+                result.err(),
+                Some(CodeHostTransportFailure::InvalidCredential)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn convergence_tools_reject_other_repositories_before_credentials() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
         )
-        .expect("fixture convergence evidence is admitted")
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let transport = GitHubCodeHostTransport::try_new(crate::code_host::test_numeric_bounds())
+            .expect("transport constructs")
+            .with_convergence_policy(Some(policy));
+        let credential = CredentialValue::new(b"invalid\nheader".to_vec());
+        for (repository, expected) in [
+            (
+                recording.repository.to_ascii_uppercase(),
+                CodeHostTransportFailure::InvalidCredential,
+            ),
+            (
+                repository().as_str().to_owned(),
+                CodeHostTransportFailure::InvalidResponse,
+            ),
+        ] {
+            let arguments =
+                serde_json::json!({"repository": repository, "number": recording.number});
+            assert_eq!(
+                transport
+                    .convergence_state(
+                        serde_json::from_value(arguments.clone()).expect("arguments decode"),
+                        &credential,
+                    )
+                    .await
+                    .err(),
+                Some(expected)
+            );
+            assert_eq!(
+                transport
+                    .review_gate_check(
+                        serde_json::from_value(arguments).expect("arguments decode"),
+                        &credential,
+                    )
+                    .await
+                    .err(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cloned_transports_serialize_one_census_without_blocking_other_pull_requests() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../convergence");
+        let policy = signalbox_convergence::ConvergencePolicy::read(
+            &fixture_root.join("examples/repository.toml"),
+        )
+        .expect("the shared policy example loads");
+        let recording =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1566.json.gz"))
+                .expect("the recorded request identity loads");
+        let other =
+            signalbox_convergence::Recording::read(&fixture_root.join("fixtures/pr-1567.json.gz"))
+                .expect("the second recorded identity loads");
+        let (transport, listener) = graphql_test_transport().await;
+        let transport = transport.with_convergence_policy(Some(policy));
+        let spawn_census = |transport: GitHubCodeHostTransport, repository: String| {
+            let number = recording.number;
+            tokio::spawn(async move {
+                let repository = CodeHostRepository::try_new(repository)
+                    .expect("recorded repository is admitted");
+                let number = CodeHostChangeRequestNumber::try_new(number)
+                    .expect("recorded number is admitted");
+                transport
+                    .convergence_state_for(&repository, number, &test_credential())
+                    .await
+            })
+        };
+        let first = spawn_census(transport.clone(), recording.repository.clone());
+        let (_first_connection, _) =
+            tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("the first census reaches the provider")
+                .expect("the first connection is accepted");
+        let second = spawn_census(transport.clone(), recording.repository.to_ascii_uppercase());
+        let other_repository =
+            CodeHostRepository::try_new(other.repository).expect("recorded repository is admitted");
+        let other_number = CodeHostChangeRequestNumber::try_new(other.number)
+            .expect("recorded number is admitted");
+        let credential = CredentialValue::new(b"invalid\nheader".to_vec());
+        let other_result = tokio::time::timeout(
+            Duration::from_secs(2),
+            transport.convergence_state_for(&other_repository, other_number, &credential),
+        )
+        .await
+        .expect("another pull request is not held behind the first census");
+        assert_eq!(
+            other_result.err(),
+            Some(CodeHostTransportFailure::InvalidCredential)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "the same pull request cannot start a second provider census"
+        );
+        first.abort();
+        assert!(
+            first
+                .await
+                .expect_err("the pending census is cancelled")
+                .is_cancelled()
+        );
+        let (_second_connection, _) =
+            tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("cancelling the first census releases its per-request history")
+                .expect("the second connection is accepted");
+        second.abort();
+        assert!(
+            second
+                .await
+                .expect_err("the pending census is cancelled")
+                .is_cancelled()
+        );
+        assert!(
+            transport
+                .convergence_history
+                .lock()
+                .expect("history map locks")
+                .is_empty(),
+            "cancellation of the last waiter removes its empty history"
+        );
     }
 
     /// REST paths and pagination are derived only from checked typed segments.
@@ -5211,31 +5248,6 @@ mod tests {
                     children_truncated: false,
                     children_next_cursor: None,
                 },
-            ),
-            Err(CodeHostTransportFailure::InvalidResponse)
-        );
-    }
-
-    /// A thread arriving during final stack revalidation invalidates the gate snapshot.
-    #[test]
-    fn review_gate_rejects_convergence_changed_during_final_stack_read() {
-        let stack = gate_stack_state();
-        let initial_convergence = gate_convergence_state(None);
-        let thread = ReviewThreadIdentity::try_new(
-            crate::code_host::test_numeric_bounds(),
-            String::from("PRRT_gate"),
-            String::from("src/lib.rs"),
-            String::from("Finding title"),
-        )
-        .expect("fixture thread identity is admitted");
-        let current_convergence = gate_convergence_state(Some(thread));
-
-        assert_eq!(
-            ensure_review_gate_snapshot_unchanged(
-                &stack,
-                &stack,
-                &initial_convergence,
-                &current_convergence,
             ),
             Err(CodeHostTransportFailure::InvalidResponse)
         );

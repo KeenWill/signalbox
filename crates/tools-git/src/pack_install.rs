@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{Read, Seek},
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, OwnedFd},
         unix::fs::{MetadataExt, PermissionsExt},
     },
     path::Path,
@@ -15,6 +15,7 @@ use rustix::{
 };
 
 use crate::descriptor::{FileIdentity, file_identity, mode_from_metadata_bits, permission_bits};
+use crate::descriptor_identity::descriptor_and_path_agree;
 use crate::failure::LocalGitFailure;
 use crate::pinning::PinnedObjectDatabase;
 
@@ -248,20 +249,7 @@ pub(super) fn pack_entry_is_owned(
     descriptor: &fs::File,
     identity: FileIdentity,
 ) -> bool {
-    let descriptor_identity = descriptor
-        .metadata()
-        .ok()
-        .map(|metadata| file_identity(&metadata));
-    let path_identity = openat(
-        pack_directory,
-        name,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .ok()
-    .and_then(|descriptor| fs::File::from(descriptor).metadata().ok())
-    .map(|metadata| file_identity(&metadata));
-    descriptor_identity == Some(identity) && path_identity == Some(identity)
+    descriptor_and_path_agree(descriptor, pack_directory.as_fd(), name, identity)
 }
 
 pub(super) fn remove_owned_pack_lock(

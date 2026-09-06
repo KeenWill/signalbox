@@ -1834,10 +1834,11 @@ impl PostgresModelCallRepository {
                 .bind(observation.call().into_uuid())
                 .fetch_one(&mut *transaction)
                 .await?;
-                // A successor reissues the request, so it needs the
-                // adapter's proof that the failed request was never accepted.
-                // Without it the call closes terminally rather than
-                // substituting a member behind an effect that may have landed.
+                // A successor reissues the request, so availability failures
+                // need the adapter's proof that the failed request was never
+                // accepted. Credential rejection is the one exception: the
+                // authentication refusal itself authorizes rotation, but never
+                // a retry on the rejected credential.
                 // A stop already requested on this attempt forbids the reissue
                 // outright: the successor would reload an attempt the domain
                 // admits only while running.
@@ -1857,7 +1858,8 @@ impl PostgresModelCallRepository {
                     && observation.non_acceptance_proven()
                     && !stop_requested;
                 let rotation_candidate = action == CredentialPoolRuntimeAction::SwitchNow
-                    && observation.non_acceptance_proven()
+                    && (observation.non_acceptance_proven()
+                        || cause == ProviderModelCallFailureCause::CredentialRejected)
                     && !stop_requested;
                 let mut durable_exclusions = if retry_candidate || rotation_candidate {
                     Some(
@@ -1876,6 +1878,9 @@ impl PostgresModelCallRepository {
                     && durable_exclusions.as_ref().is_some_and(|exclusions| {
                         !exclusions.excluded.contains(&current_reference)
                     });
+                // The failed credential itself must still be admitted for a
+                // retry. Otherwise only the pinned action may authorize a
+                // rotation; every other action follows the terminal path.
                 let rotating = !retrying_same_credential && rotation_candidate;
                 if retrying_same_credential || rotating {
                     let Some(DurablePoolExclusions { mut excluded, .. }) =
@@ -6714,6 +6719,22 @@ async fn load_durable_pool_exclusions(
     .await?
     .into_iter()
     .collect::<HashSet<_>>();
+    let member_references = policy
+        .members()
+        .iter()
+        .map(|member| member.credential_reference().to_owned())
+        .collect::<Vec<_>>();
+    excluded.extend(
+        sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT credential_reference
+              FROM credential_pool_transient_exclusion
+              WHERE credential_reference = ANY($1)
+                AND reset_at > clock_timestamp()",
+        )
+        .bind(&member_references)
+        .fetch_all(&mut *connection)
+        .await?,
+    );
     let completed_references = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT call.credential_reference
            FROM model_call AS call
@@ -8528,6 +8549,9 @@ async fn persist_availability_successor(
     cause: ProviderModelCallFailureCause,
     backoff: Duration,
 ) -> Result<(), ModelCallRepositoryError> {
+    let backoff_milliseconds = i64::try_from(backoff.as_millis()).map_err(|_| {
+        ModelCallRepositoryError::InvalidTransition("availability backoff overflow")
+    })?;
     persist_ended_call_with_provider_failure_cause(
         connection,
         successor.session(),
@@ -8563,6 +8587,24 @@ async fn persist_availability_successor(
     .bind(successor.predecessor_attempt().id().into_uuid())
     .execute(&mut *connection)
     .await?;
+    if is_same_credential_retry_cause(cause) {
+        let rows = sqlx::query(
+            "INSERT INTO credential_pool_transient_exclusion
+                (observation_model_call_id, credential_reference,
+                 cause_kind, reset_at)
+             SELECT model_call_id, credential_reference, $2,
+                    transaction_timestamp() + ($3 * interval '1 millisecond')
+               FROM model_call
+              WHERE model_call_id = $1",
+        )
+        .bind(successor.predecessor_call().id().into_uuid())
+        .bind(encode_provider_failure_cause(cause))
+        .bind(backoff_milliseconds)
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        require_single(rows, "credential transient exclusion")?;
+    }
     sqlx::query(
         "INSERT INTO credential_pool_availability_successor
             (predecessor_model_call_id, successor_turn_attempt_id, cause_kind,
@@ -8573,9 +8615,7 @@ async fn persist_availability_successor(
     .bind(successor.predecessor_call().id().into_uuid())
     .bind(successor.successor_attempt().id().into_uuid())
     .bind(encode_provider_failure_cause(cause))
-    .bind(i64::try_from(backoff.as_millis()).map_err(|_| {
-        ModelCallRepositoryError::InvalidTransition("availability backoff overflow")
-    })?)
+    .bind(backoff_milliseconds)
     .execute(&mut *connection)
     .await?;
     let rows = sqlx::query(

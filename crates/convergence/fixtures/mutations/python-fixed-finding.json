@@ -1,0 +1,14 @@
+{
+  "source": "declined-finding.json",
+  "edge": "fixed finding",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "Fixed in 113746d23d6c7b398ef34464a071dca532791898."
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "Fixed in 113746d23d6c7b398ef34464a071dca532791898."
+    }
+  ]
+}

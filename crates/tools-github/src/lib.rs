@@ -3406,11 +3406,11 @@ mod tests {
         .1
     }
 
-    /// INV-025: a rejection GitHub answered definitively closes creation as a
+    /// a rejection GitHub answered definitively closes creation as a
     /// known failure, so the workflow reports the denial instead of stalling
     /// in reconciliation for an effect that never happened.
     #[test]
-    fn inv_025_definitive_create_rejection_is_a_known_failure() {
+    fn definitive_create_rejection_is_a_known_failure() {
         let executor = create_executor();
         let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
 
@@ -3420,11 +3420,11 @@ mod tests {
         );
     }
 
-    /// INV-025: a server-side rejection cannot establish whether the pull
+    /// a server-side rejection cannot establish whether the pull
     /// request was created, so it surfaces as an ambiguous commit rather than
     /// a definite failure the agent would retry into a duplicate pull request.
     #[test]
-    fn inv_025_server_side_create_rejection_is_an_ambiguous_commit() {
+    fn server_side_create_rejection_is_an_ambiguous_commit() {
         let executor = create_executor();
         let error = executor
             .failure_detail(&GitHubTransportFailure::rejected(BAD_GATEWAY_STATUS))
@@ -3480,7 +3480,7 @@ mod tests {
         }
     }
 
-    /// INV-025: a definitively rejected creation reaches the workflow as
+    /// a definitively rejected creation reaches the workflow as
     /// `KnownFailed` *evidence* carrying the sanitized rejection detail.
     ///
     /// The classifier tests above call `failure_detail` directly, so they stay
@@ -3490,7 +3490,7 @@ mod tests {
     /// executor through a real correlated invocation so the bound evidence
     /// variant is what is asserted.
     #[tokio::test]
-    async fn inv_025_definitive_create_rejection_binds_known_failure_evidence() {
+    async fn definitive_create_rejection_binds_known_failure_evidence() {
         let (transport, dispatches) = RejectingCreateTransport::new(FORBIDDEN_STATUS);
         let outcome = create_pull_request_evidence(transport).await;
         let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
@@ -3531,11 +3531,11 @@ mod tests {
         assert_eq!(error.detail(), Some(&expected));
     }
 
-    /// INV-025: the same path refuses to bind *any* evidence when GitHub
+    /// the same path refuses to bind *any* evidence when GitHub
     /// answered ambiguously, so an effect that may have happened is never
     /// reported as a definitive outcome the agent would retry.
     #[tokio::test]
-    async fn inv_025_server_side_create_rejection_binds_no_evidence() {
+    async fn server_side_create_rejection_binds_no_evidence() {
         let (transport, dispatches) = RejectingCreateTransport::new(BAD_GATEWAY_STATUS);
         let outcome = create_pull_request_evidence(transport).await;
 
@@ -4239,7 +4239,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_provider_response_text_never_enters_durable_error_detail() {
+    fn provider_response_text_never_enters_durable_error_detail() {
         let executor = GitHubTools::try_new(
             SyntheticCredentials,
             SyntheticTransport,
@@ -4480,7 +4480,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_error_body_redaction_precedes_truncation() {
+    fn error_body_redaction_precedes_truncation() {
         let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let prefix = "x".repeat(
@@ -4499,7 +4499,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_truncated_error_source_redacts_trailing_token_prefix() {
+    fn truncated_error_source_redacts_trailing_token_prefix() {
         let credential = CredentialValue::new(SYNTHETIC_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let token_prefix = &SYNTHETIC_TOKEN[..SYNTHETIC_TOKEN.len() - 3];
@@ -4512,7 +4512,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_truncated_error_source_handles_unicode_token_prefix() {
+    fn truncated_error_source_handles_unicode_token_prefix() {
         let credential = CredentialValue::new(SYNTHETIC_UNICODE_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let body = format!("{ERROR_BODY_PREFIX}{SYNTHETIC_UNICODE_PREFIX}");
@@ -4524,7 +4524,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_truncated_error_source_discards_partial_unicode_before_redaction() {
+    fn truncated_error_source_discards_partial_unicode_before_redaction() {
         let credential = CredentialValue::new(SYNTHETIC_UNICODE_TOKEN.as_bytes().to_vec());
         let scrubber = CredentialScrubber::try_new(&credential).expect("fixture token is admitted");
         let partial_prefix_end = SYNTHETIC_UNICODE_PREFIX.len() + 1;
@@ -4539,7 +4539,7 @@ mod tests {
     }
 
     #[test]
-    fn inv_035_result_debug_never_formats_provider_content() {
+    fn result_debug_never_formats_provider_content() {
         let result = GitHubResult::metadata(serde_json::json!({"body": SYNTHETIC_TOKEN}));
 
         let diagnostic = format!("{result:?}");

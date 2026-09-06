@@ -294,7 +294,10 @@ placement revision it names, never against the session's current placement.
 Schemas whose names begin with `mod_` contain only derived or module-local
 state, which may be pruned. The transactional outbox is the sole immutable-fact
 retention exception: a pruning implementation may delete only records whose
-sequence is below every per-consumer delivery cursor.
+sequence is below every per-consumer delivery cursor. Outbox headers and typed
+records referenced by retained session-timeline entries remain ineligible for
+pruning until the historical projection materializes every field needed to
+decode those entries without the outbox.
 
 Domain types carry no SQLx or serialization traits. Each adapter module decodes
 its own rows through explicit fallible functions and assembles a checked input;

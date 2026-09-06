@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{Read, Seek, Write},
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, OwnedFd},
         unix::fs::{MetadataExt, PermissionsExt},
     },
     path::{Component, Path},
@@ -17,6 +17,8 @@ use rustix::{
 use sha2::{Digest, Sha256};
 
 use crate::descriptor::{FileIdentity, file_identity, permission_bits};
+use crate::descriptor_identity::descriptor_and_path_agree;
+use crate::descriptor_identity::entry_is;
 use crate::failure::LocalGitFailure;
 use crate::limits::MAX_REFLOG_BYTES;
 use crate::pack_install::{pack_lock_is_owned, remove_owned_pack_lock};
@@ -262,16 +264,7 @@ impl ReferenceLogLock {
             if !pack_lock_is_owned(&self.parent, &self.lock_name, &restoration, identity) {
                 return Err(LocalGitFailure::Operation);
             }
-            let published_identity = openat(
-                &self.parent,
-                &self.leaf,
-                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .ok()
-            .and_then(|descriptor| fs::File::from(descriptor).metadata().ok())
-            .map(|metadata| file_identity(&metadata));
-            if published_identity != Some(self.identity) {
+            if !entry_is(self.parent.as_fd(), &self.leaf, self.identity) {
                 remove_owned_pack_lock(&self.parent, &self.lock_name, &restoration, identity);
                 return Err(LocalGitFailure::Operation);
             }
@@ -288,16 +281,7 @@ impl ReferenceLogLock {
                 return Err(LocalGitFailure::Operation);
             }
         } else {
-            let published_identity = openat(
-                &self.parent,
-                &self.leaf,
-                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .ok()
-            .and_then(|descriptor| fs::File::from(descriptor).metadata().ok())
-            .map(|metadata| file_identity(&metadata));
-            if published_identity != Some(self.identity) {
+            if !entry_is(self.parent.as_fd(), &self.leaf, self.identity) {
                 return Err(LocalGitFailure::Operation);
             }
             unlinkat(&self.parent, &self.leaf, AtFlags::empty())
@@ -308,21 +292,12 @@ impl ReferenceLogLock {
     }
 
     fn path_still_owned(&self) -> bool {
-        let descriptor_identity = self
-            .lock
-            .metadata()
-            .map(|metadata| file_identity(&metadata))
-            .ok();
-        let path_identity = openat(
-            &self.parent,
+        descriptor_and_path_agree(
+            &self.lock,
+            self.parent.as_fd(),
             &self.lock_name,
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
+            self.identity,
         )
-        .ok()
-        .and_then(|descriptor| fs::File::from(descriptor).metadata().ok())
-        .map(|metadata| file_identity(&metadata));
-        descriptor_identity == Some(self.identity) && path_identity == Some(self.identity)
     }
 
     fn original_still_matches(&self) -> Result<bool, LocalGitFailure> {

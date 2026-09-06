@@ -1,0 +1,14 @@
+{
+  "source": "declined-finding.json",
+  "edge": "acknowledged finding",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "Acknowledged."
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/1/body",
+      "value": "Acknowledged."
+    }
+  ]
+}
