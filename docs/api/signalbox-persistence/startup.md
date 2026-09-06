@@ -294,7 +294,7 @@ impl startup::PostgresStartupScanRepository {
     pub async fn recover<Generator>(
         &self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
+        identities: turn_failure::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
     ) -> result::Result<startup_scan::StartupScanSessionOutcome, startup::StartupScanRepositoryError>
     where
@@ -311,7 +311,7 @@ impl startup_scan::StartupScanRepository for startup::PostgresStartupScanReposit
     async fn recover<Generator>(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
+        identities: turn_failure::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
     ) -> result::Result<
         startup_scan::StartupScanSessionOutcome,

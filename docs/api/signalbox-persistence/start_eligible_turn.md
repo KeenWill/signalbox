@@ -346,7 +346,7 @@ where
 {
 }
 impl start_eligible_turn::PreparedActivationPreview {
-    pub const fn prepared(&self) -> &turn_eligibility::PreparedTurnActivation;
+    pub const fn prepared(&self) -> &prepared_activation::PreparedTurnActivation;
 }
 ```
 
@@ -354,7 +354,7 @@ impl start_eligible_turn::PreparedActivationPreview {
 
 ```rust
 pub enum CommitActivationPreviewOutcome {
-    Activated(boxed::Box<turn_eligibility::ActivatedTurn>),
+    Activated(boxed::Box<activated_turn::ActivatedTurn>),
     Stale,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -615,7 +615,7 @@ impl start_eligible_turn::StartEligibleTurnRepository {
     pub async fn preview(
         &self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: activated_turn::AcceptedInputTurnActivationIdentities,
     ) -> result::Result<
         option::Option<start_eligible_turn::PreparedActivationPreview>,
         start_eligible_turn::StartEligibleTurnRepositoryError,
@@ -667,7 +667,7 @@ impl start_eligible_turn::StartEligibleTurnRepository {
     pub async fn handle(
         &self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: activated_turn::AcceptedInputTurnActivationIdentities,
     ) -> result::Result<
         start_eligible_turn::StartEligibleTurnOutcome,
         start_eligible_turn::StartEligibleTurnRepositoryError,
@@ -680,7 +680,7 @@ impl start_eligible_turn::StartEligibleTurnTransaction
     async fn handle(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: activated_turn::AcceptedInputTurnActivationIdentities,
     ) -> result::Result<
         start_eligible_turn::StartEligibleTurnOutcome,
         <Self as start_eligible_turn::StartEligibleTurnTransaction>::Error,
@@ -688,7 +688,7 @@ impl start_eligible_turn::StartEligibleTurnTransaction
     async fn handle_with_activation_observer(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: activated_turn::AcceptedInputTurnActivationIdentities,
         observer: sync::Arc<
             dyn function::Fn(signalbox_domain::TurnId) + marker::Send + marker::Sync,
         >,

@@ -88,7 +88,7 @@ pub enum SubmitInputCorruption {
     },
     CurrentSession(session::SessionCorruption),
     Domain(reconstituted::SubmitInputReconstitutionFailure),
-    Scheduling(turn_eligibility::AcceptedInputSchedulingReconstitutionFailure),
+    Scheduling(failure::AcceptedInputSchedulingReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for submit_input::SubmitInputCorruption

@@ -41,7 +41,7 @@ impl StartupScanIdGenerator for UuidV7StartupScanIdGenerator {
 ```rust
 pub enum StartupScanSessionOutcome {
     NoActiveTurn,
-    Recovered(boxed::Box<turn_eligibility::FailedAcceptedInputTurn>),
+    Recovered(boxed::Box<turn_failure::FailedAcceptedInputTurn>),
     RecoveredModelCall(boxed::Box<model_execution::ModelCallTerminalOutcome>),
     RecoveredContextCompaction {
         call: signalbox_domain::ModelCallId,
@@ -77,7 +77,7 @@ pub trait StartupScanRepository {
     fn recover<Generator>(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
+        identities: turn_failure::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
     ) -> impl future::Future<
         Output = result::Result<StartupScanSessionOutcome, <Self as StartupScanRepository>::Error>,

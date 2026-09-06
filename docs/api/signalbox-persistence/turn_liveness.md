@@ -312,7 +312,7 @@ impl turn_liveness::PostgresTurnLivenessRepository {
     pub async fn recover_observed_slot_held_turn<Generator>(
         &self,
         candidate: turn_liveness::StaleTurnCandidate,
-        identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
+        identities: turn_failure::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
     ) -> result::Result<
         option::Option<startup_scan::StartupScanSessionOutcome>,
@@ -331,7 +331,7 @@ impl turn_liveness::PostgresTurnLivenessRepository {
     pub async fn terminalize_stale_turn<Generator>(
         &self,
         candidate: turn_liveness::StaleTurnCandidate,
-        identities: turn_eligibility::AcceptedInputTurnFailureIdentities,
+        identities: turn_failure::AcceptedInputTurnFailureIdentities,
         ids: &mut Generator,
     ) -> result::Result<turn_liveness::StaleTurnOutcome, turn_liveness::TurnLivenessRepositoryError>
     where

@@ -31,7 +31,7 @@ impl StartEligibleTurnIdGenerator for UuidV7StartEligibleTurnIdGenerator {
 ```rust
 pub enum StartEligibleTurnOutcome {
     NoEligibleTurn,
-    Activated(boxed::Box<turn_eligibility::ActivatedTurn>),
+    Activated(boxed::Box<activated_turn::ActivatedTurn>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -44,7 +44,7 @@ pub trait StartEligibleTurnTransaction {
     fn handle(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: activated_turn::AcceptedInputTurnActivationIdentities,
     ) -> impl future::Future<
         Output = result::Result<
             StartEligibleTurnOutcome,
@@ -54,7 +54,7 @@ pub trait StartEligibleTurnTransaction {
     fn handle_with_activation_observer(
         &mut self,
         session: signalbox_domain::SessionId,
-        identities: turn_eligibility::AcceptedInputTurnActivationIdentities,
+        identities: activated_turn::AcceptedInputTurnActivationIdentities,
         observer: sync::Arc<
             dyn function::Fn(signalbox_domain::TurnId) + marker::Send + marker::Sync,
         >,

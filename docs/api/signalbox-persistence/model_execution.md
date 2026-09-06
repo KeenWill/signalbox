@@ -924,7 +924,7 @@ impl model_execution::PostgresModelCallRepository {
     pub fn approval_judge_repository(&self) -> approval_judge::PostgresApprovalJudgeRepository;
     pub async fn preview_activation_operation(
         &self,
-        preview: &turn_eligibility::PreparedTurnActivation,
+        preview: &prepared_activation::PreparedTurnActivation,
         call: signalbox_domain::ModelCallId,
     ) -> result::Result<
         option::Option<model_execution::ProspectiveModelCall>,
