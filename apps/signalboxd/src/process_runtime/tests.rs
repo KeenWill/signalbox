@@ -783,10 +783,9 @@ mod tests {
         SessionId::from_uuid(Uuid::from_u128(1))
     }
 
-    /// an explicit compaction whose commit outcome cannot be
-    /// decided raises the same fatal recovery signal its automatic sibling
-    /// raises through the scheduler pass, and still answers the client with the
-    /// stable ambiguous code.
+    /// an explicit compaction whose commit outcome cannot be decided raises the same fatal recovery
+    /// signal its automatic sibling raises through the scheduler pass, and still answers the client
+    /// with the stable ambiguous code.
     ///
     /// Without the report the connection handler has nowhere left to go: it
     /// holds no `PreparedContextCompaction` to terminalize, replay of the same
@@ -824,9 +823,8 @@ mod tests {
         Ok(())
     }
 
-    /// a failure proven to precede the commit boundary is
-    /// ordinary unavailability and raises no recovery signal, so the reaction
-    /// stays scoped to the one declared class that needs it.
+    /// a failure proven to precede the commit boundary is ordinary unavailability and raises no
+    /// recovery signal, so the reaction stays scoped to the one declared class that needs it.
     #[tokio::test]
     async fn decided_explicit_compaction_failure_raises_no_recovery_signal()
     -> Result<(), Box<dyn Error>> {
@@ -3274,8 +3272,8 @@ mod tests {
         );
     }
 
-    /// committing an internal delivery wake makes the exact
-    /// recipient eligible without projecting the wake onto follow streams.
+    /// committing an internal delivery wake makes the exact recipient eligible without projecting
+    /// the wake onto follow streams.
     #[test]
     fn internal_delegation_wake_nudges_exact_recipient() {
         let recipient = SessionId::from_uuid(Uuid::from_u128(10));
