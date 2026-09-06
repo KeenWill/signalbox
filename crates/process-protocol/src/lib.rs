@@ -9394,14 +9394,14 @@ mod tests {
     }
 
     #[test]
-    fn s24_content_fragmentation_preserves_empty_text_exactly() {
+    fn content_fragmentation_preserves_empty_text_exactly() {
         let empty = super::content_fragments("").collect::<Vec<_>>();
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0].as_str(), "");
     }
 
     #[test]
-    fn s24_content_fragmentation_preserves_multibyte_boundaries_exactly() {
+    fn content_fragmentation_preserves_multibyte_boundaries_exactly() {
         let text = format!(
             "{}\u{1f980}tail",
             "a".repeat(MAX_CONTENT_FRAGMENT_BYTES - 1)

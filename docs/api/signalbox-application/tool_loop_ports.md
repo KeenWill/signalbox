@@ -8,21 +8,21 @@
 pub enum ResolvedToolConversationEntry {
     AssistantToolUse {
         source: context_frontier::SemanticTranscriptEntryRef,
-        request: tool::ToolRequest,
+        request: request::ToolRequest,
     },
     ExecutionResult {
         source: context_frontier::SemanticTranscriptEntryRef,
-        request: tool::ToolRequest,
+        request: request::ToolRequest,
         attempt: tool_attempt::EndedToolAttempt,
     },
     Denied {
         source: context_frontier::SemanticTranscriptEntryRef,
-        request: tool::ToolRequest,
-        approval: tool::ToolApprovalResolution,
+        request: request::ToolRequest,
+        approval: approval::ToolApprovalResolution,
     },
     Closed {
         source: context_frontier::SemanticTranscriptEntryRef,
-        request: tool::ToolRequest,
+        request: request::ToolRequest,
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -60,11 +60,11 @@ pub trait DecideToolRequestTransaction {
     type Error: ClassifyOperatorFailure;
     fn decide<NextAttempt>(
         &mut self,
-        command: tool::DecideToolRequest,
+        command: decide::DecideToolRequest,
         next_attempt: NextAttempt,
     ) -> impl future::Future<
         Output = result::Result<
-            tool::PreparedDecideToolRequest,
+            decide::PreparedDecideToolRequest,
             <Self as DecideToolRequestTransaction>::Error,
         >,
     > + marker::Send
@@ -80,10 +80,10 @@ pub trait OverrideDeniedToolRequestTransaction {
     type Error: ClassifyOperatorFailure;
     fn override_denied(
         &mut self,
-        command: tool::OverrideDeniedToolRequest,
+        command: override_denial::OverrideDeniedToolRequest,
     ) -> impl future::Future<
         Output = result::Result<
-            tool::PreparedOverrideDeniedToolRequest,
+            override_denial::PreparedOverrideDeniedToolRequest,
             <Self as OverrideDeniedToolRequestTransaction>::Error,
         >,
     > + marker::Send;
@@ -178,7 +178,7 @@ pub trait ToolExecutionTransaction {
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
         attempt: signalbox_domain::ToolAttemptId,
-        effect_class: tool::ToolEffectClass,
+        effect_class: policy::ToolEffectClass,
     ) -> impl future::Future<
         Output = result::Result<
             option::Option<tool_attempt::CurrentToolAttempt>,

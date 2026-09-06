@@ -185,12 +185,12 @@ impl SessionMetadataListItem {
         snapshot: &session_metadata::SessionMetadataSnapshot,
         defaults_version: configuration::SessionConfigurationDefaultsVersion,
         model_selection: configuration::ModelSelectionRequest,
-        dangerous_tool_auto_approval: tool::DangerousToolAutoApproval,
+        dangerous_tool_auto_approval: policy::DangerousToolAutoApproval,
     ) -> Self;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
     pub const fn model_selection(&self) -> configuration::ModelSelectionRequest;
-    pub const fn dangerous_tool_auto_approval(&self) -> tool::DangerousToolAutoApproval;
+    pub const fn dangerous_tool_auto_approval(&self) -> policy::DangerousToolAutoApproval;
     pub fn title(&self) -> option::Option<&str>;
     pub fn tags(&self) -> impl exact_size::ExactSizeIterator<Item = &str>;
     pub const fn archived(&self) -> bool;

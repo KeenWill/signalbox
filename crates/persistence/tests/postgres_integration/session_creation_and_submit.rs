@@ -19,12 +19,12 @@ fn attachment_content(digest: BlobDigest) -> UserContent {
         .expect("the fixture attachment content is canonical")
 }
 
-/// S01: the Postgres adapters preserve
+/// the Postgres adapters preserve
 /// application command outcomes, return the complete current session
 /// projection, and keep infrastructure failure nonterminal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_application_session_services_use_postgres_adapters() -> Result<(), Box<dyn Error>> {
+async fn application_session_services_use_postgres_adapters() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x601));
     let request = CreateSessionRequest::try_new(
@@ -105,12 +105,11 @@ async fn s01_application_session_services_use_postgres_adapters() -> Result<(), 
     Ok(())
 }
 
-/// S01: both ordinary creation replay and current-session loading
+/// both ordinary creation replay and current-session loading
 /// reject a user-initiated row carrying a contradictory spawning request.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_creation_readers_reject_spawning_request_on_user_session() -> Result<(), Box<dyn Error>>
-{
+async fn creation_readers_reject_spawning_request_on_user_session() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let command = DurableCommandId::from_uuid(Uuid::from_u128(0x0016_0001));
     let session = SessionId::from_uuid(Uuid::from_u128(0x0017_0001));
@@ -400,7 +399,7 @@ async fn template_creation_persists_copy_and_name_keyed_replay() -> Result<(), B
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_create_session_schema_preserves_typed_facts() -> Result<(), Box<dyn Error>> {
+async fn create_session_schema_preserves_typed_facts() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
 
@@ -642,8 +641,7 @@ async fn registry_and_create_session_constraints_reject_torn_or_conflicting_reco
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result<(), Box<dyn Error>>
-{
+async fn schema_rejects_invalid_provenance_defaults_and_mutation() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
     let delegated_without_spawn = sqlx::query(
@@ -866,12 +864,13 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
     Ok(())
 }
 
-/// S01: first handling commits the complete typed creation, equal
+/// first handling commits the complete typed creation, equal
 /// replay returns the recorded identity, and structural conflict changes
 /// nothing. Direct and alias defaults round-trip through reconstitution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_transaction_apply_replay_conflict_and_restart() -> Result<(), Box<dyn Error>> {
+async fn creation_replays_the_committed_identity_across_conflicts_and_restart()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let first = prepared(0x101, 0x701, direct(0x801));
@@ -947,13 +946,12 @@ async fn s01_transaction_apply_replay_conflict_and_restart() -> Result<(), Box<d
     Ok(())
 }
 
-/// S01: the user-global primary key is the concurrency boundary.
+/// the user-global primary key is the concurrency boundary.
 /// Equal duplicates return one winner; unequal duplicates retain that winner
 /// and report one typed conflict.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_concurrent_duplicates_converge_on_the_committed_winner() -> Result<(), Box<dyn Error>>
-{
+async fn concurrent_duplicates_converge_on_the_committed_winner() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
 
@@ -1026,7 +1024,7 @@ async fn s01_concurrent_duplicates_converge_on_the_committed_winner() -> Result<
     Ok(())
 }
 
-/// S01: a later write failure rolls back the provisional registry
+/// a later write failure rolls back the provisional registry
 /// insert, so the same command ID remains available for a valid retry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -1405,12 +1403,13 @@ async fn defaults_schema_enforces_typed_receipts() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// S01: the application service through the
+/// the application service through the
 /// Postgres adapter records applied and stale outcomes, replays historical
 /// receipts, and leaves creation history distinct from current Session.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_defaults_apply_replay_stale_and_history() -> Result<(), Box<dyn Error>> {
+async fn defaults_replay_preserves_historical_applied_and_stale_receipts()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -1607,12 +1606,12 @@ async fn future_defaults_epoch_records_mismatch_without_applying_placeholder()
     Ok(())
 }
 
-/// S33: replacing defaults while a turn is
+/// replacing defaults while a turn is
 /// active leaves that turn bound to its accepted epoch, while the next origin
 /// freezes the successor and starts behind an injected model-identity entry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s33_mid_session_model_switch_is_forward_only() -> Result<(), Box<dyn Error>> {
+async fn mid_session_model_switch_is_forward_only() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x731));
     let first_selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x831));
@@ -2203,13 +2202,12 @@ async fn exhaustion_and_precommit_failure_are_distinct() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// S01: load-by-session identity returns the
+/// load-by-session identity returns the
 /// complete version selected by the current pointer, while creation receipt
 /// replay remains pinned to the immutable creation-time version.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_current_session_load_and_receipt_replay_remain_distinct() -> Result<(), Box<dyn Error>>
-{
+async fn current_session_load_and_receipt_replay_remain_distinct() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository =
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
@@ -4929,13 +4927,14 @@ async fn delegated_executing_tool_batch_charges_its_retained_attachment()
     Ok(())
 }
 
-/// S01: first acceptance
+/// first acceptance
 /// commits the complete exact receipt and immutable queued origin; equal
 /// replay and a restarted adapter return that receipt without consulting new
 /// candidates.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_submit_apply_replay_conflict_and_restart() -> Result<(), Box<dyn Error>> {
+async fn submit_replays_the_committed_receipt_across_conflicts_and_restart()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x301, 0x701, direct(0x801)))
@@ -5081,12 +5080,12 @@ async fn s01_submit_apply_replay_conflict_and_restart() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// S01 / S03: the real application service
+/// the real application service
 /// commits one complete activation, and a fresh repository and pool observe
 /// the same occupied slot after restart without activating it again.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s03_start_eligible_turn_survives_restart() -> Result<(), Box<dyn Error>> {
+async fn start_eligible_turn_survives_restart() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x381, 0x781, direct(0x881)))

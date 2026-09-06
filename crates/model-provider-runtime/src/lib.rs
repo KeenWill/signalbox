@@ -2454,11 +2454,11 @@ mod tests {
         .into_request()
     }
 
-    /// S28: the outward runtime bridge consumes imported
+    /// the outward runtime bridge consumes imported
     /// messages under their rendered role and exact text without consulting or
     /// manufacturing native execution provenance.
     #[test]
-    fn s28_imported_messages_map_to_provider_neutral_text_roles() {
+    fn imported_messages_map_to_provider_neutral_text_roles() {
         let source = SemanticTranscriptEntryRef::from_source(
             SessionId::from_uuid(Uuid::from_u128(2)),
             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(3)),
@@ -2487,11 +2487,11 @@ mod tests {
         );
     }
 
-    /// S33: the provider bridge renders the durable identity boundary
+    /// the provider bridge renders the durable identity boundary
     /// as the exact injected user-role session event selected by the recorded
     /// context-lifecycle decision.
     #[test]
-    fn s33_model_identity_boundary_is_an_injected_user_message() {
+    fn model_identity_boundary_is_an_injected_user_message() {
         let source = source(12);
         let defaults_version = SessionConfigurationDefaultsVersion::try_from_u64(3)
             .expect("the fixture epoch is positive");
@@ -2589,11 +2589,11 @@ mod tests {
             usage: TokenUsage::unreported(),
         })
     }
-    /// S10: one provider response and its ordered result
+    /// one provider response and its ordered result
     /// batch remain grouped, while malformed arguments use replay-safe JSON
     /// without replacing their exact durable request evidence.
     #[test]
-    fn s10_tool_history_is_grouped_and_replay_safe() {
+    fn tool_history_is_grouped_and_replay_safe() {
         let first = request(20, "{}");
         let malformed = request(21, "{\"timezone\":");
         let scalar = request(22, "7");
@@ -2859,10 +2859,10 @@ mod tests {
         );
     }
 
-    /// S02: runtime terminal evidence maps to the exact
+    /// runtime terminal evidence maps to the exact
     /// physical disposition without retryability or error-string inference.
     #[test]
-    fn s02_terminal_evidence_classification_is_total() {
+    fn terminal_evidence_classification_is_total() {
         let exchange = ExchangeFacts::default();
         assert_eq!(
             classify_terminal(
@@ -2960,10 +2960,10 @@ mod tests {
         );
     }
 
-    /// S02: only exact text from a matching reported target becomes
+    /// only exact text from a matching reported target becomes
     /// assistant content; empty blocks create no invalid empty entry.
     #[test]
-    fn s02_matching_completion_preserves_text_parts() {
+    fn matching_completion_preserves_text_parts() {
         assert_eq!(
             classify_terminal(
                 completion(
@@ -3149,10 +3149,10 @@ mod tests {
         ));
     }
 
-    /// S10: runtime-native tool calls become ordered,
+    /// runtime-native tool calls become ordered,
     /// normalized domain proposals without retaining provider identifiers.
     #[test]
-    fn s10_tool_completion_crosses_as_provider_neutral_proposals() {
+    fn tool_completion_crosses_as_provider_neutral_proposals() {
         let classified = classify_terminal(
             tool_completion("model-exact"),
             &[],
@@ -3178,12 +3178,12 @@ mod tests {
         ));
     }
 
-    /// S02: a Claude 5-family tool completion carrying the
+    /// a Claude 5-family tool completion carrying the
     /// omitted-display empty thinking part classifies as a tool round — the
     /// empty part is dropped like an empty text block instead of failing the
     /// whole legitimate completion closed.
     #[test]
-    fn s02_empty_thinking_part_is_dropped_from_a_tool_completion() {
+    fn empty_thinking_part_is_dropped_from_a_tool_completion() {
         let classified = classify_terminal(
             completion_with_finish(
                 "model-exact",
@@ -3217,11 +3217,11 @@ mod tests {
         ));
     }
 
-    /// S02: thinking with actual text still fails the bridge
+    /// thinking with actual text still fails the bridge
     /// closed — dropping it would silently erase response material for which
     /// no durable semantic representation exists.
     #[test]
-    fn s02_nonempty_thinking_part_still_fails_closed() {
+    fn nonempty_thinking_part_still_fails_closed() {
         let outcome = classify_terminal(
             completion(
                 "model-exact",
@@ -3243,10 +3243,10 @@ mod tests {
         ));
     }
 
-    /// S10: tool-call content and the `ToolUse` finish reason must
+    /// tool-call content and the `ToolUse` finish reason must
     /// agree before either terminal completion observation is constructed.
     #[test]
-    fn s10_mismatched_tool_finish_is_known_failed() {
+    fn mismatched_tool_finish_is_known_failed() {
         assert_eq!(
             classify_terminal(
                 completion(
@@ -3433,7 +3433,7 @@ mod tests {
         );
     }
 
-    /// S20: an alias resolved to its own canonical dated form is
+    /// an alias resolved to its own canonical dated form is
     /// the same logical target. The exchange completes, and the concrete
     /// identity that actually served it is retained as sanitized evidence.
     ///
@@ -3442,7 +3442,7 @@ mod tests {
     /// the dated identity failed the adapter stage closed, terminalized the
     /// call ambiguously, and stopped the daemon.
     #[test]
-    fn s20_alias_resolved_to_its_dated_form_is_the_same_target() {
+    fn alias_resolved_to_its_dated_form_is_the_same_target() {
         let early = vec![Observation {
             correlation: call(),
             fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
@@ -3477,10 +3477,10 @@ mod tests {
         );
     }
 
-    /// S20: an exactly matching identity needs no normalization
+    /// an exactly matching identity needs no normalization
     /// record, so nothing is manufactured for it.
     #[test]
-    fn s20_exact_identity_records_no_concretion() {
+    fn exact_identity_records_no_concretion() {
         let classified = classify_terminal(
             completion(
                 "claude-haiku-4-5",
@@ -3524,10 +3524,10 @@ mod tests {
             .collect()
     }
 
-    /// S20: the discriminator between an alias made concrete and a
+    /// the discriminator between an alias made concrete and a
     /// substituted lineage, stated as a table.
     #[test]
-    fn s20_provider_target_relation_rule_is_stated_by_example() {
+    fn distinguishes_exact_targets_alias_concretion_and_different_lineages() {
         let rows = relation_rows(&[
             ("claude-haiku-4-5", "claude-haiku-4-5"),
             ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),

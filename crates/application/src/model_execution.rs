@@ -3067,10 +3067,10 @@ mod tests {
             .expect("text-only fixture needs no attachment catalog facts")
     }
 
-    /// S02: ordered attachment content becomes bounded
+    /// ordered attachment content becomes bounded
     /// canonical text stubs with metadata visible and blob bytes absent.
     #[test]
-    fn s02_attachment_frontier_renders_ordered_stubs_without_bytes() {
+    fn attachment_frontier_renders_ordered_stubs_without_bytes() {
         let digest = BlobDigest::digest(b"secret blob bytes");
         let filename =
             signalbox_domain::AttachmentDisplayFilename::try_new(String::from("scan\".png"))
@@ -4561,7 +4561,7 @@ mod tests {
     /// The user-selected rendering decision: origin input becomes a user-role
     /// message carrying the semantic entry's source, in frontier order.
     #[test]
-    fn s02_frontier_rendering_preserves_user_role_order_and_source() {
+    fn frontier_rendering_preserves_user_role_order_and_source() {
         let (request, _) = prepared_fixture();
         let credential_reference = credential_reference();
         let operation = PreparedModelOperation::render(
@@ -4594,11 +4594,11 @@ mod tests {
         );
     }
 
-    /// S34: rendering binds the exact optional frozen-epoch system
+    /// rendering binds the exact optional frozen-epoch system
     /// prompt onto the provider-neutral operation without rewriting it, and
     /// an epoch without a prompt renders none.
     #[test]
-    fn s34_render_carries_the_frozen_epoch_system_prompt() {
+    fn render_carries_the_frozen_epoch_system_prompt() {
         let (request, _) = prepared_fixture();
         let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
             .expect("fixture prompt is admissible");
@@ -4627,7 +4627,7 @@ mod tests {
     /// The recorded turn-wide availability bound counts validated producing
     /// calls, not requests or inherited tool history.
     #[test]
-    fn s15_automatic_tool_round_bound_counts_current_turn_producing_calls() {
+    fn automatic_tool_round_bound_counts_current_turn_producing_calls() {
         let current_turn = identity(2, TurnId::from_uuid);
         let below_limit_count = 31;
         let below_limit = current_turn_tool_rounds(below_limit_count);
@@ -4745,12 +4745,12 @@ mod tests {
         )
     }
 
-    /// S10: a recorded override substitutes for the judge only on the
+    /// a recorded override substitutes for the judge only on the
     /// exact denied command — a proposal with other arguments still parks for
     /// the judge — and the selected approval carries the override command and
     /// the overridden denial.
     #[test]
-    fn s10_recorded_override_substitutes_for_the_judge_on_the_exact_command() {
+    fn recorded_override_substitutes_for_the_judge_on_the_exact_command() {
         let recorded = recorded_guarded_override();
         let approvals = guarded_tool_approvals(
             signalbox_domain::ToolApprovalPosture::Delegated,
@@ -4773,10 +4773,10 @@ mod tests {
         );
     }
 
-    /// S10: one recorded override pre-approves at most one proposal
+    /// one recorded override pre-approves at most one proposal
     /// per response; a second identical proposal parks for the judge again.
     #[test]
-    fn s10_recorded_override_is_consumed_at_most_once_per_response() {
+    fn recorded_override_is_consumed_at_most_once_per_response() {
         let recorded = recorded_guarded_override();
         let approvals = guarded_tool_approvals(
             signalbox_domain::ToolApprovalPosture::Delegated,
@@ -4796,10 +4796,10 @@ mod tests {
         );
     }
 
-    /// S10: a recorded override substitutes only where the judge
+    /// a recorded override substitutes only where the judge
     /// would decide; a human-frozen selection is never overridden.
     #[test]
-    fn s10_recorded_override_never_bypasses_a_human_selection() {
+    fn recorded_override_never_bypasses_a_human_selection() {
         let approvals = guarded_tool_approvals(
             signalbox_domain::ToolApprovalPosture::Human,
             vec![guarded_proposal("{}")],
@@ -4809,12 +4809,12 @@ mod tests {
         assert_eq!(approvals.as_ref(), [InitialToolApproval::Human]);
     }
 
-    /// S10: one identity is minted per ordered response
+    /// one identity is minted per ordered response
     /// part/request, approval stays pinned to the advertised catalog snapshot,
     /// mixed auto/confirm policy parks without a continuation attempt, and the
     /// adapter still receives a stopped race closure.
     #[test]
-    fn s10_tool_response_candidates_preserve_order_and_policy() {
+    fn tool_response_candidates_preserve_order_and_policy() {
         let schema =
             crate::ToolInputSchema::try_new(String::from(r#"{"properties":{},"type":"object"}"#))
                 .expect("fixture schema is valid");
@@ -4927,10 +4927,10 @@ mod tests {
         );
     }
 
-    /// S10: a credential-suppressed proposal bypasses the
+    /// a credential-suppressed proposal bypasses the
     /// advertised execution policy and receives an automatic safety denial.
     #[test]
-    fn s10_suppressed_proposal_forces_runtime_safety_denial() {
+    fn suppressed_proposal_forces_runtime_safety_denial() {
         let service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
@@ -4971,11 +4971,11 @@ mod tests {
             [InitialToolApproval::RuntimeSafetyDeny]
         );
     }
-    /// S28: attested imported text keeps its exact
+    /// attested imported text keeps its exact
     /// source-attested role, semantic source, imported authority, and decoded
     /// text without acquiring a native input or call identity.
     #[test]
-    fn s28_frontier_rendering_preserves_imported_text_roles_and_sources() {
+    fn frontier_rendering_preserves_imported_text_roles_and_sources() {
         let imported_user_entry =
             identity(110, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
         let imported_assistant_entry =
@@ -5046,10 +5046,10 @@ mod tests {
         assert_eq!(content.as_str(), exact_assistant.as_str());
     }
 
-    /// S28: typed imported text or speaker absence remains
+    /// typed imported text or speaker absence remains
     /// model-invisible rather than guessing a role or fabricating content.
     #[test]
-    fn s28_frontier_rendering_skips_imported_text_with_typed_absence() {
+    fn frontier_rendering_skips_imported_text_with_typed_absence() {
         let projected_session = identity(120, SessionId::from_uuid);
         let imported_entry = identity(121, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
         let exact_text = ImportedText::new(String::from("must remain hidden"));
@@ -5122,11 +5122,11 @@ mod tests {
         );
     }
 
-    /// S28: the conservative frontier renderer leaves
+    /// the conservative frontier renderer leaves
     /// every imported non-text vocabulary member model-invisible without
     /// removing it from the semantic frontier or inventing native tool facts.
     #[test]
-    fn s28_frontier_rendering_skips_every_imported_non_text_variant() {
+    fn frontier_rendering_skips_every_imported_non_text_variant() {
         let projected_session = identity(130, SessionId::from_uuid);
         let imported_entry = identity(131, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
         let speaker = ImportedSourceAttestation::Attested(ImportedSpeaker::User);
@@ -5257,11 +5257,11 @@ mod tests {
         );
     }
 
-    /// S02: mixed semantic content keeps exact role order and
+    /// mixed semantic content keeps exact role order and
     /// source-qualified provenance, including entries created by a different
     /// session; terminal markers do not invent provider-visible messages.
     #[test]
-    fn s02_frontier_rendering_preserves_mixed_roles_and_inherited_sources() {
+    fn frontier_rendering_preserves_mixed_roles_and_inherited_sources() {
         let inherited_session = identity(90, SessionId::from_uuid);
         let current_session = identity(1, SessionId::from_uuid);
         let inherited_input = identity(91, AcceptedInputId::from_uuid);
@@ -5462,11 +5462,11 @@ mod tests {
         );
     }
 
-    /// S02: durable request, attempt, and denial authority renders
+    /// durable request, attempt, and denial authority renders
     /// reference-only tool semantics into their exact provider-visible roles
     /// without changing source order.
     #[test]
-    fn s02_frontier_rendering_resolves_exact_tool_roles_in_source_order() {
+    fn frontier_rendering_resolves_exact_tool_roles_in_source_order() {
         let completed_request = model_tool_request(0);
         let denied_request = model_tool_request(1);
         let closed_request = model_tool_request(2);
@@ -5649,10 +5649,10 @@ mod tests {
         );
     }
 
-    /// S02: a terminal attempt from another turn cannot supply
+    /// a terminal attempt from another turn cannot supply
     /// authority for a tool-result semantic entry.
     #[test]
-    fn s02_frontier_rendering_rejects_cross_turn_tool_result_evidence() {
+    fn frontier_rendering_rejects_cross_turn_tool_result_evidence() {
         let request = model_tool_request(0);
         let source = SemanticTranscriptEntryRef::from_source(
             request.session(),
@@ -5698,10 +5698,10 @@ mod tests {
         );
     }
 
-    /// S02: a newly committed Prepared checkpoint ends
+    /// a newly committed Prepared checkpoint ends
     /// the invocation before capability preparation or authorization.
     #[tokio::test]
-    async fn s02_checkpoint_stops_before_every_later_port() {
+    async fn checkpoint_stops_before_every_later_port() {
         let checkpoint = identity(70, ModelCallId::from_uuid);
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
@@ -5727,10 +5727,10 @@ mod tests {
         assert_eq!(prepare.calls, 1);
     }
 
-    /// S02: a proven fresh-identity collision retries only the
+    /// a proven fresh-identity collision retries only the
     /// rolled-back prepare transaction with fresh candidates.
     #[tokio::test]
-    async fn s02_prepare_identity_collision_retries_transaction_only() {
+    async fn prepare_identity_collision_retries_transaction_only() {
         let checkpoint = identity(71, ModelCallId::from_uuid);
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
@@ -5840,11 +5840,11 @@ mod tests {
         );
     }
 
-    /// S34: the execution loop presents the prepare transaction's
+    /// the execution loop presents the prepare transaction's
     /// exact frozen-epoch system prompt to the provider port with the
     /// capability operation; a promptless epoch presents none.
     #[tokio::test]
-    async fn s34_prepared_capability_receives_the_frozen_epoch_system_prompt() {
+    async fn prepared_capability_receives_the_frozen_epoch_system_prompt() {
         let (request, _) = prepared_fixture();
         let session = request.session();
         let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
@@ -6227,12 +6227,12 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// S15: a turn that reaches the automatic tool-round limit closes
+    /// a turn that reaches the automatic tool-round limit closes
     /// with its distinct terminal reason before provider entry. This prevents
     /// a runaway paid provider loop without misreporting saturation as a
     /// capability failure.
     #[tokio::test]
-    async fn s15_tool_round_limit_fires_before_provider_entry() {
+    async fn tool_round_limit_fires_before_provider_entry() {
         const CONFIGURED_TOOL_ROUND_LIMIT: usize = 7;
         let (request, tool_entries, failed) =
             tool_round_saturated_fixture(CONFIGURED_TOOL_ROUND_LIMIT);
@@ -6784,12 +6784,12 @@ mod tests {
         );
     }
 
-    /// S15: a turn whose retained tool content exceeds its ceiling
+    /// a turn whose retained tool content exceeds its ceiling
     /// closes through the same pre-send terminal contract as round saturation
     /// and never enters the provider. The round ceiling alone bounds latency and
     /// spend but not retained memory, which is what this bound supplies.
     #[tokio::test]
-    async fn s15_retained_frontier_content_limit_fires_before_provider_entry() {
+    async fn retained_frontier_content_limit_fires_before_provider_entry() {
         // Two rounds and no configured round ceiling at all, so only the
         // retained-content bound can explain the closure.
         let (request, tool_entries, failed) = tool_round_saturated_fixture(2);
@@ -7139,11 +7139,11 @@ mod tests {
         assert_eq!(provider.interaction_count(), 1);
     }
 
-    /// S02: a non-collision observation failure retains
+    /// a non-collision observation failure retains
     /// the exact result; later passes authoritatively resubmit it unchanged
     /// while absent and stop once the original commit is observed.
     #[tokio::test]
-    async fn s02_failed_observation_commit_is_retained_and_reread() {
+    async fn failed_observation_commit_is_retained_and_reread() {
         let (request, authorized) = prepared_fixture();
         let call = authorized.call().id();
         let session = authorized.session();
@@ -7223,12 +7223,12 @@ mod tests {
         assert_eq!(provider.interaction_count(), 1);
     }
 
-    /// S02: when authorization acknowledgement is lost,
+    /// when authorization acknowledgement is lost,
     /// the still-owned capability proves `invoke` was never entered. An
     /// authoritative InFlight reread becomes a correlated known-failure
     /// observation without any provider interaction.
     #[tokio::test]
-    async fn s02_ambiguous_authorization_classifies_unconsumed_in_flight() {
+    async fn ambiguous_authorization_classifies_unconsumed_in_flight() {
         let (request, authorized) = prepared_fixture();
         let call = authorized.call().id();
         let session = authorized.session();
@@ -7468,7 +7468,7 @@ mod tests {
     /// back to Prepared, the unconsumed scripted interaction action can
     /// prepare again and still produces exactly one physical interaction.
     #[tokio::test]
-    async fn s02_authorization_rollback_reprepares_one_scripted_interaction_action() {
+    async fn authorization_rollback_reprepares_one_scripted_interaction_action() {
         let (request, authorized) = prepared_fixture();
         let session = request.session();
         let mut service = ModelCallExecutionService::new(
@@ -7528,11 +7528,11 @@ mod tests {
         assert_eq!(provider.remaining_step_count(), 0);
     }
 
-    /// S02: the attempt gate transfers into the provider
+    /// the attempt gate transfers into the provider
     /// interaction and is released at its acceptance-capable boundary while
     /// the slow terminal response remains pending.
     #[tokio::test]
-    async fn s02_dispatch_gate_releases_at_acceptance_boundary() {
+    async fn dispatch_gate_releases_at_acceptance_boundary() {
         let (request, authorized) = prepared_fixture();
         let session = authorized.session();
         let attempt = authorized.attempt().id();

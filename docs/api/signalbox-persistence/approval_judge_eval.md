@@ -160,7 +160,7 @@ where
 pub struct ApprovalJudgeEvalCallRecord {
     pub case_name: string::String,
     pub repeat_ordinal: u32,
-    pub recommendation: tool::DelegateApprovalRecommendation,
+    pub recommendation: policy::DelegateApprovalRecommendation,
     pub rationale: string::String,
     pub usage: model_execution::ProviderReportedTokenUsage,
 }
