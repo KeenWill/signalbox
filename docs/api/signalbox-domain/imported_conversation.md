@@ -79,7 +79,9 @@ impl fmt::Debug for imported_conversation::ImportedText {
 pub struct ImportedJsonNumber(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::PartialEq
 impl imported_conversation::ImportedJsonNumber {
-    pub fn try_new(value: string::String) -> result::Result<Self, imported_conversation::ImportedJsonNumberError>;
+    pub fn try_new(
+        value: string::String,
+    ) -> result::Result<Self, imported_conversation::ImportedJsonNumberError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -91,7 +93,7 @@ impl fmt::Debug for imported_conversation::ImportedJsonNumber {
 ## ImportedJsonNumberError
 
 ```rust
-pub struct ImportedJsonNumberError { /* private */ }
+pub struct ImportedJsonNumberError {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
 impl imported_conversation::ImportedJsonNumberError {
     pub fn value(&self) -> &str;
@@ -109,10 +111,13 @@ impl error::Error for imported_conversation::ImportedJsonNumberError {}
 ## ImportedStructuredObjectMember
 
 ```rust
-pub struct ImportedStructuredObjectMember { /* private */ }
+pub struct ImportedStructuredObjectMember {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl imported_conversation::ImportedStructuredObjectMember {
-    pub fn new(name: imported_conversation::ImportedText, value: imported_conversation::ImportedStructuredValue) -> Self;
+    pub fn new(
+        name: imported_conversation::ImportedText,
+        value: imported_conversation::ImportedStructuredValue,
+    ) -> Self;
     pub const fn name(&self) -> &imported_conversation::ImportedText;
     pub const fn value(&self) -> &imported_conversation::ImportedStructuredValue;
 }
@@ -140,7 +145,9 @@ impl cmp::PartialEq for imported_conversation::ImportedStructuredValue {
 }
 impl cmp::Eq for imported_conversation::ImportedStructuredValue {}
 impl hash::Hash for imported_conversation::ImportedStructuredValue {
-    pub fn hash<State>(&self, state: &mut State) where State: hash::Hasher;
+    pub fn hash<State>(&self, state: &mut State)
+    where
+        State: hash::Hasher;
 }
 impl drop::Drop for imported_conversation::ImportedStructuredValue {
     pub fn drop(&mut self);
@@ -160,17 +167,45 @@ pub enum ImportedSpeaker {
 ## ImportedSourceMetadata
 
 ```rust
-pub struct ImportedSourceMetadata { /* private */ }
+pub struct ImportedSourceMetadata {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl imported_conversation::ImportedSourceMetadata {
-    pub const fn new(record_id: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, parent_record_id: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, source_session_id: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, timestamp: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, sidechain: imported_conversation::ImportedSourceAttestation<bool>, metadata: imported_conversation::ImportedSourceAttestation<bool>, message_role: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedSpeaker>) -> Self;
-    pub const fn record_id(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
-    pub const fn parent_record_id(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
-    pub const fn source_session_id(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
-    pub const fn timestamp(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
+    pub const fn new(
+        record_id: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedText,
+        >,
+        parent_record_id: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedText,
+        >,
+        source_session_id: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedText,
+        >,
+        timestamp: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedText,
+        >,
+        sidechain: imported_conversation::ImportedSourceAttestation<bool>,
+        metadata: imported_conversation::ImportedSourceAttestation<bool>,
+        message_role: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedSpeaker,
+        >,
+    ) -> Self;
+    pub const fn record_id(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
+    pub const fn parent_record_id(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
+    pub const fn source_session_id(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
+    pub const fn timestamp(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
     pub const fn sidechain(&self) -> &imported_conversation::ImportedSourceAttestation<bool>;
     pub const fn metadata(&self) -> &imported_conversation::ImportedSourceAttestation<bool>;
-    pub const fn message_role(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedSpeaker>;
+    pub const fn message_role(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedSpeaker>;
 }
 ```
 
@@ -190,13 +225,25 @@ pub enum ImportedMessageContentAbsence {
 ## ImportedMediaSource
 
 ```rust
-pub struct ImportedMediaSource { /* private */ }
+pub struct ImportedMediaSource {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl imported_conversation::ImportedMediaSource {
-    pub const fn new(kind: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, media_type: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, data: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>) -> Self;
-    pub const fn kind(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
-    pub const fn media_type(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
-    pub const fn data(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
+    pub const fn new(
+        kind: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+        media_type: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedText,
+        >,
+        data: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+    ) -> Self;
+    pub const fn kind(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
+    pub const fn media_type(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
+    pub const fn data(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>;
 }
 ```
 
@@ -205,9 +252,19 @@ impl imported_conversation::ImportedMediaSource {
 ```rust
 pub enum ImportedToolResultBlock {
     Text(imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>),
-    Image(imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedMediaSource>),
-    ToolReference { tool_name: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText> },
-    SourceResultBlock { source_type: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText> },
+    Image(
+        imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedMediaSource,
+        >,
+    ),
+    ToolReference {
+        tool_name:
+            imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+    },
+    SourceResultBlock {
+        source_type:
+            imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -226,14 +283,48 @@ pub enum ImportedToolResultValue {
 
 ```rust
 pub enum ImportedTranscriptContent {
-    SourceEvent { source_type: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText> },
-    SourceMessageBlock { source_type: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText> },
+    SourceEvent {
+        source_type:
+            imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+    },
+    SourceMessageBlock {
+        source_type:
+            imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+    },
     Text(imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>),
-    ToolCall { source_call_id: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, name: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, input: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedStructuredValue>, caller: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedStructuredValue> },
-    ToolResult { source_call_id: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, content: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedToolResultValue>, is_error: imported_conversation::ImportedSourceAttestation<bool> },
-    Thinking { thinking: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, signature: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText> },
-    RedactedThinking { data: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText> },
-    Document { source: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedMediaSource> },
+    ToolCall {
+        source_call_id:
+            imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+        name: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+        input: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedStructuredValue,
+        >,
+        caller: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedStructuredValue,
+        >,
+    },
+    ToolResult {
+        source_call_id:
+            imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+        content: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedToolResultValue,
+        >,
+        is_error: imported_conversation::ImportedSourceAttestation<bool>,
+    },
+    Thinking {
+        thinking:
+            imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+        signature:
+            imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+    },
+    RedactedThinking {
+        data: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+    },
+    Document {
+        source: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedMediaSource,
+        >,
+    },
     MessageContentAbsent(imported_conversation::ImportedMessageContentAbsence),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -281,12 +372,17 @@ impl imported_conversation::ImportedTranscriptPosition {
 ## ImportedRawSourceRecord
 
 ```rust
-pub struct ImportedRawSourceRecord { /* private */ }
+pub struct ImportedRawSourceRecord {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
 impl imported_conversation::ImportedRawSourceRecord {
-    pub fn from_converted(bytes: vec::Vec<u8>, normalized: imported_conversation::ImportedStructuredValue) -> Self;
+    pub fn from_converted(
+        bytes: vec::Vec<u8>,
+        normalized: imported_conversation::ImportedStructuredValue,
+    ) -> Self;
     pub const fn content_hash(&self) -> imported_conversation::ImportedRawRecordHash;
-    pub const fn conversion_digest(&self) -> imported_conversation::ImportedRawRecordConversionDigest;
+    pub const fn conversion_digest(
+        &self,
+    ) -> imported_conversation::ImportedRawRecordConversionDigest;
     pub fn bytes(&self) -> &[u8];
     pub const fn normalized(&self) -> &imported_conversation::ImportedStructuredValue;
 }
@@ -298,13 +394,21 @@ impl fmt::Debug for imported_conversation::ImportedRawSourceRecord {
 ## ImportedRawSourceRecordReconstitutionInput
 
 ```rust
-pub struct ImportedRawSourceRecordReconstitutionInput { /* private */ }
+pub struct ImportedRawSourceRecordReconstitutionInput {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
 impl imported_conversation::ImportedRawSourceRecordReconstitutionInput {
-    pub fn new(position: imported_conversation::ImportedRawRecordPosition, stored_hash: imported_conversation::ImportedRawRecordHash, stored_conversion_digest: imported_conversation::ImportedRawRecordConversionDigest, bytes: vec::Vec<u8>, normalized: imported_conversation::ImportedStructuredValue) -> Self;
+    pub fn new(
+        position: imported_conversation::ImportedRawRecordPosition,
+        stored_hash: imported_conversation::ImportedRawRecordHash,
+        stored_conversion_digest: imported_conversation::ImportedRawRecordConversionDigest,
+        bytes: vec::Vec<u8>,
+        normalized: imported_conversation::ImportedStructuredValue,
+    ) -> Self;
     pub const fn position(&self) -> imported_conversation::ImportedRawRecordPosition;
     pub const fn stored_hash(&self) -> imported_conversation::ImportedRawRecordHash;
-    pub const fn stored_conversion_digest(&self) -> imported_conversation::ImportedRawRecordConversionDigest;
+    pub const fn stored_conversion_digest(
+        &self,
+    ) -> imported_conversation::ImportedRawRecordConversionDigest;
     pub fn bytes(&self) -> &[u8];
     pub const fn normalized(&self) -> &imported_conversation::ImportedStructuredValue;
 }
@@ -316,16 +420,30 @@ impl fmt::Debug for imported_conversation::ImportedRawSourceRecordReconstitution
 ## ImportedTranscriptEntryInput
 
 ```rust
-pub struct ImportedTranscriptEntryInput { /* private */ }
+pub struct ImportedTranscriptEntryInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_conversation::ImportedTranscriptEntryInput {
-    pub const fn new(identity: ImportedTranscriptEntryId, conversation: ImportedConversationId, position: imported_conversation::ImportedTranscriptPosition, raw_record_position: imported_conversation::ImportedRawRecordPosition, record_entry_position: imported_conversation::ImportedRecordEntryPosition, source_speaker: imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedSpeaker>, content: imported_conversation::ImportedTranscriptContent, source: imported_conversation::ImportedSourceMetadata) -> Self;
+    pub const fn new(
+        identity: ImportedTranscriptEntryId,
+        conversation: ImportedConversationId,
+        position: imported_conversation::ImportedTranscriptPosition,
+        raw_record_position: imported_conversation::ImportedRawRecordPosition,
+        record_entry_position: imported_conversation::ImportedRecordEntryPosition,
+        source_speaker: imported_conversation::ImportedSourceAttestation<
+            imported_conversation::ImportedSpeaker,
+        >,
+        content: imported_conversation::ImportedTranscriptContent,
+        source: imported_conversation::ImportedSourceMetadata,
+    ) -> Self;
     pub const fn identity(&self) -> ImportedTranscriptEntryId;
     pub const fn conversation(&self) -> ImportedConversationId;
     pub const fn position(&self) -> imported_conversation::ImportedTranscriptPosition;
     pub const fn raw_record_position(&self) -> imported_conversation::ImportedRawRecordPosition;
-    pub const fn record_entry_position(&self) -> imported_conversation::ImportedRecordEntryPosition;
-    pub const fn source_speaker(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedSpeaker>;
+    pub const fn record_entry_position(&self)
+        -> imported_conversation::ImportedRecordEntryPosition;
+    pub const fn source_speaker(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedSpeaker>;
     pub const fn content(&self) -> &imported_conversation::ImportedTranscriptContent;
     pub const fn source(&self) -> &imported_conversation::ImportedSourceMetadata;
 }
@@ -334,15 +452,18 @@ impl imported_conversation::ImportedTranscriptEntryInput {
 ## ImportedTranscriptEntry
 
 ```rust
-pub struct ImportedTranscriptEntry { /* private */ }
+pub struct ImportedTranscriptEntry {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_conversation::ImportedTranscriptEntry {
     pub const fn identity(&self) -> ImportedTranscriptEntryId;
     pub const fn conversation(&self) -> ImportedConversationId;
     pub const fn position(&self) -> imported_conversation::ImportedTranscriptPosition;
     pub const fn raw_record_position(&self) -> imported_conversation::ImportedRawRecordPosition;
-    pub const fn record_entry_position(&self) -> imported_conversation::ImportedRecordEntryPosition;
-    pub const fn source_speaker(&self) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedSpeaker>;
+    pub const fn record_entry_position(&self)
+        -> imported_conversation::ImportedRecordEntryPosition;
+    pub const fn source_speaker(
+        &self,
+    ) -> &imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedSpeaker>;
     pub const fn content(&self) -> &imported_conversation::ImportedTranscriptContent;
     pub const fn source(&self) -> &imported_conversation::ImportedSourceMetadata;
 }
@@ -351,10 +472,14 @@ impl imported_conversation::ImportedTranscriptEntry {
 ## ImportedTranscriptFrontier
 
 ```rust
-pub struct ImportedTranscriptFrontier { /* private */ }
+pub struct ImportedTranscriptFrontier {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl imported_conversation::ImportedTranscriptFrontier {
-    pub const fn from_parts(conversation: ImportedConversationId, through_entry: ImportedTranscriptEntryId, through_position: imported_conversation::ImportedTranscriptPosition) -> Self;
+    pub const fn from_parts(
+        conversation: ImportedConversationId,
+        through_entry: ImportedTranscriptEntryId,
+        through_position: imported_conversation::ImportedTranscriptPosition,
+    ) -> Self;
     pub const fn conversation(self) -> ImportedConversationId;
     pub const fn through_entry(self) -> ImportedTranscriptEntryId;
     pub const fn through_position(self) -> imported_conversation::ImportedTranscriptPosition;
@@ -364,19 +489,37 @@ impl imported_conversation::ImportedTranscriptFrontier {
 ## ImportedConversationReconstitutionInput
 
 ```rust
-pub struct ImportedConversationReconstitutionInput { /* private */ }
+pub struct ImportedConversationReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_conversation::ImportedConversationReconstitutionInput {
-    pub fn new(requested_conversation: ImportedConversationId, stored_conversation: ImportedConversationId, format: imported_conversation::ImportedConversationFormat, stored_source_digest: imported_conversation::ImportedConversationSourceDigest, declared_raw_record_count: u64, raw_records: vec::Vec<imported_conversation::ImportedRawSourceRecordReconstitutionInput>, declared_entry_count: u64, entries: vec::Vec<imported_conversation::ImportedTranscriptEntryInput>) -> Self;
+    pub fn new(
+        requested_conversation: ImportedConversationId,
+        stored_conversation: ImportedConversationId,
+        format: imported_conversation::ImportedConversationFormat,
+        stored_source_digest: imported_conversation::ImportedConversationSourceDigest,
+        declared_raw_record_count: u64,
+        raw_records: vec::Vec<imported_conversation::ImportedRawSourceRecordReconstitutionInput>,
+        declared_entry_count: u64,
+        entries: vec::Vec<imported_conversation::ImportedTranscriptEntryInput>,
+    ) -> Self;
     pub const fn requested_conversation(&self) -> ImportedConversationId;
     pub const fn stored_conversation(&self) -> ImportedConversationId;
     pub const fn format(&self) -> imported_conversation::ImportedConversationFormat;
-    pub const fn stored_source_digest(&self) -> imported_conversation::ImportedConversationSourceDigest;
+    pub const fn stored_source_digest(
+        &self,
+    ) -> imported_conversation::ImportedConversationSourceDigest;
     pub const fn declared_raw_record_count(&self) -> u64;
-    pub fn raw_records(&self) -> &[imported_conversation::ImportedRawSourceRecordReconstitutionInput];
+    pub fn raw_records(
+        &self,
+    ) -> &[imported_conversation::ImportedRawSourceRecordReconstitutionInput];
     pub const fn declared_entry_count(&self) -> u64;
     pub fn entries(&self) -> &[imported_conversation::ImportedTranscriptEntryInput];
-    pub fn reconstitute(self) -> result::Result<imported_conversation::ImportedConversation, imported_conversation::ImportedConversationReconstitutionError>;
+    pub fn reconstitute(
+        self,
+    ) -> result::Result<
+        imported_conversation::ImportedConversation,
+        imported_conversation::ImportedConversationReconstitutionError,
+    >;
 }
 ```
 
@@ -387,31 +530,92 @@ pub enum ImportedConversationReconstitutionFailure {
     RequestedConversationMismatch,
     EmptyRawRecords,
     EmptyEntries,
-    DeclaredRawRecordCountMismatch { declared: u64, actual: usize },
-    DeclaredEntryCountMismatch { declared: u64, actual: usize },
-    RawRecordPositionMismatch { expected: imported_conversation::ImportedRawRecordPosition, actual: imported_conversation::ImportedRawRecordPosition },
-    RawRecordHashMismatch { position: imported_conversation::ImportedRawRecordPosition },
-    EmptyRawRecord { position: imported_conversation::ImportedRawRecordPosition },
-    RawRecordHashCollision { position: imported_conversation::ImportedRawRecordPosition },
-    RawRecordConversionDigestMismatch { position: imported_conversation::ImportedRawRecordPosition },
-    RawRecordNormalizedValueNotObject { position: imported_conversation::ImportedRawRecordPosition },
-    RawRecordStructuredValueDepthExceeded { position: imported_conversation::ImportedRawRecordPosition },
-    RawRecordProjectionInvalid { position: imported_conversation::ImportedRawRecordPosition },
-    SourceDigestMismatch { expected: imported_conversation::ImportedConversationSourceDigest, actual: imported_conversation::ImportedConversationSourceDigest },
-    EntryConversationMismatch { entry: ImportedTranscriptEntryId },
-    EntryPositionMismatch { entry: ImportedTranscriptEntryId, expected: imported_conversation::ImportedTranscriptPosition, actual: imported_conversation::ImportedTranscriptPosition },
-    DuplicateEntry { entry: ImportedTranscriptEntryId },
-    EntryRawRecordPositionMismatch { entry: ImportedTranscriptEntryId, expected: imported_conversation::ImportedRawRecordPosition, actual: imported_conversation::ImportedRawRecordPosition },
-    EntryRawRecordNotFound { entry: ImportedTranscriptEntryId, position: imported_conversation::ImportedRawRecordPosition },
-    EntryWithinRecordPositionMismatch { entry: ImportedTranscriptEntryId, expected: imported_conversation::ImportedRecordEntryPosition, actual: imported_conversation::ImportedRecordEntryPosition },
-    RawRecordWithoutEntry { position: imported_conversation::ImportedRawRecordPosition },
-    SourceEventSpeakerMismatch { entry: ImportedTranscriptEntryId },
-    SourceRecordTypeMismatch { entry: ImportedTranscriptEntryId },
-    MessageSpeakerUnavailable { entry: ImportedTranscriptEntryId },
-    MessageRoleMismatch { entry: ImportedTranscriptEntryId },
-    EntryProjectionMismatch { entry: ImportedTranscriptEntryId },
-    RawRecordEntryProjectionMismatch { position: imported_conversation::ImportedRawRecordPosition },
-    EntryStructuredValueDepthExceeded { entry: ImportedTranscriptEntryId },
+    DeclaredRawRecordCountMismatch {
+        declared: u64,
+        actual: usize,
+    },
+    DeclaredEntryCountMismatch {
+        declared: u64,
+        actual: usize,
+    },
+    RawRecordPositionMismatch {
+        expected: imported_conversation::ImportedRawRecordPosition,
+        actual: imported_conversation::ImportedRawRecordPosition,
+    },
+    RawRecordHashMismatch {
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    EmptyRawRecord {
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    RawRecordHashCollision {
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    RawRecordConversionDigestMismatch {
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    RawRecordNormalizedValueNotObject {
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    RawRecordStructuredValueDepthExceeded {
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    RawRecordProjectionInvalid {
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    SourceDigestMismatch {
+        expected: imported_conversation::ImportedConversationSourceDigest,
+        actual: imported_conversation::ImportedConversationSourceDigest,
+    },
+    EntryConversationMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    EntryPositionMismatch {
+        entry: ImportedTranscriptEntryId,
+        expected: imported_conversation::ImportedTranscriptPosition,
+        actual: imported_conversation::ImportedTranscriptPosition,
+    },
+    DuplicateEntry {
+        entry: ImportedTranscriptEntryId,
+    },
+    EntryRawRecordPositionMismatch {
+        entry: ImportedTranscriptEntryId,
+        expected: imported_conversation::ImportedRawRecordPosition,
+        actual: imported_conversation::ImportedRawRecordPosition,
+    },
+    EntryRawRecordNotFound {
+        entry: ImportedTranscriptEntryId,
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    EntryWithinRecordPositionMismatch {
+        entry: ImportedTranscriptEntryId,
+        expected: imported_conversation::ImportedRecordEntryPosition,
+        actual: imported_conversation::ImportedRecordEntryPosition,
+    },
+    RawRecordWithoutEntry {
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    SourceEventSpeakerMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    SourceRecordTypeMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    MessageSpeakerUnavailable {
+        entry: ImportedTranscriptEntryId,
+    },
+    MessageRoleMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    EntryProjectionMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    RawRecordEntryProjectionMismatch {
+        position: imported_conversation::ImportedRawRecordPosition,
+    },
+    EntryStructuredValueDepthExceeded {
+        entry: ImportedTranscriptEntryId,
+    },
     PositionExhausted,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -420,30 +624,49 @@ pub enum ImportedConversationReconstitutionFailure {
 ## ImportedConversationReconstitutionError
 
 ```rust
-pub struct ImportedConversationReconstitutionError { /* private */ }
+pub struct ImportedConversationReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_conversation::ImportedConversationReconstitutionError {
-    pub const fn failure(&self) -> imported_conversation::ImportedConversationReconstitutionFailure;
+    pub const fn failure(&self)
+        -> imported_conversation::ImportedConversationReconstitutionFailure;
     pub const fn input(&self) -> &imported_conversation::ImportedConversationReconstitutionInput;
-    pub fn into_parts(self) -> (imported_conversation::ImportedConversationReconstitutionInput, imported_conversation::ImportedConversationReconstitutionFailure);
+    pub fn into_parts(
+        self,
+    ) -> (
+        imported_conversation::ImportedConversationReconstitutionInput,
+        imported_conversation::ImportedConversationReconstitutionFailure,
+    );
 }
 ```
 
 ## ImportedConversation
 
 ```rust
-pub struct ImportedConversation { /* private */ }
+pub struct ImportedConversation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_conversation::ImportedConversation {
-    pub fn from_converted_records(id: ImportedConversationId, format: imported_conversation::ImportedConversationFormat, raw_records: vec::Vec<imported_conversation::ImportedRawSourceRecord>, entries: vec::Vec<imported_conversation::ImportedTranscriptEntryInput>) -> result::Result<Self, imported_conversation::ImportedConversationReconstitutionError>;
+    pub fn from_converted_records(
+        id: ImportedConversationId,
+        format: imported_conversation::ImportedConversationFormat,
+        raw_records: vec::Vec<imported_conversation::ImportedRawSourceRecord>,
+        entries: vec::Vec<imported_conversation::ImportedTranscriptEntryInput>,
+    ) -> result::Result<Self, imported_conversation::ImportedConversationReconstitutionError>;
     pub const fn id(&self) -> ImportedConversationId;
     pub const fn format(&self) -> imported_conversation::ImportedConversationFormat;
     pub const fn source_digest(&self) -> imported_conversation::ImportedConversationSourceDigest;
     pub fn raw_records(&self) -> &[imported_conversation::ImportedRawSourceRecord];
     pub fn entries(&self) -> &[imported_conversation::ImportedTranscriptEntry];
-    pub fn frontiers(&self) -> impl iterator::Iterator<Item = imported_conversation::ImportedTranscriptFrontier> + '_;
-    pub fn frontier_for_entry(&self, entry: ImportedTranscriptEntryId) -> option::Option<imported_conversation::ImportedTranscriptFrontier>;
-    pub fn prefix(&self, frontier: imported_conversation::ImportedTranscriptFrontier) -> option::Option<&[imported_conversation::ImportedTranscriptEntry]>;
+    pub fn frontiers(
+        &self,
+    ) -> impl iterator::Iterator<Item = imported_conversation::ImportedTranscriptFrontier> + '_;
+    pub fn frontier_for_entry(
+        &self,
+        entry: ImportedTranscriptEntryId,
+    ) -> option::Option<imported_conversation::ImportedTranscriptFrontier>;
+    pub fn prefix(
+        &self,
+        frontier: imported_conversation::ImportedTranscriptFrontier,
+    ) -> option::Option<&[imported_conversation::ImportedTranscriptEntry]>;
 }
 ```
 
@@ -454,8 +677,12 @@ pub struct ImportedConversationDisplayTitle(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl imported_conversation::ImportedConversationDisplayTitle {
     const MAX_SCALARS: usize;
-    pub fn try_new(value: string::String) -> result::Result<Self, imported_conversation::ImportedConversationDisplayTitleError>;
-    pub fn derive(conversation: &imported_conversation::ImportedConversation) -> option::Option<Self>;
+    pub fn try_new(
+        value: string::String,
+    ) -> result::Result<Self, imported_conversation::ImportedConversationDisplayTitleError>;
+    pub fn derive(
+        conversation: &imported_conversation::ImportedConversation,
+    ) -> option::Option<Self>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -492,29 +719,63 @@ impl error::Error for imported_conversation::ImportedStructuredFieldError {}
 ## unique_imported_structured_field
 
 ```rust
-pub fn unique_imported_structured_field<'members>(members: &'members [imported_conversation::ImportedStructuredObjectMember], name: &str) -> result::Result<option::Option<&'members imported_conversation::ImportedStructuredValue>, imported_conversation::ImportedStructuredFieldError>;
+pub fn unique_imported_structured_field<'members>(
+    members: &'members [imported_conversation::ImportedStructuredObjectMember],
+    name: &str,
+) -> result::Result<
+    option::Option<&'members imported_conversation::ImportedStructuredValue>,
+    imported_conversation::ImportedStructuredFieldError,
+>;
 ```
 
 ## imported_text_attestation
 
 ```rust
-pub fn imported_text_attestation(members: &[imported_conversation::ImportedStructuredObjectMember], name: &str) -> result::Result<imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>, imported_conversation::ImportedStructuredFieldError>;
+pub fn imported_text_attestation(
+    members: &[imported_conversation::ImportedStructuredObjectMember],
+    name: &str,
+) -> result::Result<
+    imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedText>,
+    imported_conversation::ImportedStructuredFieldError,
+>;
 ```
 
 ## imported_bool_attestation
 
 ```rust
-pub fn imported_bool_attestation(members: &[imported_conversation::ImportedStructuredObjectMember], name: &str) -> result::Result<imported_conversation::ImportedSourceAttestation<bool>, imported_conversation::ImportedStructuredFieldError>;
+pub fn imported_bool_attestation(
+    members: &[imported_conversation::ImportedStructuredObjectMember],
+    name: &str,
+) -> result::Result<
+    imported_conversation::ImportedSourceAttestation<bool>,
+    imported_conversation::ImportedStructuredFieldError,
+>;
 ```
 
 ## imported_structured_attestation
 
 ```rust
-pub fn imported_structured_attestation(members: &[imported_conversation::ImportedStructuredObjectMember], name: &str) -> result::Result<imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedStructuredValue>, imported_conversation::ImportedStructuredFieldError>;
+pub fn imported_structured_attestation(
+    members: &[imported_conversation::ImportedStructuredObjectMember],
+    name: &str,
+) -> result::Result<
+    imported_conversation::ImportedSourceAttestation<
+        imported_conversation::ImportedStructuredValue,
+    >,
+    imported_conversation::ImportedStructuredFieldError,
+>;
 ```
 
 ## imported_string_structured_attestation
 
 ```rust
-pub fn imported_string_structured_attestation(members: &[imported_conversation::ImportedStructuredObjectMember], name: &str) -> result::Result<imported_conversation::ImportedSourceAttestation<imported_conversation::ImportedStructuredValue>, imported_conversation::ImportedStructuredFieldError>;
+pub fn imported_string_structured_attestation(
+    members: &[imported_conversation::ImportedStructuredObjectMember],
+    name: &str,
+) -> result::Result<
+    imported_conversation::ImportedSourceAttestation<
+        imported_conversation::ImportedStructuredValue,
+    >,
+    imported_conversation::ImportedStructuredFieldError,
+>;
 ```

@@ -20,8 +20,12 @@ impl convergence_reconciliation::PullRequestDraftState {
 ```rust
 pub enum PullRequestCheckState {
     CheckRunInProgress,
-    CheckRunCompleted { conclusion: option::Option<string::String> },
-    StatusContext { state: string::String },
+    CheckRunCompleted {
+        conclusion: option::Option<string::String>,
+    },
+    StatusContext {
+        state: string::String,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -29,10 +33,13 @@ pub enum PullRequestCheckState {
 ## PullRequestCheck
 
 ```rust
-pub struct PullRequestCheck { /* private */ }
+pub struct PullRequestCheck {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl convergence_reconciliation::PullRequestCheck {
-    pub fn new(name: string::String, state: convergence_reconciliation::PullRequestCheckState) -> Self;
+    pub fn new(
+        name: string::String,
+        state: convergence_reconciliation::PullRequestCheckState,
+    ) -> Self;
     pub fn name(&self) -> &str;
     pub const fn state(&self) -> &convergence_reconciliation::PullRequestCheckState;
     pub fn is_non_gating(&self) -> bool;
@@ -44,10 +51,17 @@ impl convergence_reconciliation::PullRequestCheck {
 ## PullRequestConvergenceFacts
 
 ```rust
-pub struct PullRequestConvergenceFacts { /* private */ }
+pub struct PullRequestConvergenceFacts {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl convergence_reconciliation::PullRequestConvergenceFacts {
-    pub fn new(head_sha: repo_watch::CommitSha, checked_head_sha: option::Option<repo_watch::CommitSha>, draft: convergence_reconciliation::PullRequestDraftState, unresolved_review_threads: u64, mergeable_state: repo_watch::MergeableState, checks: vec::Vec<convergence_reconciliation::PullRequestCheck>) -> Self;
+    pub fn new(
+        head_sha: repo_watch::CommitSha,
+        checked_head_sha: option::Option<repo_watch::CommitSha>,
+        draft: convergence_reconciliation::PullRequestDraftState,
+        unresolved_review_threads: u64,
+        mergeable_state: repo_watch::MergeableState,
+        checks: vec::Vec<convergence_reconciliation::PullRequestCheck>,
+    ) -> Self;
     pub const fn head_sha(&self) -> &repo_watch::CommitSha;
     pub const fn checked_head_sha(&self) -> option::Option<&repo_watch::CommitSha>;
     pub const fn draft(&self) -> convergence_reconciliation::PullRequestDraftState;
@@ -63,7 +77,10 @@ impl convergence_reconciliation::PullRequestConvergenceFacts {
 pub enum PullRequestConvergenceBlocker {
     UnresolvedReviewThreads(u64),
     ChecksNotForCurrentHead,
-    CheckNotGreen { name: string::String, state: string::String },
+    CheckNotGreen {
+        name: string::String,
+        state: string::String,
+    },
     BaseConflict,
     MergeabilityUnknown,
 }
@@ -73,7 +90,7 @@ pub enum PullRequestConvergenceBlocker {
 ## PullRequestConvergence
 
 ```rust
-pub struct PullRequestConvergence { /* private */ }
+pub struct PullRequestConvergence {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl convergence_reconciliation::PullRequestConvergence {
     pub fn is_converged(&self) -> bool;
@@ -84,5 +101,7 @@ impl convergence_reconciliation::PullRequestConvergence {
 ## evaluate_pull_request_convergence
 
 ```rust
-pub fn evaluate_pull_request_convergence(facts: &convergence_reconciliation::PullRequestConvergenceFacts) -> convergence_reconciliation::PullRequestConvergence;
+pub fn evaluate_pull_request_convergence(
+    facts: &convergence_reconciliation::PullRequestConvergenceFacts,
+) -> convergence_reconciliation::PullRequestConvergence;
 ```

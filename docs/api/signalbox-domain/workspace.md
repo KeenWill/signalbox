@@ -27,7 +27,9 @@ impl error::Error for workspace::WorkspaceRootPathError {}
 pub struct WorkspaceRootPath(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl workspace::WorkspaceRootPath {
-    pub fn try_new(value: string::String) -> result::Result<Self, workspace::WorkspaceRootPathError>;
+    pub fn try_new(
+        value: string::String,
+    ) -> result::Result<Self, workspace::WorkspaceRootPathError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -49,10 +51,14 @@ impl workspace::WorkspaceOrigin {
 ## WorkspaceRecord
 
 ```rust
-pub struct WorkspaceRecord { /* private */ }
+pub struct WorkspaceRecord {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl workspace::WorkspaceRecord {
-    pub const fn new(id: WorkspaceId, root: workspace::WorkspaceRootPath, origin: workspace::WorkspaceOrigin) -> Self;
+    pub const fn new(
+        id: WorkspaceId,
+        root: workspace::WorkspaceRootPath,
+        origin: workspace::WorkspaceOrigin,
+    ) -> Self;
     pub const fn id(&self) -> WorkspaceId;
     pub const fn root(&self) -> &workspace::WorkspaceRootPath;
     pub const fn origin(&self) -> workspace::WorkspaceOrigin;

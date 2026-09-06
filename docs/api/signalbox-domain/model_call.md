@@ -17,7 +17,7 @@ impl model_call::ProviderModelIdentity {
 ## ResolvedProviderTarget
 
 ```rust
-pub struct ResolvedProviderTarget { /* private */ }
+pub struct ResolvedProviderTarget {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl model_call::ResolvedProviderTarget {
     pub const fn naming(identity: model_call::ProviderModelIdentity) -> Self;
@@ -28,7 +28,7 @@ impl model_call::ResolvedProviderTarget {
 ## PinnedProviderTarget
 
 ```rust
-pub struct PinnedProviderTarget { /* private */ }
+pub struct PinnedProviderTarget {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl model_call::PinnedProviderTarget {
     pub const fn turn(&self) -> TurnId;
@@ -39,7 +39,7 @@ impl model_call::PinnedProviderTarget {
 ## PinnedProviderTargetReconstitutionInput
 
 ```rust
-pub struct PinnedProviderTargetReconstitutionInput { /* private */ }
+pub struct PinnedProviderTargetReconstitutionInput {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl model_call::PinnedProviderTargetReconstitutionInput {
     pub const fn new(turn: TurnId, target: model_call::ResolvedProviderTarget) -> Self;
@@ -75,7 +75,7 @@ pub enum CurrentModelCallState {
 ## CurrentModelCall
 
 ```rust
-pub struct CurrentModelCall { /* private */ }
+pub struct CurrentModelCall {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl model_call::CurrentModelCall {
     pub const fn id(&self) -> ModelCallId;
@@ -92,7 +92,7 @@ impl model_call::CurrentModelCall {
 ## EndedModelCall
 
 ```rust
-pub struct EndedModelCall { /* private */ }
+pub struct EndedModelCall {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl model_call::EndedModelCall {
     pub const fn id(&self) -> ModelCallId;
@@ -121,10 +121,18 @@ pub enum ModelCallReconstitutionState {
 ## ModelCallReconstitutionInput
 
 ```rust
-pub struct ModelCallReconstitutionInput { /* private */ }
+pub struct ModelCallReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl model_call::ModelCallReconstitutionInput {
-    pub const fn new(id: ModelCallId, turn: TurnId, attempt: TurnAttemptId, selection: configuration::FrozenModelSelection, target: model_call::ResolvedProviderTarget, frontier: context_frontier::ContextFrontierId, state: model_call::ModelCallReconstitutionState) -> Self;
+    pub const fn new(
+        id: ModelCallId,
+        turn: TurnId,
+        attempt: TurnAttemptId,
+        selection: configuration::FrozenModelSelection,
+        target: model_call::ResolvedProviderTarget,
+        frontier: context_frontier::ContextFrontierId,
+        state: model_call::ModelCallReconstitutionState,
+    ) -> Self;
     pub const fn id(&self) -> ModelCallId;
     pub const fn turn(&self) -> TurnId;
     pub const fn attempt(&self) -> TurnAttemptId;

@@ -209,13 +209,21 @@ def linked_name(item, links):
 
 
 def declaration_links(crate, document):
-    from render_domain_spine import Renderer
+    from render_domain_spine import ROOT, Renderer
 
     renderer = Renderer(document)
+    directory = ROOT / 'docs/api' / crate
     links = {'': f'docs/api/{crate}/README.md'}
-    for path, content in renderer.files(crate).items():
-        for name in re.findall(r'^## (.+)$', content, re.MULTILINE):
-            links[f'{renderer.crate}::{name}'] = f'docs/api/{crate}/{path}'
+    for module, items in renderer.modules().items():
+        for item in items:
+            kind = next(iter(item['inner']))
+            part = 'traits' if kind == 'trait' else 'functions' if kind in {'function', 'constant', 'static'} else 'types'
+            candidates = [directory / f'{module}.md', directory / module / f'{part}.md']
+            target = next((path for path in candidates if path.is_file()), directory / 'README.md')
+            links[f"{renderer.crate}::{item['name']}"] = target.relative_to(ROOT).as_posix()
+    for path in directory.rglob('*.md'):
+        for name in re.findall(r'^## (.+)$', path.read_text(), re.MULTILINE):
+            links[f'{renderer.crate}::{name}'] = path.relative_to(ROOT).as_posix()
     return links
 
 

@@ -97,7 +97,10 @@ pub enum AttentionSort {
 
 ```rust
 pub enum AttentionContinuation {
-    LastActivity { recorded_at: time::SystemTime, session: signalbox_domain::SessionId },
+    LastActivity {
+        recorded_at: time::SystemTime,
+        session: signalbox_domain::SessionId,
+    },
     SessionIdentity(signalbox_domain::SessionId),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -106,12 +109,18 @@ pub enum AttentionContinuation {
 ## AttentionQuery
 
 ```rust
-pub struct AttentionQuery { /* private */ }
+pub struct AttentionQuery {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl attention::AttentionQuery {
     pub fn hot_page() -> Self;
     pub fn identity_page(after: option::Option<signalbox_domain::SessionId>) -> Self;
-    pub fn try_new(search: option::Option<string::String>, required_tags: vec::Vec<string::String>, include_archived: bool, sort: attention::AttentionSort, continuation: option::Option<attention::AttentionContinuation>) -> result::Result<Self, attention::AttentionQueryError>;
+    pub fn try_new(
+        search: option::Option<string::String>,
+        required_tags: vec::Vec<string::String>,
+        include_archived: bool,
+        sort: attention::AttentionSort,
+        continuation: option::Option<attention::AttentionContinuation>,
+    ) -> result::Result<Self, attention::AttentionQueryError>;
     pub fn search(&self) -> option::Option<&str>;
     pub fn required_tags(&self) -> impl exact_size::ExactSizeIterator<Item = &str>;
     pub const fn include_archived(&self) -> bool;
@@ -165,21 +174,33 @@ pub enum AttentionBlockedReason {
 ## AttentionGoalBlock
 
 ```rust
-pub struct AttentionGoalBlock { pub generation: u64, pub reason: attention::AttentionBlockedReason, pub need_summary: string::String }
+pub struct AttentionGoalBlock {
+    pub generation: u64,
+    pub reason: attention::AttentionBlockedReason,
+    pub need_summary: string::String,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## AttentionJudgeFacts
 
 ```rust
-pub struct AttentionJudgeFacts { pub actionable: u64, pub completed: u64, pub escalated: u64, pub failed: u64 }
+pub struct AttentionJudgeFacts {
+    pub actionable: u64,
+    pub completed: u64,
+    pub escalated: u64,
+    pub failed: u64,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## AttentionActivity
 
 ```rust
-pub struct AttentionActivity { pub recorded_at: time::SystemTime, pub kind: attention::AttentionActivityKind }
+pub struct AttentionActivity {
+    pub recorded_at: time::SystemTime,
+    pub kind: attention::AttentionActivityKind,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -199,14 +220,34 @@ pub enum AttentionActivityKind {
 ## AttentionSummary
 
 ```rust
-pub struct AttentionSummary { pub session: signalbox_domain::SessionId, pub title_summary: option::Option<string::String>, pub title_truncated: bool, pub archived: bool, pub current_turn: option::Option<signalbox_domain::TurnId>, pub active_turn_count: u64, pub queued_turn_count: u64, pub state: attention::AttentionState, pub lifecycle_state: attention::AttentionLifecycleState, pub action: option::Option<attention::AttentionAction>, pub goal_block: option::Option<attention::AttentionGoalBlock>, pub judge: attention::AttentionJudgeFacts, pub last_activity: attention::AttentionActivity }
+pub struct AttentionSummary {
+    pub session: signalbox_domain::SessionId,
+    pub title_summary: option::Option<string::String>,
+    pub title_truncated: bool,
+    pub archived: bool,
+    pub current_turn: option::Option<signalbox_domain::TurnId>,
+    pub active_turn_count: u64,
+    pub queued_turn_count: u64,
+    pub state: attention::AttentionState,
+    pub lifecycle_state: attention::AttentionLifecycleState,
+    pub action: option::Option<attention::AttentionAction>,
+    pub goal_block: option::Option<attention::AttentionGoalBlock>,
+    pub judge: attention::AttentionJudgeFacts,
+    pub last_activity: attention::AttentionActivity,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## AttentionSnapshot
 
 ```rust
-pub struct AttentionSnapshot { pub cursor: attention::AttentionCursor, pub total: u64, pub sort: attention::AttentionSort, pub summaries: vec::Vec<attention::AttentionSummary>, pub continuation: option::Option<attention::AttentionContinuation> }
+pub struct AttentionSnapshot {
+    pub cursor: attention::AttentionCursor,
+    pub total: u64,
+    pub sort: attention::AttentionSort,
+    pub summaries: vec::Vec<attention::AttentionSummary>,
+    pub continuation: option::Option<attention::AttentionContinuation>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -214,8 +255,13 @@ pub struct AttentionSnapshot { pub cursor: attention::AttentionCursor, pub total
 
 ```rust
 pub enum AttentionChanges {
-    Updated { cursor: attention::AttentionCursor, summaries: vec::Vec<attention::AttentionSummary> },
-    ResyncRequired { cursor: attention::AttentionCursor },
+    Updated {
+        cursor: attention::AttentionCursor,
+        summaries: vec::Vec<attention::AttentionSummary>,
+    },
+    ResyncRequired {
+        cursor: attention::AttentionCursor,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -225,7 +271,23 @@ pub enum AttentionChanges {
 ```rust
 pub trait AttentionReader {
     type Error;
-    pub fn snapshot(&self, query: attention::AttentionQuery) -> impl future::Future<Output = result::Result<attention::AttentionSnapshot, <Self as attention::AttentionReader>::Error>> + marker::Send;
-    pub fn changes_after(&self, cursor: attention::AttentionCursor) -> impl future::Future<Output = result::Result<attention::AttentionChanges, <Self as attention::AttentionReader>::Error>> + marker::Send;
+    pub fn snapshot(
+        &self,
+        query: attention::AttentionQuery,
+    ) -> impl future::Future<
+        Output = result::Result<
+            attention::AttentionSnapshot,
+            <Self as attention::AttentionReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn changes_after(
+        &self,
+        cursor: attention::AttentionCursor,
+    ) -> impl future::Future<
+        Output = result::Result<
+            attention::AttentionChanges,
+            <Self as attention::AttentionReader>::Error,
+        >,
+    > + marker::Send;
 }
 ```

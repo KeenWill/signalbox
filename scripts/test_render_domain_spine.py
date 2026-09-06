@@ -3,11 +3,13 @@
 
 import copy
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from render_domain_spine import HEADER, MAX_LINES, Renderer, write_files
+from render_domain_spine import HEADER, MAX_LINES, Renderer, format_rust, write_files
 
 
 EMPTY_GENERICS = {'params': [], 'where_predicates': []}
@@ -99,7 +101,10 @@ class RenderDomainSpineTests(unittest.TestCase):
         self.assertEqual(renderer.block(renderer.item(1)), '''## Record
 
 ```rust
-pub struct Record<T> { pub value: T, /* private */ }
+pub struct Record<T> {
+    pub value: T,
+    /* private */
+}
 // derives: fmt::Debug
 impl example::Record {
     pub fn new(value: T) -> Self;
@@ -109,6 +114,42 @@ impl example::Read for example::Record {
     type Output = T;
 }
 ```''')
+
+    def test_rustfmt_wraps_long_function_signatures(self):
+        code = (
+            'pub fn very_long_method_name_with_long_parameters('
+            'first_parameter: first_module::FirstType, '
+            'second_parameter: second_module::SecondType, '
+            'third_parameter: third_module::ThirdType) '
+            '-> result::Result<response_module::ResponseType, failure_module::FailureType>;'
+        )
+        self.assertEqual(format_rust(code), '''pub fn very_long_method_name_with_long_parameters(
+    first_parameter: first_module::FirstType,
+    second_parameter: second_module::SecondType,
+    third_parameter: third_module::ThirdType,
+) -> result::Result<response_module::ResponseType, failure_module::FailureType>;''')
+
+    def test_rejected_synthesized_block_keeps_hand_layout(self):
+        renderer = Renderer(fixture())
+        rejected = subprocess.CompletedProcess([], 1, stdout='', stderr='rejected declaration')
+        with patch('render_domain_spine.subprocess.run', return_value=rejected):
+            block = renderer.block(renderer.item(1))
+        self.assertIn('pub struct Record<T> {\n    pub value: T,\n    /* private */\n}', block)
+        self.assertIn('    pub fn new(value: T) -> Self;', block)
+        self.assertNotIn('rejected declaration', block)
+
+    def test_rejected_long_signature_falls_back_to_wrapped_declaration(self):
+        code = (
+            'pub fn synthesized(first_parameter: first_module::FirstType, '
+            'second_parameter: second_module::SecondType, '
+            'third_parameter: third_module::ThirdType);'
+        )
+        rejected = subprocess.CompletedProcess([], 1, stdout='', stderr='rejected declaration')
+        with patch('render_domain_spine.subprocess.run', return_value=rejected):
+            formatted = format_rust(code)
+        self.assertEqual(' '.join(formatted.split()), code)
+        self.assertGreater(len(formatted.splitlines()), 1)
+        self.assertTrue(all(len(line) <= 100 for line in formatted.splitlines()))
 
     def test_enum_keeps_data_variant_shapes(self):
         renderer = Renderer(fixture())

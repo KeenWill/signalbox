@@ -108,10 +108,13 @@ impl search::SearchPageLimit {
 ## SearchCursor
 
 ```rust
-pub struct SearchCursor { /* private */ }
+pub struct SearchCursor {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl search::SearchCursor {
-    pub const fn new(address: session_timeline::TimelineAddress, projection: nonzero::NonZeroU64) -> Self;
+    pub const fn new(
+        address: session_timeline::TimelineAddress,
+        projection: nonzero::NonZeroU64,
+    ) -> Self;
     pub const fn address(self) -> session_timeline::TimelineAddress;
     pub const fn projection(self) -> nonzero::NonZeroU64;
 }
@@ -120,7 +123,13 @@ impl search::SearchCursor {
 ## SearchQuery
 
 ```rust
-pub struct SearchQuery { pub strategy: search::SearchStrategy, pub scope: search::SearchScope, pub text: search::SearchText, pub limit: search::SearchPageLimit, pub after: option::Option<search::SearchCursor> }
+pub struct SearchQuery {
+    pub strategy: search::SearchStrategy,
+    pub scope: search::SearchScope,
+    pub text: search::SearchText,
+    pub limit: search::SearchPageLimit,
+    pub after: option::Option<search::SearchCursor>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -172,7 +181,9 @@ impl error::Error for search::SearchProjectionTextError {}
 pub struct SearchProjectionText(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl search::SearchProjectionText {
-    pub fn try_new(value: string::String) -> result::Result<Self, search::SearchProjectionTextError>;
+    pub fn try_new(
+        value: string::String,
+    ) -> result::Result<Self, search::SearchProjectionTextError>;
     pub fn as_str(&self) -> &str;
 }
 ```
@@ -191,7 +202,13 @@ pub enum SearchArtifactProjectionClass {
 ## SearchArtifactProjection
 
 ```rust
-pub struct SearchArtifactProjection { pub session: signalbox_domain::SessionId, pub address: session_timeline::TimelineAddress, pub artifact: search::SearchArtifactId, pub class: search::SearchArtifactProjectionClass, pub text: search::SearchProjectionText }
+pub struct SearchArtifactProjection {
+    pub session: signalbox_domain::SessionId,
+    pub address: session_timeline::TimelineAddress,
+    pub artifact: search::SearchArtifactId,
+    pub class: search::SearchArtifactProjectionClass,
+    pub text: search::SearchProjectionText,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -200,7 +217,12 @@ pub struct SearchArtifactProjection { pub session: signalbox_domain::SessionId, 
 ```rust
 pub trait SearchProjectionWriter {
     type Error;
-    pub fn publish(&self, projection: search::SearchArtifactProjection) -> impl future::Future<Output = result::Result<(), <Self as search::SearchProjectionWriter>::Error>> + marker::Send;
+    pub fn publish(
+        &self,
+        projection: search::SearchArtifactProjection,
+    ) -> impl future::Future<
+        Output = result::Result<(), <Self as search::SearchProjectionWriter>::Error>,
+    > + marker::Send;
 }
 ```
 
@@ -209,14 +231,35 @@ pub trait SearchProjectionWriter {
 ```rust
 pub enum SearchResultSource {
     Session(signalbox_domain::SessionId),
-    AcceptedInput { input: signalbox_domain::AcceptedInputId, turn: signalbox_domain::TurnId },
-    SteeringInput { input: signalbox_domain::AcceptedInputId, source_turn: signalbox_domain::TurnId },
-    TurnTranscriptEntry { entry: context_frontier::SemanticTranscriptEntryId, turn: signalbox_domain::TurnId },
-    SessionTranscriptEntry { entry: context_frontier::SemanticTranscriptEntryId },
-    ToolRequest { request: signalbox_domain::ToolRequestId, turn: signalbox_domain::TurnId },
-    ToolAttempt { attempt: signalbox_domain::ToolAttemptId, turn: signalbox_domain::TurnId },
-    Attachment { attachment: search::SearchArtifactId },
-    DerivedArtifact { artifact: search::SearchArtifactId },
+    AcceptedInput {
+        input: signalbox_domain::AcceptedInputId,
+        turn: signalbox_domain::TurnId,
+    },
+    SteeringInput {
+        input: signalbox_domain::AcceptedInputId,
+        source_turn: signalbox_domain::TurnId,
+    },
+    TurnTranscriptEntry {
+        entry: context_frontier::SemanticTranscriptEntryId,
+        turn: signalbox_domain::TurnId,
+    },
+    SessionTranscriptEntry {
+        entry: context_frontier::SemanticTranscriptEntryId,
+    },
+    ToolRequest {
+        request: signalbox_domain::ToolRequestId,
+        turn: signalbox_domain::TurnId,
+    },
+    ToolAttempt {
+        attempt: signalbox_domain::ToolAttemptId,
+        turn: signalbox_domain::TurnId,
+    },
+    Attachment {
+        attachment: search::SearchArtifactId,
+    },
+    DerivedArtifact {
+        artifact: search::SearchArtifactId,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -224,21 +267,35 @@ pub enum SearchResultSource {
 ## SearchHighlight
 
 ```rust
-pub struct SearchHighlight { pub start_byte: u16, pub end_byte: u16 }
+pub struct SearchHighlight {
+    pub start_byte: u16,
+    pub end_byte: u16,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SearchResult
 
 ```rust
-pub struct SearchResult { pub session: signalbox_domain::SessionId, pub address: session_timeline::TimelineAddress, pub projection: nonzero::NonZeroU64, pub source: search::SearchResultSource, pub content_class: search::SearchContentClass, pub snippet: string::String, pub highlights: vec::Vec<search::SearchHighlight> }
+pub struct SearchResult {
+    pub session: signalbox_domain::SessionId,
+    pub address: session_timeline::TimelineAddress,
+    pub projection: nonzero::NonZeroU64,
+    pub source: search::SearchResultSource,
+    pub content_class: search::SearchContentClass,
+    pub snippet: string::String,
+    pub highlights: vec::Vec<search::SearchHighlight>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SearchPage
 
 ```rust
-pub struct SearchPage { pub results: vec::Vec<search::SearchResult>, pub next: option::Option<search::SearchCursor> }
+pub struct SearchPage {
+    pub results: vec::Vec<search::SearchResult>,
+    pub next: option::Option<search::SearchCursor>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -247,19 +304,27 @@ pub struct SearchPage { pub results: vec::Vec<search::SearchResult>, pub next: o
 ```rust
 pub trait SearchReader {
     type Error;
-    pub fn search(&self, query: search::SearchQuery) -> impl future::Future<Output = result::Result<search::SearchPage, <Self as search::SearchReader>::Error>> + marker::Send;
+    pub fn search(
+        &self,
+        query: search::SearchQuery,
+    ) -> impl future::Future<
+        Output = result::Result<search::SearchPage, <Self as search::SearchReader>::Error>,
+    > + marker::Send;
 }
 ```
 
 ## SearchService
 
 ```rust
-pub struct SearchService<Reader> { /* private */ }
+pub struct SearchService<Reader> {/* private */}
 // derives: fmt::Debug
 impl<Reader> search::SearchService<Reader> {
     pub const fn new(reader: Reader) -> Self;
 }
 impl<Reader: search::SearchReader> search::SearchService<Reader> {
-    pub async fn search(&self, query: search::SearchQuery) -> result::Result<search::SearchPage, <Reader as search::SearchReader>::Error>;
+    pub async fn search(
+        &self,
+        query: search::SearchQuery,
+    ) -> result::Result<search::SearchPage, <Reader as search::SearchReader>::Error>;
 }
 ```

@@ -38,7 +38,7 @@ impl fmt::Display for blob::BlobDigestParseFailure {
 ## BlobDigestParseError
 
 ```rust
-pub struct BlobDigestParseError { /* private */ }
+pub struct BlobDigestParseError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl blob::BlobDigestParseError {
     pub fn rejected(&self) -> &str;
@@ -56,7 +56,9 @@ impl error::Error for blob::BlobDigestParseError {}
 pub struct BlobTransformationName(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl blob::BlobTransformationName {
-    pub fn try_new(value: impl convert::Into<sync::Arc<str>>) -> result::Result<Self, blob::BlobTransformationError>;
+    pub fn try_new(
+        value: impl convert::Into<sync::Arc<str>>,
+    ) -> result::Result<Self, blob::BlobTransformationError>;
     pub fn as_str(&self) -> &str;
 }
 ```
@@ -64,10 +66,14 @@ impl blob::BlobTransformationName {
 ## BlobTransformation
 
 ```rust
-pub struct BlobTransformation { /* private */ }
+pub struct BlobTransformation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl blob::BlobTransformation {
-    pub fn try_new(name: blob::BlobTransformationName, version: u32, parameters: &value::Value) -> result::Result<Self, blob::BlobTransformationError>;
+    pub fn try_new(
+        name: blob::BlobTransformationName,
+        version: u32,
+        parameters: &value::Value,
+    ) -> result::Result<Self, blob::BlobTransformationError>;
     pub const fn name(&self) -> &blob::BlobTransformationName;
     pub const fn version(&self) -> nonzero::NonZeroU32;
     pub fn parameters_json(&self) -> &str;
@@ -94,9 +100,16 @@ impl error::Error for blob::BlobTransformationError {}
 
 ```rust
 pub enum BlobDerivationProducer {
-    Deterministic { implementation: blob::BlobDigest },
-    Executed { execution_id: uuid::Uuid, implementation: blob::BlobDigest },
-    ModelDerived { model_call: ModelCallId },
+    Deterministic {
+        implementation: blob::BlobDigest,
+    },
+    Executed {
+        execution_id: uuid::Uuid,
+        implementation: blob::BlobDigest,
+    },
+    ModelDerived {
+        model_call: ModelCallId,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -107,7 +120,11 @@ pub enum BlobDerivationProducer {
 pub struct DeterministicBlobDerivationKey(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl blob::DeterministicBlobDerivationKey {
-    pub fn try_derive(inputs: &[blob::BlobDigest], transformation: &blob::BlobTransformation, implementation: blob::BlobDigest) -> result::Result<Self, blob::BlobDerivationError>;
+    pub fn try_derive(
+        inputs: &[blob::BlobDigest],
+        transformation: &blob::BlobTransformation,
+        implementation: blob::BlobDigest,
+    ) -> result::Result<Self, blob::BlobDerivationError>;
     pub const fn digest(self) -> blob::BlobDigest;
 }
 ```
@@ -115,10 +132,16 @@ impl blob::DeterministicBlobDerivationKey {
 ## BlobDerivation
 
 ```rust
-pub struct BlobDerivation { /* private */ }
+pub struct BlobDerivation {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl blob::BlobDerivation {
-    pub fn try_new(id: BlobDerivationId, inputs: impl convert::Into<boxed::Box<[blob::BlobDigest]>>, transformation: blob::BlobTransformation, producer: blob::BlobDerivationProducer, outputs: impl convert::Into<boxed::Box<[blob::BlobDigest]>>) -> result::Result<Self, blob::BlobDerivationError>;
+    pub fn try_new(
+        id: BlobDerivationId,
+        inputs: impl convert::Into<boxed::Box<[blob::BlobDigest]>>,
+        transformation: blob::BlobTransformation,
+        producer: blob::BlobDerivationProducer,
+        outputs: impl convert::Into<boxed::Box<[blob::BlobDigest]>>,
+    ) -> result::Result<Self, blob::BlobDerivationError>;
     pub const fn id(&self) -> BlobDerivationId;
     pub fn inputs(&self) -> &[blob::BlobDigest];
     pub const fn transformation(&self) -> &blob::BlobTransformation;

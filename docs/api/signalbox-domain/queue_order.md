@@ -28,11 +28,14 @@ pub enum AcceptedInputQueuePriority {
 ## AcceptedInputQueueOrder
 
 ```rust
-pub struct AcceptedInputQueueOrder { /* private */ }
+pub struct AcceptedInputQueueOrder {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl queue_order::AcceptedInputQueueOrder {
     pub const fn ordinary(acceptance_position: queue_order::SessionInputPosition) -> Self;
-    pub const fn interrupt_immediately_after(acceptance_position: queue_order::SessionInputPosition, predecessor: TurnId) -> Self;
+    pub const fn interrupt_immediately_after(
+        acceptance_position: queue_order::SessionInputPosition,
+        predecessor: TurnId,
+    ) -> Self;
     pub const fn acceptance_position(&self) -> queue_order::SessionInputPosition;
     pub const fn priority(&self) -> queue_order::AcceptedInputQueuePriority;
 }
@@ -41,10 +44,14 @@ impl queue_order::AcceptedInputQueueOrder {
 ## AcceptedInputQueueWork
 
 ```rust
-pub struct AcceptedInputQueueWork { /* private */ }
+pub struct AcceptedInputQueueWork {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl queue_order::AcceptedInputQueueWork {
-    pub const fn new(session: SessionId, turn: TurnId, order: queue_order::AcceptedInputQueueOrder) -> Self;
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        order: queue_order::AcceptedInputQueueOrder,
+    ) -> Self;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn order(&self) -> queue_order::AcceptedInputQueueOrder;
@@ -55,15 +62,45 @@ impl queue_order::AcceptedInputQueueWork {
 
 ```rust
 pub enum AcceptedInputQueueOrderError {
-    MixedSessions { first_session: SessionId, second_session: SessionId },
-    DuplicateTurn { turn: TurnId },
-    DuplicateAcceptancePosition { position: queue_order::SessionInputPosition, first_turn: TurnId, second_turn: TurnId },
-    MissingInterruptPredecessor { turn: TurnId, predecessor: TurnId },
-    SelfInterruptPredecessor { turn: TurnId },
-    MultipleInterruptSuccessors { predecessor: TurnId, first_successor: TurnId, second_successor: TurnId },
-    InterruptCycle { turn: TurnId },
-    InterruptPositionNotAfterPredecessor { turn: TurnId, predecessor: TurnId, position: queue_order::SessionInputPosition, predecessor_position: queue_order::SessionInputPosition },
-    InterruptPredecessorChronologyReversed { earlier_interrupt: TurnId, earlier_predecessor: TurnId, later_interrupt: TurnId, later_predecessor: TurnId },
+    MixedSessions {
+        first_session: SessionId,
+        second_session: SessionId,
+    },
+    DuplicateTurn {
+        turn: TurnId,
+    },
+    DuplicateAcceptancePosition {
+        position: queue_order::SessionInputPosition,
+        first_turn: TurnId,
+        second_turn: TurnId,
+    },
+    MissingInterruptPredecessor {
+        turn: TurnId,
+        predecessor: TurnId,
+    },
+    SelfInterruptPredecessor {
+        turn: TurnId,
+    },
+    MultipleInterruptSuccessors {
+        predecessor: TurnId,
+        first_successor: TurnId,
+        second_successor: TurnId,
+    },
+    InterruptCycle {
+        turn: TurnId,
+    },
+    InterruptPositionNotAfterPredecessor {
+        turn: TurnId,
+        predecessor: TurnId,
+        position: queue_order::SessionInputPosition,
+        predecessor_position: queue_order::SessionInputPosition,
+    },
+    InterruptPredecessorChronologyReversed {
+        earlier_interrupt: TurnId,
+        earlier_predecessor: TurnId,
+        later_interrupt: TurnId,
+        later_predecessor: TurnId,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -71,5 +108,7 @@ pub enum AcceptedInputQueueOrderError {
 ## derive_accepted_input_total_order
 
 ```rust
-pub fn derive_accepted_input_total_order(currently_known_work: impl collect::IntoIterator<Item = queue_order::AcceptedInputQueueWork>) -> result::Result<vec::Vec<TurnId>, queue_order::AcceptedInputQueueOrderError>;
+pub fn derive_accepted_input_total_order(
+    currently_known_work: impl collect::IntoIterator<Item = queue_order::AcceptedInputQueueWork>,
+) -> result::Result<vec::Vec<TurnId>, queue_order::AcceptedInputQueueOrderError>;
 ```

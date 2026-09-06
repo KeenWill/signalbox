@@ -17,7 +17,7 @@ impl context_compaction::ContextCompactionId {
 ## ContextCompactionTokenUsage
 
 ```rust
-pub struct ContextCompactionTokenUsage { /* private */ }
+pub struct ContextCompactionTokenUsage {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
 impl context_compaction::ContextCompactionTokenUsage {
     pub const fn unreported() -> Self;
@@ -46,7 +46,7 @@ pub enum ContextCompactionModelCallState {
 ## ContextCompactionModelCall
 
 ```rust
-pub struct ContextCompactionModelCall { /* private */ }
+pub struct ContextCompactionModelCall {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl context_compaction::ContextCompactionModelCall {
     pub const fn id(&self) -> ModelCallId;
@@ -62,13 +62,27 @@ impl context_compaction::ContextCompactionModelCall {
 ## ContextCompactionModelCallReconstitutionInput
 
 ```rust
-pub struct ContextCompactionModelCallReconstitutionInput { /* private */ }
+pub struct ContextCompactionModelCallReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl context_compaction::ContextCompactionModelCallReconstitutionInput {
-    pub const fn new(id: ModelCallId, session: SessionId, selection: configuration::DirectModelSelection, target: model_call::ResolvedProviderTarget, source_frontier: context_frontier::ContextFrontierId, state: context_compaction::ContextCompactionModelCallState, usage: context_compaction::ContextCompactionTokenUsage) -> Self;
+    pub const fn new(
+        id: ModelCallId,
+        session: SessionId,
+        selection: configuration::DirectModelSelection,
+        target: model_call::ResolvedProviderTarget,
+        source_frontier: context_frontier::ContextFrontierId,
+        state: context_compaction::ContextCompactionModelCallState,
+        usage: context_compaction::ContextCompactionTokenUsage,
+    ) -> Self;
     pub const fn id(&self) -> ModelCallId;
     pub const fn source_snapshot(&self) -> context_frontier::ContextFrontierId;
-    pub fn reconstitute(self, source: &context_frontier::ResolvedContextFrontierSnapshot) -> result::Result<context_compaction::ContextCompactionModelCall, context_compaction::ContextCompactionModelCallReconstitutionFailure>;
+    pub fn reconstitute(
+        self,
+        source: &context_frontier::ResolvedContextFrontierSnapshot,
+    ) -> result::Result<
+        context_compaction::ContextCompactionModelCall,
+        context_compaction::ContextCompactionModelCallReconstitutionFailure,
+    >;
 }
 ```
 
@@ -85,10 +99,13 @@ pub enum ContextCompactionModelCallReconstitutionFailure {
 ## ContextCompactionRange
 
 ```rust
-pub struct ContextCompactionRange { /* private */ }
+pub struct ContextCompactionRange {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl context_compaction::ContextCompactionRange {
-    pub const fn inclusive(first: context_frontier::SemanticTranscriptEntryRef, through: context_frontier::SemanticTranscriptEntryRef) -> Self;
+    pub const fn inclusive(
+        first: context_frontier::SemanticTranscriptEntryRef,
+        through: context_frontier::SemanticTranscriptEntryRef,
+    ) -> Self;
     pub const fn first(&self) -> context_frontier::SemanticTranscriptEntryRef;
     pub const fn through(&self) -> context_frontier::SemanticTranscriptEntryRef;
 }
@@ -97,7 +114,7 @@ impl context_compaction::ContextCompactionRange {
 ## ContextCompaction
 
 ```rust
-pub struct ContextCompaction { /* private */ }
+pub struct ContextCompaction {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl context_compaction::ContextCompaction {
     pub const fn id(&self) -> context_compaction::ContextCompactionId;
@@ -114,16 +131,36 @@ impl context_compaction::ContextCompaction {
 ## ContextCompactionReconstitutionInput
 
 ```rust
-pub struct ContextCompactionReconstitutionInput { /* private */ }
+pub struct ContextCompactionReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl context_compaction::ContextCompactionReconstitutionInput {
-    pub const fn new(id: context_compaction::ContextCompactionId, session: SessionId, predecessor: option::Option<context_compaction::ContextCompactionId>, source_frontier: context_frontier::ContextFrontierId, result_frontier: context_frontier::ContextFrontierId, producing_call: ModelCallId, range: context_compaction::ContextCompactionRange, summary_entry: context_frontier::SemanticTranscriptEntryId) -> Self;
+    pub const fn new(
+        id: context_compaction::ContextCompactionId,
+        session: SessionId,
+        predecessor: option::Option<context_compaction::ContextCompactionId>,
+        source_frontier: context_frontier::ContextFrontierId,
+        result_frontier: context_frontier::ContextFrontierId,
+        producing_call: ModelCallId,
+        range: context_compaction::ContextCompactionRange,
+        summary_entry: context_frontier::SemanticTranscriptEntryId,
+    ) -> Self;
     pub const fn id(&self) -> context_compaction::ContextCompactionId;
     pub const fn source_snapshot(&self) -> context_frontier::ContextFrontierId;
     pub const fn result_snapshot(&self) -> context_frontier::ContextFrontierId;
     pub const fn producing_call(&self) -> ModelCallId;
     pub const fn summary_entry(&self) -> context_frontier::SemanticTranscriptEntryId;
-    pub fn reconstitute(self, source: &context_frontier::ResolvedContextFrontierSnapshot, result: &context_frontier::ResolvedContextFrontierSnapshot, source_entries: &[semantic_entry::SemanticTranscriptEntry], result_entries: &[semantic_entry::SemanticTranscriptEntry], summary: &semantic_entry::SemanticTranscriptEntry, call: &context_compaction::ContextCompactionModelCall) -> result::Result<context_compaction::ContextCompaction, context_compaction::ContextCompactionReconstitutionFailure>;
+    pub fn reconstitute(
+        self,
+        source: &context_frontier::ResolvedContextFrontierSnapshot,
+        result: &context_frontier::ResolvedContextFrontierSnapshot,
+        source_entries: &[semantic_entry::SemanticTranscriptEntry],
+        result_entries: &[semantic_entry::SemanticTranscriptEntry],
+        summary: &semantic_entry::SemanticTranscriptEntry,
+        call: &context_compaction::ContextCompactionModelCall,
+    ) -> result::Result<
+        context_compaction::ContextCompaction,
+        context_compaction::ContextCompactionReconstitutionFailure,
+    >;
 }
 ```
 
@@ -150,11 +187,15 @@ pub enum ContextCompactionReconstitutionFailure {
 ## ContextFrontierProjection
 
 ```rust
-pub struct ContextFrontierProjection { /* private */ }
+pub struct ContextFrontierProjection {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl context_compaction::ContextFrontierProjection {
-    pub fn from_complete_entries(entries: &[semantic_entry::SemanticTranscriptEntry]) -> result::Result<Self, context_compaction::ContextFrontierProjectionFailure>;
-    pub fn ordered_entries(&self) -> impl exact_size::ExactSizeIterator<Item = context_frontier::SemanticTranscriptEntryRef> + '_;
+    pub fn from_complete_entries(
+        entries: &[semantic_entry::SemanticTranscriptEntry],
+    ) -> result::Result<Self, context_compaction::ContextFrontierProjectionFailure>;
+    pub fn ordered_entries(
+        &self,
+    ) -> impl exact_size::ExactSizeIterator<Item = context_frontier::SemanticTranscriptEntryRef> + '_;
 }
 ```
 

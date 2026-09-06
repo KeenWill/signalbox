@@ -55,19 +55,28 @@ impl workspace_instruction::InstructionDigest {
 ## InstructionSourcePathInterner
 
 ```rust
-pub struct InstructionSourcePathInterner { /* private */ }
+pub struct InstructionSourcePathInterner {/* private */}
 // derives: fmt::Debug, default::Default
 impl workspace_instruction::InstructionSourcePathInterner {
     pub const fn new() -> Self;
-    pub fn root_prefix(root_path: workspace_instruction::InstructionPath) -> workspace_instruction::InstructionSourcePathPrefix;
-    pub fn append_prefix(&mut self, prefix: &workspace_instruction::InstructionSourcePathPrefix, component: &str) -> result::Result<workspace_instruction::InstructionSourcePathPrefix, workspace_instruction::InstructionPathError>;
+    pub fn root_prefix(
+        root_path: workspace_instruction::InstructionPath,
+    ) -> workspace_instruction::InstructionSourcePathPrefix;
+    pub fn append_prefix(
+        &mut self,
+        prefix: &workspace_instruction::InstructionSourcePathPrefix,
+        component: &str,
+    ) -> result::Result<
+        workspace_instruction::InstructionSourcePathPrefix,
+        workspace_instruction::InstructionPathError,
+    >;
 }
 ```
 
 ## InstructionSourcePathPrefix
 
 ```rust
-pub struct InstructionSourcePathPrefix { /* private */ }
+pub struct InstructionSourcePathPrefix {/* private */}
 // derives: clone::Clone, fmt::Debug
 ```
 
@@ -77,7 +86,9 @@ pub struct InstructionSourcePathPrefix { /* private */ }
 pub struct InstructionPath(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl workspace_instruction::InstructionPath {
-    pub fn try_new(value: string::String) -> result::Result<Self, workspace_instruction::InstructionPathError>;
+    pub fn try_new(
+        value: string::String,
+    ) -> result::Result<Self, workspace_instruction::InstructionPathError>;
     pub fn as_str(&self) -> &str;
 }
 ```
@@ -85,12 +96,23 @@ impl workspace_instruction::InstructionPath {
 ## InstructionSourcePath
 
 ```rust
-pub struct InstructionSourcePath { /* private */ }
+pub struct InstructionSourcePath {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl workspace_instruction::InstructionSourcePath {
-    pub fn try_new(root_path: workspace_instruction::InstructionPath, value: string::String) -> result::Result<Self, workspace_instruction::InstructionPathError>;
-    pub fn try_new_in(interner: &mut workspace_instruction::InstructionSourcePathInterner, root_path: workspace_instruction::InstructionPath, value: string::String) -> result::Result<Self, workspace_instruction::InstructionPathError>;
-    pub fn try_new_under(interner: &mut workspace_instruction::InstructionSourcePathInterner, directory: &workspace_instruction::InstructionSourcePathPrefix, source_name: &str) -> result::Result<Self, workspace_instruction::InstructionPathError>;
+    pub fn try_new(
+        root_path: workspace_instruction::InstructionPath,
+        value: string::String,
+    ) -> result::Result<Self, workspace_instruction::InstructionPathError>;
+    pub fn try_new_in(
+        interner: &mut workspace_instruction::InstructionSourcePathInterner,
+        root_path: workspace_instruction::InstructionPath,
+        value: string::String,
+    ) -> result::Result<Self, workspace_instruction::InstructionPathError>;
+    pub fn try_new_under(
+        interner: &mut workspace_instruction::InstructionSourcePathInterner,
+        directory: &workspace_instruction::InstructionSourcePathPrefix,
+        source_name: &str,
+    ) -> result::Result<Self, workspace_instruction::InstructionPathError>;
     pub fn absolute_path(&self) -> string::String;
     pub fn relative_path(&self) -> string::String;
 }
@@ -149,17 +171,23 @@ pub enum InstructionBundleKind {
 ## InstructionSkillMetadataInput
 
 ```rust
-pub struct InstructionSkillMetadataInput { pub name: string::String, pub description: string::String, pub parent_directory: string::String }
+pub struct InstructionSkillMetadataInput {
+    pub name: string::String,
+    pub description: string::String,
+    pub parent_directory: string::String,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## InstructionSkillMetadata
 
 ```rust
-pub struct InstructionSkillMetadata { /* private */ }
+pub struct InstructionSkillMetadata {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl workspace_instruction::InstructionSkillMetadata {
-    pub fn try_new(input: workspace_instruction::InstructionSkillMetadataInput) -> result::Result<Self, workspace_instruction::InstructionSkillMetadataError>;
+    pub fn try_new(
+        input: workspace_instruction::InstructionSkillMetadataInput,
+    ) -> result::Result<Self, workspace_instruction::InstructionSkillMetadataError>;
     pub fn name(&self) -> &str;
     pub fn description(&self) -> &str;
 }
@@ -183,17 +211,27 @@ impl error::Error for workspace_instruction::InstructionSkillMetadataError {}
 ## InstructionBundleRegistrationInput
 
 ```rust
-pub struct InstructionBundleRegistrationInput { pub kind: workspace_instruction::InstructionBundleKind, pub root_kind: workspace_instruction::InstructionDiscoveryRootKind, pub root_path: workspace_instruction::InstructionPath, pub source_path: workspace_instruction::InstructionSourcePath, pub source_bytes: u64, pub source_hash: workspace_instruction::InstructionDigest, pub skill: option::Option<workspace_instruction::InstructionSkillMetadata> }
+pub struct InstructionBundleRegistrationInput {
+    pub kind: workspace_instruction::InstructionBundleKind,
+    pub root_kind: workspace_instruction::InstructionDiscoveryRootKind,
+    pub root_path: workspace_instruction::InstructionPath,
+    pub source_path: workspace_instruction::InstructionSourcePath,
+    pub source_bytes: u64,
+    pub source_hash: workspace_instruction::InstructionDigest,
+    pub skill: option::Option<workspace_instruction::InstructionSkillMetadata>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## InstructionBundleRegistration
 
 ```rust
-pub struct InstructionBundleRegistration { /* private */ }
+pub struct InstructionBundleRegistration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl workspace_instruction::InstructionBundleRegistration {
-    pub fn new(input: workspace_instruction::InstructionBundleRegistrationInput) -> option::Option<Self>;
+    pub fn new(
+        input: workspace_instruction::InstructionBundleRegistrationInput,
+    ) -> option::Option<Self>;
     pub const fn kind(&self) -> workspace_instruction::InstructionBundleKind;
     pub const fn root_kind(&self) -> workspace_instruction::InstructionDiscoveryRootKind;
     pub const fn root_path(&self) -> &workspace_instruction::InstructionPath;
@@ -209,11 +247,20 @@ impl workspace_instruction::InstructionBundleRegistration {
 ## TurnInstructionManifest
 
 ```rust
-pub struct TurnInstructionManifest { /* private */ }
+pub struct TurnInstructionManifest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl workspace_instruction::TurnInstructionManifest {
-    pub fn empty_turn_start(id: workspace_instruction::TurnInstructionManifestId, session: SessionId, turn: TurnId) -> Self;
-    pub fn reconstitute_empty_turn_start(id: workspace_instruction::TurnInstructionManifestId, session: SessionId, turn: TurnId, evidence: workspace_instruction::EmptyTurnInstructionManifestEvidence) -> option::Option<Self>;
+    pub fn empty_turn_start(
+        id: workspace_instruction::TurnInstructionManifestId,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Self;
+    pub fn reconstitute_empty_turn_start(
+        id: workspace_instruction::TurnInstructionManifestId,
+        session: SessionId,
+        turn: TurnId,
+        evidence: workspace_instruction::EmptyTurnInstructionManifestEvidence,
+    ) -> option::Option<Self>;
     pub const fn id(&self) -> workspace_instruction::TurnInstructionManifestId;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
@@ -226,6 +273,10 @@ impl workspace_instruction::TurnInstructionManifest {
 ## EmptyTurnInstructionManifestEvidence
 
 ```rust
-pub struct EmptyTurnInstructionManifestEvidence { pub eligibility_hash: workspace_instruction::InstructionDigest, pub admitted_set_hash: workspace_instruction::InstructionDigest, pub manifest_hash: workspace_instruction::InstructionDigest }
+pub struct EmptyTurnInstructionManifestEvidence {
+    pub eligibility_hash: workspace_instruction::InstructionDigest,
+    pub admitted_set_hash: workspace_instruction::InstructionDigest,
+    pub manifest_hash: workspace_instruction::InstructionDigest,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

@@ -5,5 +5,7 @@
 ## validate_complete_review_finding_reference_graph
 
 ```rust
-pub fn validate_complete_review_finding_reference_graph(findings: &[review_workflow::ReviewFinding]) -> result::Result<(), boxed::Box<review_workflow::ReviewFindingReferenceGraphError>>;
+pub fn validate_complete_review_finding_reference_graph(
+    findings: &[review_workflow::ReviewFinding],
+) -> result::Result<(), boxed::Box<review_workflow::ReviewFindingReferenceGraphError>>;
 ```

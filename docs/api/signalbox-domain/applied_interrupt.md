@@ -5,7 +5,7 @@
 ## AppliedInterruptProof
 
 ```rust
-pub struct AppliedInterruptProof { /* private */ }
+pub struct AppliedInterruptProof {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl applied_interrupt::AppliedInterruptProof {
     pub const fn command(&self) -> DurableCommandId;
@@ -16,7 +16,7 @@ impl applied_interrupt::AppliedInterruptProof {
 ## AppliedInterruptCommandResult
 
 ```rust
-pub struct AppliedInterruptCommandResult { /* private */ }
+pub struct AppliedInterruptCommandResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl applied_interrupt::AppliedInterruptCommandResult {
     pub const fn proof(&self) -> applied_interrupt::AppliedInterruptProof;

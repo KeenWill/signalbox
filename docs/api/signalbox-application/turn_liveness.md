@@ -11,7 +11,11 @@ impl turn_liveness::AutomaticReconciliationAttempt {
     pub const fn first() -> Self;
     pub const fn try_from_u32(value: u32) -> option::Option<Self>;
     pub const fn get(self) -> u32;
-    pub fn retry_backoff(self, base: time::Duration, cap: option::Option<time::Duration>) -> time::Duration;
+    pub fn retry_backoff(
+        self,
+        base: time::Duration,
+        cap: option::Option<time::Duration>,
+    ) -> time::Duration;
     pub const fn next(self) -> option::Option<Self>;
     pub const fn is_within_budget(self, budget: option::Option<u32>) -> bool;
 }
@@ -30,10 +34,15 @@ pub enum AutomaticReconciliationOperation {
 ## ClaimedAutomaticReconciliation
 
 ```rust
-pub struct ClaimedAutomaticReconciliation { /* private */ }
+pub struct ClaimedAutomaticReconciliation {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl turn_liveness::ClaimedAutomaticReconciliation {
-    pub const fn new(session: signalbox_domain::SessionId, turn: signalbox_domain::TurnId, operation: turn_liveness::AutomaticReconciliationOperation, attempt: turn_liveness::AutomaticReconciliationAttempt) -> Self;
+    pub const fn new(
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        operation: turn_liveness::AutomaticReconciliationOperation,
+        attempt: turn_liveness::AutomaticReconciliationAttempt,
+    ) -> Self;
     pub const fn session(self) -> signalbox_domain::SessionId;
     pub const fn turn(self) -> signalbox_domain::TurnId;
     pub const fn operation(self) -> turn_liveness::AutomaticReconciliationOperation;
@@ -44,10 +53,14 @@ impl turn_liveness::ClaimedAutomaticReconciliation {
 ## ExhaustedAutomaticReconciliation
 
 ```rust
-pub struct ExhaustedAutomaticReconciliation { /* private */ }
+pub struct ExhaustedAutomaticReconciliation {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl turn_liveness::ExhaustedAutomaticReconciliation {
-    pub const fn new(session: signalbox_domain::SessionId, turn: signalbox_domain::TurnId, operation: turn_liveness::AutomaticReconciliationOperation) -> Self;
+    pub const fn new(
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        operation: turn_liveness::AutomaticReconciliationOperation,
+    ) -> Self;
     pub const fn session(self) -> signalbox_domain::SessionId;
     pub const fn turn(self) -> signalbox_domain::TurnId;
     pub const fn operation(self) -> turn_liveness::AutomaticReconciliationOperation;
@@ -57,10 +70,13 @@ impl turn_liveness::ExhaustedAutomaticReconciliation {
 ## AutomaticReconciliationBatch
 
 ```rust
-pub struct AutomaticReconciliationBatch { /* private */ }
+pub struct AutomaticReconciliationBatch {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl turn_liveness::AutomaticReconciliationBatch {
-    pub fn new(claimed: boxed::Box<[turn_liveness::ClaimedAutomaticReconciliation]>, exhausted: boxed::Box<[turn_liveness::ExhaustedAutomaticReconciliation]>) -> Self;
+    pub fn new(
+        claimed: boxed::Box<[turn_liveness::ClaimedAutomaticReconciliation]>,
+        exhausted: boxed::Box<[turn_liveness::ExhaustedAutomaticReconciliation]>,
+    ) -> Self;
     pub fn claimed(&self) -> &[turn_liveness::ClaimedAutomaticReconciliation];
     pub fn exhausted(&self) -> &[turn_liveness::ExhaustedAutomaticReconciliation];
 }
@@ -95,7 +111,9 @@ pub enum AutomaticReconciliationOutcome {
 pub struct StaleActiveTurnBound(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl turn_liveness::StaleActiveTurnBound {
-    pub fn try_new(bound: time::Duration) -> result::Result<Self, turn_liveness::TurnLivenessBoundError>;
+    pub fn try_new(
+        bound: time::Duration,
+    ) -> result::Result<Self, turn_liveness::TurnLivenessBoundError>;
     pub const fn as_secs(self) -> u64;
     pub const fn get(self) -> time::Duration;
 }
@@ -107,7 +125,9 @@ impl turn_liveness::StaleActiveTurnBound {
 pub struct TurnLivenessScanInterval(/* private */);
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl turn_liveness::TurnLivenessScanInterval {
-    pub fn try_new(interval: time::Duration) -> result::Result<Self, turn_liveness::TurnLivenessBoundError>;
+    pub fn try_new(
+        interval: time::Duration,
+    ) -> result::Result<Self, turn_liveness::TurnLivenessBoundError>;
     pub const fn get(self) -> time::Duration;
 }
 ```
@@ -130,10 +150,13 @@ impl error::Error for turn_liveness::TurnLivenessBoundError {}
 ## TurnLivenessEvidence
 
 ```rust
-pub struct TurnLivenessEvidence { /* private */ }
+pub struct TurnLivenessEvidence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl turn_liveness::TurnLivenessEvidence {
-    pub const fn new(current_attempt: signalbox_domain::TurnAttemptId, outbox_frontier: option::Option<u64>) -> Self;
+    pub const fn new(
+        current_attempt: signalbox_domain::TurnAttemptId,
+        outbox_frontier: option::Option<u64>,
+    ) -> Self;
     pub const fn current_attempt(self) -> signalbox_domain::TurnAttemptId;
     pub const fn outbox_frontier(self) -> option::Option<u64>;
 }
@@ -142,10 +165,14 @@ impl turn_liveness::TurnLivenessEvidence {
 ## StaleTurnCandidate
 
 ```rust
-pub struct StaleTurnCandidate { /* private */ }
+pub struct StaleTurnCandidate {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl turn_liveness::StaleTurnCandidate {
-    pub const fn new(session: signalbox_domain::SessionId, turn: signalbox_domain::TurnId, evidence: turn_liveness::TurnLivenessEvidence) -> Self;
+    pub const fn new(
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        evidence: turn_liveness::TurnLivenessEvidence,
+    ) -> Self;
     pub const fn session(self) -> signalbox_domain::SessionId;
     pub const fn turn(self) -> signalbox_domain::TurnId;
     pub const fn evidence(self) -> turn_liveness::TurnLivenessEvidence;
@@ -178,10 +205,13 @@ impl turn_liveness::TurnLivenessGuardKind {
 ## DurableTurnLivenessObservation
 
 ```rust
-pub struct DurableTurnLivenessObservation { /* private */ }
+pub struct DurableTurnLivenessObservation {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl turn_liveness::DurableTurnLivenessObservation {
-    pub const fn new(candidate: turn_liveness::StaleTurnCandidate, ordinal: nonzero::NonZeroU64) -> Self;
+    pub const fn new(
+        candidate: turn_liveness::StaleTurnCandidate,
+        ordinal: nonzero::NonZeroU64,
+    ) -> Self;
     pub const fn candidate(self) -> turn_liveness::StaleTurnCandidate;
     pub const fn ordinal(self) -> nonzero::NonZeroU64;
 }
@@ -190,12 +220,18 @@ impl turn_liveness::DurableTurnLivenessObservation {
 ## TurnLivenessLedger
 
 ```rust
-pub struct TurnLivenessLedger { /* private */ }
+pub struct TurnLivenessLedger {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug
 impl turn_liveness::TurnLivenessLedger {
-    pub const fn new(bound: turn_liveness::StaleActiveTurnBound, scan_interval: turn_liveness::TurnLivenessScanInterval) -> Self;
+    pub const fn new(
+        bound: turn_liveness::StaleActiveTurnBound,
+        scan_interval: turn_liveness::TurnLivenessScanInterval,
+    ) -> Self;
     pub const fn bound(&self) -> turn_liveness::StaleActiveTurnBound;
     pub const fn scan_interval(&self) -> turn_liveness::TurnLivenessScanInterval;
-    pub fn reconcile(self, observations: &[turn_liveness::DurableTurnLivenessObservation]) -> boxed::Box<[turn_liveness::StaleTurnCandidate]>;
+    pub fn reconcile(
+        self,
+        observations: &[turn_liveness::DurableTurnLivenessObservation],
+    ) -> boxed::Box<[turn_liveness::StaleTurnCandidate]>;
 }
 ```

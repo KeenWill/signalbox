@@ -5,10 +5,14 @@
 ## ReviewWorkflowCommand
 
 ```rust
-pub struct ReviewWorkflowCommand { /* private */ }
+pub struct ReviewWorkflowCommand {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl review_workflow::ReviewWorkflowCommand {
-    pub const fn new(command_id: signalbox_domain::DurableCommandId, semantic_digest: [u8; 32], operation: review_workflow::ReviewWorkflowOperation) -> Self;
+    pub const fn new(
+        command_id: signalbox_domain::DurableCommandId,
+        semantic_digest: [u8; 32],
+        operation: review_workflow::ReviewWorkflowOperation,
+    ) -> Self;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn semantic_digest(&self) -> [u8; 32];
     pub const fn operation(&self) -> &review_workflow::ReviewWorkflowOperation;
@@ -20,13 +24,31 @@ impl review_workflow::ReviewWorkflowCommand {
 ```rust
 pub enum ReviewWorkflowOperation {
     CreateTarget(review_workflow::ReviewTarget),
-    StartRun { run: review_workflow::ReviewRun, pass: review_workflow::ReviewPass },
-    ActivatePass { run: review_workflow::ReviewRun, pass: review_workflow::ReviewPass },
-    CompletePass { run: review_workflow::ReviewRun, pass: review_workflow::ReviewPass },
-    RecordFindings { pass: review_workflow::ReviewPassEvidence, findings: vec::Vec<review_workflow::ReviewFinding> },
-    RecordFindingEvent { pass: review_workflow::ReviewPassEvidence, event: review_workflow::ReviewFindingEvent },
+    StartRun {
+        run: review_workflow::ReviewRun,
+        pass: review_workflow::ReviewPass,
+    },
+    ActivatePass {
+        run: review_workflow::ReviewRun,
+        pass: review_workflow::ReviewPass,
+    },
+    CompletePass {
+        run: review_workflow::ReviewRun,
+        pass: review_workflow::ReviewPass,
+    },
+    RecordFindings {
+        pass: review_workflow::ReviewPassEvidence,
+        findings: vec::Vec<review_workflow::ReviewFinding>,
+    },
+    RecordFindingEvent {
+        pass: review_workflow::ReviewPassEvidence,
+        event: review_workflow::ReviewFindingEvent,
+    },
     ReserveExternalLink(review_workflow::ReviewExternalLink),
-    AttachExternalLink { link: signalbox_domain::ReviewExternalLinkId, attachment: review_workflow::ReviewExternalLinkAttachment },
+    AttachExternalLink {
+        link: signalbox_domain::ReviewExternalLinkId,
+        attachment: review_workflow::ReviewExternalLinkAttachment,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl review_workflow::ReviewWorkflowOperation {
@@ -69,14 +91,38 @@ impl review_workflow::ReviewPassCompletionStatus {
 
 ```rust
 pub enum ReviewWorkflowCommandResult {
-    TargetCreated { target: signalbox_domain::ReviewTargetId },
-    RunStarted { run: signalbox_domain::ReviewRunId, pass: signalbox_domain::ReviewPassId },
-    PassActivated { run: signalbox_domain::ReviewRunId, pass: signalbox_domain::ReviewPassId },
-    PassCompleted { run: signalbox_domain::ReviewRunId, pass: signalbox_domain::ReviewPassId, status: review_workflow::ReviewPassCompletionStatus },
-    FindingsRecorded { run: signalbox_domain::ReviewRunId, pass: signalbox_domain::ReviewPassId, finding_count: usize },
-    FindingEventRecorded { finding: signalbox_domain::ReviewFindingId, status: review_workflow::ReviewFindingStatus },
-    ExternalLinkReserved { link: signalbox_domain::ReviewExternalLinkId },
-    ExternalLinkAttached { link: signalbox_domain::ReviewExternalLinkId, external_object: review_workflow::ReviewKey },
+    TargetCreated {
+        target: signalbox_domain::ReviewTargetId,
+    },
+    RunStarted {
+        run: signalbox_domain::ReviewRunId,
+        pass: signalbox_domain::ReviewPassId,
+    },
+    PassActivated {
+        run: signalbox_domain::ReviewRunId,
+        pass: signalbox_domain::ReviewPassId,
+    },
+    PassCompleted {
+        run: signalbox_domain::ReviewRunId,
+        pass: signalbox_domain::ReviewPassId,
+        status: review_workflow::ReviewPassCompletionStatus,
+    },
+    FindingsRecorded {
+        run: signalbox_domain::ReviewRunId,
+        pass: signalbox_domain::ReviewPassId,
+        finding_count: usize,
+    },
+    FindingEventRecorded {
+        finding: signalbox_domain::ReviewFindingId,
+        status: review_workflow::ReviewFindingStatus,
+    },
+    ExternalLinkReserved {
+        link: signalbox_domain::ReviewExternalLinkId,
+    },
+    ExternalLinkAttached {
+        link: signalbox_domain::ReviewExternalLinkId,
+        external_object: review_workflow::ReviewKey,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -86,7 +132,9 @@ pub enum ReviewWorkflowCommandResult {
 ```rust
 pub enum ReviewWorkflowCommandOutcome {
     Recorded(review_workflow::ReviewWorkflowCommandResult),
-    ConflictingReuse { command_id: signalbox_domain::DurableCommandId },
+    ConflictingReuse {
+        command_id: signalbox_domain::DurableCommandId,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -96,20 +144,36 @@ pub enum ReviewWorkflowCommandOutcome {
 ```rust
 pub trait ReviewWorkflowTransaction {
     type Error;
-    pub fn handle(&mut self, command: review_workflow::ReviewWorkflowCommand) -> impl future::Future<Output = result::Result<review_workflow::ReviewWorkflowCommandOutcome, <Self as review_workflow::ReviewWorkflowTransaction>::Error>> + marker::Send;
+    pub fn handle(
+        &mut self,
+        command: review_workflow::ReviewWorkflowCommand,
+    ) -> impl future::Future<
+        Output = result::Result<
+            review_workflow::ReviewWorkflowCommandOutcome,
+            <Self as review_workflow::ReviewWorkflowTransaction>::Error,
+        >,
+    > + marker::Send;
 }
 ```
 
 ## ReviewWorkflowCommandService
 
 ```rust
-pub struct ReviewWorkflowCommandService<Transaction> { /* private */ }
+pub struct ReviewWorkflowCommandService<Transaction> {/* private */}
 // derives: fmt::Debug
 impl<Transaction> review_workflow::ReviewWorkflowCommandService<Transaction> {
     pub const fn new(transaction: Transaction) -> Self;
 }
-impl<Transaction: review_workflow::ReviewWorkflowTransaction> review_workflow::ReviewWorkflowCommandService<Transaction> {
-    pub async fn execute(&mut self, command: review_workflow::ReviewWorkflowCommand) -> result::Result<review_workflow::ReviewWorkflowCommandOutcome, <Transaction as review_workflow::ReviewWorkflowTransaction>::Error>;
+impl<Transaction: review_workflow::ReviewWorkflowTransaction>
+    review_workflow::ReviewWorkflowCommandService<Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        command: review_workflow::ReviewWorkflowCommand,
+    ) -> result::Result<
+        review_workflow::ReviewWorkflowCommandOutcome,
+        <Transaction as review_workflow::ReviewWorkflowTransaction>::Error,
+    >;
 }
 ```
 
@@ -118,11 +182,62 @@ impl<Transaction: review_workflow::ReviewWorkflowTransaction> review_workflow::R
 ```rust
 pub trait ReviewWorkflowReader {
     type Error;
-    pub fn load_target(&self, target: signalbox_domain::ReviewTargetId) -> impl future::Future<Output = result::Result<option::Option<review_workflow::ReviewTarget>, <Self as review_workflow::ReviewWorkflowReader>::Error>> + marker::Send;
-    pub fn load_run(&self, run: signalbox_domain::ReviewRunId) -> impl future::Future<Output = result::Result<option::Option<review_workflow::ReviewRun>, <Self as review_workflow::ReviewWorkflowReader>::Error>> + marker::Send;
-    pub fn load_run_with_pass(&self, run: signalbox_domain::ReviewRunId) -> impl future::Future<Output = result::Result<option::Option<(review_workflow::ReviewRun, option::Option<review_workflow::ReviewPass>)>, <Self as review_workflow::ReviewWorkflowReader>::Error>> + marker::Send;
-    pub fn load_pass(&self, pass: signalbox_domain::ReviewPassId) -> impl future::Future<Output = result::Result<option::Option<review_workflow::ReviewPass>, <Self as review_workflow::ReviewWorkflowReader>::Error>> + marker::Send;
-    pub fn load_finding(&self, finding: signalbox_domain::ReviewFindingId) -> impl future::Future<Output = result::Result<option::Option<review_workflow::ReviewFinding>, <Self as review_workflow::ReviewWorkflowReader>::Error>> + marker::Send;
-    pub fn list_findings(&self, run: signalbox_domain::ReviewRunId) -> impl future::Future<Output = result::Result<vec::Vec<review_workflow::ReviewFinding>, <Self as review_workflow::ReviewWorkflowReader>::Error>> + marker::Send;
+    pub fn load_target(
+        &self,
+        target: signalbox_domain::ReviewTargetId,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<review_workflow::ReviewTarget>,
+            <Self as review_workflow::ReviewWorkflowReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn load_run(
+        &self,
+        run: signalbox_domain::ReviewRunId,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<review_workflow::ReviewRun>,
+            <Self as review_workflow::ReviewWorkflowReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn load_run_with_pass(
+        &self,
+        run: signalbox_domain::ReviewRunId,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<(
+                review_workflow::ReviewRun,
+                option::Option<review_workflow::ReviewPass>,
+            )>,
+            <Self as review_workflow::ReviewWorkflowReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn load_pass(
+        &self,
+        pass: signalbox_domain::ReviewPassId,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<review_workflow::ReviewPass>,
+            <Self as review_workflow::ReviewWorkflowReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn load_finding(
+        &self,
+        finding: signalbox_domain::ReviewFindingId,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<review_workflow::ReviewFinding>,
+            <Self as review_workflow::ReviewWorkflowReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn list_findings(
+        &self,
+        run: signalbox_domain::ReviewRunId,
+    ) -> impl future::Future<
+        Output = result::Result<
+            vec::Vec<review_workflow::ReviewFinding>,
+            <Self as review_workflow::ReviewWorkflowReader>::Error,
+        >,
+    > + marker::Send;
 }
 ```

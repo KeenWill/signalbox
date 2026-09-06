@@ -7,7 +7,10 @@
 ```rust
 pub enum SubmitInputRequestError {
     InvalidCommandId(create_session::InvalidDurableCommandId),
-    OversizedContent { utf8_byte_length: usize, max_utf8_bytes: usize },
+    OversizedContent {
+        utf8_byte_length: usize,
+        max_utf8_bytes: usize,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for submit_input::SubmitInputRequestError {
@@ -19,12 +22,30 @@ impl error::Error for submit_input::SubmitInputRequestError {}
 ## SubmitInputRequest
 
 ```rust
-pub struct SubmitInputRequest { /* private */ }
+pub struct SubmitInputRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl submit_input::SubmitInputRequest {
-    pub fn try_new(command_id: signalbox_domain::DurableCommandId, session: signalbox_domain::SessionId, content: user_content::UserContent, delivery: delivery_request::DeliveryRequest) -> result::Result<Self, submit_input::SubmitInputRequestError>;
-    pub fn try_new_with_content_limit(command_id: signalbox_domain::DurableCommandId, session: signalbox_domain::SessionId, content: user_content::UserContent, delivery: delivery_request::DeliveryRequest, max_content_utf8_bytes: option::Option<usize>) -> result::Result<Self, submit_input::SubmitInputRequestError>;
-    pub fn try_new_core_interrupt(command_id: signalbox_domain::DurableCommandId, session: signalbox_domain::SessionId, content: user_content::UserContent, expected_active_turn: signalbox_domain::TurnId, descendant_scope: session_delegation::DescendantTerminationScope, configuration: delivery_request::PerInputConfigurationChoices) -> result::Result<Self, submit_input::SubmitInputRequestError>;
+    pub fn try_new(
+        command_id: signalbox_domain::DurableCommandId,
+        session: signalbox_domain::SessionId,
+        content: user_content::UserContent,
+        delivery: delivery_request::DeliveryRequest,
+    ) -> result::Result<Self, submit_input::SubmitInputRequestError>;
+    pub fn try_new_with_content_limit(
+        command_id: signalbox_domain::DurableCommandId,
+        session: signalbox_domain::SessionId,
+        content: user_content::UserContent,
+        delivery: delivery_request::DeliveryRequest,
+        max_content_utf8_bytes: option::Option<usize>,
+    ) -> result::Result<Self, submit_input::SubmitInputRequestError>;
+    pub fn try_new_core_interrupt(
+        command_id: signalbox_domain::DurableCommandId,
+        session: signalbox_domain::SessionId,
+        content: user_content::UserContent,
+        expected_active_turn: signalbox_domain::TurnId,
+        descendant_scope: session_delegation::DescendantTerminationScope,
+        configuration: delivery_request::PerInputConfigurationChoices,
+    ) -> result::Result<Self, submit_input::SubmitInputRequestError>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn content(&self) -> &user_content::UserContent;
@@ -65,7 +86,9 @@ impl submit_input::SubmitInputIdGenerator for submit_input::UuidV7SubmitInputIdG
 ```rust
 pub enum SubmitInputOutcome {
     Recorded(submit_input::SubmitInputResult),
-    ConflictingReuse { command_id: signalbox_domain::DurableCommandId },
+    ConflictingReuse {
+        command_id: signalbox_domain::DurableCommandId,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -75,20 +98,71 @@ pub enum SubmitInputOutcome {
 ```rust
 pub trait SubmitInputTransaction {
     type Error;
-    pub fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(&mut self, command: submit_input::SubmitInput, accepted_input: signalbox_domain::AcceptedInputId, turn: option::Option<signalbox_domain::TurnId>, cancellation_identities: model_execution::CancelledModelCallTurnIdentities, next_reclassified_turn: NextTurn, next_tool_cancellation: NextToolCancellation, next_closure_decision: NextClosureDecision, next_closure_attempt: NextClosureAttempt) -> impl future::Future<Output = result::Result<submit_input::SubmitInputOutcome, <Self as submit_input::SubmitInputTransaction>::Error>> + marker::Send where NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId + marker::Send, NextToolCancellation: function::FnMut(&[signalbox_domain::ToolRequestId]) -> (vec::Vec<context_frontier::SemanticTranscriptEntryId>, context_frontier::ContextFrontierId) + marker::Send, NextClosureDecision: function::FnMut() -> signalbox_domain::DurableCommandId + marker::Send, NextClosureAttempt: function::FnMut() -> signalbox_domain::TurnAttemptId + marker::Send;
+    pub fn handle<NextTurn, NextToolCancellation, NextClosureDecision, NextClosureAttempt>(
+        &mut self,
+        command: submit_input::SubmitInput,
+        accepted_input: signalbox_domain::AcceptedInputId,
+        turn: option::Option<signalbox_domain::TurnId>,
+        cancellation_identities: model_execution::CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+        next_tool_cancellation: NextToolCancellation,
+        next_closure_decision: NextClosureDecision,
+        next_closure_attempt: NextClosureAttempt,
+    ) -> impl future::Future<
+        Output = result::Result<
+            submit_input::SubmitInputOutcome,
+            <Self as submit_input::SubmitInputTransaction>::Error,
+        >,
+    > + marker::Send
+    where
+        NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId
+            + marker::Send,
+        NextToolCancellation: function::FnMut(
+                &[signalbox_domain::ToolRequestId],
+            ) -> (
+                vec::Vec<context_frontier::SemanticTranscriptEntryId>,
+                context_frontier::ContextFrontierId,
+            ) + marker::Send,
+        NextClosureDecision: function::FnMut() -> signalbox_domain::DurableCommandId + marker::Send,
+        NextClosureAttempt: function::FnMut() -> signalbox_domain::TurnAttemptId + marker::Send;
 }
 ```
 
 ## SubmitInputService
 
 ```rust
-pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }
+pub struct SubmitInputService<Generator, Transaction, Nudge> {/* private */}
 // derives: fmt::Debug
-impl<Generator, Transaction, Nudge> submit_input::SubmitInputService<Generator, Transaction, Nudge> {
-    pub const fn new(ids: Generator, transaction: Transaction, nudge: Nudge, tool_dispatch_gate: tool_dispatch_gate::InProcessToolDispatchGate) -> Self;
-    pub fn into_parts(self) -> (Generator, Transaction, Nudge, tool_dispatch_gate::InProcessToolDispatchGate);
+impl<Generator, Transaction, Nudge>
+    submit_input::SubmitInputService<Generator, Transaction, Nudge>
+{
+    pub const fn new(
+        ids: Generator,
+        transaction: Transaction,
+        nudge: Nudge,
+        tool_dispatch_gate: tool_dispatch_gate::InProcessToolDispatchGate,
+    ) -> Self;
+    pub fn into_parts(
+        self,
+    ) -> (
+        Generator,
+        Transaction,
+        Nudge,
+        tool_dispatch_gate::InProcessToolDispatchGate,
+    );
 }
-impl<Generator, Transaction, Nudge> submit_input::SubmitInputService<Generator, Transaction, Nudge> where Generator: submit_input::SubmitInputIdGenerator + marker::Send, Transaction: submit_input::SubmitInputTransaction, Nudge: scheduler::EligibilityNudge {
-    pub async fn execute(&mut self, request: submit_input::SubmitInputRequest) -> result::Result<submit_input::SubmitInputOutcome, <Transaction as submit_input::SubmitInputTransaction>::Error>;
+impl<Generator, Transaction, Nudge> submit_input::SubmitInputService<Generator, Transaction, Nudge>
+where
+    Generator: submit_input::SubmitInputIdGenerator + marker::Send,
+    Transaction: submit_input::SubmitInputTransaction,
+    Nudge: scheduler::EligibilityNudge,
+{
+    pub async fn execute(
+        &mut self,
+        request: submit_input::SubmitInputRequest,
+    ) -> result::Result<
+        submit_input::SubmitInputOutcome,
+        <Transaction as submit_input::SubmitInputTransaction>::Error,
+    >;
 }
 ```

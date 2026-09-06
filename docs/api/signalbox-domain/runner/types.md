@@ -144,8 +144,13 @@ impl runner::WorkspaceRelativePath {
 
 ```rust
 pub enum WorkspaceRecovery {
-    Commit { revision: runner::WorkspaceRevision },
-    Branch { name: runner::WorkspaceBranchName, revision: runner::WorkspaceRevision },
+    Commit {
+        revision: runner::WorkspaceRevision,
+    },
+    Branch {
+        name: runner::WorkspaceBranchName,
+        revision: runner::WorkspaceRevision,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -189,10 +194,16 @@ pub enum RunnerToolEffectClass {
 ## RunnerToolDeclaration
 
 ```rust
-pub struct RunnerToolDeclaration { /* private */ }
+pub struct RunnerToolDeclaration {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerToolDeclaration {
-    pub const fn new(name: tool::ToolName, model: runner::RunnerToolModelDefinition, permission: tool::ToolPermissionDefault, effect: runner::RunnerToolEffectClass, loci: runner::ToolAdmissibleLoci) -> Self;
+    pub const fn new(
+        name: tool::ToolName,
+        model: runner::RunnerToolModelDefinition,
+        permission: tool::ToolPermissionDefault,
+        effect: runner::RunnerToolEffectClass,
+        loci: runner::ToolAdmissibleLoci,
+    ) -> Self;
     pub const fn name(&self) -> &tool::ToolName;
     pub const fn model(&self) -> &runner::RunnerToolModelDefinition;
     pub const fn permission(&self) -> tool::ToolPermissionDefault;
@@ -204,10 +215,13 @@ impl runner::RunnerToolDeclaration {
 ## RunnerToolModelDefinition
 
 ```rust
-pub struct RunnerToolModelDefinition { /* private */ }
+pub struct RunnerToolModelDefinition {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerToolModelDefinition {
-    pub fn try_new(description: string::String, input_schema: string::String) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn try_new(
+        description: string::String,
+        input_schema: string::String,
+    ) -> result::Result<Self, runner::RunnerDomainError>;
     pub fn description(&self) -> &str;
     pub const fn input_schema(&self) -> &tool::NormalizedToolArguments;
 }
@@ -226,13 +240,18 @@ pub enum CredentialToolApproval {
 ## CredentialProfilePolicy
 
 ```rust
-pub struct CredentialProfilePolicy { /* private */ }
+pub struct CredentialProfilePolicy {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::CredentialProfilePolicy {
-    pub fn try_new(name: runner::CredentialProfileName, approvals: impl collect::IntoIterator<Item = (tool::ToolName, runner::CredentialToolApproval)>) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn try_new(
+        name: runner::CredentialProfileName,
+        approvals: impl collect::IntoIterator<Item = (tool::ToolName, runner::CredentialToolApproval)>,
+    ) -> result::Result<Self, runner::RunnerDomainError>;
     pub const fn name(&self) -> &runner::CredentialProfileName;
     pub fn approval_for(&self, tool: &tool::ToolName) -> runner::CredentialToolApproval;
-    pub fn approvals(&self) -> impl iterator::Iterator<Item = (&tool::ToolName, runner::CredentialToolApproval)>;
+    pub fn approvals(
+        &self,
+    ) -> impl iterator::Iterator<Item = (&tool::ToolName, runner::CredentialToolApproval)>;
 }
 ```
 
@@ -262,19 +281,31 @@ pub enum RunnerToolPermissionOverride {
 pub struct RunnerToolPermissionOverrides(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerToolPermissionOverrides {
-    pub fn try_new(overrides: impl collect::IntoIterator<Item = (tool::ToolName, runner::RunnerToolPermissionOverride)>) -> result::Result<Self, runner::RunnerDomainError>;
-    pub fn get(&self, tool: &tool::ToolName) -> option::Option<runner::RunnerToolPermissionOverride>;
-    pub fn iter(&self) -> impl iterator::Iterator<Item = (&tool::ToolName, runner::RunnerToolPermissionOverride)>;
+    pub fn try_new(
+        overrides: impl collect::IntoIterator<
+            Item = (tool::ToolName, runner::RunnerToolPermissionOverride),
+        >,
+    ) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn get(
+        &self,
+        tool: &tool::ToolName,
+    ) -> option::Option<runner::RunnerToolPermissionOverride>;
+    pub fn iter(
+        &self,
+    ) -> impl iterator::Iterator<Item = (&tool::ToolName, runner::RunnerToolPermissionOverride)>;
 }
 ```
 
 ## RunnerRepositoryEntry
 
 ```rust
-pub struct RunnerRepositoryEntry { /* private */ }
+pub struct RunnerRepositoryEntry {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerRepositoryEntry {
-    pub const fn new(key: runner::WorkspaceRepositoryKey, credential_profile: option::Option<runner::CredentialProfileName>) -> Self;
+    pub const fn new(
+        key: runner::WorkspaceRepositoryKey,
+        credential_profile: option::Option<runner::CredentialProfileName>,
+    ) -> Self;
     pub const fn key(&self) -> &runner::WorkspaceRepositoryKey;
     pub const fn credential_profile(&self) -> option::Option<&runner::CredentialProfileName>;
 }
@@ -292,21 +323,34 @@ pub enum WorkspaceCapability {
 ## RunnerCatalog
 
 ```rust
-pub struct RunnerCatalog { /* private */ }
+pub struct RunnerCatalog {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerCatalog {
-    pub fn try_new(classes: impl collect::IntoIterator<Item = runner::RunnerCapabilityClass>, tools: impl collect::IntoIterator<Item = runner::RunnerToolDeclaration>, profiles: impl collect::IntoIterator<Item = runner::CredentialProfilePolicy>, workspaces: impl collect::IntoIterator<Item = runner::WorkspaceCapability>, sandboxes: impl collect::IntoIterator<Item = runner::RunnerSandboxProfile>) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn try_new(
+        classes: impl collect::IntoIterator<Item = runner::RunnerCapabilityClass>,
+        tools: impl collect::IntoIterator<Item = runner::RunnerToolDeclaration>,
+        profiles: impl collect::IntoIterator<Item = runner::CredentialProfilePolicy>,
+        workspaces: impl collect::IntoIterator<Item = runner::WorkspaceCapability>,
+        sandboxes: impl collect::IntoIterator<Item = runner::RunnerSandboxProfile>,
+    ) -> result::Result<Self, runner::RunnerDomainError>;
 }
 ```
 
 ## RunnerAdvertisement
 
 ```rust
-pub struct RunnerAdvertisement { /* private */ }
+pub struct RunnerAdvertisement {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerAdvertisement {
     const MAX_REPOSITORIES: usize;
-    pub fn new(classes: impl collect::IntoIterator<Item = runner::RunnerCapabilityClass>, tools: impl collect::IntoIterator<Item = tool::ToolName>, profiles: impl collect::IntoIterator<Item = runner::CredentialProfileName>, workspaces: impl collect::IntoIterator<Item = runner::WorkspaceCapability>, sandboxes: impl collect::IntoIterator<Item = runner::RunnerSandboxProfile>, repositories: impl collect::IntoIterator<Item = runner::RunnerRepositoryEntry>) -> Self;
+    pub fn new(
+        classes: impl collect::IntoIterator<Item = runner::RunnerCapabilityClass>,
+        tools: impl collect::IntoIterator<Item = tool::ToolName>,
+        profiles: impl collect::IntoIterator<Item = runner::CredentialProfileName>,
+        workspaces: impl collect::IntoIterator<Item = runner::WorkspaceCapability>,
+        sandboxes: impl collect::IntoIterator<Item = runner::RunnerSandboxProfile>,
+        repositories: impl collect::IntoIterator<Item = runner::RunnerRepositoryEntry>,
+    ) -> Self;
     pub fn classes(&self) -> impl iterator::Iterator<Item = &runner::RunnerCapabilityClass>;
     pub fn tools(&self) -> impl iterator::Iterator<Item = &tool::ToolName>;
     pub fn profiles(&self) -> impl iterator::Iterator<Item = &runner::CredentialProfileName>;
@@ -329,50 +373,81 @@ pub enum RunnerEnrollmentState {
 ## RunnerEnrollment
 
 ```rust
-pub struct RunnerEnrollment { /* private */ }
+pub struct RunnerEnrollment {/* private */}
 // derives: fmt::Debug
 impl cmp::PartialEq for runner::RunnerEnrollment {
     pub fn eq(&self, other: &Self) -> bool;
 }
 impl cmp::Eq for runner::RunnerEnrollment {}
 impl runner::RunnerEnrollment {
-    pub fn new(enrollment: RunnerEnrollmentId, runner: RunnerId, authentication: RunnerAuthenticationId, allowed_classes: impl collect::IntoIterator<Item = runner::RunnerCapabilityClass>) -> Self;
+    pub fn new(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl collect::IntoIterator<Item = runner::RunnerCapabilityClass>,
+    ) -> Self;
     pub const fn enrollment(&self) -> RunnerEnrollmentId;
     pub const fn runner(&self) -> RunnerId;
     pub const fn authentication(&self) -> RunnerAuthenticationId;
     pub const fn state(&self) -> runner::RunnerEnrollmentState;
-    pub fn allowed_classes(&self) -> impl iterator::Iterator<Item = &runner::RunnerCapabilityClass>;
+    pub fn allowed_classes(&self)
+        -> impl iterator::Iterator<Item = &runner::RunnerCapabilityClass>;
     pub fn last_issued_registration_revision(&self) -> option::Option<runner::RunnerGeneration>;
     pub fn revoke(self) -> result::Result<Self, runner::RunnerDomainError>;
     pub fn revoke_in_place(&mut self) -> result::Result<(), runner::RunnerDomainError>;
-    pub fn register(&self, advertisement: runner::RunnerAdvertisement, catalog: &runner::RunnerCatalog) -> result::Result<runner::ValidatedRunnerRegistration, runner::RunnerDomainError>;
-    pub fn prepare_registration(&self, advertisement: runner::RunnerAdvertisement, catalog: &runner::RunnerCatalog) -> result::Result<runner::PreparedRunnerRegistration, runner::RunnerDomainError>;
-    pub fn reconstitute(input: runner::RunnerEnrollmentReconstitutionInput) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn register(
+        &self,
+        advertisement: runner::RunnerAdvertisement,
+        catalog: &runner::RunnerCatalog,
+    ) -> result::Result<runner::ValidatedRunnerRegistration, runner::RunnerDomainError>;
+    pub fn prepare_registration(
+        &self,
+        advertisement: runner::RunnerAdvertisement,
+        catalog: &runner::RunnerCatalog,
+    ) -> result::Result<runner::PreparedRunnerRegistration, runner::RunnerDomainError>;
+    pub fn reconstitute(
+        input: runner::RunnerEnrollmentReconstitutionInput,
+    ) -> result::Result<Self, runner::RunnerDomainError>;
 }
 ```
 
 ## PreparedRunnerRegistration
 
 ```rust
-pub struct PreparedRunnerRegistration { /* private */ }
+pub struct PreparedRunnerRegistration {/* private */}
 // derives: fmt::Debug
 impl runner::PreparedRunnerRegistration {
     pub const fn registration(&self) -> &runner::ValidatedRunnerRegistration;
-    pub fn commit(self) -> result::Result<runner::ValidatedRunnerRegistration, runner::RunnerDomainError>;
+    pub fn commit(
+        self,
+    ) -> result::Result<runner::ValidatedRunnerRegistration, runner::RunnerDomainError>;
 }
 ```
 
 ## RunnerEnrollmentReconstitutionInput
 
 ```rust
-pub struct RunnerEnrollmentReconstitutionInput { pub enrollment: RunnerEnrollmentId, pub recorded_enrollment: RunnerEnrollmentId, pub runner: RunnerId, pub recorded_runner: RunnerId, pub authentication: RunnerAuthenticationId, pub recorded_authentication: RunnerAuthenticationId, pub allowed_classes: set::BTreeSet<runner::RunnerCapabilityClass>, pub recorded_allowed_classes: set::BTreeSet<runner::RunnerCapabilityClass>, pub registration_revision: option::Option<runner::RunnerGeneration>, pub recorded_registration_revision: option::Option<runner::RunnerGeneration>, pub state: runner::RunnerEnrollmentState, pub recorded_state: runner::RunnerEnrollmentState }
+pub struct RunnerEnrollmentReconstitutionInput {
+    pub enrollment: RunnerEnrollmentId,
+    pub recorded_enrollment: RunnerEnrollmentId,
+    pub runner: RunnerId,
+    pub recorded_runner: RunnerId,
+    pub authentication: RunnerAuthenticationId,
+    pub recorded_authentication: RunnerAuthenticationId,
+    pub allowed_classes: set::BTreeSet<runner::RunnerCapabilityClass>,
+    pub recorded_allowed_classes: set::BTreeSet<runner::RunnerCapabilityClass>,
+    pub registration_revision: option::Option<runner::RunnerGeneration>,
+    pub recorded_registration_revision: option::Option<runner::RunnerGeneration>,
+    pub state: runner::RunnerEnrollmentState,
+    pub recorded_state: runner::RunnerEnrollmentState,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ValidatedRunnerRegistration
 
 ```rust
-pub struct ValidatedRunnerRegistration { /* private */ }
+pub struct ValidatedRunnerRegistration {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl cmp::PartialEq for runner::ValidatedRunnerRegistration {
     pub fn eq(&self, other: &Self) -> bool;
@@ -385,10 +460,16 @@ impl runner::ValidatedRunnerRegistration {
     pub const fn revision(&self) -> runner::RunnerGeneration;
     pub fn satisfies(&self, selector: &runner::RunnerSelector) -> bool;
     pub fn tool(&self, tool: &tool::ToolName) -> option::Option<&runner::RunnerToolDeclaration>;
-    pub fn profile(&self, profile: &runner::CredentialProfileName) -> option::Option<&runner::CredentialProfilePolicy>;
+    pub fn profile(
+        &self,
+        profile: &runner::CredentialProfileName,
+    ) -> option::Option<&runner::CredentialProfilePolicy>;
     pub fn supports_workspace(&self, capability: runner::WorkspaceCapability) -> bool;
     pub fn supports_sandbox(&self, profile: runner::RunnerSandboxProfile) -> bool;
-    pub fn repository(&self, key: &runner::WorkspaceRepositoryKey) -> option::Option<&runner::RunnerRepositoryEntry>;
+    pub fn repository(
+        &self,
+        key: &runner::WorkspaceRepositoryKey,
+    ) -> option::Option<&runner::RunnerRepositoryEntry>;
     pub fn tool_names(&self) -> impl iterator::Iterator<Item = &tool::ToolName>;
     pub fn classes(&self) -> impl iterator::Iterator<Item = &runner::RunnerCapabilityClass>;
     pub fn tools(&self) -> impl iterator::Iterator<Item = &runner::RunnerToolDeclaration>;
@@ -396,14 +477,29 @@ impl runner::ValidatedRunnerRegistration {
     pub fn workspaces(&self) -> impl iterator::Iterator<Item = runner::WorkspaceCapability> + '_;
     pub fn sandboxes(&self) -> impl iterator::Iterator<Item = runner::RunnerSandboxProfile> + '_;
     pub fn repositories(&self) -> impl iterator::Iterator<Item = &runner::RunnerRepositoryEntry>;
-    pub fn reconstitute(enrollment: &runner::RunnerEnrollment, catalog: &runner::RunnerCatalog, input: runner::ValidatedRunnerRegistrationReconstitutionInput) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn reconstitute(
+        enrollment: &runner::RunnerEnrollment,
+        catalog: &runner::RunnerCatalog,
+        input: runner::ValidatedRunnerRegistrationReconstitutionInput,
+    ) -> result::Result<Self, runner::RunnerDomainError>;
 }
 ```
 
 ## ValidatedRunnerRegistrationReconstitutionInput
 
 ```rust
-pub struct ValidatedRunnerRegistrationReconstitutionInput { pub enrollment: RunnerEnrollmentId, pub revision: runner::RunnerGeneration, pub runner: RunnerId, pub authentication: RunnerAuthenticationId, pub classes: set::BTreeSet<runner::RunnerCapabilityClass>, pub tools: vec::Vec<runner::RunnerToolDeclaration>, pub profiles: vec::Vec<runner::CredentialProfilePolicy>, pub workspaces: set::BTreeSet<runner::WorkspaceCapability>, pub sandboxes: set::BTreeSet<runner::RunnerSandboxProfile>, pub repositories: vec::Vec<runner::RunnerRepositoryEntry> }
+pub struct ValidatedRunnerRegistrationReconstitutionInput {
+    pub enrollment: RunnerEnrollmentId,
+    pub revision: runner::RunnerGeneration,
+    pub runner: RunnerId,
+    pub authentication: RunnerAuthenticationId,
+    pub classes: set::BTreeSet<runner::RunnerCapabilityClass>,
+    pub tools: vec::Vec<runner::RunnerToolDeclaration>,
+    pub profiles: vec::Vec<runner::CredentialProfilePolicy>,
+    pub workspaces: set::BTreeSet<runner::WorkspaceCapability>,
+    pub sandboxes: set::BTreeSet<runner::RunnerSandboxProfile>,
+    pub repositories: vec::Vec<runner::RunnerRepositoryEntry>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -423,21 +519,30 @@ impl runner::RunnerGeneration {
 ## RunnerLeaseCorrelation
 
 ```rust
-pub struct RunnerLeaseCorrelation { pub lease: RunnerLeaseId, pub runner: RunnerId, pub tool: tool::ToolName, pub dispatch: tool_attempt::ToolAttemptDispatchCorrelation, pub generation: runner::RunnerGeneration }
+pub struct RunnerLeaseCorrelation {
+    pub lease: RunnerLeaseId,
+    pub runner: RunnerId,
+    pub tool: tool::ToolName,
+    pub dispatch: tool_attempt::ToolAttemptDispatchCorrelation,
+    pub generation: runner::RunnerGeneration,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
 
 ## RunnerLeaseOfferRequest
 
 ```rust
-pub struct RunnerLeaseOfferRequest { pub lease: RunnerLeaseId, pub tool: tool::ToolName }
+pub struct RunnerLeaseOfferRequest {
+    pub lease: RunnerLeaseId,
+    pub tool: tool::ToolName,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## RunnerToolAttemptAuthorization
 
 ```rust
-pub struct RunnerToolAttemptAuthorization { /* private */ }
+pub struct RunnerToolAttemptAuthorization {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerToolAttemptAuthorization {
     pub const fn tool(&self) -> &tool::ToolName;
@@ -461,7 +566,7 @@ pub enum RunnerLeaseState {
 ## RunnerLeaseNoExecutionProof
 
 ```rust
-pub struct RunnerLeaseNoExecutionProof { /* private */ }
+pub struct RunnerLeaseNoExecutionProof {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerLeaseNoExecutionProof {
     pub const fn correlation(&self) -> &runner::RunnerLeaseCorrelation;
@@ -471,7 +576,7 @@ impl runner::RunnerLeaseNoExecutionProof {
 ## RunnerLease
 
 ```rust
-pub struct RunnerLease { /* private */ }
+pub struct RunnerLease {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerLease {
     pub fn correlation(&self) -> runner::RunnerLeaseCorrelation;
@@ -479,24 +584,61 @@ impl runner::RunnerLease {
     pub const fn generation(&self) -> runner::RunnerGeneration;
     pub const fn attempt(&self) -> ToolAttemptId;
     pub const fn tool(&self) -> &tool::ToolName;
-    pub const fn credential_authorization(&self) -> option::Option<&runner::CredentialDispatchAuthorization>;
+    pub const fn credential_authorization(
+        &self,
+    ) -> option::Option<&runner::CredentialDispatchAuthorization>;
     pub const fn session(&self) -> SessionId;
     pub const fn runner(&self) -> RunnerId;
     pub const fn effect(&self) -> runner::RunnerToolEffectClass;
-    pub fn claim(self, correlation: runner::RunnerLeaseCorrelation) -> result::Result<Self, runner::RunnerDomainError>;
-    pub fn complete(self, correlation: runner::RunnerLeaseCorrelation) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn claim(
+        self,
+        correlation: runner::RunnerLeaseCorrelation,
+    ) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn complete(
+        self,
+        correlation: runner::RunnerLeaseCorrelation,
+    ) -> result::Result<Self, runner::RunnerDomainError>;
     pub fn lose(self) -> result::Result<runner::RunnerLeaseLoss, runner::RunnerDomainError>;
-    pub fn lose_unclaimed(self, proof: &runner::RunnerLeaseNoExecutionProof) -> result::Result<runner::RunnerLeaseLoss, runner::RunnerDomainError>;
-    pub fn reconstitute(input: runner::RunnerLeaseReconstitutionInput, registration: &runner::ValidatedRunnerRegistration) -> result::Result<Self, runner::RunnerDomainError>;
-    pub fn reconstitute_loss(input: runner::RunnerLeaseReconstitutionInput, registration: &runner::ValidatedRunnerRegistration, no_execution: option::Option<runner::RunnerLeaseCorrelation>) -> result::Result<runner::RunnerLeaseLoss, runner::RunnerDomainError>;
-    pub fn into_reconstituted_loss(self, no_execution: option::Option<runner::RunnerLeaseCorrelation>, retry_preparation: runner::RunnerLeaseRetryPreparation) -> result::Result<runner::RunnerLeaseLoss, runner::RunnerDomainError>;
+    pub fn lose_unclaimed(
+        self,
+        proof: &runner::RunnerLeaseNoExecutionProof,
+    ) -> result::Result<runner::RunnerLeaseLoss, runner::RunnerDomainError>;
+    pub fn reconstitute(
+        input: runner::RunnerLeaseReconstitutionInput,
+        registration: &runner::ValidatedRunnerRegistration,
+    ) -> result::Result<Self, runner::RunnerDomainError>;
+    pub fn reconstitute_loss(
+        input: runner::RunnerLeaseReconstitutionInput,
+        registration: &runner::ValidatedRunnerRegistration,
+        no_execution: option::Option<runner::RunnerLeaseCorrelation>,
+    ) -> result::Result<runner::RunnerLeaseLoss, runner::RunnerDomainError>;
+    pub fn into_reconstituted_loss(
+        self,
+        no_execution: option::Option<runner::RunnerLeaseCorrelation>,
+        retry_preparation: runner::RunnerLeaseRetryPreparation,
+    ) -> result::Result<runner::RunnerLeaseLoss, runner::RunnerDomainError>;
 }
 ```
 
 ## RunnerLeaseReconstitutionInput
 
 ```rust
-pub struct RunnerLeaseReconstitutionInput { pub lease: RunnerLeaseId, pub dispatch: tool_attempt::ToolAttemptDispatchCorrelation, pub runner: RunnerId, pub tool: tool::ToolName, pub effect: runner::RunnerToolEffectClass, pub credential_authorization: option::Option<runner::CredentialDispatchAuthorization>, pub generation: runner::RunnerGeneration, pub state: runner::RunnerLeaseState, pub recorded_correlation: runner::RunnerLeaseCorrelation, pub recorded_session: SessionId, pub recorded_effect: runner::RunnerToolEffectClass, pub recorded_credential_authorization: option::Option<runner::CredentialDispatchAuthorization>, pub recorded_state: runner::RunnerLeaseState, pub retry_preparation: runner::RunnerLeaseRetryPreparation }
+pub struct RunnerLeaseReconstitutionInput {
+    pub lease: RunnerLeaseId,
+    pub dispatch: tool_attempt::ToolAttemptDispatchCorrelation,
+    pub runner: RunnerId,
+    pub tool: tool::ToolName,
+    pub effect: runner::RunnerToolEffectClass,
+    pub credential_authorization: option::Option<runner::CredentialDispatchAuthorization>,
+    pub generation: runner::RunnerGeneration,
+    pub state: runner::RunnerLeaseState,
+    pub recorded_correlation: runner::RunnerLeaseCorrelation,
+    pub recorded_session: SessionId,
+    pub recorded_effect: runner::RunnerToolEffectClass,
+    pub recorded_credential_authorization: option::Option<runner::CredentialDispatchAuthorization>,
+    pub recorded_state: runner::RunnerLeaseState,
+    pub retry_preparation: runner::RunnerLeaseRetryPreparation,
+}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -513,7 +655,7 @@ pub enum RunnerLeaseRetryPreparation {
 ## RunnerLeaseLoss
 
 ```rust
-pub struct RunnerLeaseLoss { /* private */ }
+pub struct RunnerLeaseLoss {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerLeaseLoss {
     pub const fn lost(&self) -> &runner::RunnerLease;
@@ -526,32 +668,43 @@ impl runner::RunnerLeaseLoss {
 ## RunnerUnclaimedAttemptReauthorization
 
 ```rust
-pub struct RunnerUnclaimedAttemptReauthorization { /* private */ }
+pub struct RunnerUnclaimedAttemptReauthorization {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerUnclaimedAttemptReauthorization {
     pub const fn batch(&self) -> &tool_execution::ToolBatch;
-    pub fn into_parts(self) -> (tool_execution::ToolBatch, runner::RunnerToolAttemptAuthorization);
+    pub fn into_parts(
+        self,
+    ) -> (
+        tool_execution::ToolBatch,
+        runner::RunnerToolAttemptAuthorization,
+    );
 }
 ```
 
 ## RunnerClaimedAttemptReplacement
 
 ```rust
-pub struct RunnerClaimedAttemptReplacement { /* private */ }
+pub struct RunnerClaimedAttemptReplacement {/* private */}
 // derives: fmt::Debug, cmp::Eq, cmp::PartialEq
 impl runner::RunnerClaimedAttemptReplacement {
     pub const fn batch(&self) -> &tool_execution::ToolBatch;
     pub const fn retired(&self) -> &tool_attempt::EndedToolAttempt;
     pub const fn source(&self) -> &runner::RunnerLeaseCorrelation;
     pub const fn replacement(&self) -> tool_attempt::ToolAttemptDispatchCorrelation;
-    pub fn into_parts(self) -> (tool_execution::ToolBatch, tool_attempt::EndedToolAttempt, runner::RunnerToolAttemptAuthorization);
+    pub fn into_parts(
+        self,
+    ) -> (
+        tool_execution::ToolBatch,
+        tool_attempt::EndedToolAttempt,
+        runner::RunnerToolAttemptAuthorization,
+    );
 }
 ```
 
 ## RunnerLeaseRetryAuthority
 
 ```rust
-pub struct RunnerLeaseRetryAuthority { /* private */ }
+pub struct RunnerLeaseRetryAuthority {/* private */}
 // derives: fmt::Debug
 impl cmp::PartialEq for runner::RunnerLeaseRetryAuthority {
     pub fn eq(&self, other: &Self) -> bool;
@@ -559,8 +712,15 @@ impl cmp::PartialEq for runner::RunnerLeaseRetryAuthority {
 impl cmp::Eq for runner::RunnerLeaseRetryAuthority {}
 impl runner::RunnerLeaseRetryAuthority {
     pub const fn generation(&self) -> runner::RunnerGeneration;
-    pub fn prepare_unclaimed_attempt(&self, batch: tool_execution::ToolBatch) -> result::Result<runner::RunnerUnclaimedAttemptReauthorization, runner::RunnerDomainError>;
-    pub fn prepare_claimed_attempt(&self, batch: tool_execution::ToolBatch, attempt: ToolAttemptId) -> result::Result<runner::RunnerClaimedAttemptReplacement, runner::RunnerDomainError>;
+    pub fn prepare_unclaimed_attempt(
+        &self,
+        batch: tool_execution::ToolBatch,
+    ) -> result::Result<runner::RunnerUnclaimedAttemptReauthorization, runner::RunnerDomainError>;
+    pub fn prepare_claimed_attempt(
+        &self,
+        batch: tool_execution::ToolBatch,
+        attempt: ToolAttemptId,
+    ) -> result::Result<runner::RunnerClaimedAttemptReplacement, runner::RunnerDomainError>;
 }
 ```
 
@@ -579,7 +739,9 @@ pub enum WorkingDirectorySelection {
 ```rust
 pub enum WorkspaceRequirement {
     None,
-    RepositoryWorktree { repository: runner::WorkspaceRepositoryKey },
+    RepositoryWorktree {
+        repository: runner::WorkspaceRepositoryKey,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -587,210 +749,42 @@ pub enum WorkspaceRequirement {
 ## ProvisionedWorkspace
 
 ```rust
-pub struct ProvisionedWorkspace { pub session: SessionId, pub placement_revision: runner::RunnerGeneration, pub runner: RunnerId, pub repository: option::Option<runner::WorkspaceRepositoryKey>, pub canonical_clone_url_digest: option::Option<runner::CanonicalCloneUrlDigest>, pub credential_profile: option::Option<runner::CredentialProfileName>, pub sandbox: runner::RunnerSandboxProfile, pub working_directory: runner::RunnerWorkingDirectory, pub relative_path: runner::WorkspaceRelativePath, pub manifest_id: WorkspaceManifestId, pub recovery: option::Option<runner::WorkspaceRecovery> }
+pub struct ProvisionedWorkspace {
+    pub session: SessionId,
+    pub placement_revision: runner::RunnerGeneration,
+    pub runner: RunnerId,
+    pub repository: option::Option<runner::WorkspaceRepositoryKey>,
+    pub canonical_clone_url_digest: option::Option<runner::CanonicalCloneUrlDigest>,
+    pub credential_profile: option::Option<runner::CredentialProfileName>,
+    pub sandbox: runner::RunnerSandboxProfile,
+    pub working_directory: runner::RunnerWorkingDirectory,
+    pub relative_path: runner::WorkspaceRelativePath,
+    pub manifest_id: WorkspaceManifestId,
+    pub recovery: option::Option<runner::WorkspaceRecovery>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SessionRunnerPlacementRequest
 
 ```rust
-pub struct SessionRunnerPlacementRequest { pub selector: runner::RunnerSelector, pub working_directory: runner::WorkingDirectorySelection, pub credential_profile: option::Option<runner::CredentialProfileName>, pub workspace: runner::WorkspaceRequirement, pub sandbox: runner::RunnerSandboxProfile, pub permission_overrides: runner::RunnerToolPermissionOverrides }
+pub struct SessionRunnerPlacementRequest {
+    pub selector: runner::RunnerSelector,
+    pub working_directory: runner::WorkingDirectorySelection,
+    pub credential_profile: option::Option<runner::CredentialProfileName>,
+    pub workspace: runner::WorkspaceRequirement,
+    pub sandbox: runner::RunnerSandboxProfile,
+    pub permission_overrides: runner::RunnerToolPermissionOverrides,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## RunnerCredentialGrantLineage
 
 ```rust
-pub struct RunnerCredentialGrantLineage { pub runner: RunnerId, pub revision: runner::RunnerGeneration }
+pub struct RunnerCredentialGrantLineage {
+    pub runner: RunnerId,
+    pub revision: runner::RunnerGeneration,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## PinnedRunnerPlacement
-
-```rust
-pub struct PinnedRunnerPlacement { pub runner: RunnerId, pub working_directory: runner::RunnerWorkingDirectory, pub credential_profile: option::Option<runner::CredentialProfileName>, pub grant_lineage: option::Option<runner::RunnerCredentialGrantLineage>, pub tools: set::BTreeSet<tool::ToolName>, pub runner_required_tools: set::BTreeSet<tool::ToolName>, pub workspace: option::Option<runner::ProvisionedWorkspace>, pub sandbox: runner::RunnerSandboxProfile, pub permission_overrides: runner::RunnerToolPermissionOverrides }
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerPlacementLossSource
-
-```rust
-pub enum RunnerPlacementLossSource {
-    Connection,
-    Registration,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## RunnerLostBeforePin
-
-```rust
-pub struct RunnerLostBeforePin { /* private */ }
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl runner::RunnerLostBeforePin {
-    pub const fn from_stored(runner: RunnerId) -> Self;
-    pub const fn runner(&self) -> RunnerId;
-}
-```
-
-## LostPinnedRunnerPlacement
-
-```rust
-pub struct LostPinnedRunnerPlacement { /* private */ }
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl runner::LostPinnedRunnerPlacement {
-    pub const fn from_stored(pinned: runner::PinnedRunnerPlacement, source: runner::RunnerPlacementLossSource) -> Self;
-    pub const fn pinned(&self) -> &runner::PinnedRunnerPlacement;
-    pub const fn source(&self) -> runner::RunnerPlacementLossSource;
-}
-```
-
-## AbandonedRunnerPlacement
-
-```rust
-pub enum AbandonedRunnerPlacement {
-    BeforePin(runner::RunnerLostBeforePin),
-    Pinned(boxed::Box<runner::LostPinnedRunnerPlacement>),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## SessionRunnerPlacementState
-
-```rust
-pub enum SessionRunnerPlacementState {
-    Unpinned,
-    RunnerLostBeforePin(runner::RunnerLostBeforePin),
-    Pinned(runner::PinnedRunnerPlacement),
-    RunnerLost(runner::LostPinnedRunnerPlacement),
-    RunnerAbandoned(runner::AbandonedRunnerPlacement),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## SessionRunnerPlacement
-
-```rust
-pub struct SessionRunnerPlacement { /* private */ }
-// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl runner::SessionRunnerPlacement {
-    pub const fn new(session: SessionId, request: runner::SessionRunnerPlacementRequest) -> Self;
-    pub const fn state(&self) -> &runner::SessionRunnerPlacementState;
-    pub const fn revision(&self) -> runner::RunnerGeneration;
-    pub const fn session(&self) -> SessionId;
-    pub const fn request(&self) -> &runner::SessionRunnerPlacementRequest;
-    pub fn pin_and_offer_lease(self, enrollment: &runner::RunnerEnrollment, registration: &runner::ValidatedRunnerRegistration, directory: runner::RunnerWorkingDirectory, workspace: option::Option<runner::ProvisionedWorkspace>, authorization: runner::RunnerToolAttemptAuthorization, offer: runner::RunnerLeaseOfferRequest) -> result::Result<runner::SessionRunnerPin, runner::RunnerDomainError>;
-    pub fn offer_lease(&self, enrollment: &runner::RunnerEnrollment, registration: &runner::ValidatedRunnerRegistration, grant: option::Option<&runner::CredentialProfileGrant>, authorization: runner::RunnerToolAttemptAuthorization, offer: runner::RunnerLeaseOfferRequest) -> result::Result<runner::RunnerLease, runner::RunnerDomainError>;
-    pub fn offer_retry(&self, enrollment: &runner::RunnerEnrollment, registration: &runner::ValidatedRunnerRegistration, grant: option::Option<&runner::CredentialProfileGrant>, loss: runner::RunnerLeaseLoss, authorization: runner::RunnerToolAttemptAuthorization) -> result::Result<runner::RunnerLease, runner::RunnerDomainError>;
-    pub fn mark_runner_lost(self) -> result::Result<Self, runner::RunnerDomainError>;
-    pub fn mark_runner_lost_before_pin(self, runner: RunnerId) -> result::Result<Self, runner::RunnerDomainError>;
-    pub fn reconcile_registration(self, registration: &runner::ValidatedRunnerRegistration) -> result::Result<Self, runner::RunnerDomainError>;
-    pub fn replace_lost_runner_before_pin(self, request: runner::SessionRunnerPlacementRequest, registration: &runner::ValidatedRunnerRegistration) -> result::Result<runner::RunnerPrePinReplacement, runner::RunnerDomainError>;
-    pub fn replace_lost_runner(self, request: runner::SessionRunnerPlacementRequest, registration: &runner::ValidatedRunnerRegistration, directory: runner::RunnerWorkingDirectory, workspace: option::Option<runner::ProvisionedWorkspace>, prior_grant: option::Option<runner::CredentialProfileGrant>) -> result::Result<runner::RunnerPlacementReplacement, runner::RunnerDomainError>;
-    pub fn abandon_lost_runner(self) -> result::Result<Self, runner::RunnerDomainError>;
-    pub fn replace_credential_profile(self, grant: runner::CredentialProfileGrant, registration: &runner::ValidatedRunnerRegistration, profile: runner::CredentialProfileName, tools: impl collect::IntoIterator<Item = tool::ToolName>) -> result::Result<runner::CredentialProfilePlacementReplacement, runner::RunnerDomainError>;
-    pub fn reconstitute(input: runner::SessionRunnerPlacementReconstitutionInput, expected_session: SessionId, registration: option::Option<&runner::ValidatedRunnerRegistration>, profileless_tombstone: option::Option<&runner::CredentialProfileGrant>) -> result::Result<Self, runner::RunnerDomainError>;
-}
-```
-
-## RunnerPlacementReconstitutionHistory
-
-```rust
-pub enum RunnerPlacementReconstitutionHistory {
-    Initial,
-    PrePinReplacements(vec::Vec<runner::RunnerPrePinReplacementHistory>),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerPrePinReplacementHistory
-
-```rust
-pub struct RunnerPrePinReplacementHistory { pub prior_revision: runner::RunnerGeneration, pub lost_runner: RunnerId, pub prior_request: runner::SessionRunnerPlacementRequest, pub replacement_request: runner::SessionRunnerPlacementRequest }
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## SessionRunnerPlacementReconstitutionInput
-
-```rust
-pub struct SessionRunnerPlacementReconstitutionInput { pub session: SessionId, pub revision: runner::RunnerGeneration, pub request: runner::SessionRunnerPlacementRequest, pub state: runner::SessionRunnerPlacementState, pub history: runner::RunnerPlacementReconstitutionHistory }
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## SessionRunnerPin
-
-```rust
-pub struct SessionRunnerPin { pub placement: runner::SessionRunnerPlacement, pub grant: option::Option<runner::CredentialProfileGrant>, pub lease: runner::RunnerLease }
-// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerPrePinReplacement
-
-```rust
-pub struct RunnerPrePinReplacement { pub placement: runner::SessionRunnerPlacement, pub before: runner::RunnerLostBeforePin, pub prior_request: runner::SessionRunnerPlacementRequest, pub replacement_request: runner::SessionRunnerPlacementRequest }
-// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerPlacementReplacement
-
-```rust
-pub struct RunnerPlacementReplacement { pub placement: runner::SessionRunnerPlacement, pub change: runner::RunnerPlacementChange, pub grant: option::Option<runner::CredentialProfileGrant>, pub grant_change: option::Option<runner::RunnerCredentialGrantChange> }
-// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerPlacementChange
-
-```rust
-pub struct RunnerPlacementChange { pub session: SessionId, pub prior_revision: runner::RunnerGeneration, pub replacement_revision: runner::RunnerGeneration, pub before_request: runner::SessionRunnerPlacementRequest, pub after_request: runner::SessionRunnerPlacementRequest, pub before: runner::PinnedRunnerPlacement, pub after: runner::PinnedRunnerPlacement }
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## CredentialProfilePlacementReplacement
-
-```rust
-pub struct CredentialProfilePlacementReplacement { pub placement: runner::SessionRunnerPlacement, pub placement_change: runner::RunnerPlacementChange, pub grant: runner::CredentialProfileGrantReplacement }
-// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## CredentialProfileGrantState
-
-```rust
-pub enum CredentialProfileGrantState {
-    Active,
-    Revoked,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## CredentialProfileGrant
-
-```rust
-pub struct CredentialProfileGrant { /* private */ }
-// derives: fmt::Debug, cmp::Eq, cmp::PartialEq
-impl runner::CredentialProfileGrant {
-    pub const fn state(&self) -> runner::CredentialProfileGrantState;
-    pub const fn revision(&self) -> runner::RunnerGeneration;
-    pub const fn lineage(&self) -> runner::RunnerCredentialGrantLineage;
-    pub const fn profile(&self) -> &runner::CredentialProfileName;
-    pub const fn session(&self) -> SessionId;
-    pub const fn runner(&self) -> RunnerId;
-    pub fn tools(&self) -> impl iterator::Iterator<Item = &tool::ToolName>;
-    pub fn approvals(&self) -> impl iterator::Iterator<Item = (&tool::ToolName, runner::CredentialToolApproval)>;
-    pub fn revoke(self) -> result::Result<Self, runner::RunnerDomainError>;
-    pub fn reconstitute(input: runner::CredentialProfileGrantReconstitutionInput, expected_session: SessionId, registration: &runner::ValidatedRunnerRegistration, sandbox: runner::RunnerSandboxProfile, permission_overrides: &runner::RunnerToolPermissionOverrides) -> result::Result<Self, runner::RunnerDomainError>;
-}
-```
-
-## CredentialProfileGrantReconstitutionInput
-
-```rust
-pub struct CredentialProfileGrantReconstitutionInput { pub session: SessionId, pub runner: RunnerId, pub revision: runner::RunnerGeneration, pub profile: runner::CredentialProfileName, pub tools: set::BTreeSet<tool::ToolName>, pub approvals: map::BTreeMap<tool::ToolName, runner::CredentialToolApproval>, pub state: runner::CredentialProfileGrantState }
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## RunnerCredentialGrantChange
-
-```rust
-pub struct RunnerCredentialGrantChange { pub before: option::Option<runner::CredentialProfileGrantReconstitutionInput>, pub after: option::Option<runner::CredentialProfileGrantReconstitutionInput> }
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

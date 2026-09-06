@@ -5,15 +5,18 @@
 ## InProcessToolDispatchGate
 
 ```rust
-pub struct InProcessToolDispatchGate { /* private */ }
+pub struct InProcessToolDispatchGate {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default
 impl tool_dispatch_gate::InProcessToolDispatchGate {
-    pub fn acquire(&self, turn: signalbox_domain::TurnId) -> impl future::Future<Output = tool_dispatch_gate::InProcessToolDispatchPermit> + marker::Send;
+    pub fn acquire(
+        &self,
+        turn: signalbox_domain::TurnId,
+    ) -> impl future::Future<Output = tool_dispatch_gate::InProcessToolDispatchPermit> + marker::Send;
 }
 ```
 
 ## InProcessToolDispatchPermit
 
 ```rust
-pub struct InProcessToolDispatchPermit { /* private */ }
+pub struct InProcessToolDispatchPermit {/* private */}
 ```

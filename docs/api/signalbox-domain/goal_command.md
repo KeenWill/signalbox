@@ -8,7 +8,9 @@
 pub enum GoalUserAction {
     Attach(goal::GoalStatement),
     Resume(option::Option<goal::GoalGuidance>),
-    Stop { descendant_scope: session_delegation::DescendantTerminationScope },
+    Stop {
+        descendant_scope: session_delegation::DescendantTerminationScope,
+    },
     Supersede(goal::GoalStatement),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -20,10 +22,14 @@ impl goal_command::GoalUserAction {
 ## GoalUserCommand
 
 ```rust
-pub struct GoalUserCommand { /* private */ }
+pub struct GoalUserCommand {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl goal_command::GoalUserCommand {
-    pub const fn new(command_id: DurableCommandId, session: SessionId, action: goal_command::GoalUserAction) -> Self;
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        action: goal_command::GoalUserAction,
+    ) -> Self;
     pub const fn command_id(&self) -> DurableCommandId;
     pub const fn session(&self) -> SessionId;
     pub const fn action(&self) -> &goal_command::GoalUserAction;
@@ -61,10 +67,13 @@ pub enum GoalCommandResult {
 ## ReconstitutedGoalCommand
 
 ```rust
-pub struct ReconstitutedGoalCommand { /* private */ }
+pub struct ReconstitutedGoalCommand {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl goal_command::ReconstitutedGoalCommand {
-    pub const fn new(command: goal_command::GoalUserCommand, result: goal_command::GoalCommandResult) -> Self;
+    pub const fn new(
+        command: goal_command::GoalUserCommand,
+        result: goal_command::GoalCommandResult,
+    ) -> Self;
     pub const fn command(&self) -> &goal_command::GoalUserCommand;
     pub const fn result(&self) -> &goal_command::GoalCommandResult;
 }

@@ -7,20 +7,37 @@
 ```rust
 pub trait SessionReader {
     type Error;
-    pub fn load_session(&self, session_id: signalbox_domain::SessionId) -> impl future::Future<Output = result::Result<option::Option<session::Session>, <Self as load_session::SessionReader>::Error>> + marker::Send;
+    pub fn load_session(
+        &self,
+        session_id: signalbox_domain::SessionId,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<session::Session>,
+            <Self as load_session::SessionReader>::Error,
+        >,
+    > + marker::Send;
 }
 ```
 
 ## LoadSessionService
 
 ```rust
-pub struct LoadSessionService<Reader> { /* private */ }
+pub struct LoadSessionService<Reader> {/* private */}
 // derives: fmt::Debug
 impl<Reader> load_session::LoadSessionService<Reader> {
     pub const fn new(reader: Reader) -> Self;
     pub fn into_reader(self) -> Reader;
 }
-impl<Reader> load_session::LoadSessionService<Reader> where Reader: load_session::SessionReader {
-    pub async fn execute(&self, session_id: signalbox_domain::SessionId) -> result::Result<option::Option<session::Session>, <Reader as load_session::SessionReader>::Error>;
+impl<Reader> load_session::LoadSessionService<Reader>
+where
+    Reader: load_session::SessionReader,
+{
+    pub async fn execute(
+        &self,
+        session_id: signalbox_domain::SessionId,
+    ) -> result::Result<
+        option::Option<session::Session>,
+        <Reader as load_session::SessionReader>::Error,
+    >;
 }
 ```

@@ -6,10 +6,20 @@
 
 ```rust
 pub enum ToolBatchPhaseReconstitutionInput {
-    AwaitingApproval { request: ToolRequestId },
-    Executing { turn_attempt: TurnAttemptId },
-    AwaitingRecovery { attempt: ToolAttemptId },
-    AwaitingChild { request: ToolRequestId, spawning_request: ToolRequestId, child: SessionId },
+    AwaitingApproval {
+        request: ToolRequestId,
+    },
+    Executing {
+        turn_attempt: TurnAttemptId,
+    },
+    AwaitingRecovery {
+        attempt: ToolAttemptId,
+    },
+    AwaitingChild {
+        request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -17,13 +27,27 @@ pub enum ToolBatchPhaseReconstitutionInput {
 ## ToolBatchReconstitutionInput
 
 ```rust
-pub struct ToolBatchReconstitutionInput { /* private */ }
+pub struct ToolBatchReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::ToolBatchReconstitutionInput {
-    pub fn new(session: SessionId, turn: TurnId, producing_call: ModelCallId, yielded_snapshot: context_frontier::ResolvedContextFrontierSnapshot, requests: vec::Vec<tool::ToolRequest>, approvals: vec::Vec<tool::ToolApprovalResolution>, attempts: vec::Vec<tool_attempt::ReconstitutedToolAttempt>, phase: tool_execution::ToolBatchPhaseReconstitutionInput) -> Self;
+    pub fn new(
+        session: SessionId,
+        turn: TurnId,
+        producing_call: ModelCallId,
+        yielded_snapshot: context_frontier::ResolvedContextFrontierSnapshot,
+        requests: vec::Vec<tool::ToolRequest>,
+        approvals: vec::Vec<tool::ToolApprovalResolution>,
+        attempts: vec::Vec<tool_attempt::ReconstitutedToolAttempt>,
+        phase: tool_execution::ToolBatchPhaseReconstitutionInput,
+    ) -> Self;
     pub fn with_retired_attempts(self, retired_attempts: vec::Vec<ToolAttemptId>) -> Self;
-    pub fn with_runner_authorized_attempts(self, runner_authorized_attempts: vec::Vec<ToolAttemptId>) -> Self;
-    pub fn reconstitute(self) -> result::Result<tool_execution::ToolBatch, tool_execution::ToolBatchReconstitutionError>;
+    pub fn with_runner_authorized_attempts(
+        self,
+        runner_authorized_attempts: vec::Vec<ToolAttemptId>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> result::Result<tool_execution::ToolBatch, tool_execution::ToolBatchReconstitutionError>;
 }
 ```
 
@@ -52,12 +76,17 @@ pub enum ToolBatchReconstitutionFailure {
 ## ToolBatchReconstitutionError
 
 ```rust
-pub struct ToolBatchReconstitutionError { /* private */ }
+pub struct ToolBatchReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::ToolBatchReconstitutionError {
     pub const fn input(&self) -> &tool_execution::ToolBatchReconstitutionInput;
     pub const fn failure(&self) -> tool_execution::ToolBatchReconstitutionFailure;
-    pub fn into_parts(self) -> (tool_execution::ToolBatchReconstitutionInput, tool_execution::ToolBatchReconstitutionFailure);
+    pub fn into_parts(
+        self,
+    ) -> (
+        tool_execution::ToolBatchReconstitutionInput,
+        tool_execution::ToolBatchReconstitutionFailure,
+    );
 }
 ```
 
@@ -65,10 +94,20 @@ impl tool_execution::ToolBatchReconstitutionError {
 
 ```rust
 pub enum ToolBatchPhase {
-    AwaitingApproval { request: ToolRequestId },
-    Executing { turn_attempt: TurnAttemptId },
-    AwaitingRecovery { attempt: ToolAttemptId },
-    AwaitingChild { request: ToolRequestId, spawning_request: ToolRequestId, child: SessionId },
+    AwaitingApproval {
+        request: ToolRequestId,
+    },
+    Executing {
+        turn_attempt: TurnAttemptId,
+    },
+    AwaitingRecovery {
+        attempt: ToolAttemptId,
+    },
+    AwaitingChild {
+        request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -76,7 +115,7 @@ pub enum ToolBatchPhase {
 ## ToolBatch
 
 ```rust
-pub struct ToolBatch { /* private */ }
+pub struct ToolBatch {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl cmp::PartialEq for tool_execution::ToolBatch {
     pub fn eq(&self, other: &Self) -> bool;
@@ -88,36 +127,133 @@ impl tool_execution::ToolBatch {
     pub const fn producing_call(&self) -> ModelCallId;
     pub const fn yielded_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
     pub fn requests(&self) -> &[tool::ToolRequest];
-    pub fn approval(&self, request: ToolRequestId) -> option::Option<&tool::ToolApprovalResolution>;
-    pub fn attempt(&self, request: ToolRequestId) -> option::Option<&tool_attempt::ReconstitutedToolAttempt>;
+    pub fn approval(&self, request: ToolRequestId)
+        -> option::Option<&tool::ToolApprovalResolution>;
+    pub fn attempt(
+        &self,
+        request: ToolRequestId,
+    ) -> option::Option<&tool_attempt::ReconstitutedToolAttempt>;
     pub fn retired_attempts(&self) -> impl iterator::Iterator<Item = ToolAttemptId> + '_;
     pub fn runner_authorized_attempts(&self) -> impl iterator::Iterator<Item = ToolAttemptId> + '_;
     pub const fn phase(&self) -> tool_execution::ToolBatchPhase;
     pub fn awaiting_approval(&self) -> option::Option<tool_execution::AwaitingToolApproval>;
     pub fn awaiting_recovery(&self) -> option::Option<tool_execution::AwaitingToolRecovery>;
-    pub fn prepare_user_decision(self, command: tool::DecideToolRequest, continuation_attempt: option::Option<TurnAttemptId>) -> result::Result<tool_execution::PreparedToolBatchDecision, tool_execution::ToolBatchDecisionError>;
-    pub fn prepare_lifecycle_closure_denial(self, command: tool::DecideToolRequest, continuation_attempt: option::Option<TurnAttemptId>) -> result::Result<tool_execution::PreparedToolBatchDecision, tool_execution::ToolBatchDecisionError>;
-    pub fn prepare_delegate_decision(self, approval: tool::DelegateToolApproval, continuation_attempt: option::Option<TurnAttemptId>) -> result::Result<tool_execution::PreparedDelegateToolApproval, tool_execution::DelegateToolApprovalTransitionError>;
-    pub fn prepare_next_attempt(&self, attempt: ToolAttemptId, effect_class: tool::ToolEffectClass) -> result::Result<tool_execution::PreparedToolAttempt, tool_execution::ToolBatchExecutionError>;
-    pub fn authorize_attempt(&self, attempt: ToolAttemptId) -> result::Result<tool_attempt::AuthorizedToolAttempt, tool_execution::ToolBatchExecutionError>;
-    pub fn authorize_dispatch(&self, attempt: ToolAttemptId) -> result::Result<tool_attempt::ToolDispatchAuthority, tool_execution::ToolBatchExecutionError>;
-    pub fn resume_in_flight_attempt(&self, attempt: ToolAttemptId) -> result::Result<tool_attempt::AuthorizedToolAttempt, tool_execution::ToolBatchExecutionError>;
-    pub fn resume_in_flight_dispatch(&self, attempt: ToolAttemptId) -> result::Result<tool_attempt::ToolDispatchAuthority, tool_execution::ToolBatchExecutionError>;
-    pub fn authorize_runner_attempt(&self, attempt: ToolAttemptId) -> result::Result<runner::RunnerToolAttemptAuthorization, tool_execution::ToolBatchExecutionError>;
-    pub fn resume_runner_attempt(&self, attempt: ToolAttemptId) -> result::Result<runner::RunnerToolAttemptAuthorization, tool_execution::ToolBatchExecutionError>;
-    pub fn prepare_result_projection(&self, entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>, continuation_frontier: context_frontier::ContextFrontierId) -> result::Result<tool_execution::PreparedToolResultProjection, tool_execution::ToolResultProjectionError>;
-    pub fn prepare_delegation_result_projection(&self, entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>, continuation_frontier: context_frontier::ContextFrontierId, outcome: session_delegation::DelegationOutcome) -> result::Result<tool_execution::PreparedToolResultProjection, tool_execution::ToolResultProjectionError>;
-    pub fn prepare_failure_projection(&self, entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>, result_frontier: context_frontier::ContextFrontierId) -> result::Result<tool_execution::PreparedToolResultProjection, tool_execution::ToolResultProjectionError>;
-    pub fn prepare_cancellation_projection(&self, entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>, result_frontier: context_frontier::ContextFrontierId) -> result::Result<tool_execution::PreparedToolResultProjection, tool_execution::ToolResultProjectionError>;
-    pub fn prepare_delegation_cancellation_projection(&self, entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>, result_frontier: context_frontier::ContextFrontierId, outcome: option::Option<session_delegation::DelegationOutcome>) -> result::Result<tool_execution::PreparedToolResultProjection, tool_execution::ToolResultProjectionError>;
-    pub fn prepare_reconciliation_projection(&self, entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>, terminal_frontier: context_frontier::ContextFrontierId) -> result::Result<tool_execution::PreparedToolResultProjection, tool_execution::ToolResultProjectionError>;
+    pub fn prepare_user_decision(
+        self,
+        command: tool::DecideToolRequest,
+        continuation_attempt: option::Option<TurnAttemptId>,
+    ) -> result::Result<
+        tool_execution::PreparedToolBatchDecision,
+        tool_execution::ToolBatchDecisionError,
+    >;
+    pub fn prepare_lifecycle_closure_denial(
+        self,
+        command: tool::DecideToolRequest,
+        continuation_attempt: option::Option<TurnAttemptId>,
+    ) -> result::Result<
+        tool_execution::PreparedToolBatchDecision,
+        tool_execution::ToolBatchDecisionError,
+    >;
+    pub fn prepare_delegate_decision(
+        self,
+        approval: tool::DelegateToolApproval,
+        continuation_attempt: option::Option<TurnAttemptId>,
+    ) -> result::Result<
+        tool_execution::PreparedDelegateToolApproval,
+        tool_execution::DelegateToolApprovalTransitionError,
+    >;
+    pub fn prepare_next_attempt(
+        &self,
+        attempt: ToolAttemptId,
+        effect_class: tool::ToolEffectClass,
+    ) -> result::Result<tool_execution::PreparedToolAttempt, tool_execution::ToolBatchExecutionError>;
+    pub fn authorize_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> result::Result<tool_attempt::AuthorizedToolAttempt, tool_execution::ToolBatchExecutionError>;
+    pub fn authorize_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> result::Result<tool_attempt::ToolDispatchAuthority, tool_execution::ToolBatchExecutionError>;
+    pub fn resume_in_flight_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> result::Result<tool_attempt::AuthorizedToolAttempt, tool_execution::ToolBatchExecutionError>;
+    pub fn resume_in_flight_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> result::Result<tool_attempt::ToolDispatchAuthority, tool_execution::ToolBatchExecutionError>;
+    pub fn authorize_runner_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> result::Result<
+        runner::RunnerToolAttemptAuthorization,
+        tool_execution::ToolBatchExecutionError,
+    >;
+    pub fn resume_runner_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> result::Result<
+        runner::RunnerToolAttemptAuthorization,
+        tool_execution::ToolBatchExecutionError,
+    >;
+    pub fn prepare_result_projection(
+        &self,
+        entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
+        continuation_frontier: context_frontier::ContextFrontierId,
+    ) -> result::Result<
+        tool_execution::PreparedToolResultProjection,
+        tool_execution::ToolResultProjectionError,
+    >;
+    pub fn prepare_delegation_result_projection(
+        &self,
+        entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
+        continuation_frontier: context_frontier::ContextFrontierId,
+        outcome: session_delegation::DelegationOutcome,
+    ) -> result::Result<
+        tool_execution::PreparedToolResultProjection,
+        tool_execution::ToolResultProjectionError,
+    >;
+    pub fn prepare_failure_projection(
+        &self,
+        entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
+        result_frontier: context_frontier::ContextFrontierId,
+    ) -> result::Result<
+        tool_execution::PreparedToolResultProjection,
+        tool_execution::ToolResultProjectionError,
+    >;
+    pub fn prepare_cancellation_projection(
+        &self,
+        entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
+        result_frontier: context_frontier::ContextFrontierId,
+    ) -> result::Result<
+        tool_execution::PreparedToolResultProjection,
+        tool_execution::ToolResultProjectionError,
+    >;
+    pub fn prepare_delegation_cancellation_projection(
+        &self,
+        entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
+        result_frontier: context_frontier::ContextFrontierId,
+        outcome: option::Option<session_delegation::DelegationOutcome>,
+    ) -> result::Result<
+        tool_execution::PreparedToolResultProjection,
+        tool_execution::ToolResultProjectionError,
+    >;
+    pub fn prepare_reconciliation_projection(
+        &self,
+        entry_ids: vec::Vec<context_frontier::SemanticTranscriptEntryId>,
+        terminal_frontier: context_frontier::ContextFrontierId,
+    ) -> result::Result<
+        tool_execution::PreparedToolResultProjection,
+        tool_execution::ToolResultProjectionError,
+    >;
 }
 ```
 
 ## AwaitingToolApproval
 
 ```rust
-pub struct AwaitingToolApproval { /* private */ }
+pub struct AwaitingToolApproval {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::AwaitingToolApproval {
     pub const fn session(&self) -> SessionId;
@@ -129,7 +265,7 @@ impl tool_execution::AwaitingToolApproval {
 ## AwaitingToolRecovery
 
 ```rust
-pub struct AwaitingToolRecovery { /* private */ }
+pub struct AwaitingToolRecovery {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::AwaitingToolRecovery {
     pub const fn session(&self) -> SessionId;
@@ -144,20 +280,26 @@ impl tool_execution::AwaitingToolRecovery {
 ## PreparedToolBatchDecision
 
 ```rust
-pub struct PreparedToolBatchDecision { /* private */ }
+pub struct PreparedToolBatchDecision {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::PreparedToolBatchDecision {
     pub const fn batch(&self) -> &tool_execution::ToolBatch;
     pub const fn prepared_command(&self) -> &tool::PreparedDecideToolRequest;
     pub const fn active_phase(&self) -> &turn_lifecycle::ActiveTurnPhase;
-    pub fn into_parts(self) -> (tool_execution::ToolBatch, tool::PreparedDecideToolRequest, turn_lifecycle::ActiveTurnPhase);
+    pub fn into_parts(
+        self,
+    ) -> (
+        tool_execution::ToolBatch,
+        tool::PreparedDecideToolRequest,
+        turn_lifecycle::ActiveTurnPhase,
+    );
 }
 ```
 
 ## PreparedDelegateToolApproval
 
 ```rust
-pub struct PreparedDelegateToolApproval { /* private */ }
+pub struct PreparedDelegateToolApproval {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::PreparedDelegateToolApproval {
     pub const fn batch(&self) -> &tool_execution::ToolBatch;
@@ -181,7 +323,7 @@ pub enum DelegateToolApprovalTransitionFailure {
 ## DelegateToolApprovalTransitionError
 
 ```rust
-pub struct DelegateToolApprovalTransitionError { /* private */ }
+pub struct DelegateToolApprovalTransitionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::DelegateToolApprovalTransitionError {
     pub const fn batch(&self) -> &tool_execution::ToolBatch;
@@ -208,7 +350,7 @@ pub enum ToolBatchDecisionFailure {
 ## ToolBatchDecisionError
 
 ```rust
-pub struct ToolBatchDecisionError { /* private */ }
+pub struct ToolBatchDecisionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::ToolBatchDecisionError {
     pub const fn batch(&self) -> &tool_execution::ToolBatch;
@@ -220,7 +362,7 @@ impl tool_execution::ToolBatchDecisionError {
 ## PreparedToolAttempt
 
 ```rust
-pub struct PreparedToolAttempt { /* private */ }
+pub struct PreparedToolAttempt {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::PreparedToolAttempt {
     pub const fn attempt(&self) -> &tool_attempt::CurrentToolAttempt;
@@ -247,7 +389,7 @@ pub enum ToolBatchExecutionFailure {
 ## ToolBatchExecutionError
 
 ```rust
-pub struct ToolBatchExecutionError { /* private */ }
+pub struct ToolBatchExecutionError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::ToolBatchExecutionError {
     pub const fn failure(&self) -> tool_execution::ToolBatchExecutionFailure;
@@ -257,12 +399,17 @@ impl tool_execution::ToolBatchExecutionError {
 ## PreparedToolResultProjection
 
 ```rust
-pub struct PreparedToolResultProjection { /* private */ }
+pub struct PreparedToolResultProjection {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::PreparedToolResultProjection {
     pub fn entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
     pub const fn snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
-    pub fn into_parts(self) -> (boxed::Box<[semantic_entry::SemanticTranscriptEntry]>, context_frontier::ResolvedContextFrontierSnapshot);
+    pub fn into_parts(
+        self,
+    ) -> (
+        boxed::Box<[semantic_entry::SemanticTranscriptEntry]>,
+        context_frontier::ResolvedContextFrontierSnapshot,
+    );
 }
 ```
 
@@ -281,7 +428,7 @@ pub enum ToolResultProjectionFailure {
 ## ToolResultProjectionError
 
 ```rust
-pub struct ToolResultProjectionError { /* private */ }
+pub struct ToolResultProjectionError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl tool_execution::ToolResultProjectionError {
     pub const fn failure(&self) -> tool_execution::ToolResultProjectionFailure;

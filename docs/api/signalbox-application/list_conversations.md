@@ -33,12 +33,26 @@ impl list_conversations::ConversationListCursor {
 ## ConversationListQuery
 
 ```rust
-pub struct ConversationListQuery { /* private */ }
+pub struct ConversationListQuery {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl list_conversations::ConversationListQuery {
     pub fn default_page(page_size: u64) -> Self;
-    pub fn try_new(title_contains: option::Option<string::String>, origin: list_conversations::ConversationOriginFilter, include_archived: bool, page_size: u64, after: option::Option<list_conversations::ConversationListCursor>) -> result::Result<Self, list_conversations::ConversationListQueryError>;
-    pub fn try_new_with_page_limits(title_contains: option::Option<string::String>, origin: list_conversations::ConversationOriginFilter, include_archived: bool, page_size: u64, after: option::Option<list_conversations::ConversationListCursor>, min_page_size: option::Option<u64>, max_page_size: option::Option<u64>) -> result::Result<Self, list_conversations::ConversationListQueryError>;
+    pub fn try_new(
+        title_contains: option::Option<string::String>,
+        origin: list_conversations::ConversationOriginFilter,
+        include_archived: bool,
+        page_size: u64,
+        after: option::Option<list_conversations::ConversationListCursor>,
+    ) -> result::Result<Self, list_conversations::ConversationListQueryError>;
+    pub fn try_new_with_page_limits(
+        title_contains: option::Option<string::String>,
+        origin: list_conversations::ConversationOriginFilter,
+        include_archived: bool,
+        page_size: u64,
+        after: option::Option<list_conversations::ConversationListCursor>,
+        min_page_size: option::Option<u64>,
+        max_page_size: option::Option<u64>,
+    ) -> result::Result<Self, list_conversations::ConversationListQueryError>;
     pub fn title_contains(&self) -> option::Option<&str>;
     pub const fn origin(&self) -> list_conversations::ConversationOriginFilter;
     pub const fn include_archived(&self) -> bool;
@@ -63,8 +77,18 @@ pub enum ConversationListQueryError {
 
 ```rust
 pub enum ConversationListItem {
-    NativeSession { session: signalbox_domain::SessionId, title: option::Option<string::String>, archived: bool, defaults_version: configuration::SessionConfigurationDefaultsVersion },
-    ImportedConversation { conversation: signalbox_domain::ImportedConversationId, title: option::Option<string::String>, entry_count: u64, format: imported_conversation::ImportedConversationFormat },
+    NativeSession {
+        session: signalbox_domain::SessionId,
+        title: option::Option<string::String>,
+        archived: bool,
+        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+    },
+    ImportedConversation {
+        conversation: signalbox_domain::ImportedConversationId,
+        title: option::Option<string::String>,
+        entry_count: u64,
+        format: imported_conversation::ImportedConversationFormat,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl list_conversations::ConversationListItem {
@@ -78,7 +102,14 @@ impl list_conversations::ConversationListItem {
 ```rust
 pub trait ConversationPageReader {
     type Error;
-    pub fn next_item(&mut self) -> impl future::Future<Output = result::Result<option::Option<list_conversations::ConversationListItem>, <Self as list_conversations::ConversationPageReader>::Error>> + marker::Send;
+    pub fn next_item(
+        &mut self,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<list_conversations::ConversationListItem>,
+            <Self as list_conversations::ConversationPageReader>::Error,
+        >,
+    > + marker::Send;
     pub fn next_after(&self) -> option::Option<list_conversations::ConversationListCursor>;
 }
 ```
@@ -88,21 +119,40 @@ pub trait ConversationPageReader {
 ```rust
 pub trait ConversationLister {
     type Error;
-    type Page: list_conversations::ConversationPageReader<Error = <Self as list_conversations::ConversationLister>::Error>;
-    pub fn open_conversation_page(&self, query: list_conversations::ConversationListQuery) -> impl future::Future<Output = result::Result<<Self as list_conversations::ConversationLister>::Page, <Self as list_conversations::ConversationLister>::Error>> + marker::Send;
+    type Page: list_conversations::ConversationPageReader<
+        Error = <Self as list_conversations::ConversationLister>::Error,
+    >;
+    pub fn open_conversation_page(
+        &self,
+        query: list_conversations::ConversationListQuery,
+    ) -> impl future::Future<
+        Output = result::Result<
+            <Self as list_conversations::ConversationLister>::Page,
+            <Self as list_conversations::ConversationLister>::Error,
+        >,
+    > + marker::Send;
 }
 ```
 
 ## ListConversationsService
 
 ```rust
-pub struct ListConversationsService<Lister> { /* private */ }
+pub struct ListConversationsService<Lister> {/* private */}
 // derives: fmt::Debug
 impl<Lister> list_conversations::ListConversationsService<Lister> {
     pub const fn new(lister: Lister) -> Self;
     pub fn into_lister(self) -> Lister;
 }
-impl<Lister> list_conversations::ListConversationsService<Lister> where Lister: list_conversations::ConversationLister {
-    pub async fn execute(&self, query: list_conversations::ConversationListQuery) -> result::Result<<Lister as list_conversations::ConversationLister>::Page, <Lister as list_conversations::ConversationLister>::Error>;
+impl<Lister> list_conversations::ListConversationsService<Lister>
+where
+    Lister: list_conversations::ConversationLister,
+{
+    pub async fn execute(
+        &self,
+        query: list_conversations::ConversationListQuery,
+    ) -> result::Result<
+        <Lister as list_conversations::ConversationLister>::Page,
+        <Lister as list_conversations::ConversationLister>::Error,
+    >;
 }
 ```

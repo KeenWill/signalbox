@@ -5,20 +5,48 @@
 ## ReplaceSessionDefaults
 
 ```rust
-pub struct ReplaceSessionDefaults { /* private */ }
+pub struct ReplaceSessionDefaults {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl replace_session_defaults::ReplaceSessionDefaults {
-    pub fn new(command_id: DurableCommandId, session: SessionId, expected_current_version: configuration::SessionConfigurationDefaultsVersion, replacement: configuration::SessionConfigurationDefaults) -> Self;
-    pub fn with_model_settings(command_id: DurableCommandId, session: SessionId, expected_current_version: configuration::SessionConfigurationDefaultsVersion, replacement: configuration::SessionConfigurationDefaults, caller_model_settings: model_settings::ModelSettingsOverlay) -> Self;
-    pub fn with_model_settings_adjustments(command_id: DurableCommandId, session: SessionId, expected_current_version: configuration::SessionConfigurationDefaultsVersion, replacement: configuration::SessionConfigurationDefaults, caller_model_settings: model_settings::ModelSettingsOverlay, model_settings_adjustments: vec::Vec<model_settings::ModelChangeAdjustment>) -> Self;
+    pub fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: configuration::SessionConfigurationDefaultsVersion,
+        replacement: configuration::SessionConfigurationDefaults,
+    ) -> Self;
+    pub fn with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: configuration::SessionConfigurationDefaultsVersion,
+        replacement: configuration::SessionConfigurationDefaults,
+        caller_model_settings: model_settings::ModelSettingsOverlay,
+    ) -> Self;
+    pub fn with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: configuration::SessionConfigurationDefaultsVersion,
+        replacement: configuration::SessionConfigurationDefaults,
+        caller_model_settings: model_settings::ModelSettingsOverlay,
+        model_settings_adjustments: vec::Vec<model_settings::ModelChangeAdjustment>,
+    ) -> Self;
     pub const fn command_id(&self) -> DurableCommandId;
     pub const fn session(&self) -> SessionId;
-    pub const fn expected_current_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
+    pub const fn expected_current_version(
+        &self,
+    ) -> configuration::SessionConfigurationDefaultsVersion;
     pub const fn replacement(&self) -> &configuration::SessionConfigurationDefaults;
     pub const fn caller_model_settings(&self) -> model_settings::ModelSettingsOverlay;
     pub fn model_settings_adjustments(&self) -> &[model_settings::ModelChangeAdjustment];
-    pub const fn prepare_session_not_found(self) -> replace_session_defaults::PreparedReplaceSessionDefaults;
-    pub fn prepare_against(self, current: &session::Session) -> result::Result<replace_session_defaults::PreparedReplaceSessionDefaults, replace_session_defaults::ReplaceSessionDefaultsPreparationError>;
+    pub const fn prepare_session_not_found(
+        self,
+    ) -> replace_session_defaults::PreparedReplaceSessionDefaults;
+    pub fn prepare_against(
+        self,
+        current: &session::Session,
+    ) -> result::Result<
+        replace_session_defaults::PreparedReplaceSessionDefaults,
+        replace_session_defaults::ReplaceSessionDefaultsPreparationError,
+    >;
 }
 impl cmp::PartialEq for replace_session_defaults::ReplaceSessionDefaults {
     pub fn eq(&self, other: &Self) -> bool;
@@ -42,7 +70,7 @@ pub enum ReplaceSessionDefaultsResult {
 ## ReplaceSessionDefaultsAppliedResult
 
 ```rust
-pub struct ReplaceSessionDefaultsAppliedResult { /* private */ }
+pub struct ReplaceSessionDefaultsAppliedResult {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl replace_session_defaults::ReplaceSessionDefaultsAppliedResult {
     pub const fn session(&self) -> SessionId;
@@ -64,7 +92,7 @@ pub enum ReplaceSessionDefaultsRejectedResult {
 ## ReplaceSessionDefaultsSessionNotFound
 
 ```rust
-pub struct ReplaceSessionDefaultsSessionNotFound { /* private */ }
+pub struct ReplaceSessionDefaultsSessionNotFound {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl replace_session_defaults::ReplaceSessionDefaultsSessionNotFound {
     pub const fn session(&self) -> SessionId;
@@ -74,7 +102,7 @@ impl replace_session_defaults::ReplaceSessionDefaultsSessionNotFound {
 ## ReplaceSessionDefaultsCurrentVersionMismatch
 
 ```rust
-pub struct ReplaceSessionDefaultsCurrentVersionMismatch { /* private */ }
+pub struct ReplaceSessionDefaultsCurrentVersionMismatch {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl replace_session_defaults::ReplaceSessionDefaultsCurrentVersionMismatch {
     pub const fn session(&self) -> SessionId;
@@ -86,7 +114,7 @@ impl replace_session_defaults::ReplaceSessionDefaultsCurrentVersionMismatch {
 ## ReplaceSessionDefaultsVersionExhausted
 
 ```rust
-pub struct ReplaceSessionDefaultsVersionExhausted { /* private */ }
+pub struct ReplaceSessionDefaultsVersionExhausted {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl replace_session_defaults::ReplaceSessionDefaultsVersionExhausted {
     pub const fn session(&self) -> SessionId;
@@ -97,19 +125,24 @@ impl replace_session_defaults::ReplaceSessionDefaultsVersionExhausted {
 ## PreparedReplaceSessionDefaults
 
 ```rust
-pub struct PreparedReplaceSessionDefaults { /* private */ }
+pub struct PreparedReplaceSessionDefaults {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl replace_session_defaults::PreparedReplaceSessionDefaults {
     pub const fn command(&self) -> &replace_session_defaults::ReplaceSessionDefaults;
     pub const fn result(&self) -> &replace_session_defaults::ReplaceSessionDefaultsResult;
-    pub fn into_parts(self) -> (replace_session_defaults::ReplaceSessionDefaults, replace_session_defaults::ReplaceSessionDefaultsResult);
+    pub fn into_parts(
+        self,
+    ) -> (
+        replace_session_defaults::ReplaceSessionDefaults,
+        replace_session_defaults::ReplaceSessionDefaultsResult,
+    );
 }
 ```
 
 ## ReplaceSessionDefaultsPreparationError
 
 ```rust
-pub struct ReplaceSessionDefaultsPreparationError { /* private */ }
+pub struct ReplaceSessionDefaultsPreparationError {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl replace_session_defaults::ReplaceSessionDefaultsPreparationError {
     pub const fn command(&self) -> &replace_session_defaults::ReplaceSessionDefaults;
@@ -121,15 +154,39 @@ impl replace_session_defaults::ReplaceSessionDefaultsPreparationError {
 ## ReplaceSessionDefaultsReconstitutionInput
 
 ```rust
-pub struct ReplaceSessionDefaultsReconstitutionInput { /* private */ }
+pub struct ReplaceSessionDefaultsReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl replace_session_defaults::ReplaceSessionDefaultsReconstitutionInput {
-    pub const fn applied(command: replace_session_defaults::ReplaceSessionDefaults, result_session: SessionId, result_version: configuration::SessionConfigurationDefaultsVersion, defaults_session: SessionId, defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults: configuration::SessionConfigurationDefaults) -> Self;
-    pub const fn rejected_session_not_found(command: replace_session_defaults::ReplaceSessionDefaults, result_session: SessionId) -> Self;
-    pub const fn rejected_current_version_mismatch(command: replace_session_defaults::ReplaceSessionDefaults, result_session: SessionId, result_expected: configuration::SessionConfigurationDefaultsVersion, result_current: configuration::SessionConfigurationDefaultsVersion) -> Self;
-    pub const fn rejected_version_exhausted(command: replace_session_defaults::ReplaceSessionDefaults, result_session: SessionId, result_current: configuration::SessionConfigurationDefaultsVersion) -> Self;
+    pub const fn applied(
+        command: replace_session_defaults::ReplaceSessionDefaults,
+        result_session: SessionId,
+        result_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults: configuration::SessionConfigurationDefaults,
+    ) -> Self;
+    pub const fn rejected_session_not_found(
+        command: replace_session_defaults::ReplaceSessionDefaults,
+        result_session: SessionId,
+    ) -> Self;
+    pub const fn rejected_current_version_mismatch(
+        command: replace_session_defaults::ReplaceSessionDefaults,
+        result_session: SessionId,
+        result_expected: configuration::SessionConfigurationDefaultsVersion,
+        result_current: configuration::SessionConfigurationDefaultsVersion,
+    ) -> Self;
+    pub const fn rejected_version_exhausted(
+        command: replace_session_defaults::ReplaceSessionDefaults,
+        result_session: SessionId,
+        result_current: configuration::SessionConfigurationDefaultsVersion,
+    ) -> Self;
     pub const fn command(&self) -> &replace_session_defaults::ReplaceSessionDefaults;
-    pub fn reconstitute(self) -> result::Result<replace_session_defaults::ReconstitutedReplaceSessionDefaults, replace_session_defaults::ReplaceSessionDefaultsReconstitutionError>;
+    pub fn reconstitute(
+        self,
+    ) -> result::Result<
+        replace_session_defaults::ReconstitutedReplaceSessionDefaults,
+        replace_session_defaults::ReplaceSessionDefaultsReconstitutionError,
+    >;
 }
 ```
 
@@ -152,19 +209,28 @@ pub enum ReplaceSessionDefaultsReconstitutionFailure {
 ## ReplaceSessionDefaultsReconstitutionError
 
 ```rust
-pub struct ReplaceSessionDefaultsReconstitutionError { /* private */ }
+pub struct ReplaceSessionDefaultsReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl replace_session_defaults::ReplaceSessionDefaultsReconstitutionError {
-    pub const fn failure(&self) -> replace_session_defaults::ReplaceSessionDefaultsReconstitutionFailure;
-    pub const fn input(&self) -> &replace_session_defaults::ReplaceSessionDefaultsReconstitutionInput;
-    pub fn into_parts(self) -> (replace_session_defaults::ReplaceSessionDefaultsReconstitutionInput, replace_session_defaults::ReplaceSessionDefaultsReconstitutionFailure);
+    pub const fn failure(
+        &self,
+    ) -> replace_session_defaults::ReplaceSessionDefaultsReconstitutionFailure;
+    pub const fn input(
+        &self,
+    ) -> &replace_session_defaults::ReplaceSessionDefaultsReconstitutionInput;
+    pub fn into_parts(
+        self,
+    ) -> (
+        replace_session_defaults::ReplaceSessionDefaultsReconstitutionInput,
+        replace_session_defaults::ReplaceSessionDefaultsReconstitutionFailure,
+    );
 }
 ```
 
 ## ReconstitutedReplaceSessionDefaults
 
 ```rust
-pub struct ReconstitutedReplaceSessionDefaults { /* private */ }
+pub struct ReconstitutedReplaceSessionDefaults {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl replace_session_defaults::ReconstitutedReplaceSessionDefaults {
     pub const fn command(&self) -> &replace_session_defaults::ReplaceSessionDefaults;

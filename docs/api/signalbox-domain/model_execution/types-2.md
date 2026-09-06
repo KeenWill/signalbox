@@ -2,6 +2,300 @@
 
 # model_execution: types-2
 
+## ModelCallTerminalIdentities
+
+```rust
+pub enum ModelCallTerminalIdentities {
+    Completed(model_execution::CompletedModelCallIdentities),
+    ToolRound(model_execution::ToolRoundModelCallIdentities),
+    StoppedToolRound(model_execution::StoppedToolRoundModelCallIdentities),
+    Failed(model_execution::FailedModelCallTurnIdentities),
+    PhysicalCancellation(model_execution::PhysicalCancellationModelCallTurnIdentities),
+    Refused(model_execution::RefusedModelCallTurnIdentities),
+    Ambiguous(model_execution::AmbiguousModelCallTurnIdentities),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallTerminalOutcome
+
+```rust
+pub enum ModelCallTerminalOutcome {
+    Completed(model_execution::CompletedModelCallTurn),
+    ToolRound(model_execution::ToolRoundModelCallTurn),
+    CancelledWithToolResponse(model_execution::CancelledToolRoundModelCallTurn),
+    Failed(model_execution::FailedModelCallTurn),
+    Cancelled(model_execution::CancelledModelCallTurn),
+    Refused(model_execution::RefusedModelCallTurn),
+    ReconciliationRequired(model_execution::ReconciliationRequiredModelCallTurn),
+    AwaitingRecovery(model_execution::AmbiguousModelCallTurn),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallInterruptOutcome
+
+```rust
+pub enum ModelCallInterruptOutcome {
+    Cancelled(model_execution::CancelledModelCallTurn),
+    CancellationRequested(model_execution::StopRequestedModelCallTurn),
+    ReconciliationRequired(model_execution::ReconciliationRequiredModelCallTurn),
+    ToolReconciliationRequired(model_execution::ReconciliationRequiredToolTurn),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## AmbiguousModelCallTurnIdentities
+
+```rust
+pub struct AmbiguousModelCallTurnIdentities {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::AmbiguousModelCallTurnIdentities {
+    pub const fn new(terminal_frontier: context_frontier::ContextFrontierId) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: vec::Vec<model_execution::PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
+```
+
+## ReclassifiedPendingSteeringTurn
+
+```rust
+pub struct ReclassifiedPendingSteeringTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::ReclassifiedPendingSteeringTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn source_turn(&self) -> TurnId;
+    pub const fn accepted_input(&self) -> &accepted_input::AcceptedInputLifecycle;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn order(&self) -> queue_order::AcceptedInputQueueOrder;
+    pub const fn binding(&self) -> accepted_input::SteeringBinding;
+    pub const fn effective_configuration(&self) -> &configuration::EffectiveConfiguration;
+}
+```
+
+## CompletedModelCallTurn
+
+```rust
+pub struct CompletedModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::CompletedModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn call(&self) -> &model_call::EndedModelCall;
+    pub const fn attempt(&self) -> &turn_attempt::EndedTurnAttempt;
+    pub const fn disposition(&self) -> &turn_lifecycle::TurnDisposition;
+    pub fn assistant_entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
+    pub const fn completion_entry(&self) -> &semantic_entry::SemanticTranscriptEntry;
+    pub const fn terminal_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
+    pub fn reclassified_pending_steering(
+        &self,
+    ) -> &[model_execution::ReclassifiedPendingSteeringTurn];
+}
+```
+
+## ToolRoundModelCallTurn
+
+```rust
+pub struct ToolRoundModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::ToolRoundModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn call(&self) -> &model_call::EndedModelCall;
+    pub const fn attempt(&self) -> &turn_attempt::EndedTurnAttempt;
+    pub fn assistant_entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
+    pub fn requests(&self) -> &[tool::ToolRequest];
+    pub fn automatic_approvals(&self) -> &[tool::ToolApprovalResolution];
+    pub const fn yielded_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
+    pub const fn next_phase(&self) -> &turn_lifecycle::ActiveTurnPhase;
+}
+```
+
+## AvailabilitySuccessorModelCallTurn
+
+```rust
+pub struct AvailabilitySuccessorModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::AvailabilitySuccessorModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn predecessor_call(&self) -> &model_call::EndedModelCall;
+    pub const fn predecessor_attempt(&self) -> &turn_attempt::EndedTurnAttempt;
+    pub const fn successor_attempt(&self) -> &turn_attempt::CurrentTurnAttempt;
+}
+```
+
+## CancelledToolRoundModelCallTurn
+
+```rust
+pub struct CancelledToolRoundModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::CancelledToolRoundModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn call(&self) -> &model_call::EndedModelCall;
+    pub const fn attempt(&self) -> &turn_attempt::EndedTurnAttempt;
+    pub const fn disposition(&self) -> &turn_lifecycle::TurnDisposition;
+    pub fn assistant_entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
+    pub fn requests(&self) -> &[tool::ToolRequest];
+    pub fn closed_result_entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
+    pub const fn cancellation_entry(&self) -> &semantic_entry::SemanticTranscriptEntry;
+    pub const fn terminal_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
+    pub fn reclassified_pending_steering(
+        &self,
+    ) -> &[model_execution::ReclassifiedPendingSteeringTurn];
+}
+```
+
+## FailedModelCallTurn
+
+```rust
+pub struct FailedModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::FailedModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn call(&self) -> option::Option<&model_call::EndedModelCall>;
+    pub const fn attempt(&self) -> &turn_attempt::EndedTurnAttempt;
+    pub const fn disposition(&self) -> &turn_lifecycle::TurnDisposition;
+    pub const fn failure_entry(&self) -> &semantic_entry::SemanticTranscriptEntry;
+    pub const fn terminal_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
+    pub fn reclassified_pending_steering(
+        &self,
+    ) -> &[model_execution::ReclassifiedPendingSteeringTurn];
+}
+```
+
+## CredentialPoolExhaustedModelCallTurn
+
+```rust
+pub struct CredentialPoolExhaustedModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::CredentialPoolExhaustedModelCallTurn {
+    pub fn pool_name(&self) -> &str;
+    pub const fn failed(&self) -> &model_execution::FailedModelCallTurn;
+    pub fn into_failed(self) -> model_execution::FailedModelCallTurn;
+}
+```
+
+## ContextHeadroomExhaustedModelCallTurn
+
+```rust
+pub struct ContextHeadroomExhaustedModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::ContextHeadroomExhaustedModelCallTurn {
+    pub const fn producing_call(&self) -> ModelCallId;
+    pub const fn failed(&self) -> &model_execution::FailedModelCallTurn;
+    pub fn into_failed(self) -> model_execution::FailedModelCallTurn;
+}
+```
+
+## CancelledModelCallTurn
+
+```rust
+pub struct CancelledModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::CancelledModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn call(&self) -> option::Option<&model_call::EndedModelCall>;
+    pub const fn attempt(&self) -> option::Option<&turn_attempt::EndedTurnAttempt>;
+    pub const fn disposition(&self) -> &turn_lifecycle::TurnDisposition;
+    pub fn tool_result_entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
+    pub const fn cancellation_entry(&self) -> &semantic_entry::SemanticTranscriptEntry;
+    pub const fn terminal_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
+    pub fn reclassified_pending_steering(
+        &self,
+    ) -> &[model_execution::ReclassifiedPendingSteeringTurn];
+}
+```
+
+## StopRequestedModelCallTurn
+
+```rust
+pub struct StopRequestedModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::StopRequestedModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn call(&self) -> &model_call::CurrentModelCall;
+    pub const fn attempt(&self) -> &turn_attempt::CurrentTurnAttempt;
+    pub const fn interrupt(&self) -> applied_interrupt::AppliedInterruptProof;
+    pub const fn observation_correlation(&self) -> model_execution::IssuedModelCallCorrelation;
+}
+```
+
+## RefusedModelCallTurn
+
+```rust
+pub struct RefusedModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::RefusedModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn call(&self) -> &model_call::EndedModelCall;
+    pub const fn attempt(&self) -> &turn_attempt::EndedTurnAttempt;
+    pub const fn disposition(&self) -> &turn_lifecycle::TurnDisposition;
+    pub const fn terminal_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
+    pub fn reclassified_pending_steering(
+        &self,
+    ) -> &[model_execution::ReclassifiedPendingSteeringTurn];
+}
+```
+
+## ReconciliationRequiredModelCallTurn
+
+```rust
+pub struct ReconciliationRequiredModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::ReconciliationRequiredModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn call(&self) -> &model_call::EndedModelCall;
+    pub const fn attempt(&self) -> &turn_attempt::EndedTurnAttempt;
+    pub const fn disposition(&self) -> &turn_lifecycle::TurnDisposition;
+    pub const fn terminal_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
+    pub fn reclassified_pending_steering(
+        &self,
+    ) -> &[model_execution::ReclassifiedPendingSteeringTurn];
+}
+```
+
+## ReconciliationRequiredToolTurn
+
+```rust
+pub struct ReconciliationRequiredToolTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::ReconciliationRequiredToolTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn tool_attempt(&self) -> &tool_attempt::EndedToolAttempt;
+    pub const fn attempt(&self) -> &turn_attempt::EndedTurnAttempt;
+    pub const fn disposition(&self) -> &turn_lifecycle::TurnDisposition;
+    pub fn tool_result_entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
+    pub const fn terminal_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
+    pub fn reclassified_pending_steering(
+        &self,
+    ) -> &[model_execution::ReclassifiedPendingSteeringTurn];
+}
+```
+
+## AmbiguousModelCallTurn
+
+```rust
+pub struct AmbiguousModelCallTurn {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl model_execution::AmbiguousModelCallTurn {
+    pub const fn session(&self) -> SessionId;
+    pub const fn turn(&self) -> TurnId;
+    pub const fn call(&self) -> &model_call::EndedModelCall;
+    pub const fn attempt(&self) -> &turn_attempt::EndedTurnAttempt;
+    pub const fn ambiguous_operations(&self) -> &turn_lifecycle::NonEmptyIssuedOperationRefs;
+}
+```
+
 ## ModelCallClosureError
 
 ```rust

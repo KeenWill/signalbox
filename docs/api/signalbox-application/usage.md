@@ -47,7 +47,9 @@ impl error::Error for usage::UsageCredentialProfileLabelError {}
 pub struct UsageCredentialProfileLabel(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl usage::UsageCredentialProfileLabel {
-    pub fn new(label: string::String) -> result::Result<Self, usage::UsageCredentialProfileLabelError>;
+    pub fn new(
+        label: string::String,
+    ) -> result::Result<Self, usage::UsageCredentialProfileLabelError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -56,7 +58,9 @@ impl usage::UsageCredentialProfileLabel {
 ## UsageTimestampError
 
 ```rust
-pub struct UsageTimestampError { pub rejected_micros: u64 }
+pub struct UsageTimestampError {
+    pub rejected_micros: u64,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for usage::UsageTimestampError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -78,7 +82,10 @@ impl usage::UsageTimestampMicros {
 ## UsageTimeRangeError
 
 ```rust
-pub struct UsageTimeRangeError { pub from_inclusive_micros: u64, pub to_exclusive_micros: u64 }
+pub struct UsageTimeRangeError {
+    pub from_inclusive_micros: u64,
+    pub to_exclusive_micros: u64,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for usage::UsageTimeRangeError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -103,11 +110,14 @@ pub struct UsageTimeToExclusive(pub usage::UsageTimestampMicros);
 ## UsageTimeRange
 
 ```rust
-pub struct UsageTimeRange { /* private */ }
+pub struct UsageTimeRange {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl usage::UsageTimeRange {
     pub const fn all() -> Self;
-    pub const fn new(from_inclusive: option::Option<usage::UsageTimeFromInclusive>, to_exclusive: option::Option<usage::UsageTimeToExclusive>) -> result::Result<Self, usage::UsageTimeRangeError>;
+    pub const fn new(
+        from_inclusive: option::Option<usage::UsageTimeFromInclusive>,
+        to_exclusive: option::Option<usage::UsageTimeToExclusive>,
+    ) -> result::Result<Self, usage::UsageTimeRangeError>;
     pub const fn from_inclusive(self) -> option::Option<usage::UsageTimestampMicros>;
     pub const fn to_exclusive(self) -> option::Option<usage::UsageTimestampMicros>;
 }
@@ -173,14 +183,24 @@ pub enum UsageTokenPresence {
 ## UsageTokenCoverage
 
 ```rust
-pub struct UsageTokenCoverage { pub input: usage::UsageTokenPresence, pub output: usage::UsageTokenPresence, pub cache_creation_input: usage::UsageTokenPresence, pub cache_read_input: usage::UsageTokenPresence }
+pub struct UsageTokenCoverage {
+    pub input: usage::UsageTokenPresence,
+    pub output: usage::UsageTokenPresence,
+    pub cache_creation_input: usage::UsageTokenPresence,
+    pub cache_read_input: usage::UsageTokenPresence,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 ```
 
 ## UsageTokenAxes
 
 ```rust
-pub struct UsageTokenAxes { pub input: option::Option<u64>, pub output: option::Option<u64>, pub cache_creation_input: option::Option<u64>, pub cache_read_input: option::Option<u64> }
+pub struct UsageTokenAxes {
+    pub input: option::Option<u64>,
+    pub output: option::Option<u64>,
+    pub cache_creation_input: option::Option<u64>,
+    pub cache_read_input: option::Option<u64>,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl usage::UsageTokenAxes {
     pub const fn coverage(self) -> usage::UsageTokenCoverage;
@@ -190,14 +210,25 @@ impl usage::UsageTokenAxes {
 ## UsageAggregateTokenAxes
 
 ```rust
-pub struct UsageAggregateTokenAxes { pub input: option::Option<u128>, pub output: option::Option<u128>, pub cache_creation_input: option::Option<u128>, pub cache_read_input: option::Option<u128> }
+pub struct UsageAggregateTokenAxes {
+    pub input: option::Option<u128>,
+    pub output: option::Option<u128>,
+    pub cache_creation_input: option::Option<u128>,
+    pub cache_read_input: option::Option<u128>,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## UsageSelection
 
 ```rust
-pub struct UsageSelection { pub session: option::Option<signalbox_domain::SessionId>, pub turn: option::Option<signalbox_domain::TurnId>, pub model: option::Option<model_call::ResolvedProviderTarget>, pub provenance: option::Option<usage::UsageProvenance>, pub call_kind: option::Option<usage::UsageCallKind> }
+pub struct UsageSelection {
+    pub session: option::Option<signalbox_domain::SessionId>,
+    pub turn: option::Option<signalbox_domain::TurnId>,
+    pub model: option::Option<model_call::ResolvedProviderTarget>,
+    pub provenance: option::Option<usage::UsageProvenance>,
+    pub call_kind: option::Option<usage::UsageCallKind>,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl usage::UsageSelection {
     pub const fn all() -> Self;
@@ -207,14 +238,19 @@ impl usage::UsageSelection {
 ## UsageQuery
 
 ```rust
-pub struct UsageQuery { pub time: usage::UsageTimeRange, pub selection: usage::UsageSelection }
+pub struct UsageQuery {
+    pub time: usage::UsageTimeRange,
+    pub selection: usage::UsageSelection,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## UsageCallPageLimitError
 
 ```rust
-pub struct UsageCallPageLimitError { pub rejected_items: u16 }
+pub struct UsageCallPageLimitError {
+    pub rejected_items: u16,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for usage::UsageCallPageLimitError {
     pub fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -245,21 +281,40 @@ pub enum UsageCallOrder {
 ## UsageCallCursor
 
 ```rust
-pub struct UsageCallCursor { pub recorded_at: usage::UsageTimestampMicros, pub call: signalbox_domain::ModelCallId }
+pub struct UsageCallCursor {
+    pub recorded_at: usage::UsageTimestampMicros,
+    pub call: signalbox_domain::ModelCallId,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## UsageCallQuery
 
 ```rust
-pub struct UsageCallQuery { pub scope: usage::UsageQuery, pub order: usage::UsageCallOrder, pub limit: usage::UsageCallPageLimit, pub after: option::Option<usage::UsageCallCursor> }
+pub struct UsageCallQuery {
+    pub scope: usage::UsageQuery,
+    pub order: usage::UsageCallOrder,
+    pub limit: usage::UsageCallPageLimit,
+    pub after: option::Option<usage::UsageCallCursor>,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## UsageCallEvidence
 
 ```rust
-pub struct UsageCallEvidence { pub scope: usage::UsageCallScope, pub call: signalbox_domain::ModelCallId, pub session: signalbox_domain::SessionId, pub model: model_call::ResolvedProviderTarget, pub credential_profile: usage::UsageCredentialProfileLabel, pub credential_reference: option::Option<string::String>, pub provenance: usage::UsageProvenance, pub input_semantics: usage::UsageInputTokenSemantics, pub tokens: usage::UsageTokenAxes, pub recorded_at: usage::UsageTimestampMicros }
+pub struct UsageCallEvidence {
+    pub scope: usage::UsageCallScope,
+    pub call: signalbox_domain::ModelCallId,
+    pub session: signalbox_domain::SessionId,
+    pub model: model_call::ResolvedProviderTarget,
+    pub credential_profile: usage::UsageCredentialProfileLabel,
+    pub credential_reference: option::Option<string::String>,
+    pub provenance: usage::UsageProvenance,
+    pub input_semantics: usage::UsageInputTokenSemantics,
+    pub tokens: usage::UsageTokenAxes,
+    pub recorded_at: usage::UsageTimestampMicros,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -277,9 +332,14 @@ pub enum UsageCallPageContinuation {
 
 ```rust
 pub enum UsageCallPageError {
-    Overflow { returned_calls: usize, limit_items: u16 },
+    Overflow {
+        returned_calls: usize,
+        limit_items: u16,
+    },
     DanglingContinuation,
-    Misordered { position: usize },
+    Misordered {
+        position: usize,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for usage::UsageCallPageError {
@@ -291,10 +351,14 @@ impl error::Error for usage::UsageCallPageError {}
 ## UsageCallPage
 
 ```rust
-pub struct UsageCallPage { /* private */ }
+pub struct UsageCallPage {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl usage::UsageCallPage {
-    pub fn new(calls: vec::Vec<usage::UsageCallEvidence>, continuation: usage::UsageCallPageContinuation, limit: usage::UsageCallPageLimit) -> result::Result<Self, usage::UsageCallPageError>;
+    pub fn new(
+        calls: vec::Vec<usage::UsageCallEvidence>,
+        continuation: usage::UsageCallPageContinuation,
+        limit: usage::UsageCallPageLimit,
+    ) -> result::Result<Self, usage::UsageCallPageError>;
     pub fn calls(&self) -> &[usage::UsageCallEvidence];
     pub const fn next(&self) -> option::Option<usage::UsageCallCursor>;
 }
@@ -303,7 +367,15 @@ impl usage::UsageCallPage {
 ## UsageAggregateKey
 
 ```rust
-pub struct UsageAggregateKey { pub call_kind: usage::UsageCallKind, pub model: model_call::ResolvedProviderTarget, pub credential_profile: usage::UsageCredentialProfileLabel, pub credential_reference: option::Option<string::String>, pub provenance: usage::UsageProvenance, pub input_semantics: usage::UsageInputTokenSemantics, pub coverage: usage::UsageTokenCoverage }
+pub struct UsageAggregateKey {
+    pub call_kind: usage::UsageCallKind,
+    pub model: model_call::ResolvedProviderTarget,
+    pub credential_profile: usage::UsageCredentialProfileLabel,
+    pub credential_reference: option::Option<string::String>,
+    pub provenance: usage::UsageProvenance,
+    pub input_semantics: usage::UsageInputTokenSemantics,
+    pub coverage: usage::UsageTokenCoverage,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -330,10 +402,15 @@ pub enum UsageAggregateCompleteness {
 ## UsageAggregateGroup
 
 ```rust
-pub struct UsageAggregateGroup { /* private */ }
+pub struct UsageAggregateGroup {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl usage::UsageAggregateGroup {
-    pub fn new(key: usage::UsageAggregateKey, call_count: u64, tokens: usage::UsageAggregateTokenAxes, cache_normalization: usage::UsageCacheNormalization) -> result::Result<Self, usage::UsageAggregateGroupError>;
+    pub fn new(
+        key: usage::UsageAggregateKey,
+        call_count: u64,
+        tokens: usage::UsageAggregateTokenAxes,
+        cache_normalization: usage::UsageCacheNormalization,
+    ) -> result::Result<Self, usage::UsageAggregateGroupError>;
     pub const fn key(&self) -> &usage::UsageAggregateKey;
     pub const fn call_count(&self) -> u64;
     pub const fn tokens(&self) -> usage::UsageAggregateTokenAxes;
@@ -357,8 +434,14 @@ pub enum UsageTokenAxis {
 
 ```rust
 pub enum UsageAggregateGroupError {
-    Coverage { axis: usage::UsageTokenAxis, declared: usage::UsageTokenPresence },
-    NormalizationClaim { claimed: usage::UsageCacheNormalization, input_semantics: usage::UsageInputTokenSemantics },
+    Coverage {
+        axis: usage::UsageTokenAxis,
+        declared: usage::UsageTokenPresence,
+    },
+    NormalizationClaim {
+        claimed: usage::UsageCacheNormalization,
+        input_semantics: usage::UsageInputTokenSemantics,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for usage::UsageAggregateGroupError {
@@ -384,10 +467,13 @@ impl error::Error for usage::UsageAggregateReportError {}
 ## UsageAggregateReport
 
 ```rust
-pub struct UsageAggregateReport { /* private */ }
+pub struct UsageAggregateReport {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl usage::UsageAggregateReport {
-    pub fn new(groups: vec::Vec<usage::UsageAggregateGroup>, completeness: usage::UsageAggregateCompleteness) -> result::Result<Self, usage::UsageAggregateReportError>;
+    pub fn new(
+        groups: vec::Vec<usage::UsageAggregateGroup>,
+        completeness: usage::UsageAggregateCompleteness,
+    ) -> result::Result<Self, usage::UsageAggregateReportError>;
     pub fn groups(&self) -> &[usage::UsageAggregateGroup];
     pub const fn completeness(&self) -> usage::UsageAggregateCompleteness;
 }
@@ -398,21 +484,37 @@ impl usage::UsageAggregateReport {
 ```rust
 pub trait UsageReader {
     type Error;
-    pub fn aggregate(&self, query: usage::UsageQuery) -> impl future::Future<Output = result::Result<usage::UsageAggregateReport, <Self as usage::UsageReader>::Error>> + marker::Send;
-    pub fn calls(&self, query: usage::UsageCallQuery) -> impl future::Future<Output = result::Result<usage::UsageCallPage, <Self as usage::UsageReader>::Error>> + marker::Send;
+    pub fn aggregate(
+        &self,
+        query: usage::UsageQuery,
+    ) -> impl future::Future<
+        Output = result::Result<usage::UsageAggregateReport, <Self as usage::UsageReader>::Error>,
+    > + marker::Send;
+    pub fn calls(
+        &self,
+        query: usage::UsageCallQuery,
+    ) -> impl future::Future<
+        Output = result::Result<usage::UsageCallPage, <Self as usage::UsageReader>::Error>,
+    > + marker::Send;
 }
 ```
 
 ## UsageService
 
 ```rust
-pub struct UsageService<Reader> { /* private */ }
+pub struct UsageService<Reader> {/* private */}
 // derives: fmt::Debug
 impl<Reader> usage::UsageService<Reader> {
     pub const fn new(reader: Reader) -> Self;
 }
 impl<Reader: usage::UsageReader> usage::UsageService<Reader> {
-    pub async fn aggregate(&self, query: usage::UsageQuery) -> result::Result<usage::UsageAggregateReport, <Reader as usage::UsageReader>::Error>;
-    pub async fn calls(&self, query: usage::UsageCallQuery) -> result::Result<usage::UsageCallPage, <Reader as usage::UsageReader>::Error>;
+    pub async fn aggregate(
+        &self,
+        query: usage::UsageQuery,
+    ) -> result::Result<usage::UsageAggregateReport, <Reader as usage::UsageReader>::Error>;
+    pub async fn calls(
+        &self,
+        query: usage::UsageCallQuery,
+    ) -> result::Result<usage::UsageCallPage, <Reader as usage::UsageReader>::Error>;
 }
 ```

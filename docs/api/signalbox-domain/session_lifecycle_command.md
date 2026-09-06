@@ -8,13 +8,18 @@
 pub enum CommandPrincipal {
     Core,
     Operator,
-    Module { module: session_lifecycle::DispatchingModule },
+    Module {
+        module: session_lifecycle::DispatchingModule,
+    },
     Watchdog,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl session_lifecycle_command::CommandPrincipal {
     pub const fn for_actor(actor: actor::Actor) -> Self;
-    pub const fn classify(self, actor: option::Option<actor::Actor>) -> session_lifecycle::LifecycleActor;
+    pub const fn classify(
+        self,
+        actor: option::Option<actor::Actor>,
+    ) -> session_lifecycle::LifecycleActor;
 }
 ```
 
@@ -54,12 +59,21 @@ pub enum FinishCheckVerdict {
 ```rust
 pub enum SessionLifecycleOperation {
     ReleaseStart,
-    Stop { sticky: session_lifecycle::StopStickiness, descendant_scope: session_delegation::DescendantTerminationScope },
-    Supersede { successor: SessionId },
+    Stop {
+        sticky: session_lifecycle::StopStickiness,
+        descendant_scope: session_delegation::DescendantTerminationScope,
+    },
+    Supersede {
+        successor: SessionId,
+    },
     Abandon,
-    CloseFailed { cause: option::Option<session_lifecycle::SessionFailureCause> },
+    CloseFailed {
+        cause: option::Option<session_lifecycle::SessionFailureCause>,
+    },
     Resume,
-    Adopt { finish_condition: option::Option<session_lifecycle_command::FinishCondition> },
+    Adopt {
+        finish_condition: option::Option<session_lifecycle_command::FinishCondition>,
+    },
     Release,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -68,10 +82,14 @@ pub enum SessionLifecycleOperation {
 ## SessionLifecycleCommand
 
 ```rust
-pub struct SessionLifecycleCommand { /* private */ }
+pub struct SessionLifecycleCommand {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl session_lifecycle_command::SessionLifecycleCommand {
-    pub const fn new(command_id: DurableCommandId, session: SessionId, operation: session_lifecycle_command::SessionLifecycleOperation) -> Self;
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        operation: session_lifecycle_command::SessionLifecycleOperation,
+    ) -> Self;
     pub const fn command_id(&self) -> DurableCommandId;
     pub const fn session(&self) -> SessionId;
     pub const fn operation(&self) -> &session_lifecycle_command::SessionLifecycleOperation;
@@ -110,9 +128,17 @@ pub enum SessionLifecycleCommandRejection {
 ```rust
 pub enum SessionLifecycleApplication {
     StartReleased,
-    Closed { outcome: session_lifecycle::SessionTerminalOutcome },
-    ClosurePending { outcome: session_lifecycle::SessionTerminalOutcome, live_turn: TurnId, defaults_version: configuration::SessionConfigurationDefaultsVersion },
-    Resumed { state: session_lifecycle::SessionLifecycleState },
+    Closed {
+        outcome: session_lifecycle::SessionTerminalOutcome,
+    },
+    ClosurePending {
+        outcome: session_lifecycle::SessionTerminalOutcome,
+        live_turn: TurnId,
+        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+    },
+    Resumed {
+        state: session_lifecycle::SessionLifecycleState,
+    },
     OwnershipChanged,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq

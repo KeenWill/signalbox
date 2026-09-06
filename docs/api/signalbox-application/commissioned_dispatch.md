@@ -6,8 +6,18 @@
 
 ```rust
 pub enum CommissionedDispatchFence {
-    PullRequest { repository: repo_watch::RepositorySlug, pull_request: repo_watch::PullRequestNumber, head_sha: repo_watch::CommitSha, head_repository: repo_watch::RepositorySlug, head_branch: repo_watch::BranchName, base_branch: repo_watch::BranchName },
-    Branch { repository: repo_watch::RepositorySlug, branch: repo_watch::BranchName },
+    PullRequest {
+        repository: repo_watch::RepositorySlug,
+        pull_request: repo_watch::PullRequestNumber,
+        head_sha: repo_watch::CommitSha,
+        head_repository: repo_watch::RepositorySlug,
+        head_branch: repo_watch::BranchName,
+        base_branch: repo_watch::BranchName,
+    },
+    Branch {
+        repository: repo_watch::RepositorySlug,
+        branch: repo_watch::BranchName,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -27,7 +37,9 @@ pub trait CommissionedDispatchIdGenerator {
 ```rust
 pub struct UuidV7CommissionedDispatchIdGenerator;
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl commissioned_dispatch::CommissionedDispatchIdGenerator for commissioned_dispatch::UuidV7CommissionedDispatchIdGenerator {
+impl commissioned_dispatch::CommissionedDispatchIdGenerator
+    for commissioned_dispatch::UuidV7CommissionedDispatchIdGenerator
+{
     pub fn next_dispatch_id(&mut self) -> signalbox_domain::CommissionedDispatchId;
     pub fn next_command_id(&mut self) -> signalbox_domain::DurableCommandId;
     pub fn next_session_id(&mut self) -> signalbox_domain::SessionId;
@@ -37,23 +49,37 @@ impl commissioned_dispatch::CommissionedDispatchIdGenerator for commissioned_dis
 ## CommissionDispatchRequest
 
 ```rust
-pub struct CommissionDispatchRequest { /* private */ }
+pub struct CommissionDispatchRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl commissioned_dispatch::CommissionDispatchRequest {
-    pub fn try_new(command_id: signalbox_domain::DurableCommandId, template: session_template::SessionTemplateName, fence: commissioned_dispatch::CommissionedDispatchFence, statement: goal::GoalStatement, context: user_content::UserContent) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    pub fn try_new(
+        command_id: signalbox_domain::DurableCommandId,
+        template: session_template::SessionTemplateName,
+        fence: commissioned_dispatch::CommissionedDispatchFence,
+        statement: goal::GoalStatement,
+        context: user_content::UserContent,
+    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn template(&self) -> &session_template::SessionTemplateName;
     pub const fn fence(&self) -> &commissioned_dispatch::CommissionedDispatchFence;
     pub const fn statement(&self) -> &goal::GoalStatement;
     pub fn initial_content_digest(&self) -> [u8; 32];
-    pub fn prepare(self, ids: &mut impl commissioned_dispatch::CommissionedDispatchIdGenerator, template_provenance: session_template::SessionTemplateProvenance, resolved_defaults: configuration::SessionConfigurationDefaults) -> result::Result<commissioned_dispatch::PreparedCommissionedDispatch, commissioned_dispatch::CommissionDispatchPreparationError>;
+    pub fn prepare(
+        self,
+        ids: &mut impl commissioned_dispatch::CommissionedDispatchIdGenerator,
+        template_provenance: session_template::SessionTemplateProvenance,
+        resolved_defaults: configuration::SessionConfigurationDefaults,
+    ) -> result::Result<
+        commissioned_dispatch::PreparedCommissionedDispatch,
+        commissioned_dispatch::CommissionDispatchPreparationError,
+    >;
 }
 ```
 
 ## PreparedCommissionedDispatch
 
 ```rust
-pub struct PreparedCommissionedDispatch { /* private */ }
+pub struct PreparedCommissionedDispatch {/* private */}
 // derives: fmt::Debug
 impl commissioned_dispatch::PreparedCommissionedDispatch {
     pub const fn dispatch_id(&self) -> signalbox_domain::CommissionedDispatchId;
@@ -62,7 +88,15 @@ impl commissioned_dispatch::PreparedCommissionedDispatch {
     pub const fn goal(&self) -> &goal_command::GoalUserCommand;
     pub fn initial_content_digest(&self) -> [u8; 32];
     pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub fn into_parts(self) -> (signalbox_domain::CommissionedDispatchId, commissioned_dispatch::CommissionedDispatchFence, session::PreparedCreateSession, submit_input::SubmitInput, goal_command::GoalUserCommand);
+    pub fn into_parts(
+        self,
+    ) -> (
+        signalbox_domain::CommissionedDispatchId,
+        commissioned_dispatch::CommissionedDispatchFence,
+        session::PreparedCreateSession,
+        submit_input::SubmitInput,
+        goal_command::GoalUserCommand,
+    );
 }
 ```
 

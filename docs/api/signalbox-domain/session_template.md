@@ -9,7 +9,9 @@ pub struct SessionTemplateName(/* private */);
 // derives: clone::Clone, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl session_template::SessionTemplateName {
     const MAX_UTF8_BYTES: usize;
-    pub fn try_new(value: string::String) -> result::Result<Self, session_template::SessionTemplateNameError>;
+    pub fn try_new(
+        value: string::String,
+    ) -> result::Result<Self, session_template::SessionTemplateNameError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
 }
@@ -33,7 +35,7 @@ pub enum SessionTemplateNameFailure {
 ## SessionTemplateNameError
 
 ```rust
-pub struct SessionTemplateNameError { /* private */ }
+pub struct SessionTemplateNameError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_template::SessionTemplateNameError {
     pub fn value(&self) -> &str;
@@ -63,7 +65,10 @@ impl session_template::SessionTemplateVersion {
 pub struct SessionTemplateContentDigest(/* private */);
 // derives: clone::Clone, marker::Copy, cmp::Eq, hash::Hash, cmp::PartialEq
 impl session_template::SessionTemplateContentDigest {
-    pub fn derive(version: session_template::SessionTemplateVersion, defaults: &configuration::SessionConfigurationDefaults) -> option::Option<Self>;
+    pub fn derive(
+        version: session_template::SessionTemplateVersion,
+        defaults: &configuration::SessionConfigurationDefaults,
+    ) -> option::Option<Self>;
     pub const fn from_bytes(bytes: [u8; 32]) -> Self;
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
@@ -75,10 +80,13 @@ impl fmt::Debug for session_template::SessionTemplateContentDigest {
 ## SessionTemplateProvenance
 
 ```rust
-pub struct SessionTemplateProvenance { /* private */ }
+pub struct SessionTemplateProvenance {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl session_template::SessionTemplateProvenance {
-    pub const fn new(name: session_template::SessionTemplateName, content_digest: session_template::SessionTemplateContentDigest) -> Self;
+    pub const fn new(
+        name: session_template::SessionTemplateName,
+        content_digest: session_template::SessionTemplateContentDigest,
+    ) -> Self;
     pub const fn name(&self) -> &session_template::SessionTemplateName;
     pub const fn content_digest(&self) -> session_template::SessionTemplateContentDigest;
 }

@@ -5,15 +5,38 @@
 ## ReplaceSessionDefaultsRequest
 
 ```rust
-pub struct ReplaceSessionDefaultsRequest { /* private */ }
+pub struct ReplaceSessionDefaultsRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl replace_session_defaults::ReplaceSessionDefaultsRequest {
-    pub fn try_new(command_id: signalbox_domain::DurableCommandId, session: signalbox_domain::SessionId, expected_current_version: configuration::SessionConfigurationDefaultsVersion, replacement: configuration::SessionConfigurationDefaults, prompt_member: replace_session_defaults::PromptMemberStatement) -> result::Result<Self, create_session::InvalidDurableCommandId>;
-    pub fn try_new_with_model_settings(command_id: signalbox_domain::DurableCommandId, session: signalbox_domain::SessionId, expected_current_version: configuration::SessionConfigurationDefaultsVersion, replacement: configuration::SessionConfigurationDefaults, caller_model_settings: model_settings::ModelSettingsOverlay, prompt_member: replace_session_defaults::PromptMemberStatement) -> result::Result<Self, create_session::InvalidDurableCommandId>;
-    pub fn try_new_with_model_settings_adjustments(command_id: signalbox_domain::DurableCommandId, session: signalbox_domain::SessionId, expected_current_version: configuration::SessionConfigurationDefaultsVersion, replacement: configuration::SessionConfigurationDefaults, caller_model_settings: model_settings::ModelSettingsOverlay, model_settings_adjustments: vec::Vec<model_settings::ModelChangeAdjustment>, prompt_member: replace_session_defaults::PromptMemberStatement) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    pub fn try_new(
+        command_id: signalbox_domain::DurableCommandId,
+        session: signalbox_domain::SessionId,
+        expected_current_version: configuration::SessionConfigurationDefaultsVersion,
+        replacement: configuration::SessionConfigurationDefaults,
+        prompt_member: replace_session_defaults::PromptMemberStatement,
+    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    pub fn try_new_with_model_settings(
+        command_id: signalbox_domain::DurableCommandId,
+        session: signalbox_domain::SessionId,
+        expected_current_version: configuration::SessionConfigurationDefaultsVersion,
+        replacement: configuration::SessionConfigurationDefaults,
+        caller_model_settings: model_settings::ModelSettingsOverlay,
+        prompt_member: replace_session_defaults::PromptMemberStatement,
+    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    pub fn try_new_with_model_settings_adjustments(
+        command_id: signalbox_domain::DurableCommandId,
+        session: signalbox_domain::SessionId,
+        expected_current_version: configuration::SessionConfigurationDefaultsVersion,
+        replacement: configuration::SessionConfigurationDefaults,
+        caller_model_settings: model_settings::ModelSettingsOverlay,
+        model_settings_adjustments: vec::Vec<model_settings::ModelChangeAdjustment>,
+        prompt_member: replace_session_defaults::PromptMemberStatement,
+    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
     pub const fn command_id(&self) -> signalbox_domain::DurableCommandId;
     pub const fn session(&self) -> signalbox_domain::SessionId;
-    pub const fn expected_current_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
+    pub const fn expected_current_version(
+        &self,
+    ) -> configuration::SessionConfigurationDefaultsVersion;
     pub const fn replacement(&self) -> &configuration::SessionConfigurationDefaults;
     pub const fn caller_model_settings(&self) -> model_settings::ModelSettingsOverlay;
     pub fn model_settings_adjustments(&self) -> &[model_settings::ModelChangeAdjustment];
@@ -36,7 +59,9 @@ pub enum PromptMemberStatement {
 ```rust
 pub enum ReplaceSessionDefaultsOutcome {
     Recorded(replace_session_defaults::ReplaceSessionDefaultsResult),
-    ConflictingReuse { command_id: signalbox_domain::DurableCommandId },
+    ConflictingReuse {
+        command_id: signalbox_domain::DurableCommandId,
+    },
     PromptRequiresStatedMember,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -47,20 +72,38 @@ pub enum ReplaceSessionDefaultsOutcome {
 ```rust
 pub trait ReplaceSessionDefaultsTransaction {
     type Error;
-    pub fn handle(&mut self, command: replace_session_defaults::ReplaceSessionDefaults, prompt_member: replace_session_defaults::PromptMemberStatement) -> impl future::Future<Output = result::Result<replace_session_defaults::ReplaceSessionDefaultsOutcome, <Self as replace_session_defaults::ReplaceSessionDefaultsTransaction>::Error>> + marker::Send;
+    pub fn handle(
+        &mut self,
+        command: replace_session_defaults::ReplaceSessionDefaults,
+        prompt_member: replace_session_defaults::PromptMemberStatement,
+    ) -> impl future::Future<
+        Output = result::Result<
+            replace_session_defaults::ReplaceSessionDefaultsOutcome,
+            <Self as replace_session_defaults::ReplaceSessionDefaultsTransaction>::Error,
+        >,
+    > + marker::Send;
 }
 ```
 
 ## ReplaceSessionDefaultsService
 
 ```rust
-pub struct ReplaceSessionDefaultsService<Transaction> { /* private */ }
+pub struct ReplaceSessionDefaultsService<Transaction> {/* private */}
 // derives: fmt::Debug
 impl<Transaction> replace_session_defaults::ReplaceSessionDefaultsService<Transaction> {
     pub const fn new(transaction: Transaction) -> Self;
     pub fn into_transaction(self) -> Transaction;
 }
-impl<Transaction> replace_session_defaults::ReplaceSessionDefaultsService<Transaction> where Transaction: replace_session_defaults::ReplaceSessionDefaultsTransaction {
-    pub async fn execute(&mut self, request: replace_session_defaults::ReplaceSessionDefaultsRequest) -> result::Result<replace_session_defaults::ReplaceSessionDefaultsOutcome, <Transaction as replace_session_defaults::ReplaceSessionDefaultsTransaction>::Error>;
+impl<Transaction> replace_session_defaults::ReplaceSessionDefaultsService<Transaction>
+where
+    Transaction: replace_session_defaults::ReplaceSessionDefaultsTransaction,
+{
+    pub async fn execute(
+        &mut self,
+        request: replace_session_defaults::ReplaceSessionDefaultsRequest,
+    ) -> result::Result<
+        replace_session_defaults::ReplaceSessionDefaultsOutcome,
+        <Transaction as replace_session_defaults::ReplaceSessionDefaultsTransaction>::Error,
+    >;
 }
 ```

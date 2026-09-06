@@ -5,6 +5,8 @@ import argparse
 import json
 import os
 import subprocess
+import tempfile
+import textwrap
 import tomllib
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -39,6 +41,28 @@ def page(title, blocks):
 
 def fits(text):
     return len(text.splitlines()) < MAX_LINES and len(text.encode()) < MAX_BYTES
+
+
+def format_rust(code):
+    fallback = []
+    for line in code.splitlines():
+        indent = line[:len(line) - len(line.lstrip())]
+        if len(line) > 100 and not line.lstrip().startswith('//'):
+            fallback.append(textwrap.fill(
+                line, width=100, subsequent_indent=indent + '    ',
+                break_long_words=False, break_on_hyphens=False,
+            ))
+        else:
+            fallback.append(line)
+    code = '\n'.join(fallback) + '\n'
+    with tempfile.TemporaryDirectory(prefix='domain-spine-rustfmt-') as temporary:
+        path = Path(temporary) / 'declarations.rs'
+        path.write_text(code)
+        result = subprocess.run([
+            'rustfmt', '--quiet', '--edition', '2021', '--emit', 'stdout',
+            '--config', 'max_width=100', str(path),
+        ], check=False, capture_output=True, text=True)
+    return (result.stdout if result.returncode == 0 else code).rstrip()
 
 
 class Renderer:
@@ -216,6 +240,11 @@ class Renderer:
             return '(' + ', '.join(fields) + ')'
         body = kind.get('plain', kind.get('struct'))
         fields = [self.field(i, named=True, public=public) for i in body['fields']]
+        if public:
+            lines = ['    ' + field + ',' for field in fields]
+            if body['has_stripped_fields']:
+                lines.append('    /* private */')
+            return ' {\n' + '\n'.join(lines) + '\n}'
         if body['has_stripped_fields']:
             fields.append('/* private */')
         return ' { ' + ', '.join(fields) + ' }'
@@ -302,7 +331,7 @@ class Renderer:
                 declarations.append(self.impl_block(implementation))
         if derives:
             declarations.insert(1, '// derives: ' + ', '.join(dict.fromkeys(derives)))
-        return '## ' + item['name'] + '\n\n```rust\n' + '\n'.join(declarations) + '\n```'
+        return '## ' + item['name'] + '\n\n```rust\n' + format_rust('\n'.join(declarations)) + '\n```'
 
     def modules(self):
         result = defaultdict(list)

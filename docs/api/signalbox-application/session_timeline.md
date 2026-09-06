@@ -85,10 +85,13 @@ impl error::Error for session_timeline::TimelineWindowLimitError {}
 ## TimelineWindowLimits
 
 ```rust
-pub struct TimelineWindowLimits { /* private */ }
+pub struct TimelineWindowLimits {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_timeline::TimelineWindowLimits {
-    pub const fn new(max_items: u16, max_projected_bytes: u32) -> result::Result<Self, session_timeline::TimelineWindowLimitError>;
+    pub const fn new(
+        max_items: u16,
+        max_projected_bytes: u32,
+    ) -> result::Result<Self, session_timeline::TimelineWindowLimitError>;
     pub const fn max_items(self) -> u16;
     pub const fn max_projected_bytes(self) -> u32;
 }
@@ -129,35 +132,57 @@ pub enum SessionTimelineEventKind {
 ## SessionTimelineItem
 
 ```rust
-pub struct SessionTimelineItem { pub address: session_timeline::TimelineAddress, pub kind: session_timeline::SessionTimelineEventKind, pub projected_structured_bytes: u32 }
+pub struct SessionTimelineItem {
+    pub address: session_timeline::TimelineAddress,
+    pub kind: session_timeline::SessionTimelineEventKind,
+    pub projected_structured_bytes: u32,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SessionTimelineBounds
 
 ```rust
-pub struct SessionTimelineBounds { pub first: option::Option<session_timeline::TimelineAddress>, pub latest: option::Option<session_timeline::TimelineAddress> }
+pub struct SessionTimelineBounds {
+    pub first: option::Option<session_timeline::TimelineAddress>,
+    pub latest: option::Option<session_timeline::TimelineAddress>,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SessionTimelineSizeFacts
 
 ```rust
-pub struct SessionTimelineSizeFacts { pub item_count: u64, pub projected_text_bytes: u64, pub projected_structured_bytes: u64, pub referenced_blob_count: u64, pub referenced_blob_bytes: u64 }
+pub struct SessionTimelineSizeFacts {
+    pub item_count: u64,
+    pub projected_text_bytes: u64,
+    pub projected_structured_bytes: u64,
+    pub referenced_blob_count: u64,
+    pub referenced_blob_bytes: u64,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SessionWorkFacts
 
 ```rust
-pub struct SessionWorkFacts { pub active_turn_count: u64, pub queued_turn_count: u64 }
+pub struct SessionWorkFacts {
+    pub active_turn_count: u64,
+    pub queued_turn_count: u64,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SessionTimelineDescriptor
 
 ```rust
-pub struct SessionTimelineDescriptor { pub session: signalbox_domain::SessionId, pub sizes: session_timeline::SessionTimelineSizeFacts, pub bounds: session_timeline::SessionTimelineBounds, pub work: session_timeline::SessionWorkFacts, pub observed_through: u64 }
+pub struct SessionTimelineDescriptor {
+    pub session: signalbox_domain::SessionId,
+    pub sizes: session_timeline::SessionTimelineSizeFacts,
+    pub bounds: session_timeline::SessionTimelineBounds,
+    pub work: session_timeline::SessionWorkFacts,
+    pub observed_through: u64,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -174,7 +199,13 @@ pub enum TimelineContinuation {
 ## SessionTimelineWindow
 
 ```rust
-pub struct SessionTimelineWindow { pub session: signalbox_domain::SessionId, pub items: vec::Vec<session_timeline::SessionTimelineItem>, pub projected_structured_bytes: u32, pub continuation_before: session_timeline::TimelineContinuation, pub continuation_after: session_timeline::TimelineContinuation }
+pub struct SessionTimelineWindow {
+    pub session: signalbox_domain::SessionId,
+    pub items: vec::Vec<session_timeline::SessionTimelineItem>,
+    pub projected_structured_bytes: u32,
+    pub continuation_before: session_timeline::TimelineContinuation,
+    pub continuation_after: session_timeline::TimelineContinuation,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -195,10 +226,13 @@ impl error::Error for session_timeline::TimelineDetailLimitError {}
 ## TimelineDetailLimits
 
 ```rust
-pub struct TimelineDetailLimits { /* private */ }
+pub struct TimelineDetailLimits {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_timeline::TimelineDetailLimits {
-    pub const fn new(max_items: u16, max_projected_bytes: u32) -> result::Result<Self, session_timeline::TimelineDetailLimitError>;
+    pub const fn new(
+        max_items: u16,
+        max_projected_bytes: u32,
+    ) -> result::Result<Self, session_timeline::TimelineDetailLimitError>;
     pub const fn max_items(self) -> u16;
     pub const fn max_projected_bytes(self) -> u32;
 }
@@ -217,14 +251,24 @@ pub enum TimelineBodyField {
 ## TimelineBodyContinuation
 
 ```rust
-pub struct TimelineBodyContinuation { pub address: session_timeline::TimelineAddress, pub field: session_timeline::TimelineBodyField, pub member_index: u32, pub offset_bytes: u64 }
+pub struct TimelineBodyContinuation {
+    pub address: session_timeline::TimelineAddress,
+    pub field: session_timeline::TimelineBodyField,
+    pub member_index: u32,
+    pub offset_bytes: u64,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## TimelineDetailCursor
 
 ```rust
-pub struct TimelineDetailCursor { pub address: session_timeline::TimelineAddress, pub field: option::Option<session_timeline::TimelineBodyField>, pub member_index: u32, pub offset_bytes: u64 }
+pub struct TimelineDetailCursor {
+    pub address: session_timeline::TimelineAddress,
+    pub field: option::Option<session_timeline::TimelineBodyField>,
+    pub member_index: u32,
+    pub offset_bytes: u64,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -241,14 +285,23 @@ pub enum TimelineDetailContinuation {
 ## TimelineTextExcerpt
 
 ```rust
-pub struct TimelineTextExcerpt { pub text: string::String, pub offset_bytes: u64, pub total_bytes: u64, pub continuation: option::Option<session_timeline::TimelineBodyContinuation> }
+pub struct TimelineTextExcerpt {
+    pub text: string::String,
+    pub offset_bytes: u64,
+    pub total_bytes: u64,
+    pub continuation: option::Option<session_timeline::TimelineBodyContinuation>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## TimelineBlobReference
 
 ```rust
-pub struct TimelineBlobReference { pub blob_id: blob::BlobDigest, pub length_bytes: u64, pub media_type: option::Option<string::String> }
+pub struct TimelineBlobReference {
+    pub blob_id: blob::BlobDigest,
+    pub length_bytes: u64,
+    pub media_type: option::Option<string::String>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -280,7 +333,12 @@ pub enum TimelineModelCallDisposition {
 ## TimelineModelUsage
 
 ```rust
-pub struct TimelineModelUsage { pub input_tokens: option::Option<u64>, pub output_tokens: option::Option<u64>, pub cache_creation_input_tokens: option::Option<u64>, pub cache_read_input_tokens: option::Option<u64> }
+pub struct TimelineModelUsage {
+    pub input_tokens: option::Option<u64>,
+    pub output_tokens: option::Option<u64>,
+    pub cache_creation_input_tokens: option::Option<u64>,
+    pub cache_read_input_tokens: option::Option<u64>,
+}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -298,10 +356,29 @@ pub enum TimelineTurnLifecycleKind {
 
 ```rust
 pub enum SessionTimelineDetailBody {
-    UserInput { turn_id: signalbox_domain::TurnId, text: session_timeline::TimelineTextExcerpt, attachments: vec::Vec<session_timeline::TimelineBlobReference> },
-    ModelCall { turn_id: signalbox_domain::TurnId, model_call_id: signalbox_domain::ModelCallId, state: session_timeline::TimelineModelCallState, model_identity_id: model_call::ProviderModelIdentity, request_context_items: u64, response: option::Option<session_timeline::TimelineTextExcerpt>, usage: session_timeline::TimelineModelUsage, provider_failure_cause: option::Option<model_execution::ProviderModelCallFailureCause> },
-    TurnLifecycle { turn_id: signalbox_domain::TurnId, lifecycle: session_timeline::TimelineTurnLifecycleKind, cause_code: string::String },
-    EventFact { kind: session_timeline::SessionTimelineEventKind },
+    UserInput {
+        turn_id: signalbox_domain::TurnId,
+        text: session_timeline::TimelineTextExcerpt,
+        attachments: vec::Vec<session_timeline::TimelineBlobReference>,
+    },
+    ModelCall {
+        turn_id: signalbox_domain::TurnId,
+        model_call_id: signalbox_domain::ModelCallId,
+        state: session_timeline::TimelineModelCallState,
+        model_identity_id: model_call::ProviderModelIdentity,
+        request_context_items: u64,
+        response: option::Option<session_timeline::TimelineTextExcerpt>,
+        usage: session_timeline::TimelineModelUsage,
+        provider_failure_cause: option::Option<model_execution::ProviderModelCallFailureCause>,
+    },
+    TurnLifecycle {
+        turn_id: signalbox_domain::TurnId,
+        lifecycle: session_timeline::TimelineTurnLifecycleKind,
+        cause_code: string::String,
+    },
+    EventFact {
+        kind: session_timeline::SessionTimelineEventKind,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -309,14 +386,24 @@ pub enum SessionTimelineDetailBody {
 ## SessionTimelineDetail
 
 ```rust
-pub struct SessionTimelineDetail { pub address: session_timeline::TimelineAddress, pub kind: session_timeline::SessionTimelineEventKind, pub body: session_timeline::SessionTimelineDetailBody, pub projected_body_bytes: u32 }
+pub struct SessionTimelineDetail {
+    pub address: session_timeline::TimelineAddress,
+    pub kind: session_timeline::SessionTimelineEventKind,
+    pub body: session_timeline::SessionTimelineDetailBody,
+    pub projected_body_bytes: u32,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## SessionTimelineDetailPage
 
 ```rust
-pub struct SessionTimelineDetailPage { pub session: signalbox_domain::SessionId, pub items: vec::Vec<session_timeline::SessionTimelineDetail>, pub projected_body_bytes: u32, pub continuation: option::Option<session_timeline::TimelineDetailContinuation> }
+pub struct SessionTimelineDetailPage {
+    pub session: signalbox_domain::SessionId,
+    pub items: vec::Vec<session_timeline::SessionTimelineDetail>,
+    pub projected_body_bytes: u32,
+    pub continuation: option::Option<session_timeline::TimelineDetailContinuation>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
@@ -325,27 +412,123 @@ pub struct SessionTimelineDetailPage { pub session: signalbox_domain::SessionId,
 ```rust
 pub trait SessionTimelineReader {
     type Error;
-    pub fn read_descriptor(&self, session: signalbox_domain::SessionId) -> impl future::Future<Output = result::Result<option::Option<session_timeline::SessionTimelineDescriptor>, <Self as session_timeline::SessionTimelineReader>::Error>> + marker::Send;
-    pub fn read_window(&self, session: signalbox_domain::SessionId, anchor: session_timeline::TimelineWindowAnchor, limits: session_timeline::TimelineWindowLimits) -> impl future::Future<Output = result::Result<option::Option<session_timeline::SessionTimelineWindow>, <Self as session_timeline::SessionTimelineReader>::Error>> + marker::Send;
-    pub fn read_item_details(&self, session: signalbox_domain::SessionId, address: session_timeline::TimelineAddress, cursor: option::Option<session_timeline::TimelineDetailCursor>, limits: session_timeline::TimelineDetailLimits) -> impl future::Future<Output = result::Result<option::Option<session_timeline::SessionTimelineDetailPage>, <Self as session_timeline::SessionTimelineReader>::Error>> + marker::Send;
-    pub fn read_turn_details(&self, session: signalbox_domain::SessionId, turn: signalbox_domain::TurnId, cursor: option::Option<session_timeline::TimelineDetailCursor>, limits: session_timeline::TimelineDetailLimits) -> impl future::Future<Output = result::Result<option::Option<session_timeline::SessionTimelineDetailPage>, <Self as session_timeline::SessionTimelineReader>::Error>> + marker::Send;
-    pub fn read_region_details(&self, session: signalbox_domain::SessionId, first: session_timeline::TimelineAddress, through: session_timeline::TimelineAddress, cursor: option::Option<session_timeline::TimelineDetailCursor>, limits: session_timeline::TimelineDetailLimits) -> impl future::Future<Output = result::Result<option::Option<session_timeline::SessionTimelineDetailPage>, <Self as session_timeline::SessionTimelineReader>::Error>> + marker::Send;
+    pub fn read_descriptor(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<session_timeline::SessionTimelineDescriptor>,
+            <Self as session_timeline::SessionTimelineReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn read_window(
+        &self,
+        session: signalbox_domain::SessionId,
+        anchor: session_timeline::TimelineWindowAnchor,
+        limits: session_timeline::TimelineWindowLimits,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<session_timeline::SessionTimelineWindow>,
+            <Self as session_timeline::SessionTimelineReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn read_item_details(
+        &self,
+        session: signalbox_domain::SessionId,
+        address: session_timeline::TimelineAddress,
+        cursor: option::Option<session_timeline::TimelineDetailCursor>,
+        limits: session_timeline::TimelineDetailLimits,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<session_timeline::SessionTimelineDetailPage>,
+            <Self as session_timeline::SessionTimelineReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn read_turn_details(
+        &self,
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        cursor: option::Option<session_timeline::TimelineDetailCursor>,
+        limits: session_timeline::TimelineDetailLimits,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<session_timeline::SessionTimelineDetailPage>,
+            <Self as session_timeline::SessionTimelineReader>::Error,
+        >,
+    > + marker::Send;
+    pub fn read_region_details(
+        &self,
+        session: signalbox_domain::SessionId,
+        first: session_timeline::TimelineAddress,
+        through: session_timeline::TimelineAddress,
+        cursor: option::Option<session_timeline::TimelineDetailCursor>,
+        limits: session_timeline::TimelineDetailLimits,
+    ) -> impl future::Future<
+        Output = result::Result<
+            option::Option<session_timeline::SessionTimelineDetailPage>,
+            <Self as session_timeline::SessionTimelineReader>::Error,
+        >,
+    > + marker::Send;
 }
 ```
 
 ## ReadSessionTimelineService
 
 ```rust
-pub struct ReadSessionTimelineService<Reader> { /* private */ }
+pub struct ReadSessionTimelineService<Reader> {/* private */}
 // derives: fmt::Debug
 impl<Reader> session_timeline::ReadSessionTimelineService<Reader> {
     pub const fn new(reader: Reader) -> Self;
 }
-impl<Reader: session_timeline::SessionTimelineReader> session_timeline::ReadSessionTimelineService<Reader> {
-    pub async fn descriptor(&self, session: signalbox_domain::SessionId) -> result::Result<option::Option<session_timeline::SessionTimelineDescriptor>, <Reader as session_timeline::SessionTimelineReader>::Error>;
-    pub async fn window(&self, session: signalbox_domain::SessionId, anchor: session_timeline::TimelineWindowAnchor, limits: session_timeline::TimelineWindowLimits) -> result::Result<option::Option<session_timeline::SessionTimelineWindow>, <Reader as session_timeline::SessionTimelineReader>::Error>;
-    pub async fn item_details(&self, session: signalbox_domain::SessionId, address: session_timeline::TimelineAddress, cursor: option::Option<session_timeline::TimelineDetailCursor>, limits: session_timeline::TimelineDetailLimits) -> result::Result<option::Option<session_timeline::SessionTimelineDetailPage>, <Reader as session_timeline::SessionTimelineReader>::Error>;
-    pub async fn turn_details(&self, session: signalbox_domain::SessionId, turn: signalbox_domain::TurnId, cursor: option::Option<session_timeline::TimelineDetailCursor>, limits: session_timeline::TimelineDetailLimits) -> result::Result<option::Option<session_timeline::SessionTimelineDetailPage>, <Reader as session_timeline::SessionTimelineReader>::Error>;
-    pub async fn region_details(&self, session: signalbox_domain::SessionId, first: session_timeline::TimelineAddress, through: session_timeline::TimelineAddress, cursor: option::Option<session_timeline::TimelineDetailCursor>, limits: session_timeline::TimelineDetailLimits) -> result::Result<option::Option<session_timeline::SessionTimelineDetailPage>, <Reader as session_timeline::SessionTimelineReader>::Error>;
+impl<Reader: session_timeline::SessionTimelineReader>
+    session_timeline::ReadSessionTimelineService<Reader>
+{
+    pub async fn descriptor(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<
+        option::Option<session_timeline::SessionTimelineDescriptor>,
+        <Reader as session_timeline::SessionTimelineReader>::Error,
+    >;
+    pub async fn window(
+        &self,
+        session: signalbox_domain::SessionId,
+        anchor: session_timeline::TimelineWindowAnchor,
+        limits: session_timeline::TimelineWindowLimits,
+    ) -> result::Result<
+        option::Option<session_timeline::SessionTimelineWindow>,
+        <Reader as session_timeline::SessionTimelineReader>::Error,
+    >;
+    pub async fn item_details(
+        &self,
+        session: signalbox_domain::SessionId,
+        address: session_timeline::TimelineAddress,
+        cursor: option::Option<session_timeline::TimelineDetailCursor>,
+        limits: session_timeline::TimelineDetailLimits,
+    ) -> result::Result<
+        option::Option<session_timeline::SessionTimelineDetailPage>,
+        <Reader as session_timeline::SessionTimelineReader>::Error,
+    >;
+    pub async fn turn_details(
+        &self,
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+        cursor: option::Option<session_timeline::TimelineDetailCursor>,
+        limits: session_timeline::TimelineDetailLimits,
+    ) -> result::Result<
+        option::Option<session_timeline::SessionTimelineDetailPage>,
+        <Reader as session_timeline::SessionTimelineReader>::Error,
+    >;
+    pub async fn region_details(
+        &self,
+        session: signalbox_domain::SessionId,
+        first: session_timeline::TimelineAddress,
+        through: session_timeline::TimelineAddress,
+        cursor: option::Option<session_timeline::TimelineDetailCursor>,
+        limits: session_timeline::TimelineDetailLimits,
+    ) -> result::Result<
+        option::Option<session_timeline::SessionTimelineDetailPage>,
+        <Reader as session_timeline::SessionTimelineReader>::Error,
+    >;
 }
 ```

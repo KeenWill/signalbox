@@ -2,6 +2,7 @@
 """Exercise the domain API digest's parser and revision selection."""
 
 import os
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -388,6 +389,28 @@ pub fn sample::ToolArgumentValidator::validate(&self)
     def test_event_base_selects_previous_revision(self) -> None:
         with patch.dict(os.environ, {"DOMAIN_SPINE_BASE": "event-base"}, clear=True):
             self.assertEqual(digest.baseline_revision(), "event-base")
+
+    def test_split_page_links_cover_current_and_removed_types(self) -> None:
+        document = {'root': 0, 'paths': {}, 'index': {
+            '0': {'id': 0, 'crate_id': 0, 'name': 'sample',
+                  'inner': {'module': {'items': [1, 2]}}},
+            '1': {'id': 1, 'crate_id': 0, 'name': 'Record',
+                  'span': {'filename': 'src/example.rs', 'begin': [1, 1]},
+                  'inner': {'struct': {}}},
+            '2': {'id': 2, 'crate_id': 0, 'name': 'Removed',
+                  'span': {'filename': 'src/example.rs', 'begin': [2, 1]},
+                  'inner': {'struct': {}}},
+        }}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'docs/api/sample/example'
+            directory.mkdir(parents=True)
+            (directory / 'types.md').write_text('# example: types\n')
+            (directory / 'types-2.md').write_text('# example: types-2\n\n## Record\n')
+            with patch('render_domain_spine.ROOT', root):
+                links = digest.declaration_links('sample', document)
+        self.assertEqual(links['sample::Record'], 'docs/api/sample/example/types-2.md')
+        self.assertEqual(links['sample::Removed'], 'docs/api/sample/example/types.md')
 
     def test_delta_names_link_to_module_files(self) -> None:
         baseline = "pub mod sample\npub struct sample::Removed\n"

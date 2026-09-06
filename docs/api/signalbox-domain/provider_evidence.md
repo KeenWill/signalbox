@@ -6,8 +6,12 @@
 
 ```rust
 pub enum ProviderTargetObservation {
-    MatchesResolvedTarget { reported: model_call::ProviderModelIdentity },
-    Mismatch { reported: model_call::ProviderModelIdentity },
+    MatchesResolvedTarget {
+        reported: model_call::ProviderModelIdentity,
+    },
+    Mismatch {
+        reported: model_call::ProviderModelIdentity,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -15,7 +19,7 @@ pub enum ProviderTargetObservation {
 ## ProviderTargetEvidence
 
 ```rust
-pub struct ProviderTargetEvidence { /* private */ }
+pub struct ProviderTargetEvidence {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl provider_evidence::ProviderTargetEvidence {
     pub const fn id(&self) -> ProviderTargetEvidenceId;
@@ -27,18 +31,21 @@ impl provider_evidence::ProviderTargetEvidence {
 ## ProviderTargetEvidenceLog
 
 ```rust
-pub struct ProviderTargetEvidenceLog { /* private */ }
+pub struct ProviderTargetEvidenceLog {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
 impl provider_evidence::ProviderTargetEvidenceLog {
     pub fn new() -> Self;
-    pub fn lookup(&self, id: ProviderTargetEvidenceId) -> option::Option<&provider_evidence::ProviderTargetEvidence>;
+    pub fn lookup(
+        &self,
+        id: ProviderTargetEvidenceId,
+    ) -> option::Option<&provider_evidence::ProviderTargetEvidence>;
 }
 ```
 
 ## ProviderTargetMismatchInvalidation
 
 ```rust
-pub struct ProviderTargetMismatchInvalidation { /* private */ }
+pub struct ProviderTargetMismatchInvalidation {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl provider_evidence::ProviderTargetMismatchInvalidation {
     pub const fn invalidated_call(&self) -> ModelCallId;
@@ -49,10 +56,13 @@ impl provider_evidence::ProviderTargetMismatchInvalidation {
 ## ProviderTargetMismatchInvalidationLog
 
 ```rust
-pub struct ProviderTargetMismatchInvalidationLog { /* private */ }
+pub struct ProviderTargetMismatchInvalidationLog {/* private */}
 // derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
 impl provider_evidence::ProviderTargetMismatchInvalidationLog {
     pub fn new() -> Self;
-    pub fn lookup(&self, call: ModelCallId) -> option::Option<&provider_evidence::ProviderTargetMismatchInvalidation>;
+    pub fn lookup(
+        &self,
+        call: ModelCallId,
+    ) -> option::Option<&provider_evidence::ProviderTargetMismatchInvalidation>;
 }
 ```

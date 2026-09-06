@@ -10,7 +10,9 @@ pub struct SessionPlacementPath(/* private */);
 impl session_placement::SessionPlacementPath {
     const MAX_DEPTH: usize;
     const MAX_SEGMENT_BYTES: usize;
-    pub fn try_new(value: string::String) -> result::Result<Self, session_placement::SessionPlacementPathError>;
+    pub fn try_new(
+        value: string::String,
+    ) -> result::Result<Self, session_placement::SessionPlacementPathError>;
     pub fn as_str(&self) -> &str;
     pub fn depth(&self) -> usize;
 }
@@ -45,15 +47,23 @@ pub enum RootPlacementGlobalReadIntent {
 ## SessionPlacement
 
 ```rust
-pub struct SessionPlacement { /* private */ }
+pub struct SessionPlacement {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl session_placement::SessionPlacement {
     pub const fn pathless() -> Self;
-    pub fn scoped(path: session_placement::SessionPlacementPath) -> result::Result<Self, session_placement::SessionPlacementError>;
-    pub fn root_global_read(path: session_placement::SessionPlacementPath, intent: session_placement::RootPlacementGlobalReadIntent) -> result::Result<Self, session_placement::SessionPlacementError>;
+    pub fn scoped(
+        path: session_placement::SessionPlacementPath,
+    ) -> result::Result<Self, session_placement::SessionPlacementError>;
+    pub fn root_global_read(
+        path: session_placement::SessionPlacementPath,
+        intent: session_placement::RootPlacementGlobalReadIntent,
+    ) -> result::Result<Self, session_placement::SessionPlacementError>;
     pub fn path(&self) -> option::Option<&session_placement::SessionPlacementPath>;
     pub const fn records_root_global_read_intent(&self) -> bool;
-    pub fn decide_cross_session_read(&self, target: &Self) -> session_placement::SessionReadScopeDecision;
+    pub fn decide_cross_session_read(
+        &self,
+        target: &Self,
+    ) -> session_placement::SessionReadScopeDecision;
 }
 ```
 
@@ -96,7 +106,7 @@ pub enum SessionReadScopeDecision {
 ## SessionReadScopeRefusal
 
 ```rust
-pub struct SessionReadScopeRefusal { /* private */ }
+pub struct SessionReadScopeRefusal {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_placement::SessionReadScopeRefusal {
     pub const fn requesting_directory(&self) -> &session_placement::SessionPlacementDirectory;
@@ -129,11 +139,14 @@ impl session_placement::SessionPlacementVersion {
 ## VersionedSessionPlacement
 
 ```rust
-pub struct VersionedSessionPlacement { /* private */ }
+pub struct VersionedSessionPlacement {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl session_placement::VersionedSessionPlacement {
     pub const fn initial(placement: session_placement::SessionPlacement) -> Self;
-    pub const fn reconstitute(version: session_placement::SessionPlacementVersion, placement: session_placement::SessionPlacement) -> Self;
+    pub const fn reconstitute(
+        version: session_placement::SessionPlacementVersion,
+        placement: session_placement::SessionPlacement,
+    ) -> Self;
     pub const fn version(&self) -> session_placement::SessionPlacementVersion;
     pub const fn placement(&self) -> &session_placement::SessionPlacement;
 }
@@ -142,7 +155,7 @@ impl session_placement::VersionedSessionPlacement {
 ## UpdateSessionPlacement
 
 ```rust
-pub struct UpdateSessionPlacement { /* private */ }
+pub struct UpdateSessionPlacement {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl cmp::PartialEq for session_placement::UpdateSessionPlacement {
     pub fn eq(&self, other: &Self) -> bool;
@@ -152,7 +165,12 @@ impl hash::Hash for session_placement::UpdateSessionPlacement {
     pub fn hash<H: hash::Hasher>(&self, state: &mut H);
 }
 impl session_placement::UpdateSessionPlacement {
-    pub const fn new(command_id: DurableCommandId, session: SessionId, expected_version: session_placement::SessionPlacementVersion, replacement: session_placement::SessionPlacement) -> Self;
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_version: session_placement::SessionPlacementVersion,
+        replacement: session_placement::SessionPlacement,
+    ) -> Self;
     pub const fn command_id(&self) -> DurableCommandId;
     pub const fn session(&self) -> SessionId;
     pub const fn expected_version(&self) -> session_placement::SessionPlacementVersion;
@@ -173,15 +191,25 @@ pub enum SessionPlacementEventKind {
 ## SessionPlacementEvent
 
 ```rust
-pub struct SessionPlacementEvent { /* private */ }
+pub struct SessionPlacementEvent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl session_placement::SessionPlacementEvent {
-    pub fn created(session: SessionId, placement: session_placement::SessionPlacement, command_id: DurableCommandId) -> Self;
-    pub fn updated(session: SessionId, prior_version: session_placement::SessionPlacementVersion, placement: session_placement::SessionPlacement, command_id: DurableCommandId) -> option::Option<Self>;
+    pub fn created(
+        session: SessionId,
+        placement: session_placement::SessionPlacement,
+        command_id: DurableCommandId,
+    ) -> Self;
+    pub fn updated(
+        session: SessionId,
+        prior_version: session_placement::SessionPlacementVersion,
+        placement: session_placement::SessionPlacement,
+        command_id: DurableCommandId,
+    ) -> option::Option<Self>;
     pub const fn session(&self) -> SessionId;
     pub const fn kind(&self) -> session_placement::SessionPlacementEventKind;
     pub const fn placement(&self) -> &session_placement::VersionedSessionPlacement;
-    pub const fn prior_version(&self) -> option::Option<session_placement::SessionPlacementVersion>;
+    pub const fn prior_version(&self)
+        -> option::Option<session_placement::SessionPlacementVersion>;
     pub const fn command_id(&self) -> DurableCommandId;
 }
 ```
@@ -199,10 +227,13 @@ pub enum UpdateSessionPlacementResult {
 ## UpdateSessionPlacementApplied
 
 ```rust
-pub struct UpdateSessionPlacementApplied { /* private */ }
+pub struct UpdateSessionPlacementApplied {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_placement::UpdateSessionPlacementApplied {
-    pub fn try_new(command: &session_placement::UpdateSessionPlacement, event: session_placement::SessionPlacementEvent) -> option::Option<Self>;
+    pub fn try_new(
+        command: &session_placement::UpdateSessionPlacement,
+        event: session_placement::SessionPlacementEvent,
+    ) -> option::Option<Self>;
     pub const fn event(&self) -> &session_placement::SessionPlacementEvent;
 }
 ```
@@ -221,15 +252,23 @@ pub enum UpdateSessionPlacementRejectionKind {
 ## UpdateSessionPlacementRejection
 
 ```rust
-pub struct UpdateSessionPlacementRejection { /* private */ }
+pub struct UpdateSessionPlacementRejection {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_placement::UpdateSessionPlacementRejection {
     pub const fn session_not_found(command: &session_placement::UpdateSessionPlacement) -> Self;
-    pub const fn current_version_mismatch(command: &session_placement::UpdateSessionPlacement, current: session_placement::SessionPlacementVersion) -> option::Option<Self>;
-    pub const fn version_exhausted(command: &session_placement::UpdateSessionPlacement, current: session_placement::SessionPlacementVersion) -> option::Option<Self>;
+    pub const fn current_version_mismatch(
+        command: &session_placement::UpdateSessionPlacement,
+        current: session_placement::SessionPlacementVersion,
+    ) -> option::Option<Self>;
+    pub const fn version_exhausted(
+        command: &session_placement::UpdateSessionPlacement,
+        current: session_placement::SessionPlacementVersion,
+    ) -> option::Option<Self>;
     pub const fn session(self) -> SessionId;
     pub const fn expected_version(self) -> session_placement::SessionPlacementVersion;
-    pub const fn current_version(self) -> option::Option<session_placement::SessionPlacementVersion>;
+    pub const fn current_version(
+        self,
+    ) -> option::Option<session_placement::SessionPlacementVersion>;
     pub const fn kind(self) -> session_placement::UpdateSessionPlacementRejectionKind;
 }
 ```

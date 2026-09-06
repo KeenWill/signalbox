@@ -5,10 +5,15 @@
 ## UpdateSessionPlacementRequest
 
 ```rust
-pub struct UpdateSessionPlacementRequest { /* private */ }
+pub struct UpdateSessionPlacementRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl update_session_placement::UpdateSessionPlacementRequest {
-    pub fn try_new(command_id: signalbox_domain::DurableCommandId, session: signalbox_domain::SessionId, expected_version: session_placement::SessionPlacementVersion, replacement: session_placement::SessionPlacement) -> result::Result<Self, create_session::InvalidDurableCommandId>;
+    pub fn try_new(
+        command_id: signalbox_domain::DurableCommandId,
+        session: signalbox_domain::SessionId,
+        expected_version: session_placement::SessionPlacementVersion,
+        replacement: session_placement::SessionPlacement,
+    ) -> result::Result<Self, create_session::InvalidDurableCommandId>;
 }
 ```
 
@@ -17,7 +22,15 @@ impl update_session_placement::UpdateSessionPlacementRequest {
 ```rust
 pub trait UpdateSessionPlacementTransaction {
     type Error;
-    pub fn handle(&mut self, command: session_placement::UpdateSessionPlacement) -> impl future::Future<Output = result::Result<update_session_placement::UpdateSessionPlacementOutcome, <Self as update_session_placement::UpdateSessionPlacementTransaction>::Error>> + marker::Send;
+    pub fn handle(
+        &mut self,
+        command: session_placement::UpdateSessionPlacement,
+    ) -> impl future::Future<
+        Output = result::Result<
+            update_session_placement::UpdateSessionPlacementOutcome,
+            <Self as update_session_placement::UpdateSessionPlacementTransaction>::Error,
+        >,
+    > + marker::Send;
 }
 ```
 
@@ -26,7 +39,9 @@ pub trait UpdateSessionPlacementTransaction {
 ```rust
 pub enum UpdateSessionPlacementOutcome {
     Recorded(session_placement::UpdateSessionPlacementResult),
-    ConflictingReuse { command_id: signalbox_domain::DurableCommandId },
+    ConflictingReuse {
+        command_id: signalbox_domain::DurableCommandId,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -34,12 +49,20 @@ pub enum UpdateSessionPlacementOutcome {
 ## UpdateSessionPlacementService
 
 ```rust
-pub struct UpdateSessionPlacementService<Transaction> { /* private */ }
+pub struct UpdateSessionPlacementService<Transaction> {/* private */}
 // derives: fmt::Debug
 impl<Transaction> update_session_placement::UpdateSessionPlacementService<Transaction> {
     pub const fn new(transaction: Transaction) -> Self;
 }
-impl<Transaction: update_session_placement::UpdateSessionPlacementTransaction> update_session_placement::UpdateSessionPlacementService<Transaction> {
-    pub async fn execute(&mut self, request: update_session_placement::UpdateSessionPlacementRequest) -> result::Result<update_session_placement::UpdateSessionPlacementOutcome, <Transaction as update_session_placement::UpdateSessionPlacementTransaction>::Error>;
+impl<Transaction: update_session_placement::UpdateSessionPlacementTransaction>
+    update_session_placement::UpdateSessionPlacementService<Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        request: update_session_placement::UpdateSessionPlacementRequest,
+    ) -> result::Result<
+        update_session_placement::UpdateSessionPlacementOutcome,
+        <Transaction as update_session_placement::UpdateSessionPlacementTransaction>::Error,
+    >;
 }
 ```

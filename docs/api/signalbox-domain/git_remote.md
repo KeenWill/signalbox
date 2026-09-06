@@ -61,10 +61,15 @@ impl fmt::Debug for git_remote::GitRemoteUrl {
 ## ConfiguredGitRemoteRecord
 
 ```rust
-pub struct ConfiguredGitRemoteRecord { /* private */ }
+pub struct ConfiguredGitRemoteRecord {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl git_remote::ConfiguredGitRemoteRecord {
-    pub const fn new(mint: GitRemoteMintId, workspace: WorkspaceId, name: git_remote::GitRemoteName, url: git_remote::GitRemoteUrl) -> Self;
+    pub const fn new(
+        mint: GitRemoteMintId,
+        workspace: WorkspaceId,
+        name: git_remote::GitRemoteName,
+        url: git_remote::GitRemoteUrl,
+    ) -> Self;
     pub const fn mint(&self) -> GitRemoteMintId;
     pub const fn workspace(&self) -> WorkspaceId;
     pub const fn name(&self) -> &git_remote::GitRemoteName;

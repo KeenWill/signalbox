@@ -40,9 +40,13 @@ pub enum CoreAgency {
 
 ```rust
 pub enum LifecycleActor {
-    Core { agency: session_lifecycle::CoreAgency },
+    Core {
+        agency: session_lifecycle::CoreAgency,
+    },
     Operator,
-    Module { module: session_lifecycle::DispatchingModule },
+    Module {
+        module: session_lifecycle::DispatchingModule,
+    },
     Watchdog,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -136,7 +140,10 @@ pub enum SessionParkCause {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl session_lifecycle::SessionParkCause {
-    pub const fn admits_standing(self, standing: option::Option<session_lifecycle::SessionFailureCause>) -> bool;
+    pub const fn admits_standing(
+        self,
+        standing: option::Option<session_lifecycle::SessionFailureCause>,
+    ) -> bool;
 }
 ```
 
@@ -145,7 +152,9 @@ impl session_lifecycle::SessionParkCause {
 ```rust
 pub enum SessionParkResponder {
     Operator,
-    Module { module: session_lifecycle::DispatchingModule },
+    Module {
+        module: session_lifecycle::DispatchingModule,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
@@ -211,17 +220,28 @@ pub enum StopStickiness {
 pub enum SessionTerminalOutcome {
     AchievedVerified,
     AchievedDeclared,
-    FailedRetryable { cause: session_lifecycle::SessionRetryableCause },
-    FailedStructural { cause: session_lifecycle::SessionStructuralCause },
+    FailedRetryable {
+        cause: session_lifecycle::SessionRetryableCause,
+    },
+    FailedStructural {
+        cause: session_lifecycle::SessionStructuralCause,
+    },
     FailedUnknown,
-    Stopped { sticky: session_lifecycle::StopStickiness },
-    Superseded { by: option::Option<SessionId> },
+    Stopped {
+        sticky: session_lifecycle::StopStickiness,
+    },
+    Superseded {
+        by: option::Option<SessionId>,
+    },
     Abandoned,
-    Retired { cause: session_lifecycle::SessionRetirementCause },
+    Retired {
+        cause: session_lifecycle::SessionRetirementCause,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_lifecycle::SessionTerminalOutcome {
-    pub const fn closure_outcome(&self) -> option::Option<session_lifecycle::SessionClosureOutcome>;
+    pub const fn closure_outcome(&self)
+        -> option::Option<session_lifecycle::SessionClosureOutcome>;
     pub const fn forbids_further_escalation(&self) -> bool;
     pub const fn releases_resources(&self) -> bool;
 }
@@ -249,25 +269,41 @@ pub enum SessionLifecycleState {
     Created,
     Dispatched,
     Active,
-    Waiting { wait: session_lifecycle::SessionWait },
-    Recovering { operation: session_lifecycle::SessionRecoveryOperation },
-    Blocked { reason: goal::GoalBlockedReasonKind, cycle: u64 },
-    Parked { cause: session_lifecycle::SessionParkCause, responder: session_lifecycle::SessionParkResponder, standing: option::Option<session_lifecycle::SessionFailureCause> },
-    Terminal { outcome: session_lifecycle::SessionTerminalOutcome },
+    Waiting {
+        wait: session_lifecycle::SessionWait,
+    },
+    Recovering {
+        operation: session_lifecycle::SessionRecoveryOperation,
+    },
+    Blocked {
+        reason: goal::GoalBlockedReasonKind,
+        cycle: u64,
+    },
+    Parked {
+        cause: session_lifecycle::SessionParkCause,
+        responder: session_lifecycle::SessionParkResponder,
+        standing: option::Option<session_lifecycle::SessionFailureCause>,
+    },
+    Terminal {
+        outcome: session_lifecycle::SessionTerminalOutcome,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_lifecycle::SessionLifecycleState {
     pub const fn is_terminal(&self) -> bool;
     pub const fn is_parked(&self) -> bool;
     pub const fn admits(&self, next: &Self) -> bool;
-    pub fn transition(self, next: Self) -> result::Result<Self, session_lifecycle::SessionLifecycleTransitionError>;
+    pub fn transition(
+        self,
+        next: Self,
+    ) -> result::Result<Self, session_lifecycle::SessionLifecycleTransitionError>;
 }
 ```
 
 ## SessionLifecycleTransitionError
 
 ```rust
-pub struct SessionLifecycleTransitionError { /* private */ }
+pub struct SessionLifecycleTransitionError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl session_lifecycle::SessionLifecycleTransitionError {
     pub const fn from(&self) -> session_lifecycle::SessionLifecycleState;
@@ -300,7 +336,9 @@ pub enum SessionDeadlineKind {
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl session_lifecycle::SessionDeadlineKind {
     pub const fn on_expiry(&self) -> session_lifecycle::SessionDeadlineExpiry;
-    pub const fn for_state(state: &session_lifecycle::SessionLifecycleState) -> option::Option<Self>;
+    pub const fn for_state(
+        state: &session_lifecycle::SessionLifecycleState,
+    ) -> option::Option<Self>;
 }
 ```
 

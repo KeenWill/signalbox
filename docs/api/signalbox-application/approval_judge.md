@@ -31,14 +31,22 @@ impl approval_judge::ApprovalJudgeDispatchAuthority {
 ## ApprovalJudgePullRequestAuthorityInput
 
 ```rust
-pub struct ApprovalJudgePullRequestAuthorityInput { pub dispatch: approval_judge::ApprovalJudgeDispatchProvenance, pub repository: repo_watch::RepositorySlug, pub pull_request: repo_watch::PullRequestNumber, pub head_sha: repo_watch::CommitSha, pub head_repository: repo_watch::RepositorySlug, pub head_branch: repo_watch::BranchName, pub base_branch: repo_watch::BranchName }
+pub struct ApprovalJudgePullRequestAuthorityInput {
+    pub dispatch: approval_judge::ApprovalJudgeDispatchProvenance,
+    pub repository: repo_watch::RepositorySlug,
+    pub pull_request: repo_watch::PullRequestNumber,
+    pub head_sha: repo_watch::CommitSha,
+    pub head_repository: repo_watch::RepositorySlug,
+    pub head_branch: repo_watch::BranchName,
+    pub base_branch: repo_watch::BranchName,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ApprovalJudgePullRequestAuthority
 
 ```rust
-pub struct ApprovalJudgePullRequestAuthority { /* private */ }
+pub struct ApprovalJudgePullRequestAuthority {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl approval_judge::ApprovalJudgePullRequestAuthority {
     pub const fn new(input: approval_judge::ApprovalJudgePullRequestAuthorityInput) -> Self;
@@ -55,14 +63,18 @@ impl approval_judge::ApprovalJudgePullRequestAuthority {
 ## ApprovalJudgeBranchAuthorityInput
 
 ```rust
-pub struct ApprovalJudgeBranchAuthorityInput { pub dispatch: approval_judge::ApprovalJudgeDispatchProvenance, pub repository: repo_watch::RepositorySlug, pub branch: repo_watch::BranchName }
+pub struct ApprovalJudgeBranchAuthorityInput {
+    pub dispatch: approval_judge::ApprovalJudgeDispatchProvenance,
+    pub repository: repo_watch::RepositorySlug,
+    pub branch: repo_watch::BranchName,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ApprovalJudgeBranchAuthority
 
 ```rust
-pub struct ApprovalJudgeBranchAuthority { /* private */ }
+pub struct ApprovalJudgeBranchAuthority {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl approval_judge::ApprovalJudgeBranchAuthority {
     pub const fn new(input: approval_judge::ApprovalJudgeBranchAuthorityInput) -> Self;
@@ -75,10 +87,14 @@ impl approval_judge::ApprovalJudgeBranchAuthority {
 ## ApprovalJudgeCompletionIdentities
 
 ```rust
-pub struct ApprovalJudgeCompletionIdentities { /* private */ }
+pub struct ApprovalJudgeCompletionIdentities {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl approval_judge::ApprovalJudgeCompletionIdentities {
-    pub const fn new(continuation_attempt: signalbox_domain::TurnAttemptId, failure_entry: context_frontier::SemanticTranscriptEntryId, terminal_frontier: context_frontier::ContextFrontierId) -> Self;
+    pub const fn new(
+        continuation_attempt: signalbox_domain::TurnAttemptId,
+        failure_entry: context_frontier::SemanticTranscriptEntryId,
+        terminal_frontier: context_frontier::ContextFrontierId,
+    ) -> Self;
     pub const fn continuation_attempt(self) -> signalbox_domain::TurnAttemptId;
     pub const fn failure_entry(self) -> context_frontier::SemanticTranscriptEntryId;
     pub const fn terminal_frontier(self) -> context_frontier::ContextFrontierId;

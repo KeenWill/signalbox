@@ -5,10 +5,13 @@
 ## InstructionDiscoveryRoot
 
 ```rust
-pub struct InstructionDiscoveryRoot { /* private */ }
+pub struct InstructionDiscoveryRoot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl workspace_instructions::InstructionDiscoveryRoot {
-    pub const fn new(kind: workspace_instruction::InstructionDiscoveryRootKind, path: workspace_instruction::InstructionPath) -> Self;
+    pub const fn new(
+        kind: workspace_instruction::InstructionDiscoveryRootKind,
+        path: workspace_instruction::InstructionPath,
+    ) -> Self;
     pub const fn kind(&self) -> workspace_instruction::InstructionDiscoveryRootKind;
     pub const fn path(&self) -> &workspace_instruction::InstructionPath;
 }
@@ -43,7 +46,7 @@ pub enum InstructionDiscoveryLimitKind {
 ## InstructionDiscoveryFinding
 
 ```rust
-pub struct InstructionDiscoveryFinding { /* private */ }
+pub struct InstructionDiscoveryFinding {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl workspace_instructions::InstructionDiscoveryFinding {
     pub const fn path(&self) -> &workspace_instruction::InstructionPath;
@@ -54,7 +57,7 @@ impl workspace_instructions::InstructionDiscoveryFinding {
 ## InstructionDiscoverySnapshot
 
 ```rust
-pub struct InstructionDiscoverySnapshot { /* private */ }
+pub struct InstructionDiscoverySnapshot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl workspace_instructions::InstructionDiscoverySnapshot {
     pub fn roots(&self) -> &[workspace_instructions::InstructionDiscoveryRoot];
@@ -71,5 +74,7 @@ impl workspace_instructions::InstructionDiscoverySnapshot {
 ## discover_workspace_instructions
 
 ```rust
-pub fn discover_workspace_instructions(roots: vec::Vec<workspace_instructions::InstructionDiscoveryRoot>) -> workspace_instructions::InstructionDiscoverySnapshot;
+pub fn discover_workspace_instructions(
+    roots: vec::Vec<workspace_instructions::InstructionDiscoveryRoot>,
+) -> workspace_instructions::InstructionDiscoverySnapshot;
 ```

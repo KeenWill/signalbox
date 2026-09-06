@@ -5,7 +5,7 @@
 ## RepoWatchWebhookBodyReferenceV1
 
 ```rust
-pub struct RepoWatchWebhookBodyReferenceV1 { /* private */ }
+pub struct RepoWatchWebhookBodyReferenceV1 {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl repo_watch_webhook::RepoWatchWebhookBodyReferenceV1 {
     pub const fn new(hook_id: nonzero::NonZeroU64, delivery_id: uuid::Uuid) -> Self;
@@ -17,14 +17,22 @@ impl repo_watch_webhook::RepoWatchWebhookBodyReferenceV1 {
 ## RepoWatchWebhookDeliveryV1Input
 
 ```rust
-pub struct RepoWatchWebhookDeliveryV1Input { pub repository: repo_watch::RepositorySlug, pub hook_id: nonzero::NonZeroU64, pub delivery_id: uuid::Uuid, pub event: string::String, pub action: option::Option<string::String>, pub receipt_sequence: nonzero::NonZeroU64, pub body_digest: [u8; 32] }
+pub struct RepoWatchWebhookDeliveryV1Input {
+    pub repository: repo_watch::RepositorySlug,
+    pub hook_id: nonzero::NonZeroU64,
+    pub delivery_id: uuid::Uuid,
+    pub event: string::String,
+    pub action: option::Option<string::String>,
+    pub receipt_sequence: nonzero::NonZeroU64,
+    pub body_digest: [u8; 32],
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## RepoWatchWebhookDeliveryV1
 
 ```rust
-pub struct RepoWatchWebhookDeliveryV1 { /* private */ }
+pub struct RepoWatchWebhookDeliveryV1 {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl repo_watch_webhook::RepoWatchWebhookDeliveryV1 {
     pub fn new(input: repo_watch_webhook::RepoWatchWebhookDeliveryV1Input) -> Self;
@@ -52,14 +60,25 @@ pub enum RepoWatchPullRequestMissingPolicyV1 {
 ## RepoWatchWebhookPullRequestContextV1Input
 
 ```rust
-pub struct RepoWatchWebhookPullRequestContextV1Input { pub number: repo_watch::PullRequestNumber, pub head_sha: repo_watch::CommitSha, pub head_repository: option::Option<repo_watch::RepositorySlug>, pub base_branch: repo_watch::BranchName, pub head_branch: repo_watch::BranchName, pub title: repo_watch::PullRequestTitle, pub body: repo_watch::PullRequestBody, pub labels: vec::Vec<repo_watch::LabelName>, pub draft: bool, pub author: option::Option<repo_watch::RepoWatchAuthorLogin> }
+pub struct RepoWatchWebhookPullRequestContextV1Input {
+    pub number: repo_watch::PullRequestNumber,
+    pub head_sha: repo_watch::CommitSha,
+    pub head_repository: option::Option<repo_watch::RepositorySlug>,
+    pub base_branch: repo_watch::BranchName,
+    pub head_branch: repo_watch::BranchName,
+    pub title: repo_watch::PullRequestTitle,
+    pub body: repo_watch::PullRequestBody,
+    pub labels: vec::Vec<repo_watch::LabelName>,
+    pub draft: bool,
+    pub author: option::Option<repo_watch::RepoWatchAuthorLogin>,
+}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## RepoWatchWebhookPullRequestContextV1
 
 ```rust
-pub struct RepoWatchWebhookPullRequestContextV1 { /* private */ }
+pub struct RepoWatchWebhookPullRequestContextV1 {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl repo_watch_webhook::RepoWatchWebhookPullRequestContextV1 {
     pub fn new(input: repo_watch_webhook::RepoWatchWebhookPullRequestContextV1Input) -> Self;
@@ -67,7 +86,10 @@ impl repo_watch_webhook::RepoWatchWebhookPullRequestContextV1 {
     pub const fn head_sha(&self) -> &repo_watch::CommitSha;
     pub fn head_repository(&self) -> option::Option<&repo_watch::RepositorySlug>;
     pub fn delivered(&self) -> option::Option<repo_watch::PullRequestEventContext>;
-    pub fn with_retained_head_repository(&self, retained: &repo_watch::RepositorySlug) -> repo_watch::PullRequestEventContext;
+    pub fn with_retained_head_repository(
+        &self,
+        retained: &repo_watch::RepositorySlug,
+    ) -> repo_watch::PullRequestEventContext;
 }
 ```
 
@@ -85,13 +107,38 @@ pub enum RepoWatchPullRequestHeadGuardV1 {
 
 ```rust
 pub enum RepoWatchObservationChangeV1 {
-    PullRequestContext { context: repo_watch_webhook::RepoWatchWebhookPullRequestContextV1, lifecycle: option::Option<repo_watch::RepoWatchPullRequestLifecycle>, head_guard: repo_watch_webhook::RepoWatchPullRequestHeadGuardV1, missing: repo_watch_webhook::RepoWatchPullRequestMissingPolicyV1 },
-    ReviewUnion { pull_request: repo_watch::PullRequestNumber, expected_head: repo_watch::CommitSha, review: repo_watch::RepoWatchReviewObservation },
-    ThreadState { pull_request: repo_watch::PullRequestNumber, expected_head: repo_watch::CommitSha, thread: repo_watch::RepoWatchThreadObservation },
-    CheckRunUnion { pull_request: repo_watch::PullRequestNumber, expected_head: repo_watch::CommitSha, check_run: repo_watch::RepoWatchCheckRunObservation },
-    WorkflowRun { run: repo_watch::RepoWatchWorkflowRunObservation },
-    BranchHead { previous: repo_watch_webhook::RepoWatchBranchHeadPreviousV1, current: repo_watch::RepoWatchBranchHead },
-    BranchDeleted { branch: repo_watch::BranchName, expected_previous: repo_watch::CommitSha },
+    PullRequestContext {
+        context: repo_watch_webhook::RepoWatchWebhookPullRequestContextV1,
+        lifecycle: option::Option<repo_watch::RepoWatchPullRequestLifecycle>,
+        head_guard: repo_watch_webhook::RepoWatchPullRequestHeadGuardV1,
+        missing: repo_watch_webhook::RepoWatchPullRequestMissingPolicyV1,
+    },
+    ReviewUnion {
+        pull_request: repo_watch::PullRequestNumber,
+        expected_head: repo_watch::CommitSha,
+        review: repo_watch::RepoWatchReviewObservation,
+    },
+    ThreadState {
+        pull_request: repo_watch::PullRequestNumber,
+        expected_head: repo_watch::CommitSha,
+        thread: repo_watch::RepoWatchThreadObservation,
+    },
+    CheckRunUnion {
+        pull_request: repo_watch::PullRequestNumber,
+        expected_head: repo_watch::CommitSha,
+        check_run: repo_watch::RepoWatchCheckRunObservation,
+    },
+    WorkflowRun {
+        run: repo_watch::RepoWatchWorkflowRunObservation,
+    },
+    BranchHead {
+        previous: repo_watch_webhook::RepoWatchBranchHeadPreviousV1,
+        current: repo_watch::RepoWatchBranchHead,
+    },
+    BranchDeleted {
+        branch: repo_watch::BranchName,
+        expected_previous: repo_watch::CommitSha,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -110,10 +157,20 @@ pub enum RepoWatchBranchHeadPreviousV1 {
 
 ```rust
 pub enum RepoWatchTargetedRefreshV1 {
-    PullRequestHydration { pull_request: repo_watch::PullRequestNumber },
-    Mergeability { pull_request: repo_watch::PullRequestNumber, expected_head: repo_watch::CommitSha },
-    CheckRollup { pull_request: repo_watch::PullRequestNumber, expected_head: repo_watch::CommitSha },
-    CheckRollupForCommit { head: repo_watch::CommitSha },
+    PullRequestHydration {
+        pull_request: repo_watch::PullRequestNumber,
+    },
+    Mergeability {
+        pull_request: repo_watch::PullRequestNumber,
+        expected_head: repo_watch::CommitSha,
+    },
+    CheckRollup {
+        pull_request: repo_watch::PullRequestNumber,
+        expected_head: repo_watch::CommitSha,
+    },
+    CheckRollupForCommit {
+        head: repo_watch::CommitSha,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -121,11 +178,14 @@ pub enum RepoWatchTargetedRefreshV1 {
 ## RepoWatchTargetedRefreshCoalescerV1
 
 ```rust
-pub struct RepoWatchTargetedRefreshCoalescerV1 { /* private */ }
+pub struct RepoWatchTargetedRefreshCoalescerV1 {/* private */}
 // derives: fmt::Debug
 impl repo_watch_webhook::RepoWatchTargetedRefreshCoalescerV1 {
     pub fn for_delivery_page() -> Self;
-    pub fn unissued(&self, refreshes: &[repo_watch_webhook::RepoWatchTargetedRefreshV1]) -> vec::Vec<repo_watch_webhook::RepoWatchTargetedRefreshV1>;
+    pub fn unissued(
+        &self,
+        refreshes: &[repo_watch_webhook::RepoWatchTargetedRefreshV1],
+    ) -> vec::Vec<repo_watch_webhook::RepoWatchTargetedRefreshV1>;
     pub fn record_issued(&mut self, refreshes: &[repo_watch_webhook::RepoWatchTargetedRefreshV1]);
 }
 ```
@@ -133,7 +193,7 @@ impl repo_watch_webhook::RepoWatchTargetedRefreshCoalescerV1 {
 ## RepoWatchObservationPatchV1
 
 ```rust
-pub struct RepoWatchObservationPatchV1 { /* private */ }
+pub struct RepoWatchObservationPatchV1 {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl repo_watch_webhook::RepoWatchObservationPatchV1 {
     pub fn changes(&self) -> &[repo_watch_webhook::RepoWatchObservationChangeV1];
@@ -149,7 +209,10 @@ pub enum RepoWatchObservationApplyV1 {
     DuplicateState,
     Superseded,
     Ignored(repo_watch_webhook::RepoWatchWebhookIgnoredReasonV1),
-    NeedsTargetedRefresh { observation: repo_watch::RepoWatchObservation, refreshes: boxed::Box<[repo_watch_webhook::RepoWatchTargetedRefreshV1]> },
+    NeedsTargetedRefresh {
+        observation: repo_watch::RepoWatchObservation,
+        refreshes: boxed::Box<[repo_watch_webhook::RepoWatchTargetedRefreshV1]>,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -168,7 +231,9 @@ impl fmt::Display for repo_watch_webhook::RepoWatchWebhookApplyError {
 impl error::Error for repo_watch_webhook::RepoWatchWebhookApplyError {
     pub fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
-impl convert::From<repo_watch::RepoWatchRepositoryStateError> for repo_watch_webhook::RepoWatchWebhookApplyError {
+impl convert::From<repo_watch::RepoWatchRepositoryStateError>
+    for repo_watch_webhook::RepoWatchWebhookApplyError
+{
     pub fn from(value: repo_watch::RepoWatchRepositoryStateError) -> Self;
 }
 ```
@@ -176,7 +241,13 @@ impl convert::From<repo_watch::RepoWatchRepositoryStateError> for repo_watch_web
 ## apply_repo_watch_observation_patch_v1
 
 ```rust
-pub fn apply_repo_watch_observation_patch_v1(previous: &repo_watch::RepoWatchObservation, patch: &repo_watch_webhook::RepoWatchObservationPatchV1) -> result::Result<repo_watch_webhook::RepoWatchObservationApplyV1, repo_watch_webhook::RepoWatchWebhookApplyError>;
+pub fn apply_repo_watch_observation_patch_v1(
+    previous: &repo_watch::RepoWatchObservation,
+    patch: &repo_watch_webhook::RepoWatchObservationPatchV1,
+) -> result::Result<
+    repo_watch_webhook::RepoWatchObservationApplyV1,
+    repo_watch_webhook::RepoWatchWebhookApplyError,
+>;
 ```
 
 ## RepoWatchWebhookMappedNoChangeV1
@@ -235,5 +306,11 @@ impl error::Error for repo_watch_webhook::RepoWatchWebhookMappingError {}
 ## map_repo_watch_webhook_delivery_v1
 
 ```rust
-pub fn map_repo_watch_webhook_delivery_v1(delivery: &repo_watch_webhook::RepoWatchWebhookDeliveryV1, exact_body: &[u8]) -> result::Result<repo_watch_webhook::RepoWatchWebhookMappingV1, repo_watch_webhook::RepoWatchWebhookMappingError>;
+pub fn map_repo_watch_webhook_delivery_v1(
+    delivery: &repo_watch_webhook::RepoWatchWebhookDeliveryV1,
+    exact_body: &[u8],
+) -> result::Result<
+    repo_watch_webhook::RepoWatchWebhookMappingV1,
+    repo_watch_webhook::RepoWatchWebhookMappingError,
+>;
 ```

@@ -24,7 +24,7 @@
 | provider_evidence | 5 | 0 | 0 | [provider_evidence](provider_evidence.md) |
 | queue_order | 5 | 0 | 1 | [queue_order](queue_order.md) |
 | replace_session_defaults | 13 | 0 | 0 | [replace_session_defaults](replace_session_defaults.md) |
-| repo_watch | 51 | 0 | 0 | [repo_watch](repo_watch.md) |
+| repo_watch | 51 | 0 | 0 | [types](repo_watch/types.md), [types-2](repo_watch/types-2.md) |
 | review_workflow | 83 | 0 | 1 | [types](review_workflow/types.md), [types-2](review_workflow/types-2.md), [functions](review_workflow/functions.md) |
 | runner | 70 | 0 | 0 | [types](runner/types.md), [types-2](runner/types-2.md) |
 | semantic_entry | 4 | 0 | 0 | [semantic_entry](semantic_entry.md) |
@@ -40,7 +40,7 @@
 | tool_attempt | 27 | 0 | 0 | [tool_attempt](tool_attempt.md) |
 | tool_execution | 20 | 0 | 0 | [tool_execution](tool_execution.md) |
 | turn_attempt | 13 | 0 | 0 | [turn_attempt](turn_attempt.md) |
-| turn_eligibility | 39 | 0 | 0 | [turn_eligibility](turn_eligibility.md) |
+| turn_eligibility | 39 | 0 | 0 | [types](turn_eligibility/types.md), [types-2](turn_eligibility/types-2.md), [types-3](turn_eligibility/types-3.md) |
 | turn_lifecycle | 11 | 0 | 0 | [turn_lifecycle](turn_lifecycle.md) |
 | user_content | 15 | 0 | 0 | [user_content](user_content.md) |
 | workspace | 4 | 0 | 0 | [workspace](workspace.md) |

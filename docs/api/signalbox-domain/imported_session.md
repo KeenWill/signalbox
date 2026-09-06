@@ -5,7 +5,7 @@
 ## CreateSessionFromImportedFrontierAppliedResult
 
 ```rust
-pub struct CreateSessionFromImportedFrontierAppliedResult { /* private */ }
+pub struct CreateSessionFromImportedFrontierAppliedResult {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl imported_session::CreateSessionFromImportedFrontierAppliedResult {
     pub const fn session(&self) -> SessionId;
@@ -15,7 +15,7 @@ impl imported_session::CreateSessionFromImportedFrontierAppliedResult {
 ## PreparedCreateSessionFromImportedFrontier
 
 ```rust
-pub struct PreparedCreateSessionFromImportedFrontier { /* private */ }
+pub struct PreparedCreateSessionFromImportedFrontier {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::PreparedCreateSessionFromImportedFrontier {
     pub const fn command(&self) -> &session::CreateSessionFromImportedFrontier;
@@ -23,8 +23,19 @@ impl imported_session::PreparedCreateSessionFromImportedFrontier {
     pub fn semantic_entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
     pub const fn seed_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
     pub const fn imported_seed(&self) -> session::ImportedSessionSeed;
-    pub const fn applied_result(&self) -> imported_session::CreateSessionFromImportedFrontierAppliedResult;
-    pub fn into_parts(self) -> (session::CreateSessionFromImportedFrontier, session::InitialSession, boxed::Box<[semantic_entry::SemanticTranscriptEntry]>, context_frontier::ResolvedContextFrontierSnapshot, session::ImportedSessionSeed, imported_session::CreateSessionFromImportedFrontierAppliedResult);
+    pub const fn applied_result(
+        &self,
+    ) -> imported_session::CreateSessionFromImportedFrontierAppliedResult;
+    pub fn into_parts(
+        self,
+    ) -> (
+        session::CreateSessionFromImportedFrontier,
+        session::InitialSession,
+        boxed::Box<[semantic_entry::SemanticTranscriptEntry]>,
+        context_frontier::ResolvedContextFrontierSnapshot,
+        session::ImportedSessionSeed,
+        imported_session::CreateSessionFromImportedFrontierAppliedResult,
+    );
 }
 ```
 
@@ -34,7 +45,9 @@ impl imported_session::PreparedCreateSessionFromImportedFrontier {
 pub enum CreateSessionFromImportedFrontierPreparationFailure {
     ImportedConversationMismatch,
     ImportedFrontierNotFound,
-    DuplicateSemanticEntryIdentity { entry: context_frontier::SemanticTranscriptEntryId },
+    DuplicateSemanticEntryIdentity {
+        entry: context_frontier::SemanticTranscriptEntryId,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -42,24 +55,36 @@ pub enum CreateSessionFromImportedFrontierPreparationFailure {
 ## CreateSessionFromImportedFrontierPreparationError
 
 ```rust
-pub struct CreateSessionFromImportedFrontierPreparationError { /* private */ }
+pub struct CreateSessionFromImportedFrontierPreparationError {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl imported_session::CreateSessionFromImportedFrontierPreparationError {
     pub const fn command(&self) -> &session::CreateSessionFromImportedFrontier;
     pub const fn session(&self) -> SessionId;
     pub const fn seed_frontier(&self) -> context_frontier::ContextFrontierId;
-    pub const fn failure(&self) -> imported_session::CreateSessionFromImportedFrontierPreparationFailure;
-    pub fn into_parts(self) -> (session::CreateSessionFromImportedFrontier, SessionId, context_frontier::ContextFrontierId, imported_session::CreateSessionFromImportedFrontierPreparationFailure);
+    pub const fn failure(
+        &self,
+    ) -> imported_session::CreateSessionFromImportedFrontierPreparationFailure;
+    pub fn into_parts(
+        self,
+    ) -> (
+        session::CreateSessionFromImportedFrontier,
+        SessionId,
+        context_frontier::ContextFrontierId,
+        imported_session::CreateSessionFromImportedFrontierPreparationFailure,
+    );
 }
 ```
 
 ## ImportedSessionSeedReconstitutionInput
 
 ```rust
-pub struct ImportedSessionSeedReconstitutionInput { /* private */ }
+pub struct ImportedSessionSeedReconstitutionInput {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::ImportedSessionSeedReconstitutionInput {
-    pub const fn new(session: SessionId, seed_frontier: context_frontier::ContextFrontierId) -> Self;
+    pub const fn new(
+        session: SessionId,
+        seed_frontier: context_frontier::ContextFrontierId,
+    ) -> Self;
     pub const fn session(&self) -> SessionId;
     pub const fn seed_frontier(&self) -> context_frontier::ContextFrontierId;
 }
@@ -68,10 +93,14 @@ impl imported_session::ImportedSessionSeedReconstitutionInput {
 ## ImportedSessionSeedHeaderReconstitutionInput
 
 ```rust
-pub struct ImportedSessionSeedHeaderReconstitutionInput { /* private */ }
+pub struct ImportedSessionSeedHeaderReconstitutionInput {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::ImportedSessionSeedHeaderReconstitutionInput {
-    pub const fn new(owning_session: SessionId, seed_frontier: context_frontier::ContextFrontierId, declared_member_count: u64) -> Self;
+    pub const fn new(
+        owning_session: SessionId,
+        seed_frontier: context_frontier::ContextFrontierId,
+        declared_member_count: u64,
+    ) -> Self;
     pub const fn owning_session(&self) -> SessionId;
     pub const fn seed_frontier(&self) -> context_frontier::ContextFrontierId;
     pub const fn declared_member_count(&self) -> u64;
@@ -81,17 +110,49 @@ impl imported_session::ImportedSessionSeedHeaderReconstitutionInput {
 ## BoundedImportedSessionReconstitutionInput
 
 ```rust
-pub struct BoundedImportedSessionReconstitutionInput { /* private */ }
+pub struct BoundedImportedSessionReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::BoundedImportedSessionReconstitutionInput {
-    pub fn new(requested_session: SessionId, stored_session: SessionId, provenance: session::SessionCreationProvenance, current_defaults_session: SessionId, current_defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults_session: SessionId, defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults: configuration::SessionConfigurationDefaults, placement: session::SessionPlacementReconstitutionFacts, seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>, seed_headers: vec::Vec<imported_session::ImportedSessionSeedHeaderReconstitutionInput>) -> Self;
-    pub fn from_stored_imported_parts(requested_session: SessionId, stored_session: SessionId, creation_cause: session::SessionCreationCause, imported_conversation: ImportedConversationId, imported_frontier_entry: ImportedTranscriptEntryId, imported_frontier_position: imported_conversation::ImportedTranscriptPosition, imported_relationship: session::ImportedSessionRelationship, current_defaults_session: SessionId, current_defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults_session: SessionId, defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults: configuration::SessionConfigurationDefaults, placement: session::SessionPlacementReconstitutionFacts, seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>, seed_headers: vec::Vec<imported_session::ImportedSessionSeedHeaderReconstitutionInput>) -> Self;
-    pub fn reconstitute(self) -> result::Result<session::Session, imported_session::BoundedImportedSessionReconstitutionError>;
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: session::SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults: configuration::SessionConfigurationDefaults,
+        placement: session::SessionPlacementReconstitutionFacts,
+        seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>,
+        seed_headers: vec::Vec<imported_session::ImportedSessionSeedHeaderReconstitutionInput>,
+    ) -> Self;
+    pub fn from_stored_imported_parts(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        creation_cause: session::SessionCreationCause,
+        imported_conversation: ImportedConversationId,
+        imported_frontier_entry: ImportedTranscriptEntryId,
+        imported_frontier_position: imported_conversation::ImportedTranscriptPosition,
+        imported_relationship: session::ImportedSessionRelationship,
+        current_defaults_session: SessionId,
+        current_defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults: configuration::SessionConfigurationDefaults,
+        placement: session::SessionPlacementReconstitutionFacts,
+        seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>,
+        seed_headers: vec::Vec<imported_session::ImportedSessionSeedHeaderReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> result::Result<session::Session, imported_session::BoundedImportedSessionReconstitutionError>;
     pub const fn requested_session(&self) -> SessionId;
     pub const fn stored_session(&self) -> SessionId;
     pub const fn provenance(&self) -> session::SessionCreationProvenance;
     pub const fn current_defaults_session(&self) -> SessionId;
-    pub const fn current_defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
+    pub const fn current_defaults_version(
+        &self,
+    ) -> configuration::SessionConfigurationDefaultsVersion;
     pub const fn defaults_session(&self) -> SessionId;
     pub const fn defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
     pub const fn defaults(&self) -> &configuration::SessionConfigurationDefaults;
@@ -100,7 +161,8 @@ impl imported_session::BoundedImportedSessionReconstitutionInput {
     pub const fn placement_session(&self) -> SessionId;
     pub const fn current_placement(&self) -> &session_placement::VersionedSessionPlacement;
     pub fn seed_records(&self) -> &[imported_session::ImportedSessionSeedReconstitutionInput];
-    pub fn seed_headers(&self) -> &[imported_session::ImportedSessionSeedHeaderReconstitutionInput];
+    pub fn seed_headers(&self)
+        -> &[imported_session::ImportedSessionSeedHeaderReconstitutionInput];
 }
 ```
 
@@ -132,12 +194,17 @@ pub enum BoundedImportedSessionReconstitutionFailure {
 ## BoundedImportedSessionReconstitutionError
 
 ```rust
-pub struct BoundedImportedSessionReconstitutionError { /* private */ }
+pub struct BoundedImportedSessionReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::BoundedImportedSessionReconstitutionError {
     pub const fn failure(&self) -> imported_session::BoundedImportedSessionReconstitutionFailure;
     pub const fn input(&self) -> &imported_session::BoundedImportedSessionReconstitutionInput;
-    pub fn into_parts(self) -> (imported_session::BoundedImportedSessionReconstitutionInput, imported_session::BoundedImportedSessionReconstitutionFailure);
+    pub fn into_parts(
+        self,
+    ) -> (
+        imported_session::BoundedImportedSessionReconstitutionInput,
+        imported_session::BoundedImportedSessionReconstitutionFailure,
+    );
 }
 ```
 
@@ -155,13 +222,28 @@ pub enum ImportedSessionSeedReconstitutionFailure {
     DuplicateSeedSnapshot,
     SeedSnapshotSessionMismatch,
     SeedSnapshotIdentityMismatch,
-    SemanticEntryCountMismatch { expected: usize, actual: usize },
-    SemanticEntrySourceSessionMismatch { entry: context_frontier::SemanticTranscriptEntryId },
-    DuplicateSemanticEntry { entry: context_frontier::SemanticTranscriptEntryId },
-    SemanticEntryNotImported { entry: context_frontier::SemanticTranscriptEntryId },
-    ImportedEntryIdentityMismatch { entry: context_frontier::SemanticTranscriptEntryId },
-    ImportedSpeakerMismatch { entry: context_frontier::SemanticTranscriptEntryId },
-    ImportedContentMismatch { entry: context_frontier::SemanticTranscriptEntryId },
+    SemanticEntryCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    SemanticEntrySourceSessionMismatch {
+        entry: context_frontier::SemanticTranscriptEntryId,
+    },
+    DuplicateSemanticEntry {
+        entry: context_frontier::SemanticTranscriptEntryId,
+    },
+    SemanticEntryNotImported {
+        entry: context_frontier::SemanticTranscriptEntryId,
+    },
+    ImportedEntryIdentityMismatch {
+        entry: context_frontier::SemanticTranscriptEntryId,
+    },
+    ImportedSpeakerMismatch {
+        entry: context_frontier::SemanticTranscriptEntryId,
+    },
+    ImportedContentMismatch {
+        entry: context_frontier::SemanticTranscriptEntryId,
+    },
     SeedSnapshotMalformed,
     SeedSnapshotMembershipMismatch,
 }
@@ -171,16 +253,37 @@ pub enum ImportedSessionSeedReconstitutionFailure {
 ## ImportedSessionReconstitutionInput
 
 ```rust
-pub struct ImportedSessionReconstitutionInput { /* private */ }
+pub struct ImportedSessionReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::ImportedSessionReconstitutionInput {
-    pub fn new(requested_session: SessionId, stored_session: SessionId, provenance: session::SessionCreationProvenance, current_defaults_session: SessionId, current_defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults_session: SessionId, defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults: configuration::SessionConfigurationDefaults, placement: session::SessionPlacementReconstitutionFacts, imported_conversation: imported_conversation::ImportedConversation, seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>, seed_snapshots: vec::Vec<context_frontier::ResolvedContextFrontierReconstitutionInput>, semantic_entries: vec::Vec<semantic_entry::SemanticTranscriptEntryReconstitutionInput>) -> Self;
-    pub fn reconstitute(self) -> result::Result<imported_session::ReconstitutedImportedSession, imported_session::ImportedSessionReconstitutionError>;
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: session::SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults: configuration::SessionConfigurationDefaults,
+        placement: session::SessionPlacementReconstitutionFacts,
+        imported_conversation: imported_conversation::ImportedConversation,
+        seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: vec::Vec<context_frontier::ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: vec::Vec<semantic_entry::SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> result::Result<
+        imported_session::ReconstitutedImportedSession,
+        imported_session::ImportedSessionReconstitutionError,
+    >;
     pub const fn requested_session(&self) -> SessionId;
     pub const fn stored_session(&self) -> SessionId;
     pub const fn provenance(&self) -> session::SessionCreationProvenance;
     pub const fn current_defaults_session(&self) -> SessionId;
-    pub const fn current_defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
+    pub const fn current_defaults_version(
+        &self,
+    ) -> configuration::SessionConfigurationDefaultsVersion;
     pub const fn defaults_session(&self) -> SessionId;
     pub const fn defaults_version(&self) -> configuration::SessionConfigurationDefaultsVersion;
     pub const fn defaults(&self) -> &configuration::SessionConfigurationDefaults;
@@ -190,8 +293,10 @@ impl imported_session::ImportedSessionReconstitutionInput {
     pub const fn current_placement(&self) -> &session_placement::VersionedSessionPlacement;
     pub const fn imported_conversation(&self) -> &imported_conversation::ImportedConversation;
     pub fn seed_records(&self) -> &[imported_session::ImportedSessionSeedReconstitutionInput];
-    pub fn seed_snapshots(&self) -> &[context_frontier::ResolvedContextFrontierReconstitutionInput];
-    pub fn semantic_entries(&self) -> &[semantic_entry::SemanticTranscriptEntryReconstitutionInput];
+    pub fn seed_snapshots(&self)
+        -> &[context_frontier::ResolvedContextFrontierReconstitutionInput];
+    pub fn semantic_entries(&self)
+        -> &[semantic_entry::SemanticTranscriptEntryReconstitutionInput];
 }
 ```
 
@@ -215,60 +320,113 @@ pub enum ImportedSessionReconstitutionFailure {
 ## ImportedSessionNormalizedReconstitutionInput
 
 ```rust
-pub struct ImportedSessionNormalizedReconstitutionInput { /* private */ }
+pub struct ImportedSessionNormalizedReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::ImportedSessionNormalizedReconstitutionInput {
-    pub fn new(requested_session: SessionId, stored_session: SessionId, provenance: session::SessionCreationProvenance, current_defaults_session: SessionId, current_defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults_session: SessionId, defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults: configuration::SessionConfigurationDefaults, placement: session::SessionPlacementReconstitutionFacts, imported_entries: vec::Vec<imported_conversation::ImportedTranscriptEntryInput>, seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>, seed_snapshots: vec::Vec<context_frontier::ResolvedContextFrontierReconstitutionInput>, semantic_entries: vec::Vec<semantic_entry::SemanticTranscriptEntryReconstitutionInput>) -> Self;
-    pub fn reconstitute(self) -> result::Result<imported_session::ReconstitutedImportedSession, imported_session::ImportedSessionNormalizedReconstitutionError>;
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: session::SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults: configuration::SessionConfigurationDefaults,
+        placement: session::SessionPlacementReconstitutionFacts,
+        imported_entries: vec::Vec<imported_conversation::ImportedTranscriptEntryInput>,
+        seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: vec::Vec<context_frontier::ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: vec::Vec<semantic_entry::SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> result::Result<
+        imported_session::ReconstitutedImportedSession,
+        imported_session::ImportedSessionNormalizedReconstitutionError,
+    >;
 }
 ```
 
 ## ImportedSessionNormalizedReconstitutionError
 
 ```rust
-pub struct ImportedSessionNormalizedReconstitutionError { /* private */ }
+pub struct ImportedSessionNormalizedReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::ImportedSessionNormalizedReconstitutionError {
     pub const fn failure(&self) -> imported_session::ImportedSessionReconstitutionFailure;
     pub const fn input(&self) -> &imported_session::ImportedSessionNormalizedReconstitutionInput;
-    pub fn into_parts(self) -> (imported_session::ImportedSessionNormalizedReconstitutionInput, imported_session::ImportedSessionReconstitutionFailure);
+    pub fn into_parts(
+        self,
+    ) -> (
+        imported_session::ImportedSessionNormalizedReconstitutionInput,
+        imported_session::ImportedSessionReconstitutionFailure,
+    );
 }
 ```
 
 ## ImportedSessionReconstitutionError
 
 ```rust
-pub struct ImportedSessionReconstitutionError { /* private */ }
+pub struct ImportedSessionReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::ImportedSessionReconstitutionError {
     pub const fn failure(&self) -> imported_session::ImportedSessionReconstitutionFailure;
     pub const fn input(&self) -> &imported_session::ImportedSessionReconstitutionInput;
-    pub fn into_parts(self) -> (imported_session::ImportedSessionReconstitutionInput, imported_session::ImportedSessionReconstitutionFailure);
+    pub fn into_parts(
+        self,
+    ) -> (
+        imported_session::ImportedSessionReconstitutionInput,
+        imported_session::ImportedSessionReconstitutionFailure,
+    );
 }
 ```
 
 ## ReconstitutedImportedSession
 
 ```rust
-pub struct ReconstitutedImportedSession { /* private */ }
+pub struct ReconstitutedImportedSession {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::ReconstitutedImportedSession {
     pub const fn session(&self) -> &session::Session;
     pub const fn imported_seed(&self) -> session::ImportedSessionSeed;
     pub const fn seed_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
     pub fn semantic_entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
-    pub fn into_parts(self) -> (session::Session, session::ImportedSessionSeed, context_frontier::ResolvedContextFrontierSnapshot, boxed::Box<[semantic_entry::SemanticTranscriptEntry]>);
+    pub fn into_parts(
+        self,
+    ) -> (
+        session::Session,
+        session::ImportedSessionSeed,
+        context_frontier::ResolvedContextFrontierSnapshot,
+        boxed::Box<[semantic_entry::SemanticTranscriptEntry]>,
+    );
 }
 ```
 
 ## CreateSessionFromImportedFrontierReconstitutionInput
 
 ```rust
-pub struct CreateSessionFromImportedFrontierReconstitutionInput { /* private */ }
+pub struct CreateSessionFromImportedFrontierReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::CreateSessionFromImportedFrontierReconstitutionInput {
-    pub fn new(command: session::CreateSessionFromImportedFrontier, result_session: SessionId, session: SessionId, provenance: session::SessionCreationProvenance, defaults_session: SessionId, defaults_version: configuration::SessionConfigurationDefaultsVersion, defaults: configuration::SessionConfigurationDefaults, imported_conversation: imported_conversation::ImportedConversation, seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>, seed_snapshots: vec::Vec<context_frontier::ResolvedContextFrontierReconstitutionInput>, semantic_entries: vec::Vec<semantic_entry::SemanticTranscriptEntryReconstitutionInput>) -> Self;
-    pub fn reconstitute(self) -> result::Result<imported_session::ReconstitutedSessionCreationFromImportedFrontier, imported_session::CreateSessionFromImportedFrontierReconstitutionError>;
+    pub fn new(
+        command: session::CreateSessionFromImportedFrontier,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: session::SessionCreationProvenance,
+        defaults_session: SessionId,
+        defaults_version: configuration::SessionConfigurationDefaultsVersion,
+        defaults: configuration::SessionConfigurationDefaults,
+        imported_conversation: imported_conversation::ImportedConversation,
+        seed_records: vec::Vec<imported_session::ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: vec::Vec<context_frontier::ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: vec::Vec<semantic_entry::SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> result::Result<
+        imported_session::ReconstitutedSessionCreationFromImportedFrontier,
+        imported_session::CreateSessionFromImportedFrontierReconstitutionError,
+    >;
     pub const fn command(&self) -> &session::CreateSessionFromImportedFrontier;
     pub const fn result_session(&self) -> SessionId;
     pub const fn session(&self) -> SessionId;
@@ -278,8 +436,10 @@ impl imported_session::CreateSessionFromImportedFrontierReconstitutionInput {
     pub const fn defaults(&self) -> &configuration::SessionConfigurationDefaults;
     pub const fn imported_conversation(&self) -> &imported_conversation::ImportedConversation;
     pub fn seed_records(&self) -> &[imported_session::ImportedSessionSeedReconstitutionInput];
-    pub fn seed_snapshots(&self) -> &[context_frontier::ResolvedContextFrontierReconstitutionInput];
-    pub fn semantic_entries(&self) -> &[semantic_entry::SemanticTranscriptEntryReconstitutionInput];
+    pub fn seed_snapshots(&self)
+        -> &[context_frontier::ResolvedContextFrontierReconstitutionInput];
+    pub fn semantic_entries(&self)
+        -> &[semantic_entry::SemanticTranscriptEntryReconstitutionInput];
 }
 ```
 
@@ -300,19 +460,28 @@ pub enum CreateSessionFromImportedFrontierReconstitutionFailure {
 ## CreateSessionFromImportedFrontierReconstitutionError
 
 ```rust
-pub struct CreateSessionFromImportedFrontierReconstitutionError { /* private */ }
+pub struct CreateSessionFromImportedFrontierReconstitutionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::CreateSessionFromImportedFrontierReconstitutionError {
-    pub const fn failure(&self) -> imported_session::CreateSessionFromImportedFrontierReconstitutionFailure;
-    pub const fn input(&self) -> &imported_session::CreateSessionFromImportedFrontierReconstitutionInput;
-    pub fn into_parts(self) -> (imported_session::CreateSessionFromImportedFrontierReconstitutionInput, imported_session::CreateSessionFromImportedFrontierReconstitutionFailure);
+    pub const fn failure(
+        &self,
+    ) -> imported_session::CreateSessionFromImportedFrontierReconstitutionFailure;
+    pub const fn input(
+        &self,
+    ) -> &imported_session::CreateSessionFromImportedFrontierReconstitutionInput;
+    pub fn into_parts(
+        self,
+    ) -> (
+        imported_session::CreateSessionFromImportedFrontierReconstitutionInput,
+        imported_session::CreateSessionFromImportedFrontierReconstitutionFailure,
+    );
 }
 ```
 
 ## ReconstitutedSessionCreationFromImportedFrontier
 
 ```rust
-pub struct ReconstitutedSessionCreationFromImportedFrontier { /* private */ }
+pub struct ReconstitutedSessionCreationFromImportedFrontier {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl imported_session::ReconstitutedSessionCreationFromImportedFrontier {
     pub const fn command(&self) -> &session::CreateSessionFromImportedFrontier;
@@ -320,6 +489,8 @@ impl imported_session::ReconstitutedSessionCreationFromImportedFrontier {
     pub fn semantic_entries(&self) -> &[semantic_entry::SemanticTranscriptEntry];
     pub const fn seed_snapshot(&self) -> &context_frontier::ResolvedContextFrontierSnapshot;
     pub const fn imported_seed(&self) -> session::ImportedSessionSeed;
-    pub const fn applied_result(&self) -> imported_session::CreateSessionFromImportedFrontierAppliedResult;
+    pub const fn applied_result(
+        &self,
+    ) -> imported_session::CreateSessionFromImportedFrontierAppliedResult;
 }
 ```

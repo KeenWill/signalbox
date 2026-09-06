@@ -123,7 +123,7 @@ impl goal::GoalUserProvenance {
 ## GoalModelProvenance
 
 ```rust
-pub struct GoalModelProvenance { /* private */ }
+pub struct GoalModelProvenance {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl goal::GoalModelProvenance {
     pub const fn new(turn: TurnId, tool_request: ToolRequestId) -> Self;
@@ -147,7 +147,7 @@ impl goal::GoalSchedulerProvenance {
 ## GoalReportRef
 
 ```rust
-pub struct GoalReportRef { /* private */ }
+pub struct GoalReportRef {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl goal::GoalReportRef {
     pub const fn turn(self) -> TurnId;
@@ -189,9 +189,16 @@ impl convert::From<goal::GoalModelBlockedReasonKind> for goal::GoalBlockedReason
 
 ```rust
 pub enum GoalBlockProvenance {
-    Model { reason: goal::GoalModelBlockedReasonKind, provenance: goal::GoalModelProvenance },
-    ExecutionFailure { provenance: goal::GoalSchedulerProvenance },
-    FinishCheck { provenance: goal::GoalModelProvenance },
+    Model {
+        reason: goal::GoalModelBlockedReasonKind,
+        provenance: goal::GoalModelProvenance,
+    },
+    ExecutionFailure {
+        provenance: goal::GoalSchedulerProvenance,
+    },
+    FinishCheck {
+        provenance: goal::GoalModelProvenance,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl goal::GoalBlockProvenance {
@@ -204,11 +211,20 @@ impl goal::GoalBlockProvenance {
 ```rust
 pub enum GoalState {
     Pursuing,
-    Blocked { reason: goal::GoalBlockedReasonKind, need: goal::GoalNeed },
-    Achieved { report: goal::GoalReportRef },
+    Blocked {
+        reason: goal::GoalBlockedReasonKind,
+        need: goal::GoalNeed,
+    },
+    Achieved {
+        report: goal::GoalReportRef,
+    },
     UserStopped,
-    Superseded { by_generation: goal::GoalGeneration },
-    SessionClosed { outcome: session_lifecycle::SessionClosureOutcome },
+    Superseded {
+        by_generation: goal::GoalGeneration,
+    },
+    SessionClosed {
+        outcome: session_lifecycle::SessionClosureOutcome,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl goal::GoalState {
@@ -219,7 +235,7 @@ impl goal::GoalState {
 ## GoalGenerationSnapshot
 
 ```rust
-pub struct GoalGenerationSnapshot { /* private */ }
+pub struct GoalGenerationSnapshot {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl goal::GoalGenerationSnapshot {
     pub const fn generation(&self) -> goal::GoalGeneration;
@@ -231,10 +247,14 @@ impl goal::GoalGenerationSnapshot {
 ## GoalEvent
 
 ```rust
-pub struct GoalEvent { /* private */ }
+pub struct GoalEvent {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl goal::GoalEvent {
-    pub const fn from_stored_parts(ordinal: goal::GoalEventOrdinal, generation: goal::GoalGeneration, kind: goal::GoalEventKind) -> Self;
+    pub const fn from_stored_parts(
+        ordinal: goal::GoalEventOrdinal,
+        generation: goal::GoalGeneration,
+        kind: goal::GoalEventKind,
+    ) -> Self;
     pub const fn ordinal(&self) -> goal::GoalEventOrdinal;
     pub const fn generation(&self) -> goal::GoalGeneration;
     pub const fn kind(&self) -> &goal::GoalEventKind;
@@ -245,13 +265,33 @@ impl goal::GoalEvent {
 
 ```rust
 pub enum GoalEventKind {
-    Commissioned { statement: goal::GoalStatement, provenance: goal::GoalUserProvenance },
-    Blocked { block: goal::GoalBlockProvenance, need: goal::GoalNeed },
-    Resumed { guidance: option::Option<goal::GoalGuidance>, provenance: goal::GoalUserProvenance },
-    Achieved { report: goal::GoalReport, provenance: goal::GoalModelProvenance },
-    UserStopped { provenance: goal::GoalUserProvenance },
-    Superseded { replacement_statement: goal::GoalStatement, provenance: goal::GoalUserProvenance },
-    SessionClosed { outcome: session_lifecycle::SessionClosureOutcome, provenance: session_lifecycle::LifecycleActor },
+    Commissioned {
+        statement: goal::GoalStatement,
+        provenance: goal::GoalUserProvenance,
+    },
+    Blocked {
+        block: goal::GoalBlockProvenance,
+        need: goal::GoalNeed,
+    },
+    Resumed {
+        guidance: option::Option<goal::GoalGuidance>,
+        provenance: goal::GoalUserProvenance,
+    },
+    Achieved {
+        report: goal::GoalReport,
+        provenance: goal::GoalModelProvenance,
+    },
+    UserStopped {
+        provenance: goal::GoalUserProvenance,
+    },
+    Superseded {
+        replacement_statement: goal::GoalStatement,
+        provenance: goal::GoalUserProvenance,
+    },
+    SessionClosed {
+        outcome: session_lifecycle::SessionClosureOutcome,
+        provenance: session_lifecycle::LifecycleActor,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -259,23 +299,63 @@ pub enum GoalEventKind {
 ## Goal
 
 ```rust
-pub struct Goal { /* private */ }
+pub struct Goal {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl goal::Goal {
-    pub fn commission(session: SessionId, statement: goal::GoalStatement, provenance: goal::GoalUserProvenance) -> Self;
-    pub fn commission_successor(self, statement: goal::GoalStatement, provenance: goal::GoalUserProvenance) -> result::Result<Self, goal::GoalTransitionError>;
+    pub fn commission(
+        session: SessionId,
+        statement: goal::GoalStatement,
+        provenance: goal::GoalUserProvenance,
+    ) -> Self;
+    pub fn commission_successor(
+        self,
+        statement: goal::GoalStatement,
+        provenance: goal::GoalUserProvenance,
+    ) -> result::Result<Self, goal::GoalTransitionError>;
     pub const fn session(&self) -> SessionId;
     pub fn generations(&self) -> &[goal::GoalGenerationSnapshot];
     pub fn current(&self) -> &goal::GoalGenerationSnapshot;
     pub fn events(&self) -> &[goal::GoalEvent];
-    pub fn declare_blocked(self, reason: goal::GoalModelBlockedReasonKind, need: goal::GoalNeed, provenance: goal::GoalModelProvenance) -> result::Result<Self, goal::GoalTransitionError>;
-    pub fn block_execution_failure(self, need: goal::GoalNeed, provenance: goal::GoalSchedulerProvenance) -> result::Result<Self, goal::GoalTransitionError>;
-    pub fn block_finish_check(self, need: goal::GoalNeed, provenance: goal::GoalModelProvenance) -> result::Result<Self, goal::GoalTransitionError>;
-    pub fn resume(self, guidance: option::Option<goal::GoalGuidance>, provenance: goal::GoalUserProvenance) -> result::Result<Self, goal::GoalTransitionError>;
-    pub fn declare_achieved(self, report: goal::GoalReport, provenance: goal::GoalModelProvenance) -> result::Result<Self, goal::GoalTransitionError>;
-    pub fn stop(self, provenance: goal::GoalUserProvenance) -> result::Result<Self, goal::GoalTransitionError>;
-    pub fn close_with_session(self, outcome: session_lifecycle::SessionClosureOutcome, provenance: session_lifecycle::LifecycleActor) -> result::Result<Self, goal::GoalTransitionError>;
-    pub fn supersede(self, replacement_statement: goal::GoalStatement, provenance: goal::GoalUserProvenance) -> result::Result<Self, goal::GoalTransitionError>;
+    pub fn declare_blocked(
+        self,
+        reason: goal::GoalModelBlockedReasonKind,
+        need: goal::GoalNeed,
+        provenance: goal::GoalModelProvenance,
+    ) -> result::Result<Self, goal::GoalTransitionError>;
+    pub fn block_execution_failure(
+        self,
+        need: goal::GoalNeed,
+        provenance: goal::GoalSchedulerProvenance,
+    ) -> result::Result<Self, goal::GoalTransitionError>;
+    pub fn block_finish_check(
+        self,
+        need: goal::GoalNeed,
+        provenance: goal::GoalModelProvenance,
+    ) -> result::Result<Self, goal::GoalTransitionError>;
+    pub fn resume(
+        self,
+        guidance: option::Option<goal::GoalGuidance>,
+        provenance: goal::GoalUserProvenance,
+    ) -> result::Result<Self, goal::GoalTransitionError>;
+    pub fn declare_achieved(
+        self,
+        report: goal::GoalReport,
+        provenance: goal::GoalModelProvenance,
+    ) -> result::Result<Self, goal::GoalTransitionError>;
+    pub fn stop(
+        self,
+        provenance: goal::GoalUserProvenance,
+    ) -> result::Result<Self, goal::GoalTransitionError>;
+    pub fn close_with_session(
+        self,
+        outcome: session_lifecycle::SessionClosureOutcome,
+        provenance: session_lifecycle::LifecycleActor,
+    ) -> result::Result<Self, goal::GoalTransitionError>;
+    pub fn supersede(
+        self,
+        replacement_statement: goal::GoalStatement,
+        provenance: goal::GoalUserProvenance,
+    ) -> result::Result<Self, goal::GoalTransitionError>;
 }
 ```
 
@@ -296,7 +376,7 @@ pub enum GoalTransitionFailure {
 ## GoalTransitionError
 
 ```rust
-pub struct GoalTransitionError { /* private */ }
+pub struct GoalTransitionError {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl goal::GoalTransitionError {
     pub const fn failure(&self) -> goal::GoalTransitionFailure;
@@ -312,7 +392,7 @@ impl error::Error for goal::GoalTransitionError {}
 ## GoalReconstitutionInput
 
 ```rust
-pub struct GoalReconstitutionInput { /* private */ }
+pub struct GoalReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl goal::GoalReconstitutionInput {
     pub fn new(session: SessionId, events: vec::Vec<goal::GoalEvent>) -> Self;

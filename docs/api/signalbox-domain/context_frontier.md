@@ -29,7 +29,7 @@ impl context_frontier::SemanticTranscriptEntryId {
 ## ContextFrontier
 
 ```rust
-pub struct ContextFrontier { /* private */ }
+pub struct ContextFrontier {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl context_frontier::ContextFrontier {
     pub const fn owning_session(&self) -> SessionId;
@@ -40,10 +40,13 @@ impl context_frontier::ContextFrontier {
 ## SemanticTranscriptEntryRef
 
 ```rust
-pub struct SemanticTranscriptEntryRef { /* private */ }
+pub struct SemanticTranscriptEntryRef {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 impl context_frontier::SemanticTranscriptEntryRef {
-    pub const fn from_source(source_session: SessionId, entry: context_frontier::SemanticTranscriptEntryId) -> Self;
+    pub const fn from_source(
+        source_session: SessionId,
+        entry: context_frontier::SemanticTranscriptEntryId,
+    ) -> Self;
     pub const fn source_session(&self) -> SessionId;
     pub const fn entry(&self) -> context_frontier::SemanticTranscriptEntryId;
 }
@@ -52,15 +55,23 @@ impl context_frontier::SemanticTranscriptEntryRef {
 ## ResolvedContextFrontierSnapshot
 
 ```rust
-pub struct ResolvedContextFrontierSnapshot { /* private */ }
+pub struct ResolvedContextFrontierSnapshot {/* private */}
 impl context_frontier::ResolvedContextFrontierSnapshot {
     pub const fn frontier(&self) -> context_frontier::ContextFrontier;
     pub fn entry_count(&self) -> usize;
-    pub fn ordered_entries(&self) -> impl exact_size::ExactSizeIterator<Item = context_frontier::SemanticTranscriptEntryRef> + double_ended::DoubleEndedIterator + '_;
+    pub fn ordered_entries(
+        &self,
+    ) -> impl exact_size::ExactSizeIterator<Item = context_frontier::SemanticTranscriptEntryRef>
+           + double_ended::DoubleEndedIterator
+           + '_;
     pub fn same_semantic_content(&self, other: &Self) -> bool;
     pub fn is_semantic_prefix_of(&self, later: &Self) -> bool;
     pub fn immediate_semantic_prefix(&self) -> option::Option<context_frontier::ContextFrontier>;
-    pub fn appended_entries(&self) -> impl exact_size::ExactSizeIterator<Item = context_frontier::SemanticTranscriptEntryRef> + double_ended::DoubleEndedIterator + '_;
+    pub fn appended_entries(
+        &self,
+    ) -> impl exact_size::ExactSizeIterator<Item = context_frontier::SemanticTranscriptEntryRef>
+           + double_ended::DoubleEndedIterator
+           + '_;
 }
 impl clone::Clone for context_frontier::ResolvedContextFrontierSnapshot {
     pub fn clone(&self) -> Self;
@@ -77,10 +88,18 @@ impl cmp::Eq for context_frontier::ResolvedContextFrontierSnapshot {}
 ## ResolvedContextFrontierReconstitutionInput
 
 ```rust
-pub struct ResolvedContextFrontierReconstitutionInput { /* private */ }
+pub struct ResolvedContextFrontierReconstitutionInput {/* private */}
 impl context_frontier::ResolvedContextFrontierReconstitutionInput {
-    pub fn new(owning_session: SessionId, snapshot: context_frontier::ContextFrontierId, ordered_entries: vec::Vec<context_frontier::SemanticTranscriptEntryRef>) -> Self;
-    pub fn derive_appending(&self, snapshot: context_frontier::ContextFrontierId, appended_entries: vec::Vec<context_frontier::SemanticTranscriptEntryRef>) -> Self;
+    pub fn new(
+        owning_session: SessionId,
+        snapshot: context_frontier::ContextFrontierId,
+        ordered_entries: vec::Vec<context_frontier::SemanticTranscriptEntryRef>,
+    ) -> Self;
+    pub fn derive_appending(
+        &self,
+        snapshot: context_frontier::ContextFrontierId,
+        appended_entries: vec::Vec<context_frontier::SemanticTranscriptEntryRef>,
+    ) -> Self;
     pub const fn owning_session(&self) -> SessionId;
     pub const fn snapshot(&self) -> context_frontier::ContextFrontierId;
     pub fn entry_count(&self) -> usize;
