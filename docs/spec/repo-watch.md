@@ -60,7 +60,8 @@ producers. Stream identity is closed by event kind: a recurring kind names the
 pull request plus its kind-specific label, thread, branch, or reaction member;
 an immutable check-suite fact names provider identity and completion generation;
 a review names its provider review identity; a workflow fact names branch,
-workflow, run, and attempt.
+workflow, run, and attempt. Each newly accepted occurrence receives the next
+positive per-repository event ordinal.
 
 Rules are versioned structures (`RepoWatchMatcherV1`). Fields within one rule
 are conjunctive and distinct rules are disjunctive. Omitting every target field
@@ -434,35 +435,35 @@ following poll observes the dismissal through the ordinary review and
 convergence projections and may then seal; no synthetic approval is created, no
 fresh review is requested, and dismissal itself does not stop dispatch.
 
-A newly configured rule activates immediately after the repository's current
-durable event tail, before its task polls, and consumes later events in cursor
-and event-ordinal order. Restart resumes the oldest unevaluated fact and the
-oldest eligible obligation for that rule version, redispatching no evaluated
-fact and treating no pre-activation history as live. Reconciliation records an
-append-only deactivation when a configured identity or its repository disappears
-from configuration, and deactivation settles an obligation without dispatch
-rather than leaving permanently owed work; terminal-target settlement records
-why the obligation is no longer owed. Guarded startup admits the complete
-repository set, the empty set included, in two phases: it first validates the
-whole set in one transaction it discards, in the Configuration phase before
-either local socket binds, then commits the deactivations and activations in one
-transaction after every remaining fallible startup step succeeds. A refusal
-anywhere in the set, or any startup failure before that commit, leaves no
-deactivation or activation, so restoring the previous configuration is admitted
-rather than refused as reuse. A lost commit response is resolved by rereading
-the durable active set, which commits nothing and so cannot itself become
-ambiguous. Reconciliation and evaluation serialize per repository, so an
-already-loaded event cannot create a dispatch after deactivation commits, though
-a committed evaluation may replay. Changing a rule's semantics while keeping the
-same rule identity and revision fails in the Configuration phase. A higher
-revision under the same rule identity is a replacement and the ordinary way to
-preserve stable identity and history: reconciliation appends deactivation of the
-old revision and activation of the new one after the current event tail; a fresh
-rule identity remains an admitted replacement path. A deactivated
-identity-and-revision pair cannot be configured again, a revision below the
-highest ever recorded for that identity in that repository is refused, and rule
-identity is per repository, so the same identity first configured in a newly
-watched repository starts its own lineage.
+A newly configured rule records and activates immediately after the repository's
+current durable event ordinal, before its task polls, and consumes later events
+in repository-event-ordinal order. Restart resumes the oldest unevaluated fact
+and the oldest eligible obligation for that rule version, redispatching no
+evaluated fact and treating no pre-activation history as live. Reconciliation
+records an append-only deactivation when a configured identity or its repository
+disappears from configuration, and deactivation settles an obligation without
+dispatch rather than leaving permanently owed work; terminal-target settlement
+records why the obligation is no longer owed. Guarded startup admits the
+complete repository set, the empty set included, in two phases: it first
+validates the whole set in one transaction it discards, in the Configuration
+phase before either local socket binds, then commits the deactivations and
+activations in one transaction after every remaining fallible startup step
+succeeds. A refusal anywhere in the set, or any startup failure before that
+commit, leaves no deactivation or activation, so restoring the previous
+configuration is admitted rather than refused as reuse. A lost commit response
+is resolved by rereading the durable active set, which commits nothing and so
+cannot itself become ambiguous. Reconciliation and evaluation serialize per
+repository, so an already-loaded event cannot create a dispatch after
+deactivation commits, though a committed evaluation may replay. Changing a
+rule's semantics while keeping the same rule identity and revision fails in the
+Configuration phase. A higher revision under the same rule identity is a
+replacement and the ordinary way to preserve stable identity and history:
+reconciliation appends deactivation of the old revision and activation of the
+new one after the current event tail; a fresh rule identity remains an admitted
+replacement path. A deactivated identity-and-revision pair cannot be configured
+again, a revision below the highest ever recorded for that identity in that
+repository is refused, and rule identity is per repository, so the same identity
+first configured in a newly watched repository starts its own lineage.
 
 Everything the listener does before a delivery is durably admitted is identical
 in both webhook modes. The body's canonical repository must equal the repository

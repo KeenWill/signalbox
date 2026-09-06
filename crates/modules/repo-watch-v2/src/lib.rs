@@ -4,7 +4,7 @@
 //! unqualified and must run on a pool whose effective role and search path are
 //! confined to `mod_repo_watch`.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt};
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::{Value, json};
@@ -151,6 +151,24 @@ pub enum EventAdmission {
     Replayed,
 }
 
+/// Closed producer recorded with every durable repository-watch fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventProducer {
+    /// A complete or targeted provider poll produced the fact.
+    Poll,
+    /// An authenticated primary-mode webhook produced the fact.
+    Webhook,
+}
+
+impl EventProducer {
+    const fn storage(self) -> &'static str {
+        match self {
+            Self::Poll => "poll",
+            Self::Webhook => "webhook",
+        }
+    }
+}
+
 /// Result of atomically committing a complete frontier candidate and event batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FrontierEventAdmission {
@@ -186,6 +204,7 @@ pub enum FrontierReleaseAdmission {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EventEvaluationPosition {
     event: RepoWatchEventId,
+    repository_event_ordinal: u64,
     frontier_generation: u64,
     event_ordinal: u64,
 }
@@ -194,6 +213,11 @@ impl EventEvaluationPosition {
     /// Returns the retained event identity.
     pub const fn event(&self) -> RepoWatchEventId {
         self.event
+    }
+
+    /// Returns the event's repository-wide durable order.
+    pub const fn repository_event_ordinal(&self) -> u64 {
+        self.repository_event_ordinal
     }
 
     /// Returns the cursor generation that committed the event.
@@ -222,6 +246,22 @@ pub enum RuleAdmission {
     Stale,
 }
 
+/// Result of reconciling one repository's complete configured rule set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuleReconciliationAdmission {
+    /// The complete set was admitted atomically.
+    Applied {
+        /// Per-input outcomes in the supplied order.
+        rules: Box<[RuleAdmission]>,
+        /// Number of formerly active rules deactivated by this commit.
+        deactivated: u64,
+    },
+    /// A retained revision was already bound to different semantics.
+    ConflictingReuse,
+    /// At least one supplied revision was older than retained lineage.
+    Stale,
+}
+
 impl WebhookDisposition {
     const fn storage(self) -> &'static str {
         match self {
@@ -241,18 +281,20 @@ pub enum StoreError {
     InvalidProviderIdentity,
     /// The webhook expiry does not follow its receipt time.
     InvalidWebhookExpiry,
-    /// The event retention boundary does not follow its recording time.
-    InvalidEventRetention,
     /// The supplied frontier generation has no successor.
     InvalidFrontierGeneration,
     /// A retained event has an invalid durable evaluation position.
     InvalidEventEvaluationPosition,
+    /// The repository-wide event ordinal has no successor.
+    InvalidEventOrdinal,
     /// A fact in a frontier commit belongs to another repository.
     EventRepositoryMismatch,
     /// A pull-request projection belongs to another repository.
     ProjectionRepositoryMismatch,
     /// The checked rule exposed too many identity fields for the durable inventory.
     InvalidRuleFieldInventory,
+    /// A complete configured set repeated one repository-scoped rule identity.
+    DuplicateRuleIdentity,
 }
 
 impl fmt::Display for StoreError {
@@ -261,15 +303,13 @@ impl fmt::Display for StoreError {
             Self::Database(_) => "repository-watch module database operation failed",
             Self::InvalidProviderIdentity => "repository-watch provider identity is not positive",
             Self::InvalidWebhookExpiry => "repository-watch webhook expiry is not after receipt",
-            Self::InvalidEventRetention => {
-                "repository-watch event retention is not after recording"
-            }
             Self::InvalidFrontierGeneration => {
                 "repository-watch frontier generation has no successor"
             }
             Self::InvalidEventEvaluationPosition => {
                 "repository-watch event has an invalid evaluation position"
             }
+            Self::InvalidEventOrdinal => "repository-watch event ordinal has no successor",
             Self::EventRepositoryMismatch => {
                 "repository-watch event does not belong to the frontier repository"
             }
@@ -278,6 +318,9 @@ impl fmt::Display for StoreError {
             }
             Self::InvalidRuleFieldInventory => {
                 "repository-watch rule identity-field inventory is too large"
+            }
+            Self::DuplicateRuleIdentity => {
+                "repository-watch configured rule set repeats an identity"
             }
         })
     }
@@ -289,12 +332,13 @@ impl Error for StoreError {
             Self::Database(error) => Some(error),
             Self::InvalidProviderIdentity
             | Self::InvalidWebhookExpiry
-            | Self::InvalidEventRetention
             | Self::InvalidFrontierGeneration
             | Self::InvalidEventEvaluationPosition
+            | Self::InvalidEventOrdinal
             | Self::EventRepositoryMismatch
             | Self::ProjectionRepositoryMismatch
-            | Self::InvalidRuleFieldInventory => None,
+            | Self::InvalidRuleFieldInventory
+            | Self::DuplicateRuleIdentity => None,
         }
     }
 }
@@ -440,36 +484,44 @@ impl RepoWatchStore {
         Ok(updated.rows_affected() == 1)
     }
 
-    /// Reads retained event identities in cursor-generation and batch order.
+    /// Reads retained event identities in repository-wide observation order.
     pub async fn event_evaluation_order(
         &self,
         repository: &RepositorySlug,
     ) -> Result<Box<[EventEvaluationPosition]>, StoreError> {
-        let rows: Vec<(Uuid, Decimal, Decimal)> = sqlx::query_as(
-            "SELECT event_id, frontier_generation, event_ordinal
+        let rows: Vec<(Uuid, Decimal, Decimal, Decimal)> = sqlx::query_as(
+            "SELECT event_id, repository_event_ordinal,
+                    frontier_generation, event_ordinal
                FROM gh_event
               WHERE repository = $1
-              ORDER BY frontier_generation, event_ordinal",
+              ORDER BY repository_event_ordinal",
         )
         .bind(repository.as_str())
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
-            .map(|(event, frontier_generation, event_ordinal)| {
-                let frontier_generation = frontier_generation
-                    .to_u64()
-                    .filter(|generation| *generation > 0)
-                    .ok_or(StoreError::InvalidEventEvaluationPosition)?;
-                let event_ordinal = event_ordinal
-                    .to_u64()
-                    .filter(|ordinal| *ordinal > 0)
-                    .ok_or(StoreError::InvalidEventEvaluationPosition)?;
-                Ok(EventEvaluationPosition {
-                    event: RepoWatchEventId::from_uuid(event),
-                    frontier_generation,
-                    event_ordinal,
-                })
-            })
+            .map(
+                |(event, repository_event_ordinal, frontier_generation, event_ordinal)| {
+                    let repository_event_ordinal = repository_event_ordinal
+                        .to_u64()
+                        .filter(|ordinal| *ordinal > 0)
+                        .ok_or(StoreError::InvalidEventEvaluationPosition)?;
+                    let frontier_generation = frontier_generation
+                        .to_u64()
+                        .filter(|generation| *generation > 0)
+                        .ok_or(StoreError::InvalidEventEvaluationPosition)?;
+                    let event_ordinal = event_ordinal
+                        .to_u64()
+                        .filter(|ordinal| *ordinal > 0)
+                        .ok_or(StoreError::InvalidEventEvaluationPosition)?;
+                    Ok(EventEvaluationPosition {
+                        event: RepoWatchEventId::from_uuid(event),
+                        repository_event_ordinal,
+                        frontier_generation,
+                        event_ordinal,
+                    })
+                },
+            )
             .collect::<Result<Vec<_>, _>>()
             .map(Vec::into_boxed_slice)
     }
@@ -481,12 +533,9 @@ impl RepoWatchStore {
         expected_generation: u64,
         frontier: &RepoWatchEventIdentityFrontierV1,
         events: &[RepoWatchEventOccurrenceV1],
+        producer: EventProducer,
         recorded_at: OffsetDateTime,
-        retain_until: OffsetDateTime,
     ) -> Result<FrontierEventAdmission, StoreError> {
-        if retain_until <= recorded_at {
-            return Err(StoreError::InvalidEventRetention);
-        }
         let repository_state = &projection.repository;
         let pull_request_states = projection.pull_requests.as_slice();
         let comparison_baseline =
@@ -621,22 +670,40 @@ impl RepoWatchStore {
         let next_generation = expected_generation
             .checked_add(1)
             .ok_or(StoreError::InvalidFrontierGeneration)?;
+        let mut repository_event_ordinal = sqlx::query_scalar::<_, Decimal>(
+            "SELECT COALESCE(max(repository_event_ordinal), 0) FROM gh_event
+              WHERE repository = $1",
+        )
+        .bind(repository.as_str())
+        .fetch_one(&mut *transaction)
+        .await?
+        .to_u64()
+        .ok_or(StoreError::InvalidEventEvaluationPosition)?;
         let mut admissions = Vec::with_capacity(events.len());
         for (event_ordinal, occurrence) in (1_u64..).zip(events) {
             if occurrence.event().repository() != repository {
                 return Err(StoreError::EventRepositoryMismatch);
             }
+            let candidate_repository_ordinal = repository_event_ordinal
+                .checked_add(1)
+                .ok_or(StoreError::InvalidEventOrdinal)?;
             match append_event(
                 &mut transaction,
                 occurrence,
+                producer,
+                candidate_repository_ordinal,
                 next_generation,
                 event_ordinal,
                 recorded_at,
-                retain_until,
             )
             .await?
             {
-                Some(admission) => admissions.push(admission),
+                Some(admission) => {
+                    if admission == EventAdmission::Inserted {
+                        repository_event_ordinal = candidate_repository_ordinal;
+                    }
+                    admissions.push(admission);
+                }
                 None => {
                     transaction.rollback().await?;
                     return Ok(FrontierEventAdmission::ConflictingReuse);
@@ -767,168 +834,200 @@ impl RepoWatchStore {
         })
     }
 
-    /// Activates one checked rule revision without retaining configuration text.
-    pub async fn record_rule(
+    /// Reconciles one repository's complete checked rule set atomically.
+    pub async fn reconcile_rules(
         &self,
         repository: &RepositorySlug,
-        rule: &RepoWatchRule,
+        rules: &[RepoWatchRule],
         activated_at: OffsetDateTime,
-    ) -> Result<RuleAdmission, StoreError> {
-        let revision = Decimal::from(rule.version().get());
-        let digest = rule.content_digest();
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(
-                hashtextextended(length($1)::text || ':' || $1 || $2, 0))",
-        )
-        .bind(repository.as_str())
-        .bind(rule.id().as_str())
-        .execute(&mut *transaction)
-        .await?;
-        let active: Option<(Decimal, Vec<u8>)> = sqlx::query_as(
-            "SELECT active_revision, content_digest
-               FROM rule
-              WHERE repository = $1 AND rule_id = $2
-              FOR UPDATE",
-        )
-        .bind(repository.as_str())
-        .bind(rule.id().as_str())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let latest_revision: Option<Decimal> = sqlx::query_scalar(
-            "SELECT max(revision) FROM rule_revision
-              WHERE repository = $1 AND rule_id = $2",
-        )
-        .bind(repository.as_str())
-        .bind(rule.id().as_str())
-        .fetch_one(&mut *transaction)
-        .await?;
-        let historical_digest: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT content_digest
-               FROM rule_revision
-              WHERE repository = $1 AND rule_id = $2 AND revision = $3",
-        )
-        .bind(repository.as_str())
-        .bind(rule.id().as_str())
-        .bind(revision)
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if let Some(historical_digest) = historical_digest {
-            transaction.rollback().await?;
-            return Ok(if historical_digest != digest.as_bytes() {
-                RuleAdmission::ConflictingReuse
-            } else if active
-                .as_ref()
-                .is_some_and(|(active_revision, _)| *active_revision == revision)
-            {
-                RuleAdmission::Replayed
-            } else {
-                RuleAdmission::Stale
-            });
-        }
-        if active
-            .as_ref()
-            .is_some_and(|(active_revision, _)| revision < *active_revision)
-            || latest_revision.is_some_and(|latest_revision| revision < latest_revision)
-        {
-            transaction.rollback().await?;
-            return Ok(RuleAdmission::Stale);
-        }
-        insert_rule_revision(&mut transaction, repository, rule, activated_at).await?;
-        let admission = if let Some((active_revision, _)) = active {
-            sqlx::query(
-                "UPDATE rule_revision
-                    SET retired_at = GREATEST(activated_at, $4)
-                  WHERE repository = $1 AND rule_id = $2 AND revision = $3",
-            )
-            .bind(repository.as_str())
-            .bind(rule.id().as_str())
-            .bind(active_revision)
-            .bind(activated_at)
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query(
-                "UPDATE rule
-                    SET active_revision = $3,
-                        content_digest = $4,
-                        updated_at = statement_timestamp()
-                  WHERE repository = $1 AND rule_id = $2",
-            )
-            .bind(repository.as_str())
-            .bind(rule.id().as_str())
-            .bind(revision)
-            .bind(digest.as_bytes().as_slice())
-            .execute(&mut *transaction)
-            .await?;
-            RuleAdmission::Updated
-        } else {
-            sqlx::query(
-                "INSERT INTO rule
-                    (repository, rule_id, active_revision, content_digest, updated_at)
-                 VALUES ($1, $2, $3, $4, statement_timestamp())",
-            )
-            .bind(repository.as_str())
-            .bind(rule.id().as_str())
-            .bind(revision)
-            .bind(digest.as_bytes().as_slice())
-            .execute(&mut *transaction)
-            .await?;
-            if latest_revision.is_some() {
-                RuleAdmission::Updated
-            } else {
-                RuleAdmission::Inserted
+    ) -> Result<RuleReconciliationAdmission, StoreError> {
+        let mut configured_ids = BTreeSet::new();
+        for rule in rules {
+            if !configured_ids.insert(rule.id().as_str()) {
+                return Err(StoreError::DuplicateRuleIdentity);
             }
-        };
-        transaction.commit().await?;
-        Ok(admission)
-    }
-
-    /// Deactivates one repository-scoped rule while retaining revision lineage.
-    pub async fn deactivate_rule(
-        &self,
-        repository: &RepositorySlug,
-        rule_id: &str,
-        retired_at: OffsetDateTime,
-    ) -> Result<bool, StoreError> {
+        }
         let mut transaction = self.pool.begin().await?;
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(
-                hashtextextended(length($1)::text || ':' || $1 || $2, 0))",
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1, 0))")
+            .bind(repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        let active_rules: Vec<(String, Decimal)> = sqlx::query_as(
+            "SELECT rule_id, active_revision FROM rule
+              WHERE repository = $1 ORDER BY rule_id FOR UPDATE",
         )
         .bind(repository.as_str())
-        .bind(rule_id)
-        .execute(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await?;
-        let active_revision: Option<Decimal> = sqlx::query_scalar(
-            "SELECT active_revision FROM rule
-              WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
-        )
-        .bind(repository.as_str())
-        .bind(rule_id)
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let Some(active_revision) = active_revision else {
-            transaction.rollback().await?;
-            return Ok(false);
-        };
-        sqlx::query(
-            "UPDATE rule_revision
-                SET retired_at = GREATEST(activated_at, $4)
-              WHERE repository = $1 AND rule_id = $2 AND revision = $3",
-        )
-        .bind(repository.as_str())
-        .bind(rule_id)
-        .bind(active_revision)
-        .bind(retired_at)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query("DELETE FROM rule WHERE repository = $1 AND rule_id = $2")
+        let mut locked_ids = configured_ids.clone();
+        locked_ids.extend(active_rules.iter().map(|(rule_id, _)| rule_id.as_str()));
+        for rule_id in locked_ids {
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(
+                    hashtextextended(length($1)::text || ':' || $1 || $2, 0))",
+            )
             .bind(repository.as_str())
             .bind(rule_id)
             .execute(&mut *transaction)
             .await?;
+        }
+        let activation_tail: Decimal = sqlx::query_scalar(
+            "SELECT COALESCE(max(repository_event_ordinal), 0)
+               FROM gh_event WHERE repository = $1",
+        )
+        .bind(repository.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let mut plans = Vec::with_capacity(rules.len());
+        for rule in rules {
+            let revision = Decimal::from(rule.version().get());
+            let digest = rule.content_digest();
+            let active: Option<(Decimal, Vec<u8>)> = sqlx::query_as(
+                "SELECT active_revision, content_digest
+                   FROM rule
+                  WHERE repository = $1 AND rule_id = $2 FOR UPDATE",
+            )
+            .bind(repository.as_str())
+            .bind(rule.id().as_str())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let latest_revision: Option<Decimal> = sqlx::query_scalar(
+                "SELECT max(revision) FROM rule_revision
+                  WHERE repository = $1 AND rule_id = $2",
+            )
+            .bind(repository.as_str())
+            .bind(rule.id().as_str())
+            .fetch_one(&mut *transaction)
+            .await?;
+            let historical_digest: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT content_digest FROM rule_revision
+                  WHERE repository = $1 AND rule_id = $2 AND revision = $3",
+            )
+            .bind(repository.as_str())
+            .bind(rule.id().as_str())
+            .bind(revision)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if historical_digest
+                .as_ref()
+                .is_some_and(|historical| historical != digest.as_bytes())
+                || active
+                    .as_ref()
+                    .is_some_and(|(active_revision, active_digest)| {
+                        *active_revision == revision && active_digest != digest.as_bytes()
+                    })
+            {
+                transaction.rollback().await?;
+                return Ok(RuleReconciliationAdmission::ConflictingReuse);
+            }
+            if historical_digest.is_some() {
+                if active
+                    .as_ref()
+                    .is_some_and(|(active_revision, _)| *active_revision == revision)
+                {
+                    plans.push((
+                        rule,
+                        active.map(|(revision, _)| revision),
+                        RuleAdmission::Replayed,
+                    ));
+                    continue;
+                }
+                transaction.rollback().await?;
+                return Ok(RuleReconciliationAdmission::Stale);
+            }
+            if active
+                .as_ref()
+                .is_some_and(|(active_revision, _)| revision < *active_revision)
+                || latest_revision.is_some_and(|latest| revision < latest)
+            {
+                transaction.rollback().await?;
+                return Ok(RuleReconciliationAdmission::Stale);
+            }
+            let admission = if active.is_some() || latest_revision.is_some() {
+                RuleAdmission::Updated
+            } else {
+                RuleAdmission::Inserted
+            };
+            plans.push((rule, active.map(|(revision, _)| revision), admission));
+        }
+        for (rule, active_revision, admission) in &plans {
+            if *admission == RuleAdmission::Replayed {
+                continue;
+            }
+            insert_rule_revision(
+                &mut transaction,
+                repository,
+                rule,
+                activated_at,
+                activation_tail,
+            )
+            .await?;
+            if let Some(active_revision) = active_revision {
+                retire_rule_revision(
+                    &mut transaction,
+                    repository,
+                    rule.id().as_str(),
+                    *active_revision,
+                    activated_at,
+                )
+                .await?;
+                sqlx::query(
+                    "UPDATE rule
+                        SET active_revision = $3, content_digest = $4,
+                            updated_at = statement_timestamp()
+                      WHERE repository = $1 AND rule_id = $2",
+                )
+                .bind(repository.as_str())
+                .bind(rule.id().as_str())
+                .bind(Decimal::from(rule.version().get()))
+                .bind(rule.content_digest().as_bytes().as_slice())
+                .execute(&mut *transaction)
+                .await?;
+            } else {
+                sqlx::query(
+                    "INSERT INTO rule
+                        (repository, rule_id, active_revision, content_digest, updated_at)
+                     VALUES ($1, $2, $3, $4, statement_timestamp())",
+                )
+                .bind(repository.as_str())
+                .bind(rule.id().as_str())
+                .bind(Decimal::from(rule.version().get()))
+                .bind(rule.content_digest().as_bytes().as_slice())
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        let mut deactivated = 0_u64;
+        for (rule_id, active_revision) in active_rules {
+            if configured_ids.contains(rule_id.as_str()) {
+                continue;
+            }
+            retire_rule_revision(
+                &mut transaction,
+                repository,
+                &rule_id,
+                active_revision,
+                activated_at,
+            )
+            .await?;
+            sqlx::query("DELETE FROM rule WHERE repository = $1 AND rule_id = $2")
+                .bind(repository.as_str())
+                .bind(&rule_id)
+                .execute(&mut *transaction)
+                .await?;
+            deactivated = deactivated
+                .checked_add(1)
+                .ok_or(StoreError::InvalidRuleFieldInventory)?;
+        }
         transaction.commit().await?;
-        Ok(true)
+        Ok(RuleReconciliationAdmission::Applied {
+            rules: plans
+                .into_iter()
+                .map(|(_, _, admission)| admission)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            deactivated,
+        })
     }
 }
 
@@ -1170,10 +1269,11 @@ fn frontier_release_identity(stream_identity: &[u8; 32]) -> Vec<u8> {
 async fn append_event(
     transaction: &mut Transaction<'_, Postgres>,
     occurrence: &RepoWatchEventOccurrenceV1,
+    producer: EventProducer,
+    repository_event_ordinal: u64,
     frontier_generation: u64,
     event_ordinal: u64,
     recorded_at: OffsetDateTime,
-    retain_until: OffsetDateTime,
 ) -> Result<Option<EventAdmission>, StoreError> {
     let event = occurrence.event();
     let (target_kind, pull_request_number) = match event.target() {
@@ -1182,13 +1282,15 @@ async fn append_event(
         }
         RepoWatchEventTarget::Branch => ("branch", None),
     };
-    let payload = normalized_event_payload(event).to_string().into_bytes();
+    let payload = canonical_json(normalized_event_payload(event))
+        .to_string()
+        .into_bytes();
     let inserted = sqlx::query(
         "INSERT INTO gh_event
             (event_id, content_identity, repository, event_kind, target_kind,
-             pull_request_number, normalized_payload, frontier_generation,
-             event_ordinal, recorded_at, retain_until)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             pull_request_number, normalized_payload, producer,
+             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT DO NOTHING",
     )
     .bind(event.id().into_uuid())
@@ -1198,10 +1300,11 @@ async fn append_event(
     .bind(target_kind)
     .bind(pull_request_number)
     .bind(payload.as_slice())
+    .bind(producer.storage())
+    .bind(Decimal::from(repository_event_ordinal))
     .bind(Decimal::from(frontier_generation))
     .bind(Decimal::from(event_ordinal))
     .bind(recorded_at)
-    .bind(retain_until)
     .execute(&mut **transaction)
     .await?
     .rows_affected()
@@ -1211,13 +1314,16 @@ async fn append_event(
     }
     let exact: bool = sqlx::query_scalar(
         "SELECT EXISTS (
-            SELECT 1 FROM gh_event WHERE content_identity = $2)
+            SELECT 1 FROM gh_event
+             WHERE content_identity = $2 AND normalized_payload = $3)
             AND NOT EXISTS (
                 SELECT 1 FROM gh_event
-                 WHERE event_id = $1 AND content_identity <> $2)",
+                 WHERE event_id = $1
+                   AND (content_identity <> $2 OR normalized_payload <> $3))",
     )
     .bind(event.id().into_uuid())
     .bind(occurrence.content_identity().as_bytes().as_slice())
+    .bind(payload.as_slice())
     .fetch_one(&mut **transaction)
     .await?;
     Ok(exact.then_some(EventAdmission::Replayed))
@@ -1228,19 +1334,22 @@ async fn insert_rule_revision(
     repository: &RepositorySlug,
     rule: &RepoWatchRule,
     activated_at: OffsetDateTime,
+    activated_after_event_ordinal: Decimal,
 ) -> Result<(), StoreError> {
     let revision = Decimal::from(rule.version().get());
     let digest = rule.content_digest();
     sqlx::query(
         "INSERT INTO rule_revision
-            (repository, rule_id, revision, content_digest, activated_at)
-         VALUES ($1, $2, $3, $4, $5)",
+            (repository, rule_id, revision, content_digest, activated_at,
+             activated_after_event_ordinal)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(repository.as_str())
     .bind(rule.id().as_str())
     .bind(revision)
     .bind(digest.as_bytes().as_slice())
     .bind(activated_at)
+    .bind(activated_after_event_ordinal)
     .execute(&mut **transaction)
     .await?;
     for (index, (field, field_digest)) in rule.identity_field_digests().into_iter().enumerate() {
@@ -1260,6 +1369,44 @@ async fn insert_rule_revision(
         .await?;
     }
     Ok(())
+}
+
+async fn retire_rule_revision(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    rule_id: &str,
+    revision: Decimal,
+    retired_at: OffsetDateTime,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE rule_revision
+            SET retired_at = GREATEST(activated_at, $4)
+          WHERE repository = $1 AND rule_id = $2 AND revision = $3",
+    )
+    .bind(repository.as_str())
+    .bind(rule_id)
+    .bind(revision)
+    .bind(retired_at)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        Value::Object(values) => {
+            let mut entries = values.into_iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
+    }
 }
 
 fn normalized_event_payload(event: &RepoWatchEvent) -> Value {
@@ -1460,7 +1607,8 @@ fn validate_webhook(delivery: &WebhookDelivery<'_>) -> Result<(), StoreError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StoreError, WebhookDelivery, validate_webhook};
+    use super::{StoreError, WebhookDelivery, canonical_json, validate_webhook};
+    use serde_json::{Map, Value};
     use signalbox_ownership_seam::{OffsetDateTime, RepositorySlug};
     use uuid::Uuid;
 
@@ -1483,5 +1631,20 @@ mod tests {
             validate_webhook(&input),
             Err(StoreError::InvalidWebhookExpiry)
         ));
+    }
+
+    #[test]
+    fn normalized_payload_object_keys_are_canonical_at_every_depth() {
+        let mut nested = Map::new();
+        nested.insert(String::from("z"), Value::from(1));
+        nested.insert(String::from("a"), Value::from(2));
+        let mut payload = Map::new();
+        payload.insert(String::from("target"), Value::Object(nested));
+        payload.insert(String::from("repository"), Value::from("owner/repository"));
+
+        assert_eq!(
+            canonical_json(Value::Object(payload)).to_string(),
+            r#"{"repository":"owner/repository","target":{"a":2,"z":1}}"#
+        );
     }
 }
