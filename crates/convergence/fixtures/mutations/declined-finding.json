@@ -1,0 +1,160 @@
+{
+  "source": "settled.json",
+  "edge": "all findings declined and resolved completes a quiet review",
+  "mutations": [
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviewThreads",
+      "value": {
+        "totalCount": 1,
+        "nodes": [
+          {
+            "comments": {
+              "totalCount": 2,
+              "nodes": [
+                {
+                  "author": {
+                    "login": "chatgpt-codex-connector"
+                  },
+                  "authorAssociation": "NONE",
+                  "body": "A finding requires a disposition.",
+                  "createdAt": "2026-09-05T12:00:00Z",
+                  "id": "PRRC_kwDOTWhy-87q561i",
+                  "lastEditedAt": null,
+                  "pullRequestReview": {
+                    "id": "PRR_kwDOTWhy-88AAAABMUiacg"
+                  }
+                },
+                {
+                  "author": {
+                    "login": "KeenWill"
+                  },
+                  "authorAssociation": "OWNER",
+                  "body": "Declined: the cited behavior is outside this change.",
+                  "createdAt": "2026-09-05T13:00:00Z",
+                  "id": "IC_kwDOTWhy-88AAAABSvedMg",
+                  "lastEditedAt": null,
+                  "pullRequestReview": null
+                }
+              ],
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+              }
+            },
+            "id": "PRRT_kwDOTWhy-86fkWZr",
+            "isResolved": true
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviewThreads",
+      "value": {
+        "totalCount": 1,
+        "nodes": [
+          {
+            "comments": {
+              "totalCount": 2,
+              "nodes": [
+                {
+                  "author": {
+                    "login": "chatgpt-codex-connector"
+                  },
+                  "authorAssociation": "NONE",
+                  "body": "A finding requires a disposition.",
+                  "createdAt": "2026-09-05T12:00:00Z",
+                  "id": "PRRC_kwDOTWhy-87q561i",
+                  "lastEditedAt": null,
+                  "pullRequestReview": {
+                    "id": "PRR_kwDOTWhy-88AAAABMUiacg"
+                  }
+                },
+                {
+                  "author": {
+                    "login": "KeenWill"
+                  },
+                  "authorAssociation": "OWNER",
+                  "body": "Declined: the cited behavior is outside this change.",
+                  "createdAt": "2026-09-05T13:00:00Z",
+                  "id": "IC_kwDOTWhy-88AAAABSvedMg",
+                  "lastEditedAt": null,
+                  "pullRequestReview": null
+                }
+              ],
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+              }
+            },
+            "id": "PRRT_kwDOTWhy-86fkWZr",
+            "isResolved": true
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/0/0/response/data/repository/pullRequest/reviews",
+      "value": {
+        "totalCount": 1,
+        "nodes": [
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 1
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T12:00:00Z"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    },
+    {
+      "path": "/observations/1/0/response/data/repository/pullRequest/reviews",
+      "value": {
+        "totalCount": 1,
+        "nodes": [
+          {
+            "author": {
+              "login": "chatgpt-codex-connector"
+            },
+            "body": "",
+            "comments": {
+              "totalCount": 1
+            },
+            "commit": {
+              "oid": "417a88fd53464ef0783ec39f5c4da3c50a3ef5e2"
+            },
+            "id": "PRR_kwDOTWhy-88AAAABMUiacg",
+            "lastEditedAt": null,
+            "state": "COMMENTED",
+            "submittedAt": "2026-09-05T12:00:00Z"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    }
+  ]
+}

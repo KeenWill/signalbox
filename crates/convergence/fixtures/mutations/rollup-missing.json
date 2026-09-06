@@ -1,0 +1,14 @@
+{
+  "source": "settled.json",
+  "edge": "no head check rollup",
+  "mutations": [
+    {
+      "path": "/observations/0/1/response/data/repository/object/statusCheckRollup",
+      "value": null
+    },
+    {
+      "path": "/observations/1/1/response/data/repository/object/statusCheckRollup",
+      "value": null
+    }
+  ]
+}
