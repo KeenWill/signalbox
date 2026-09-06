@@ -245,14 +245,14 @@ prompt carries the session's commissioned goal, template, frozen system prompt,
 and optional dispatch authority, each separately delimited and quoted as
 untrusted evidence, and the prompt treats them as scope to compare with the
 request, never as instruction. Outside a turn judged under the commissioned
-generation's dispatch authority, which [repo-watch](repo-watch.md) owns, an
-`EscalateToHuman` result stores the completed call but no decision and leaves
-the same request parked. Under that authority the request stays parked when the
-turn has pending steering, or when the session escalated earlier and the
-authority still stands; an operator-commissioned dispatch keeps the park while
-its authority stands. A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous`
-terminal judge call retains the attended park while immediately admitting a user
-decision.
+generation's dispatch authority, an `EscalateToHuman` result stores the
+completed call but no decision and leaves the same request parked. A
+commissioned dispatch also keeps the request parked while its authority stands
+or when the turn has pending steering. Once that authority is withdrawn, an
+escalation with no pending steering terminalizes the unattended turn under the
+commissioned-dispatch audit. A `KnownFailed`, `Refused`, `Cancelled`, or
+`Ambiguous` terminal judge call retains the attended park while immediately
+admitting a user decision.
 
 Deny-and-end composes the recorded denial with the applied-interrupt stop path,
 and the interrupt remains the proof-bearing authority for ending the turn. An

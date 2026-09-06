@@ -213,8 +213,6 @@ pub enum CompleteApprovalJudgeOutcome {
     /// The judge explicitly left the request parked for a user decision.
     EscalatedToHuman,
     /// An unattended turn was terminalized and audited for its dispatch.
-    ///
-    /// The owning dispatch module records its command settlement separately.
     HeadlessEscalationTerminalized,
 }
 

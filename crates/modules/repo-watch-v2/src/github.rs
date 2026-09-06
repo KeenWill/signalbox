@@ -34,6 +34,7 @@ impl GitHubClient {
         );
         let client = Client::builder()
             .https_only(true)
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .default_headers(headers)
             .build()
