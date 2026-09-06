@@ -15,8 +15,9 @@ use signalbox_module_repo_watch_v2::{
     CreateSessionCommandFactory, DispatchAdmission, DispatchReferenceGenerator, EventAdmission,
     FrontierEventAdmission, FrontierReleaseAdmission, PullRequestLifecycle, PullRequestState,
     RepoWatchStore, RepositoryProjection, RepositoryState, RuleAdmission, SessionCommandCodec,
-    WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules,
+    StoreError, WebhookAdmission, WebhookDelivery, WebhookDisposition, matching_rules,
     plan_lifecycle_reaction_for_test, plan_repository_event,
+    plan_retained_lifecycle_reaction_for_test,
 };
 use signalbox_ownership_seam::{
     BranchName, CommitSha, CreateSession, DescendantTerminationScope, DurableCommandId,
@@ -681,6 +682,26 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         DispatchAdmission::ConflictingReuse
     ));
+    let mut occupied_ids = FixedDispatchIds {
+        value: 30,
+        calls: 0,
+    };
+    let mut occupied_factory = FixtureSessionFactory {
+        next_command: 90,
+        model: 18,
+    };
+    let occupied_batches = plan_repository_event(
+        std::slice::from_ref(&second_rule),
+        &event,
+        &mut occupied_ids,
+        &mut occupied_factory,
+    )?;
+    assert!(matches!(
+        store
+            .record_commands(&occupied_batches[0], observed_at, &mut command_codec)
+            .await?,
+        DispatchAdmission::Inserted
+    ));
     let mut replay_ids = FixedDispatchIds {
         value: 30,
         calls: 0,
@@ -761,14 +782,18 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         retained_command_ids
     );
     let recovered_without_rule = store.recover_pending_commands(&mut command_codec).await?;
+    let recovered_without_removed_rule = recovered_without_rule
+        .iter()
+        .filter(|planned| planned.rule_id() == rule.id())
+        .collect::<Vec<_>>();
     assert_eq!(
-        recovered_without_rule
+        recovered_without_removed_rule
             .iter()
             .map(|planned| planned.command().command_id())
             .collect::<Vec<_>>(),
         retained_command_ids
     );
-    assert!(recovered_without_rule.iter().all(|planned| {
+    assert!(recovered_without_removed_rule.iter().all(|planned| {
         let SessionCommandPayload::CreateSession(command) =
             planned.command().clone().into_payload()
         else {
@@ -798,6 +823,50 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .record_commands(&unowned_reaction, observed_at, &mut command_codec)
             .await?,
         DispatchAdmission::ConflictingReuse
+    ));
+    let ordered_reaction_one = plan_lifecycle_reaction_for_test(
+        trigger_sequence,
+        retained_dispatch,
+        &rule,
+        &event,
+        NonZeroU64::MIN,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(85)),
+            reaction_session,
+            SessionLifecycleOperation::ReleaseStart,
+        ),
+    )?;
+    let ordered_reaction_two = plan_lifecycle_reaction_for_test(
+        trigger_sequence,
+        retained_dispatch,
+        &rule,
+        &event,
+        NonZeroU64::new(2).expect("two is positive"),
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(86)),
+            reaction_session,
+            SessionLifecycleOperation::ReleaseStart,
+        ),
+    )?;
+    assert!(matches!(
+        store
+            .record_commands(
+                &[ordered_reaction_two.clone(), ordered_reaction_one.clone()],
+                observed_at,
+                &mut command_codec,
+            )
+            .await,
+        Err(StoreError::InvalidDispatchBatch)
+    ));
+    assert!(matches!(
+        store
+            .record_commands(
+                &[ordered_reaction_one.clone(), ordered_reaction_one],
+                observed_at,
+                &mut command_codec,
+            )
+            .await,
+        Err(StoreError::InvalidDispatchBatch)
     ));
     let reaction_commands = [plan_lifecycle_reaction_for_test(
         trigger_sequence,
@@ -857,6 +926,32 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .fetch_one(&module_pool)
             .await?;
     assert_eq!(linked_session, created_session);
+    let restarted_store = RepoWatchStore::new(module_pool.clone());
+    let retained_origin = restarted_store
+        .reaction_origin_for_session(reaction_session)
+        .await?
+        .expect("a created module session retains its reaction origin");
+    assert_eq!(retained_origin.dispatch(), retained_dispatch);
+    assert_eq!(retained_origin.action_ordinal(), NonZeroU64::MIN);
+    assert_eq!(retained_origin.repository(), &repository);
+    assert_eq!(retained_origin.rule_id(), rule.id());
+    assert_eq!(retained_origin.rule_revision(), rule.version());
+    assert_eq!(retained_origin.event_id(), event.id());
+    let restarted_reaction = [plan_retained_lifecycle_reaction_for_test(
+        NonZeroU64::new(44).expect("forty-four is positive"),
+        &retained_origin,
+        SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(87)),
+            reaction_session,
+            SessionLifecycleOperation::ReleaseStart,
+        ),
+    )?];
+    assert!(matches!(
+        restarted_store
+            .record_commands(&restarted_reaction, observed_at, &mut command_codec)
+            .await?,
+        DispatchAdmission::Inserted
+    ));
     let still_pending_creates: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM dispatch_ledger
           WHERE dispatch_ref = $1 AND command_kind = 'create_session' AND status = 'pending'",

@@ -75,7 +75,12 @@ count of matches it collapsed, the boundary event identities, and that state.
 One event and rule match admits the rule's complete ordered action list as one
 singleton batch. Each dispatch record links the triggering event, rule identity
 and version, singleton key, action ordinal, session-template provenance, and the
-new session. A durable delivery intent records the reserved submit-command,
+new session. Initial actions and lifecycle reactions are retained and submitted
+in strictly increasing, unique action-ordinal order. A created session indexes
+its retained rule revision, event, dispatch, and action ordinal, so lifecycle
+reaction planning survives rule removal and process restart. Equal evaluation
+recovery finds that retained batch before considering newly reserved dispatch
+or command identities. A durable delivery intent records the reserved submit-command,
 accepted-input, turn, and cancellation candidates beside the applied link, so
 equal recovery reuses the committed batch. An obligation records exactly one
 blocker: the occupying repository-watch dispatch or an external commissioned

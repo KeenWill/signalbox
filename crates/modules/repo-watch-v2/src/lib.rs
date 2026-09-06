@@ -298,6 +298,49 @@ impl PlannedCommand {
     }
 }
 
+/// Retained origin of the create action that produced one session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedDispatchAction {
+    dispatch: RepoWatchDispatchId,
+    action_ordinal: NonZeroU64,
+    repository: RepositorySlug,
+    rule_id: RepoWatchRuleId,
+    rule_revision: RepoWatchRuleVersion,
+    event_id: signalbox_ownership_seam::RepoWatchEventId,
+}
+
+impl RetainedDispatchAction {
+    /// Returns the committed dispatch reference.
+    pub const fn dispatch(&self) -> RepoWatchDispatchId {
+        self.dispatch
+    }
+
+    /// Returns the originating action ordinal.
+    pub const fn action_ordinal(&self) -> NonZeroU64 {
+        self.action_ordinal
+    }
+
+    /// Returns the retained repository identity.
+    pub const fn repository(&self) -> &RepositorySlug {
+        &self.repository
+    }
+
+    /// Returns the retained rule identity.
+    pub const fn rule_id(&self) -> &RepoWatchRuleId {
+        &self.rule_id
+    }
+
+    /// Returns the retained rule revision.
+    pub const fn rule_revision(&self) -> RepoWatchRuleVersion {
+        self.rule_revision
+    }
+
+    /// Returns the retained triggering event identity.
+    pub const fn event_id(&self) -> signalbox_ownership_seam::RepoWatchEventId {
+        self.event_id
+    }
+}
+
 /// Core-owned factory for the resolved create-session payload.
 pub trait CreateSessionCommandFactory {
     /// Infrastructure or template-resolution failure.
@@ -1441,17 +1484,22 @@ impl RepoWatchStore {
             return Err(StoreError::InvalidDispatchBatch);
         };
         let initial_batch = first.trigger_sequence().is_none();
-        if planned.iter().enumerate().any(|(index, command)| {
-            command.dispatch() != first.dispatch()
-                || command.repository() != first.repository()
-                || command.rule_id() != first.rule_id()
-                || command.rule_revision() != first.rule_revision()
-                || command.event_id() != first.event_id()
-                || command.trigger_sequence() != first.trigger_sequence()
-                || (initial_batch
-                    && command.action_ordinal()
-                        != u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
-        }) {
+        if planned.iter().any(|command| command.action_ordinal() == 0)
+            || planned
+                .windows(2)
+                .any(|commands| commands[0].action_ordinal() >= commands[1].action_ordinal())
+            || planned.iter().enumerate().any(|(index, command)| {
+                command.dispatch() != first.dispatch()
+                    || command.repository() != first.repository()
+                    || command.rule_id() != first.rule_id()
+                    || command.rule_revision() != first.rule_revision()
+                    || command.event_id() != first.event_id()
+                    || command.trigger_sequence() != first.trigger_sequence()
+                    || (initial_batch
+                        && command.action_ordinal()
+                            != u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
+            })
+        {
             return Err(StoreError::InvalidDispatchBatch);
         }
         let encoded_commands = planned
@@ -1478,25 +1526,6 @@ impl RepoWatchStore {
         .bind(first.dispatch().into_uuid())
         .execute(&mut *transaction)
         .await?;
-        let conflicting_dispatch: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1 FROM dispatch_ledger WHERE dispatch_ref = $1
-                  AND (repository IS DISTINCT FROM $2
-                       OR rule_id IS DISTINCT FROM $3
-                       OR rule_revision IS DISTINCT FROM $4
-                       OR event_id IS DISTINCT FROM $5))",
-        )
-        .bind(first.dispatch().into_uuid())
-        .bind(first.repository().as_str())
-        .bind(first.rule_id().as_str())
-        .bind(Decimal::from(first.rule_revision().get()))
-        .bind(first.event_id().into_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        if conflicting_dispatch {
-            transaction.rollback().await?;
-            return Ok(DispatchAdmission::ConflictingReuse);
-        }
         let retained_actions: Vec<(Uuid, Decimal, Uuid, String, Vec<u8>)> = sqlx::query_as(
             "SELECT dispatch_ref, action_ordinal, command_id, command_kind, command_payload
                FROM dispatch_ledger
@@ -1542,6 +1571,25 @@ impl RepoWatchStore {
             });
         }
         if !retained_actions.is_empty() {
+            transaction.rollback().await?;
+            return Ok(DispatchAdmission::ConflictingReuse);
+        }
+        let conflicting_dispatch: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM dispatch_ledger WHERE dispatch_ref = $1
+                  AND (repository IS DISTINCT FROM $2
+                       OR rule_id IS DISTINCT FROM $3
+                       OR rule_revision IS DISTINCT FROM $4
+                       OR event_id IS DISTINCT FROM $5))",
+        )
+        .bind(first.dispatch().into_uuid())
+        .bind(first.repository().as_str())
+        .bind(first.rule_id().as_str())
+        .bind(Decimal::from(first.rule_revision().get()))
+        .bind(first.event_id().into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if conflicting_dispatch {
             transaction.rollback().await?;
             return Ok(DispatchAdmission::ConflictingReuse);
         }
@@ -1701,6 +1749,64 @@ impl RepoWatchStore {
             )
             .collect::<Result<Vec<_>, _>>()
             .map(Vec::into_boxed_slice)
+    }
+
+    /// Finds the retained create action that produced one session.
+    ///
+    /// The lookup joins the retained rule revision and event, so it remains
+    /// sufficient for lifecycle reaction planning after active configuration
+    /// is removed and after a daemon restart.
+    pub async fn reaction_origin_for_session(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<RetainedDispatchAction>, StoreError> {
+        type OriginRow = (Uuid, Decimal, String, String, Decimal, Uuid);
+        let rows: Vec<OriginRow> = sqlx::query_as(
+            "SELECT ledger.dispatch_ref, ledger.action_ordinal, ledger.repository,
+                    ledger.rule_id, ledger.rule_revision, ledger.event_id
+               FROM dispatch_ledger AS ledger
+               JOIN rule_revision AS retained_rule
+                 ON retained_rule.repository = ledger.repository
+                AND retained_rule.rule_id = ledger.rule_id
+                AND retained_rule.revision = ledger.rule_revision
+               JOIN gh_event AS retained_event
+                 ON retained_event.event_id = ledger.event_id
+                AND retained_event.repository = ledger.repository
+              WHERE ledger.created_session_id = $1
+                AND ledger.trigger_sequence IS NULL
+              ORDER BY ledger.dispatch_ref, ledger.action_ordinal
+              LIMIT 2",
+        )
+        .bind(session.into_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        let [row] = rows.as_slice() else {
+            return if rows.is_empty() {
+                Ok(None)
+            } else {
+                Err(StoreError::InvalidRetainedCommand)
+            };
+        };
+        let (dispatch, ordinal, repository, rule_id, rule_revision, event_id) = row;
+        let action_ordinal = ordinal
+            .to_u64()
+            .and_then(NonZeroU64::new)
+            .ok_or(StoreError::InvalidRetainedCommand)?;
+        let rule_revision = rule_revision
+            .to_u64()
+            .and_then(NonZeroU64::new)
+            .and_then(RepoWatchRuleVersion::new)
+            .ok_or(StoreError::InvalidRetainedCommand)?;
+        Ok(Some(RetainedDispatchAction {
+            dispatch: RepoWatchDispatchId::from_uuid(*dispatch),
+            action_ordinal,
+            repository: RepositorySlug::try_new(repository.clone())
+                .map_err(|_| StoreError::InvalidRetainedCommand)?,
+            rule_id: RepoWatchRuleId::try_new(rule_id.clone())
+                .map_err(|_| StoreError::InvalidRetainedCommand)?,
+            rule_revision,
+            event_id: signalbox_ownership_seam::RepoWatchEventId::from_uuid(*event_id),
+        }))
     }
 
     /// Applies one lifecycle event to the module command ledger.
@@ -1875,6 +1981,51 @@ fn plan_lifecycle_reaction_at_sequence(
     ))
 }
 
+/// Admits a lifecycle reaction using the durable origin of its created session.
+pub fn plan_retained_lifecycle_reaction(
+    trigger: &LifecycleEvent,
+    origin: &RetainedDispatchAction,
+    command: SessionLifecycleCommand,
+) -> Result<PlannedCommand, LifecycleReactionError> {
+    if !matches!(
+        trigger.kind(),
+        LifecycleEventKind::SessionTerminal(_) | LifecycleEventKind::GoalChanged(_)
+    ) {
+        return Err(LifecycleReactionError::UnsupportedTrigger);
+    }
+    plan_retained_lifecycle_reaction_at_sequence(trigger.sequence(), origin, command)
+}
+
+fn plan_retained_lifecycle_reaction_at_sequence(
+    trigger_sequence: u64,
+    origin: &RetainedDispatchAction,
+    command: SessionLifecycleCommand,
+) -> Result<PlannedCommand, LifecycleReactionError> {
+    let admitted = matches!(command.operation(), SessionLifecycleOperation::ReleaseStart)
+        || matches!(
+            command.operation(),
+            SessionLifecycleOperation::Stop {
+                sticky: StopStickiness::Sticky,
+                ..
+            }
+        );
+    if !admitted {
+        return Err(LifecycleReactionError::UnsupportedCommand);
+    }
+    let command = SessionCommand::lifecycle(command)
+        .map_err(|_| LifecycleReactionError::UnsupportedCommand)?;
+    Ok(PlannedCommand {
+        dispatch: origin.dispatch,
+        action_ordinal: origin.action_ordinal.get(),
+        repository: origin.repository.clone(),
+        rule_id: origin.rule_id.clone(),
+        rule_revision: origin.rule_revision,
+        event_id: origin.event_id,
+        trigger_sequence: Some(trigger_sequence),
+        command,
+    })
+}
+
 /// Builds a lifecycle reaction from an explicit positive trigger sequence.
 ///
 /// This constructor exists only for persistence-boundary integration tests;
@@ -1896,6 +2047,16 @@ pub fn plan_lifecycle_reaction_for_test(
         action_ordinal,
         command,
     )
+}
+
+/// Builds a retained-origin reaction from an explicit positive trigger sequence.
+#[cfg(feature = "test-support")]
+pub fn plan_retained_lifecycle_reaction_for_test(
+    trigger_sequence: NonZeroU64,
+    origin: &RetainedDispatchAction,
+    command: SessionLifecycleCommand,
+) -> Result<PlannedCommand, LifecycleReactionError> {
+    plan_retained_lifecycle_reaction_at_sequence(trigger_sequence.get(), origin, command)
 }
 
 /// Returns configured rules whose checked matcher accepts one normalized fact.
