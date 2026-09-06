@@ -729,13 +729,13 @@ pub enum CodeHostResult {
     /// Accepted rerun request.
     RerunFailedJobs(RerunFailedJobsResult),
     /// Deterministic convergence evidence and verdict.
-    ConvergenceState(super::ConvergenceStateResult),
+    ConvergenceState(super::ConvergenceReadResult),
     /// Parent and immediate-child stack ancestry evidence.
     StackState(super::StackStateResult),
     /// Structured bounded thread inventory.
     ThreadInventory(super::ThreadInventoryResult),
     /// Pure review-protocol gate composition.
-    ReviewGateCheck(super::ReviewGateCheckResult),
+    ReviewGateCheck(super::ConvergenceReadResult),
 }
 
 impl CodeHostResult {
@@ -754,10 +754,10 @@ impl CodeHostResult {
             Self::ThreadResolve(result) => result.into_value(),
             Self::CiJobLog(result) => result.into_value(),
             Self::RerunFailedJobs(result) => result.into_value(),
-            Self::ConvergenceState(result) => super::review_slog::convergence_into_value(result),
+            Self::ConvergenceState(result) => result.into_value(),
             Self::StackState(result) => super::review_slog::stack_into_value(result),
             Self::ThreadInventory(result) => super::review_slog::inventory_into_value(result),
-            Self::ReviewGateCheck(result) => super::review_slog::gate_into_value(result),
+            Self::ReviewGateCheck(result) => result.into_value(),
         }
     }
 }

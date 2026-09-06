@@ -418,7 +418,7 @@ mod tests {
         "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     #[test]
-    fn inv056_exact_bytes_have_one_tagged_lowercase_identity() {
+    fn exact_bytes_have_one_tagged_lowercase_identity() {
         let first_producer = BlobDigest::digest(b"abc");
         let independently_owned_bytes = Vec::from(*b"abc");
         let second_producer = BlobDigest::digest(&independently_owned_bytes);
@@ -457,8 +457,8 @@ mod tests {
     }
 
     #[test]
-    /// INV-078: deterministic reuse is fixed by inputs, procedure, parameters, and implementation.
-    fn inv078_deterministic_derivation_keys_cover_exact_procedure_provenance() {
+    /// deterministic reuse is fixed by inputs, procedure, parameters, and implementation.
+    fn deterministic_derivation_keys_cover_exact_procedure_provenance() {
         let transformation = BlobTransformation::try_new(
             BlobTransformationName::try_new("image.thumbnail")
                 .expect("the fixture procedure name is valid"),

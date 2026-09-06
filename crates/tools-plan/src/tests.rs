@@ -1060,7 +1060,7 @@ fn write_returns_the_assigned_entry_identity() {
     let output: Value =
         serde_json::from_str(&completed_text(evidence)).expect("tool result is compact JSON");
 
-    assert_eq!(output["event"]["ordinal"], json!(expected_ordinal.as_u64()));
+    assert_eq!(output["event"]["ordinal"], json!(expected_ordinal.get()));
     assert_eq!(
         output["event"]["entry_id"],
         json!(PlanEntryId::from_creation_ordinal(expected_ordinal).as_u64())

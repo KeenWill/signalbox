@@ -16,6 +16,7 @@ use rustix::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::descriptor_identity::descriptor_identity;
 use crate::failure::LocalGitFailure;
 use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_TREE_BLOB_BYTES, MAX_WORKTREE_INSPECTIONS};
 
@@ -725,10 +726,7 @@ fn unsupported_packed_replacement_objects_are_absent(
 }
 
 fn owned_descriptor_identity(directory: &OwnedFd) -> Result<FileIdentity, LocalGitFailure> {
-    fs::File::from(dup(directory).map_err(|_| LocalGitFailure::Repository)?)
-        .metadata()
-        .map(|metadata| file_identity(&metadata))
-        .map_err(|_| LocalGitFailure::Repository)
+    descriptor_identity(directory.as_fd()).ok_or(LocalGitFailure::Repository)
 }
 
 fn reopen_bound_directory(
