@@ -5036,10 +5036,11 @@ fn terminal_snapshot_selection(
         SessionEvent::TurnRefused {
             turn_id,
             model_call_id,
-            ..
+            terminal_frontier_id,
         } => Some(SnapshotSelection::Refused {
             turn_id: *turn_id,
             model_call_id: *model_call_id,
+            terminal_frontier_id: *terminal_frontier_id,
         }),
         SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
@@ -8483,6 +8484,7 @@ mod tests {
             Some(SnapshotSelection::Refused {
                 turn_id,
                 model_call_id,
+                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
             })
         );
     }

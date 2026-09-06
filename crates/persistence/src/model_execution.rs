@@ -86,6 +86,7 @@ pub struct ToolContinuationUsageLimit {
     fast_mode: FastMode,
     max_output_tokens: u64,
     context_window_tokens: u64,
+    replays_provider_compaction: bool,
 }
 
 impl ToolContinuationUsageLimit {
@@ -101,7 +102,15 @@ impl ToolContinuationUsageLimit {
             fast_mode,
             max_output_tokens,
             context_window_tokens,
+            replays_provider_compaction: false,
         }
+    }
+
+    /// Marks that this resolved target replays durable provider compaction.
+    #[must_use]
+    pub const fn with_provider_compaction_replay(mut self) -> Self {
+        self.replays_provider_compaction = true;
+        self
     }
 
     pub(crate) const fn max_output_tokens(self) -> u64 {
@@ -110,6 +119,10 @@ impl ToolContinuationUsageLimit {
 
     pub(crate) const fn context_window_tokens(self) -> u64 {
         self.context_window_tokens
+    }
+
+    const fn replays_provider_compaction(self) -> bool {
+        self.replays_provider_compaction
     }
 }
 
@@ -3494,9 +3507,11 @@ async fn load_tool_continuation_headroom_evidence(
     let Some(input_tokens) = usage.input_tokens() else {
         return Ok(None);
     };
-    let retained_input_tokens = decode("retained_input_tokens")?;
-    let retained_output_tokens = decode("retained_output_tokens")?;
-    if row.try_get::<bool, _>("has_provider_compaction")?
+    let mut retained_input_tokens = decode("retained_input_tokens")?;
+    let mut retained_output_tokens = decode("retained_output_tokens")?;
+    let has_provider_compaction = row.try_get::<bool, _>("has_provider_compaction")?;
+    let mut input_is_retained: bool = row.try_get("input_is_retained")?;
+    if has_provider_compaction
         && (retained_input_tokens.is_none() || retained_output_tokens.is_none())
     {
         return Err(ModelCallCorruption::Missing(
@@ -3504,7 +3519,13 @@ async fn load_tool_continuation_headroom_evidence(
         )
         .into());
     }
-    let input_is_retained: bool = row.try_get("input_is_retained")?;
+    if has_provider_compaction && !limit.replays_provider_compaction() {
+        // The disabled projection omits the opaque block and replays the
+        // preserved history that the aggregate usage measured.
+        retained_input_tokens = None;
+        retained_output_tokens = None;
+        input_is_retained = true;
+    }
     let input_tokens = if let Some(retained_input_tokens) = retained_input_tokens {
         retained_input_tokens
     } else if !input_is_retained {

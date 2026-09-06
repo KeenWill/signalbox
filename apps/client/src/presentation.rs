@@ -461,6 +461,7 @@ pub(crate) enum SnapshotSelection {
     Refused {
         turn_id: CanonicalUuid,
         model_call_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
     },
     ToolBatchProposed {
         turn_id: CanonicalUuid,
@@ -3119,6 +3120,25 @@ impl SnapshotSelection {
                 if matches!(
                     (self, &turn.state),
                     (
+                        Self::Refused {
+                            turn_id,
+                            model_call_id,
+                            terminal_frontier_id,
+                        },
+                        TurnState::Refused {
+                            terminal_frontier_id: stored_frontier,
+                            terminal_model_call_id: stored_call,
+                            ..
+                        },
+                    ) if turn_id == turn.turn_id
+                        && model_call_id == *stored_call
+                        && terminal_frontier_id == *stored_frontier
+                ) {
+                    anchor_found = true;
+                }
+                if matches!(
+                    (self, &turn.state),
+                    (
                         Self::ToolReconciliation {
                             turn_id,
                             tool_attempt_id,
@@ -3237,7 +3257,7 @@ impl SnapshotSelection {
                     cancelled_model_call,
                 })
             }
-            Self::Refused { .. } => Ok(SnapshotSelectionContext::default()),
+            Self::Refused { .. } if anchor_found => Ok(SnapshotSelectionContext::default()),
             Self::ToolReconciliation { .. }
                 if anchor_found
                     && !reconciliation_proposals.is_empty()
@@ -3253,9 +3273,12 @@ impl SnapshotSelection {
             Self::ToolBatchProposed { .. } => Err(ClientError::Protocol(
                 "tool-proposal reread omitted the event's exact proposal",
             )),
-            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. } => Err(
-                ClientError::Protocol("terminal reread omitted the event's exact marker"),
-            ),
+            Self::Completed { .. }
+            | Self::Failed { .. }
+            | Self::Cancelled { .. }
+            | Self::Refused { .. } => Err(ClientError::Protocol(
+                "terminal reread omitted the event's exact marker",
+            )),
             Self::ToolReconciliation { .. } => Err(ClientError::Protocol(
                 "tool reconciliation reread omitted its exact terminal result suffix",
             )),
@@ -3308,6 +3331,7 @@ impl SnapshotSelection {
                 | Self::Refused {
                     turn_id,
                     model_call_id,
+                    ..
                 }
                 | Self::ToolBatchProposed {
                     turn_id,
@@ -5046,6 +5070,7 @@ mod tests {
         let selected_call = wire_uuid(2);
         let other_turn = wire_uuid(3);
         let other_call = wire_uuid(4);
+        let selected_frontier = wire_uuid(5);
         let compaction = |turn_id, model_call_id| SnapshotEntry {
             entry_index: 0,
             source_session_id: wire_uuid(10),
@@ -5066,6 +5091,7 @@ mod tests {
             SnapshotSelection::Refused {
                 turn_id: selected_turn,
                 model_call_id: selected_call,
+                terminal_frontier_id: selected_frontier,
             },
             SnapshotSelection::ToolBatchProposed {
                 turn_id: selected_turn,
@@ -5087,9 +5113,20 @@ mod tests {
         let selected_turn = wire_uuid(1);
         let selected_call = wire_uuid(2);
         let other_call = wire_uuid(3);
+        let selected_frontier = wire_uuid(4);
         let mut snapshot = TranscriptSnapshot::from_messages(
             12,
             [
+                ServerMessage::TranscriptTurn {
+                    turn_id: selected_turn,
+                    acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
+                    state: TurnState::Refused {
+                        terminal_frontier_id: selected_frontier,
+                        terminal_attempt_id: wire_uuid(5),
+                        terminal_model_call_id: selected_call,
+                    },
+                },
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(0),
                     source_session_id: wire_uuid(10),
@@ -5121,6 +5158,7 @@ mod tests {
                 SnapshotSelection::Refused {
                     turn_id: selected_turn,
                     model_call_id: selected_call,
+                    terminal_frontier_id: selected_frontier,
                 },
             )
             .expect("a refused compaction marker must render without refusal text");
@@ -5131,6 +5169,69 @@ mod tests {
         )));
         assert!(!rendered.contains(&format!("call={other_call}")));
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn refused_terminal_reread_requires_its_exact_durable_turn_anchor() {
+        let selected_turn = wire_uuid(1);
+        let selected_call = wire_uuid(2);
+        let selected_frontier = wire_uuid(3);
+        let mismatched_anchors = [
+            None,
+            Some((selected_turn, wire_uuid(4), selected_frontier)),
+            Some((selected_turn, selected_call, wire_uuid(5))),
+            Some((wire_uuid(6), selected_call, selected_frontier)),
+        ];
+
+        for anchor in mismatched_anchors {
+            let mut messages = vec![ServerMessage::TranscriptEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: wire_uuid(10),
+                entry_id: wire_uuid(11),
+                entry: TranscriptEntry::ProviderCompaction {
+                    turn_id: selected_turn,
+                    model_call_id: selected_call,
+                },
+            }];
+            if let Some((turn_id, model_call_id, frontier_id)) = anchor {
+                messages.insert(
+                    0,
+                    ServerMessage::TranscriptTurn {
+                        turn_id,
+                        acceptance_position: CanonicalU64::new(1),
+                        model_settings: None,
+                        state: TurnState::Refused {
+                            terminal_frontier_id: frontier_id,
+                            terminal_attempt_id: wire_uuid(7),
+                            terminal_model_call_id: model_call_id,
+                        },
+                    },
+                );
+            }
+            let mut snapshot =
+                TranscriptSnapshot::from_messages(12, messages).expect("snapshot must spool");
+            let mut displayed = SnapshotIdentitySet::new().expect("identity spool must open");
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let error = Output::new(&mut stdout, &mut stderr, false)
+                .terminal_material(
+                    &mut snapshot,
+                    &mut displayed,
+                    SnapshotSelection::Refused {
+                        turn_id: selected_turn,
+                        model_call_id: selected_call,
+                        terminal_frontier_id: selected_frontier,
+                    },
+                )
+                .expect_err("a refused reread must require the event's exact turn anchor");
+
+            assert!(matches!(
+                error,
+                ClientError::Protocol("terminal reread omitted the event's exact marker")
+            ));
+            assert!(stdout.is_empty());
+            assert!(stderr.is_empty());
+        }
     }
 
     #[test]

@@ -1712,12 +1712,17 @@ impl HubModelConfiguration {
                 let effective = runtime_models
                     .effective_definition(definition, fast_mode)
                     .ok_or(HubModelConfigurationError::ConflictingTarget)?;
-                tool_continuation_usage_limits.push(ToolContinuationUsageLimit::new(
+                let limit = ToolContinuationUsageLimit::new(
                     route.target,
                     fast_mode,
                     u64::from(effective.max_output_tokens()),
                     u64::from(effective.context_window_tokens()),
-                ));
+                );
+                tool_continuation_usage_limits.push(if effective.provider_compaction_supported() {
+                    limit.with_provider_compaction_replay()
+                } else {
+                    limit
+                });
             }
         }
         let billing_rates = target_billing_rates
