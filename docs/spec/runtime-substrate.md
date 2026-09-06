@@ -313,9 +313,10 @@ closes carries none.
 
 Provider-internal non-acceptance proof is admitted for Anthropic `api_error` at
 HTTP 500, OpenAI `server_error`/`internal_server_error` at HTTP 500, and a Codex
-CLI event stream that closes with `turn.failed`. Anthropic also admits
-`rate_limit_error` and `overloaded_error`; OpenAI also admits
-`rate_limit_exceeded`, `rate_limit_error`, and `insufficient_quota`.
+CLI event stream that closes with `turn.failed` whose message classifies as
+`ProviderInternal`. Anthropic also admits `rate_limit_error` and
+`overloaded_error`; OpenAI also admits `rate_limit_exceeded`,
+`rate_limit_error`, and `insufficient_quota`.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion, and an unrecognized finish token is boundary
