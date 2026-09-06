@@ -21,7 +21,7 @@ pub use context_compaction::{
     ContextCompactionModelResult, RuntimeContextCompactionModel,
 };
 
-use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
+use std::{collections::HashMap, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallInputTokenCount,
@@ -216,33 +216,23 @@ impl RuntimeModelDefinition {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A runtime delivery definition cannot construct a request-safe mapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeModelDefinitionError {
+    #[error("provider model spelling is empty or padded")]
     /// The provider model spelling was empty or padded.
     InvalidProviderModel,
+    #[error("provider output-token limit is zero")]
     /// A provider request requires a positive output-token ceiling.
     InvalidOutputLimit,
+    #[error("provider context-window limit is zero")]
     /// Automatic guarding requires a positive declared context window.
     InvalidContextWindow,
+    #[error("provider output-token limit exceeds its context window")]
     /// The reserved output alone cannot exceed the declared context window.
     OutputLimitExceedsContextWindow,
 }
-
-impl fmt::Display for RuntimeModelDefinitionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidProviderModel => "provider model spelling is empty or padded",
-            Self::InvalidOutputLimit => "provider output-token limit is zero",
-            Self::InvalidContextWindow => "provider context-window limit is zero",
-            Self::OutputLimitExceedsContextWindow => {
-                "provider output-token limit exceeds its context window"
-            }
-        })
-    }
-}
-
-impl Error for RuntimeModelDefinitionError {}
 
 /// Immutable runtime delivery mappings indexed by durable exact target.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -299,14 +289,17 @@ impl RuntimeModelCatalog {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Two deployment definitions assigned conflicting meanings to one target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeModelCatalogError {
+    #[error("runtime model catalog contains a conflicting target")]
     /// One target named distinct provider spellings or output limits.
     ConflictingTarget {
         /// The target whose immutable meaning conflicted.
         target: ResolvedProviderTarget,
     },
+    #[error("runtime model catalog contains a missing mapped fast target")]
     /// A mapped fast target has no runtime delivery definition.
     MissingFastTarget {
         /// Source target declaring mapped fast serving.
@@ -315,19 +308,6 @@ pub enum RuntimeModelCatalogError {
         fast_target: ResolvedProviderTarget,
     },
 }
-
-impl fmt::Display for RuntimeModelCatalogError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ConflictingTarget { .. } => "runtime model catalog contains a conflicting target",
-            Self::MissingFastTarget { .. } => {
-                "runtime model catalog contains a missing mapped fast target"
-            }
-        })
-    }
-}
-
-impl Error for RuntimeModelCatalogError {}
 
 fn runtime_delivery_definitions(
     models: &RuntimeModelCatalog,
@@ -823,60 +803,44 @@ pub struct RuntimeModelCallCapability<Prepared> {
     resolved_target: ResolvedTarget,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized adapter defect; provider response text and credentials are never
 /// retained in this error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeModelCallProviderError {
+    #[error("resolved model target has no runtime mapping")]
     /// A durably resolved target had no matching runtime mapping.
     UnconfiguredTarget,
+    #[error("model runtime preparation reported a defect")]
     /// Runtime preparation reported a local adapter defect.
     PreparationDefect,
+    #[error("model runtime returned a different correlation")]
     /// The runtime returned a different caller-owned correlation identity.
     CorrelationMismatch,
+    #[error("authorized model call differs from the prepared capability")]
     /// Durable authorization did not match the prepared one-shot request.
     AuthorizationMismatch,
+    #[error("model runtime observation carried a different correlation")]
     /// A runtime observation did not carry the caller-owned call identity.
     ObservationCorrelationMismatch,
+    #[error("provider served a different model lineage than the configured target")]
     /// The provider served a model from a different lineage than the
     /// configured target — a substitution the daemon never authorized, and a
     /// distinct outcome from an alias made concrete.
     ProviderTargetSubstituted,
+    #[error("provider completion contains unsupported assistant material")]
     /// Definitive response material is outside the first text-only slice.
     UnsupportedCompletionMaterial,
+    #[error("provider completion contains invalid assistant text")]
     /// A runtime text part cannot construct exact domain assistant text.
     InvalidAssistantText,
+    #[error("application tool schema is invalid at the runtime bridge")]
     /// A checked application schema could not form a runtime JSON value.
     InvalidToolSchema,
+    #[error("provider completion contains an invalid tool proposal")]
     /// Runtime tool material could not form a bounded domain proposal.
     InvalidToolProposal,
 }
-
-impl fmt::Display for RuntimeModelCallProviderError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::UnconfiguredTarget => "resolved model target has no runtime mapping",
-            Self::PreparationDefect => "model runtime preparation reported a defect",
-            Self::CorrelationMismatch => "model runtime returned a different correlation",
-            Self::AuthorizationMismatch => {
-                "authorized model call differs from the prepared capability"
-            }
-            Self::ObservationCorrelationMismatch => {
-                "model runtime observation carried a different correlation"
-            }
-            Self::ProviderTargetSubstituted => {
-                "provider served a different model lineage than the configured target"
-            }
-            Self::UnsupportedCompletionMaterial => {
-                "provider completion contains unsupported assistant material"
-            }
-            Self::InvalidAssistantText => "provider completion contains invalid assistant text",
-            Self::InvalidToolSchema => "application tool schema is invalid at the runtime bridge",
-            Self::InvalidToolProposal => "provider completion contains an invalid tool proposal",
-        })
-    }
-}
-
-impl Error for RuntimeModelCallProviderError {}
 
 impl RuntimeModelCallProviderError {
     /// The stable, sanitized operator-facing cause of this fail-closed
@@ -1016,41 +980,22 @@ impl<R> fmt::Debug for RuntimeModelCallProvider<R> {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Sanitized exact-count adapter failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeInputTokenCountError {
+    #[error("model input token estimation failed")]
+    #[operator(class = CallerOrHubBug, code = "model_input_count_unconfigured_target")]
     /// The durable target has no runtime mapping.
     UnconfiguredTarget,
+    #[error("model input token estimation failed")]
+    #[operator(class = CallerOrHubBug, code = "model_input_count_invalid_tool_schema")]
     /// A checked application schema could not form runtime JSON.
     InvalidToolSchema,
+    #[error("model input token estimation failed")]
+    #[operator(class = CallerOrHubBug, code = "model_input_count_correlation_mismatch")]
     /// The runtime returned a different caller-owned correlation.
     CorrelationMismatch,
-}
-
-impl fmt::Display for RuntimeInputTokenCountError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("model input token estimation failed")
-    }
-}
-
-impl Error for RuntimeInputTokenCountError {}
-
-impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        match self {
-            Self::UnconfiguredTarget | Self::InvalidToolSchema | Self::CorrelationMismatch => {
-                OperatorFailureClass::CallerOrHubBug
-            }
-        }
-    }
-
-    fn operator_failure_cause_code(&self) -> &'static str {
-        match self {
-            Self::UnconfiguredTarget => "model_input_count_unconfigured_target",
-            Self::InvalidToolSchema => "model_input_count_invalid_tool_schema",
-            Self::CorrelationMismatch => "model_input_count_correlation_mismatch",
-        }
-    }
 }
 
 fn runtime_model_settings(
@@ -1726,10 +1671,16 @@ fn decode_checked_raw_json(
     serde_json::value::RawValue::from_string(value.to_owned())
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error(
+    "application tool schema is invalid at the runtime bridge: {}",
+    tool_name
+)]
 /// One application tool definition carried a schema that is not valid JSON.
 #[derive(Debug)]
 pub struct InvalidRuntimeToolSchema {
     tool_name: String,
+    #[source]
     source: serde_json::Error,
 }
 
@@ -1737,22 +1688,6 @@ impl InvalidRuntimeToolSchema {
     /// Returns the safe application tool name whose schema was rejected.
     pub fn tool_name(&self) -> &str {
         &self.tool_name
-    }
-}
-
-impl fmt::Display for InvalidRuntimeToolSchema {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "application tool schema is invalid at the runtime bridge: {}",
-            self.tool_name
-        )
-    }
-}
-
-impl Error for InvalidRuntimeToolSchema {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.source)
     }
 }
 

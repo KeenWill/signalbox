@@ -27,14 +27,14 @@ impl ImportedConversationIdGenerator for UuidV7ImportedConversationIdGenerator {
 ```rust
 pub trait ImportedConversationConverter {
     type Error;
-    fn format(&self) -> imported_conversation::ImportedConversationFormat;
+    fn format(&self) -> format::ImportedConversationFormat;
     fn convert<NextEntryId>(
         &mut self,
         conversation: signalbox_domain::ImportedConversationId,
         source: &[u8],
         next_entry_id: NextEntryId,
     ) -> result::Result<
-        imported_conversation::ImportedConversation,
+        conversation::ImportedConversation,
         <Self as ImportedConversationConverter>::Error,
     >
     where
@@ -60,7 +60,7 @@ impl<Failure> ImportedConversationSkippedRecord<Failure> {
 ```rust
 pub enum ImportedConversationConversionReport<Failure> {
     Converted {
-        conversation: imported_conversation::ImportedConversation,
+        conversation: conversation::ImportedConversation,
         skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
     },
     NoValidRecords {
@@ -97,17 +97,17 @@ pub trait ResilientImportedConversationConverter: ImportedConversationConverter 
 pub enum ImportedConversationStoreOutcome {
     Inserted {
         conversation: signalbox_domain::ImportedConversationId,
-        source_digest: imported_conversation::ImportedConversationSourceDigest,
+        source_digest: digest::ImportedConversationSourceDigest,
     },
     AlreadyImported {
         conversation: signalbox_domain::ImportedConversationId,
-        source_digest: imported_conversation::ImportedConversationSourceDigest,
+        source_digest: digest::ImportedConversationSourceDigest,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ImportedConversationStoreOutcome {
     pub const fn conversation(self) -> signalbox_domain::ImportedConversationId;
-    pub const fn source_digest(self) -> imported_conversation::ImportedConversationSourceDigest;
+    pub const fn source_digest(self) -> digest::ImportedConversationSourceDigest;
 }
 ```
 
@@ -118,7 +118,7 @@ pub trait ImportedConversationStore {
     type Error;
     fn resolve_or_insert(
         &mut self,
-        conversation: imported_conversation::ImportedConversation,
+        conversation: conversation::ImportedConversation,
     ) -> impl future::Future<
         Output = result::Result<
             ImportedConversationStoreOutcome,
@@ -150,7 +150,7 @@ impl ImportConversationOutcome {
 ```rust
 pub enum ImportConversationReport<Failure> {
     Converted {
-        conversation: imported_conversation::ImportedConversation,
+        conversation: conversation::ImportedConversation,
         skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
     },
     Imported {
@@ -174,13 +174,13 @@ pub enum ImportConversationError<ConverterError, StoreError> {
         converted: signalbox_domain::ImportedConversationId,
     },
     ConverterFormatMismatch {
-        declared: imported_conversation::ImportedConversationFormat,
-        converted: imported_conversation::ImportedConversationFormat,
+        declared: format::ImportedConversationFormat,
+        converted: format::ImportedConversationFormat,
     },
     ConverterEntryIdentitySequenceMismatch,
     StoreSourceDigestMismatch {
-        expected: imported_conversation::ImportedConversationSourceDigest,
-        actual: imported_conversation::ImportedConversationSourceDigest,
+        expected: digest::ImportedConversationSourceDigest,
+        actual: digest::ImportedConversationSourceDigest,
     },
     StoreInsertedIdentityMismatch {
         expected: signalbox_domain::ImportedConversationId,

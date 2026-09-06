@@ -26,6 +26,7 @@ const HUB_FENCE_NAMESPACE: u64 = 1_396_852_273;
 /// outbox, recovery, and guard checks make database progress under load.
 pub const FENCED_POOL_MAX_CONNECTIONS: u32 = 48;
 
+#[derive(signalbox_derive::Accessors)]
 /// One positive durable hub-pool generation.
 ///
 /// A retained value cannot call the retired free pool-construction boundary:
@@ -44,14 +45,11 @@ pub const FENCED_POOL_MAX_CONNECTIONS: u32 = 48;
 /// }
 /// ```
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct HubFenceGeneration(u64);
-
-impl HubFenceGeneration {
+pub struct HubFenceGeneration(
     /// Returns the exact positive generation.
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
+    #[get(copy, as = "get")]
+    u64,
+);
 
 /// Applies migrations only through the migration that establishes fencing.
 ///

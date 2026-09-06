@@ -35,10 +35,13 @@ pub const MAX_PENDING_PAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WEBHOOK_NAME_BYTES: usize = 64;
 const MAX_OUTCOME_CODE_BYTES: usize = 64;
 
+#[derive(signalbox_derive::Accessors)]
 /// Permanent replay identity supplied by GitHub for one repository webhook.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RepoWatchWebhookDeliveryKey {
+    #[get(copy)]
     hook_id: NonZeroU64,
+    #[get(copy)]
     delivery_id: Uuid,
 }
 
@@ -49,24 +52,21 @@ impl RepoWatchWebhookDeliveryKey {
             delivery_id,
         }
     }
-
-    pub const fn hook_id(self) -> NonZeroU64 {
-        self.hook_id
-    }
-
-    pub const fn delivery_id(self) -> Uuid {
-        self.delivery_id
-    }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One already-authenticated exact delivery prepared for durable admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookAdmission {
     key: RepoWatchWebhookDeliveryKey,
+    #[get]
     repository: RepositorySlug,
+    #[get(str)]
     event_name: String,
     action_name: Option<String>,
+    #[get]
     body_digest: [u8; 32],
+    #[get(unbox)]
     body: Box<[u8]>,
 }
 
@@ -105,24 +105,8 @@ impl RepoWatchWebhookAdmission {
         self.key
     }
 
-    pub const fn repository(&self) -> &RepositorySlug {
-        &self.repository
-    }
-
-    pub fn event_name(&self) -> &str {
-        &self.event_name
-    }
-
     pub fn action_name(&self) -> Option<&str> {
         self.action_name.as_deref()
-    }
-
-    pub const fn body_digest(&self) -> &[u8; 32] {
-        &self.body_digest
-    }
-
-    pub fn body(&self) -> &[u8] {
-        &self.body
     }
 }
 
@@ -144,21 +128,14 @@ pub enum RepoWatchWebhookRequestError {
     TooManyProjections,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Positive durable intake position returned only after the local commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookReceipt {
+    #[get(copy)]
     sequence: NonZeroU64,
+    #[get(copy)]
     received_at: SystemTime,
-}
-
-impl RepoWatchWebhookReceipt {
-    pub const fn sequence(self) -> NonZeroU64 {
-        self.sequence
-    }
-
-    pub const fn received_at(self) -> SystemTime {
-        self.received_at
-    }
 }
 
 /// Replay-sensitive outcome of durable delivery admission.
@@ -214,9 +191,10 @@ impl RepoWatchWebhookProjectionFault {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One bounded pending-delivery page size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RepoWatchWebhookPendingPageSize(NonZeroU16);
+pub struct RepoWatchWebhookPendingPageSize(#[get(inner, as = "get")] NonZeroU16);
 
 impl RepoWatchWebhookPendingPageSize {
     pub fn try_new(value: NonZeroU16) -> Result<Self, RepoWatchWebhookPageSizeError> {
@@ -226,10 +204,6 @@ impl RepoWatchWebhookPendingPageSize {
             Ok(Self(value))
         }
     }
-
-    pub const fn get(self) -> u16 {
-        self.0.get()
-    }
 }
 
 #[derive(signalbox_derive::OperatorError)]
@@ -238,15 +212,20 @@ impl RepoWatchWebhookPendingPageSize {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookPageSizeError;
 
+#[derive(signalbox_derive::Accessors)]
 /// One accepted delivery that still lacks a terminal disposition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingRepoWatchWebhookDelivery {
     key: RepoWatchWebhookDeliveryKey,
+    #[get]
     repository: RepositorySlug,
+    #[get(str)]
     event_name: String,
     action_name: Option<String>,
+    #[get]
     body_digest: [u8; 32],
     receipt: RepoWatchWebhookReceipt,
+    #[get(unbox)]
     body: Box<[u8]>,
 }
 
@@ -284,28 +263,12 @@ impl PendingRepoWatchWebhookDelivery {
         self.key
     }
 
-    pub const fn repository(&self) -> &RepositorySlug {
-        &self.repository
-    }
-
-    pub fn event_name(&self) -> &str {
-        &self.event_name
-    }
-
     pub fn action_name(&self) -> Option<&str> {
         self.action_name.as_deref()
     }
 
-    pub const fn body_digest(&self) -> &[u8; 32] {
-        &self.body_digest
-    }
-
     pub const fn receipt(&self) -> RepoWatchWebhookReceipt {
         self.receipt
-    }
-
-    pub fn body(&self) -> &[u8] {
-        &self.body
     }
 }
 
@@ -399,9 +362,11 @@ pub enum RepoWatchWebhookDisposition {
     Quarantined,
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// One atomic shadow-projection and terminal-disposition request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookTerminalRequest {
+    #[get(unbox)]
     projections: Box<[RepoWatchWebhookProjection]>,
     disposition: RepoWatchWebhookDisposition,
     outcome_code: Option<String>,
@@ -427,10 +392,6 @@ impl RepoWatchWebhookTerminalRequest {
             disposition,
             outcome_code,
         })
-    }
-
-    pub fn projections(&self) -> &[RepoWatchWebhookProjection] {
-        &self.projections
     }
 
     pub const fn disposition(&self) -> RepoWatchWebhookDisposition {

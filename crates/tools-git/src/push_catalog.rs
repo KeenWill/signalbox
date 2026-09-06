@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, fs, path::Path};
+use std::{fs, path::Path};
 
 use signalbox_application::{CompiledTool, CompiledToolCatalog, ToolArgumentValidator};
 use signalbox_domain::{
@@ -128,36 +128,26 @@ fn detail(value: &str) -> Result<ToolExecutionErrorDetail, GitPushToolsConstruct
         .map_err(|_| GitPushToolsConstructionError::ErrorDetail)
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// Static push suite or injected-repository construction failure.
 #[derive(Debug)]
 pub enum GitPushToolsConstructionError {
+    #[error("Git push tool construction failed")]
     /// Static tool name failed compilation.
     Name,
+    #[error("Git push tool construction failed")]
     /// Static schema failed compilation.
     Schema,
+    #[error("Git push tool construction failed")]
     /// Static detail failed construction.
     ErrorDetail,
+    #[error("Git push tool construction failed")]
     /// The fixed catalog unexpectedly contained a duplicate.
     Duplicate,
+    #[error("Git push tool construction failed")]
     /// The injected workspace root was invalid.
-    Root(WorkspaceRootError),
+    Root(#[source] WorkspaceRootError),
+    #[error("Git push tool construction failed")]
     /// The repository layout escaped or did not match the injected root.
     Repository,
-}
-
-impl fmt::Display for GitPushToolsConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Git push tool construction failed")
-    }
-}
-
-impl Error for GitPushToolsConstructionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Root(error) => Some(error),
-            Self::Name | Self::Schema | Self::ErrorDetail | Self::Duplicate | Self::Repository => {
-                None
-            }
-        }
-    }
 }

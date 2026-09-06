@@ -1,6 +1,6 @@
 //! The first compiled hub-local tool: deterministic current-time lookup.
 
-use std::{error::Error, fmt, future::Future, time::SystemTime};
+use std::{fmt, future::Future, time::SystemTime};
 
 use jiff::{
     Timestamp,
@@ -53,31 +53,23 @@ impl CurrentTimeClock for SystemCurrentTimeClock {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A static `current_time` declaration could not be compiled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentTimeToolConstructionError {
+    #[error("current_time static name is invalid")]
     /// The static tool name was rejected.
     Name,
+    #[error("current_time static schema is invalid")]
     /// The static JSON Schema was rejected.
     Schema,
+    #[error("current_time static error detail is invalid")]
     /// A static sanitized error detail was rejected.
     ErrorDetail,
+    #[error("current_time catalog is duplicated")]
     /// The one-entry catalog unexpectedly reported a duplicate.
     Duplicate,
 }
-
-impl fmt::Display for CurrentTimeToolConstructionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Name => formatter.write_str("current_time static name is invalid"),
-            Self::Schema => formatter.write_str("current_time static schema is invalid"),
-            Self::ErrorDetail => formatter.write_str("current_time static error detail is invalid"),
-            Self::Duplicate => formatter.write_str("current_time catalog is duplicated"),
-        }
-    }
-}
-
-impl Error for CurrentTimeToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for `current_time`.
 ///
@@ -167,32 +159,20 @@ pub struct CurrentTimeExecutor<Clock> {
     offset_not_rfc3339_detail: ToolExecutionErrorDetail,
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A checked catalog/executor assumption failed inside `current_time`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentTimeExecutorError {
+    #[error("current_time argument validation drifted")]
     /// The executor could not reproduce catalog argument validation.
     ArgumentValidationDrift,
+    #[error("current_time timestamp formatting failed")]
     /// The static RFC 3339 formatting operation failed.
     TimestampFormatting,
+    #[error("current_time result encoding failed")]
     /// Compact JSON result encoding unexpectedly failed.
     ResultEncoding,
 }
-
-impl fmt::Display for CurrentTimeExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ArgumentValidationDrift => {
-                formatter.write_str("current_time argument validation drifted")
-            }
-            Self::TimestampFormatting => {
-                formatter.write_str("current_time timestamp formatting failed")
-            }
-            Self::ResultEncoding => formatter.write_str("current_time result encoding failed"),
-        }
-    }
-}
-
-impl Error for CurrentTimeExecutorError {}
 
 impl ClassifyOperatorFailure for CurrentTimeExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {

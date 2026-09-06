@@ -171,29 +171,16 @@ impl From<ContextFrontierId> for ProspectiveModelInput<'_> {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Latest terminal-call usage usable as a conservative next-call lower bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReportedModelCallUsage {
-    usage: ProviderReportedTokenUsage,
-    input_includes_cache_tokens: bool,
-    input_is_retained: bool,
-    retained_input_tokens: Option<u64>,
-    retained_output_tokens: Option<u64>,
-    output_is_retained: bool,
-    projected_unreported_content_bytes: u64,
-}
-
-impl ReportedModelCallUsage {
     /// Returns the exact provider-reported fields retained for the call.
-    pub const fn usage(self) -> ProviderReportedTokenUsage {
-        self.usage
-    }
-
+    #[get(copy)]
+    usage: ProviderReportedTokenUsage,
     /// Whether the stored input field already includes the cache axes.
-    pub const fn input_includes_cache_tokens(self) -> bool {
-        self.input_includes_cache_tokens
-    }
-
+    #[get(copy)]
+    input_includes_cache_tokens: bool,
     /// Whether the reported input is still model-visible for the next call.
     ///
     /// An ordinary call's input is the transcript prefix its successor resends.
@@ -201,32 +188,23 @@ impl ReportedModelCallUsage {
     /// replaced, so none of it survives into the next request; that call's
     /// retained material is its summary output plus the content the compaction
     /// did not summarize, which the projected-content allowance counts.
-    pub const fn input_is_retained(self) -> bool {
-        self.input_is_retained
-    }
-
+    #[get(copy)]
+    input_is_retained: bool,
     /// Provider-reported final-iteration input retained after in-response
     /// compaction, including cache axes and separate from billed usage.
-    pub const fn retained_input_tokens(self) -> Option<u64> {
-        self.retained_input_tokens
-    }
-
+    #[get(copy)]
+    retained_input_tokens: Option<u64>,
     /// Provider-reported final-iteration output retained after in-response
     /// compaction, separate from billed usage.
-    pub const fn retained_output_tokens(self) -> Option<u64> {
-        self.retained_output_tokens
-    }
-
+    #[get(copy)]
+    retained_output_tokens: Option<u64>,
     /// Whether reported output became assistant transcript for the next call.
-    pub const fn output_is_retained(self) -> bool {
-        self.output_is_retained
-    }
-
+    #[get(copy)]
+    output_is_retained: bool,
     /// Returns a conservative byte allowance for model-visible transcript
     /// material appended after the reported call's input.
-    pub const fn projected_unreported_content_bytes(self) -> u64 {
-        self.projected_unreported_content_bytes
-    }
+    #[get(copy)]
+    projected_unreported_content_bytes: u64,
 }
 
 impl ProspectiveModelCall {
@@ -454,9 +432,12 @@ impl CredentialPoolRuntimeAction {
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Runtime pool member in immutable policy order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialPoolRuntimeMember {
+    /// Borrows the deployment-owned profile reference.
+    #[get(str)]
     credential_reference: Arc<str>,
     priority: NonZeroU32,
 }
@@ -474,20 +455,18 @@ impl CredentialPoolRuntimeMember {
         }
     }
 
-    /// Borrows the deployment-owned profile reference.
-    pub fn credential_reference(&self) -> &str {
-        &self.credential_reference
-    }
-
     /// Returns the membership priority.
     pub const fn priority(&self) -> NonZeroU32 {
         self.priority
     }
 }
 
+#[derive(signalbox_derive::Accessors)]
 /// Immutable credential-pool policy supplied by admitted daemon configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialPoolRuntimePolicy {
+    /// Borrows the exact pool name.
+    #[get(str)]
     name: Arc<str>,
     members: Arc<[CredentialPoolRuntimeMember]>,
     on_pool_exhausted: CredentialPoolRuntimeExhaustion,
@@ -519,11 +498,6 @@ impl CredentialPoolRuntimePolicy {
         }
     }
 
-    /// Borrows the exact pool name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     /// Borrows members in deterministic selection order.
     pub fn members(&self) -> &[CredentialPoolRuntimeMember] {
         &self.members
@@ -549,9 +523,12 @@ impl CredentialPoolRuntimePolicy {
 pub type CredentialPoolRuntimeCatalog =
     HashMap<ResolvedProviderTarget, CredentialPoolRuntimePolicy>;
 
+#[derive(signalbox_derive::Accessors)]
 /// PostgreSQL adapter for the initial model-call execution transactions.
 #[derive(Clone, Debug)]
 pub struct PostgresModelCallRepository {
+    /// Borrows the shared pool for composition-owned adjacent transactions.
+    #[get]
     pool: PgPool,
     targets: ModelTargetCatalog,
     credential_reference: ModelCallCredentialReference,
@@ -634,11 +611,6 @@ impl PostgresModelCallRepository {
             .map(|limit| ((limit.target, limit.fast_mode), limit))
             .collect();
         self
-    }
-
-    /// Borrows the shared pool for composition-owned adjacent transactions.
-    pub const fn pool(&self) -> &PgPool {
-        &self.pool
     }
 
     /// Reads the newest ordinary or dedicated-compaction call with reported input

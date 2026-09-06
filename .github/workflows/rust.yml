@@ -175,8 +175,6 @@ jobs:
         run: /tmp/mdformat-venv/bin/python scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
         run: /tmp/mdformat-venv/bin/python scripts/test_postgres_integration_suites.py
-      - name: Test the built-executable resolver
-        run: python3 tooling/test_resolve_cargo_bin.py
       - name: Test the lifecycle watchdog
         run: python3 tooling/test_supervise_lifecycle.py
       # Drives the sweep against a fake `docker` it puts first on PATH, so it

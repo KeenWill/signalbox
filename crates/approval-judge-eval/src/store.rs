@@ -1,7 +1,6 @@
 //! Pluggable corpus-store contracts governed by the evaluation-system specification.
 
 use std::{
-    error::Error,
     fmt,
     future::{Future, ready},
     path::{Path, PathBuf},
@@ -121,17 +120,11 @@ impl<'de> Deserialize<'de> for Sha256Digest {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
+#[error("SHA-256 digest must be exactly 64 lowercase hexadecimal digits")]
 /// A hexadecimal SHA-256 digest was not exactly 64 lowercase digits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DigestParseError;
-
-impl fmt::Display for DigestParseError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SHA-256 digest must be exactly 64 lowercase hexadecimal digits")
-    }
-}
-
-impl Error for DigestParseError {}
 
 /// Durable provenance for a corpus registration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -317,25 +310,35 @@ impl CorpusStore for DiskCorpusStore {
     }
 }
 
+#[derive(signalbox_derive::OperatorError)]
 /// A pluggable corpus store could not complete an operation.
 #[derive(Debug)]
 pub enum CorpusStoreError {
+    #[error("corpus {}/{} is not registered", field_0.name, field_0.version)]
     /// The requested logical corpus is not registered.
     NotFound(CorpusKey),
+    #[error("corpus manifest is invalid: {field_0}")]
     /// A manifest or its content failed validation.
-    Manifest(crate::manifest::ManifestError),
+    Manifest(#[source] crate::manifest::ManifestError),
+    #[error("corpus database operation failed: {field_0}")]
     /// Durable database access failed.
-    Database(sqlx::Error),
+    Database(#[source] sqlx::Error),
+    #[error("stored case JSON is invalid: {field_0}")]
     /// Stored case JSON did not decode into the strict case shape.
-    StoredCaseJson(serde_json::Error),
+    StoredCaseJson(#[source] serde_json::Error),
+    #[error("corpus registration is corrupt: {field_0}")]
     /// A database row violated the store representation.
     CorruptRegistration(CorpusStoreCorruption),
+    #[error("stored corpus registration is corrupt: {field_0}")]
     /// Stored content failed shared corpus or registration admission.
-    CorruptStoredAdmission(crate::manifest::ManifestError),
+    CorruptStoredAdmission(#[source] crate::manifest::ManifestError),
+    #[error("blob-backed corpus content cannot be loaded: no blob corpus backend is configured")]
     /// The manifest names a blob, but this slice has no blob backend.
     BlobBackendUnavailable,
+    #[error("repository-backed corpus content must be imported through a verified manifest")]
     /// Repository content was supplied without verified manifest source bytes.
     RepositorySourceRequiresManifestImport,
+    #[error("database-native corpus content must be imported through the database store")]
     /// Embedded database-native content was supplied to the repository-file store.
     DatabaseNativeRequiresDatabaseImport,
 }
@@ -415,56 +418,6 @@ impl fmt::Display for CorpusStoreCorruption {
             }
             Self::InvalidBlobByteLength => formatter.write_str("blob byte length is invalid"),
             Self::InvalidDigestLength => formatter.write_str("SHA-256 digest is not 32 bytes"),
-        }
-    }
-}
-
-impl fmt::Display for CorpusStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound(key) => write!(
-                formatter,
-                "corpus {}/{} is not registered",
-                key.name, key.version
-            ),
-            Self::Manifest(source) => write!(formatter, "corpus manifest is invalid: {source}"),
-            Self::Database(source) => {
-                write!(formatter, "corpus database operation failed: {source}")
-            }
-            Self::StoredCaseJson(source) => {
-                write!(formatter, "stored case JSON is invalid: {source}")
-            }
-            Self::CorruptRegistration(corruption) => {
-                write!(formatter, "corpus registration is corrupt: {corruption}")
-            }
-            Self::CorruptStoredAdmission(source) => {
-                write!(formatter, "stored corpus registration is corrupt: {source}")
-            }
-            Self::BlobBackendUnavailable => formatter.write_str(
-                "blob-backed corpus content cannot be loaded: no blob corpus backend is configured",
-            ),
-            Self::RepositorySourceRequiresManifestImport => formatter.write_str(
-                "repository-backed corpus content must be imported through a verified manifest",
-            ),
-            Self::DatabaseNativeRequiresDatabaseImport => formatter.write_str(
-                "database-native corpus content must be imported through the database store",
-            ),
-        }
-    }
-}
-
-impl Error for CorpusStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Manifest(source) => Some(source),
-            Self::Database(source) => Some(source),
-            Self::StoredCaseJson(source) => Some(source),
-            Self::CorruptStoredAdmission(source) => Some(source),
-            Self::NotFound(_)
-            | Self::CorruptRegistration(_)
-            | Self::BlobBackendUnavailable
-            | Self::RepositorySourceRequiresManifestImport
-            | Self::DatabaseNativeRequiresDatabaseImport => None,
         }
     }
 }

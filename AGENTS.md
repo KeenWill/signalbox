@@ -7,8 +7,8 @@ owner-approved plans. Do not add speculative product behavior.
 
 - Cross-crate and wire contracts: `docs/spec/`. `docs/spec/README.md` states the
   page conventions.
-- Public API of the domain and application crates: generated Markdown under
-  `docs/api/`, checked by CI against rustdoc JSON.
+- Public API of the crates listed in `docs/api/crates.toml`: generated Markdown
+  under `docs/api/`, checked by CI against rustdoc JSON.
 - Committed but unbuilt design: `docs/design/`; undecided items:
   `docs/open-questions.md`.
 - Test style: `docs/agents/testing-style.md`. Literal-provenance and label rules
@@ -81,9 +81,10 @@ owner's private repositories may be named as provenance, not cited as rules.
   conflict in practice, report the conflict instead of resolving it silently.
 - Fix every defect you introduce. A pre-existing defect outside the assigned
   change is recorded, not fixed.
-- A change to a public item in the domain or application crates regenerates
-  `docs/api/` with `devenv shell -- python3 scripts/render_domain_spine.py` in
-  the same pull request.
+- A change to a public item in a crate listed in `docs/api/crates.toml`
+  regenerates `docs/api/` with
+  `devenv shell -- python3 scripts/render_domain_spine.py` in the same pull
+  request.
 - A change to behavior a `docs/spec/` page describes updates that page in the
   same pull request. In a stack, the bottom spec diff covers the behavior its
   children implement; a child adds a spec edit only for behavior the bottom diff

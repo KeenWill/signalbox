@@ -115,7 +115,9 @@ pub enum CommissionDispatchPreparationError {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for CommissionDispatchPreparationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for CommissionDispatchPreparationError {}
+impl error::Error for CommissionDispatchPreparationError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
