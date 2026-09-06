@@ -1525,7 +1525,7 @@ fn require_single(
 }
 
 #[derive(signalbox_derive::OperatorError)]
-/// Provider output or lifecycle facts could not form one exact compaction result.
+/// Provider output or durable facts could not form one exact compaction result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextCompactionCorruption {
     #[error("context compaction storage is inconsistent: required durable fact is missing")]
@@ -1534,8 +1534,8 @@ pub enum ContextCompactionCorruption {
     #[error("context compaction ordinal cannot be represented as u64")]
     /// A decoded or computed ordinal was outside the admitted u64 range.
     InvalidOrdinal(&'static str),
-    #[error("context compaction storage is inconsistent: related lifecycle facts disagree")]
-    /// Related lifecycle facts disagreed.
+    #[error("context compaction storage is inconsistent: invalid durable facts for {field_0}")]
+    /// Durable facts violate their required shape or relationship.
     Inconsistent(&'static str),
     #[error("context compaction storage is inconsistent: unknown command result discriminator")]
     /// Stored command result discriminator is unknown.
@@ -1629,7 +1629,7 @@ mod tests {
         expect_test::expect![[r#"
             context compaction storage is inconsistent: required durable fact is missing
             context compaction ordinal cannot be represented as u64
-            context compaction storage is inconsistent: related lifecycle facts disagree
+            context compaction storage is inconsistent: invalid durable facts for frontier
             context compaction storage is inconsistent: unknown command result discriminator
             context compaction storage is inconsistent: unknown command kind discriminator
             context compaction provider summary is invalid"#]]
