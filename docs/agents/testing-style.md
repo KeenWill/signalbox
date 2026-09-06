@@ -262,8 +262,8 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
     stays in one test even though its description contains "and". Splitting such
     guarantees across separate executions lets each half pass under a different
     interleaving while no test can detect a violation of the combined contract.
-    Keep names stable when renaming or splitting a test so review can follow the
-    behavior it exercises.
+    When renaming or splitting a test, preserve its scenario prefix and the
+    wording that identifies each behavior it exercises.
 
 From the application sweep, `replace_session_defaults.rs` — two behaviors, so a
 split, not an unroll:
