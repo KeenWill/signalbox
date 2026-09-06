@@ -116,8 +116,8 @@ pub enum DispatchedOutboxEventKind {
     },
     ToolApprovalDecided {
         turn: signalbox_domain::TurnId,
-        approval: tool::ToolApprovalResolution,
-        decider: tool::ToolApprovalDecider,
+        approval: approval::ToolApprovalResolution,
+        decider: policy::ToolApprovalDecider,
     },
     ContextCompacted {
         compaction: context_compaction::ContextCompactionId,

@@ -108,7 +108,8 @@ Order comes from commit-ordered sequences, never from comparing wall-clock
 times. A liveness check that cannot query some kind of evidence skips the turn
 instead of ending it, and any event it does not recognize counts as progress.
 When a lifecycle guard trips on an admitted session, the daemon waits, asks, or
-parks the session; it never ends work on staleness evidence alone.
+parks the session, subject to the
+[quiescent-watchdog exception](turn-lifecycle-and-scheduling.md#boundary-contracts).
 
 An owned session that waits for an operator is parked, blocked on a goal that no
 automatic resumption will lift, or held in an exhausted recovery wait; a pending
@@ -136,10 +137,8 @@ of lifecycle state and turn phase, never an independent machine.
 An absent configured bound leaves a deadline unbounded. An owned session in a
 deadline-bearing state with no deadline row is a violation.
 
-Parking overrides the turn projection: it suspends a live turn in place, the
-turn keeps its phase, and no new turn starts while the session is parked. Work
-already in flight continues, including the tool execution an in-flight call's
-response requests; that call runs to its end and records its result.
+A park takes effect at the next scheduler admission. Work already in flight
+completes; any further pass waits for resume. A stop ends the active turn.
 
 Verified achievement is recorded only when the declared finish check passes.
 
@@ -210,7 +209,7 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
   [session lifecycle design](../design/session-lifecycle.md).
 - Sticky-stop suppression: re-dispatch of stopped work stays suppressed until
   the dispatch source is updated; see the
-  [repository-watch reaction contract](repo-watch.md#reducer-and-dispatch-ledger).
+  [repository-watch reaction contract](repo-watch.md#design-decisions).
 - Worktree and container cleanup on closure: a closed session's worktree and
   container are removed; see
   [session lifecycle design](../design/session-lifecycle.md).

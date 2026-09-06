@@ -7,7 +7,7 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S03 / S08: an active scheduling projection
+/// an active scheduling projection
 /// requires the exact session-scoped interval anchored at its origin; a
 /// missing, cross-session, or cross-wired interval fails closed.
 #[test]
@@ -84,7 +84,7 @@ fn active_reconstitution_requires_exact_session_acceptance_tail_identity() {
         ]));
 }
 
-/// S03 / S08: every position from the active origin through
+/// every position from the active origin through
 /// the observed session tail is present exactly once and every
 /// pending-steering disposition remains bound to that active turn.
 #[test]
@@ -235,11 +235,11 @@ fn active_reconstitution_rejects_gapped_or_misbound_acceptance_tail() {
         ]));
 }
 
-/// S03: a newly active queued origin retains later acceptance
+/// a newly active queued origin retains later acceptance
 /// positions already consumed by its terminal predecessor, while only its
 /// own consumed steering reaches the active execution aggregate.
 #[test]
-fn s03_active_tail_retains_predecessor_consumed_steering() {
+fn active_tail_retains_predecessor_consumed_steering() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let active = accepted_origin(2);
@@ -384,11 +384,11 @@ fn s03_active_tail_retains_predecessor_consumed_steering() {
     );
 }
 
-/// S03: later-accepted interrupt work executes before the
+/// later-accepted interrupt work executes before the
 /// ordinary origin it displaced, so steering consumed by that interrupt
 /// remains historical rather than becoming active execution input.
 #[test]
-fn s03_active_tail_rejects_unproven_historical_consumed_steering() {
+fn active_tail_rejects_unproven_historical_consumed_steering() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let active = accepted_origin(2);

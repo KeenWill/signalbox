@@ -2,12 +2,12 @@
 
 use crate::*;
 
-/// S24: the transactional allocator holds its singleton row through
+/// the transactional allocator holds its singleton row through
 /// commit, so a concurrent event cannot obtain the next sequence and commit
 /// ahead of the lower event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_outbox_sequences_follow_concurrent_commit_order() -> Result<(), Box<dyn Error>> {
+async fn outbox_sequences_follow_concurrent_commit_order() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_session = insert_outbox_session_fixture(&pool, 0xe11).await?;
     let second_session = insert_outbox_session_fixture(&pool, 0xe12).await?;
@@ -55,12 +55,12 @@ async fn s24_outbox_sequences_follow_concurrent_commit_order() -> Result<(), Box
     Ok(())
 }
 
-/// S24: delivery cannot advance to an uncommitted allocation, and a
+/// delivery cannot advance to an uncommitted allocation, and a
 /// later concurrent allocation remains a suffix after the committed prefix is
 /// marked delivered.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
+async fn outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_session = insert_outbox_session_fixture(&pool, 0xe13).await?;
     let second_session = insert_outbox_session_fixture(&pool, 0xe14).await?;
@@ -155,12 +155,11 @@ async fn s24_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// S24: one summary page batches distinct placement projections while retaining
+/// one summary page batches distinct placement projections while retaining
 /// stable session-identity order and each selected defaults row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_process_session_summary_page_batches_placement_projection()
--> Result<(), Box<dyn Error>> {
+async fn process_session_summary_page_batches_placement_projection() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let earlier_selection = outbox_session_fixture_model_selection(0xe31);
     let earlier_session = insert_outbox_session_fixture(&pool, 0xe31).await?;
@@ -227,12 +226,11 @@ async fn insert_session_summary_page_boundary_fixture(
     Ok(sessions)
 }
 
-/// S24: a summary catalog one row beyond the 64-session safety ceiling
+/// a summary catalog one row beyond the 64-session safety ceiling
 /// continues onto a second page without skipping or duplicating an identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_process_session_summary_page_continues_after_64_sessions() -> Result<(), Box<dyn Error>>
-{
+async fn process_session_summary_page_continues_after_64_sessions() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let expected_sessions = insert_session_summary_page_boundary_fixture(&pool).await?;
 
@@ -254,12 +252,12 @@ async fn s24_process_session_summary_page_continues_after_64_sessions() -> Resul
     Ok(())
 }
 
-/// S24: the process transcript read observes the global outbox
+/// the process transcript read observes the global outbox
 /// cursor, ordered turn state, and latest semantic frontier in one
 /// repeatable-read snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_process_transcript_is_one_authoritative_snapshot() -> Result<(), Box<dyn Error>> {
+async fn process_transcript_is_one_authoritative_snapshot() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e41));
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xce41));
@@ -378,11 +376,11 @@ async fn s24_process_transcript_is_one_authoritative_snapshot() -> Result<(), Bo
     Ok(())
 }
 
-/// S24: a settings-aware turn cannot omit its required
+/// a settings-aware turn cannot omit its required
 /// resolution event.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_process_read_rejects_missing_turn_settings_evidence() -> Result<(), Box<dyn Error>> {
+async fn process_read_rejects_missing_turn_settings_evidence() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e51));
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e51));
@@ -450,12 +448,12 @@ async fn s24_process_read_rejects_missing_turn_settings_evidence() -> Result<(),
     Ok(())
 }
 
-/// S24: a process transcript snapshot exposes the exact durable
+/// a process transcript snapshot exposes the exact durable
 /// Prepared, InFlight, or CancellationRequested state of the current model
 /// call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_process_transcript_projects_current_model_call_state() -> Result<(), Box<dyn Error>> {
+async fn process_transcript_projects_current_model_call_state() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let prepared = checkpoint_restart_model_call(&pool, 0x8e50, false).await?;
     let in_flight = checkpoint_restart_model_call(&pool, 0x8e60, true).await?;
@@ -489,14 +487,14 @@ async fn s24_process_transcript_projects_current_model_call_state() -> Result<()
     Ok(())
 }
 
-/// S24: the production dispatcher offers one exact next event before
+/// the production dispatcher offers one exact next event before
 /// advancing the locked durable prefix. Consumer retry and an injected deferred
 /// commit failure after the offer both roll the prefix back, so restart offers
 /// the same cursor again before the later committed event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_redelivers_after_cursor_commit_failure_in_order()
--> Result<(), Box<dyn Error>> {
+async fn dispatcher_redelivers_after_cursor_commit_failure_in_order() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_session = insert_outbox_session_fixture(&pool, 0xe17).await?;
     let second_session = insert_outbox_session_fixture(&pool, 0xe18).await?;
@@ -635,11 +633,11 @@ async fn s24_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     Ok(())
 }
 
-/// S24: each compiled-in outbox consumer advances an independent
+/// each compiled-in outbox consumer advances an independent
 /// prefix while decoding the same commit-ordered typed events.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_outbox_consumers_advance_independent_typed_prefixes() -> Result<(), Box<dyn Error>> {
+async fn outbox_consumers_advance_independent_typed_prefixes() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_session = insert_outbox_session_fixture(&pool, 0xe19).await?;
     let second_session = insert_outbox_session_fixture(&pool, 0xe1a).await?;
@@ -713,11 +711,11 @@ async fn s24_outbox_consumers_advance_independent_typed_prefixes() -> Result<(),
     Ok(())
 }
 
-/// S10: storage independently rejects a restored tool response whose
+/// storage independently rejects a restored tool response whose
 /// request inventory exceeds the bounded domain vocabulary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_tool_round_storage_rejects_more_than_32_requests() -> Result<(), Box<dyn Error>> {
+async fn tool_round_storage_rejects_more_than_32_requests() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query(
         "INSERT INTO tool_round
@@ -745,11 +743,11 @@ async fn s10_tool_round_storage_rejects_more_than_32_requests() -> Result<(), Bo
     Ok(())
 }
 
-/// S24: an allocator cursor beyond the delivered prefix requires its
+/// an allocator cursor beyond the delivered prefix requires its
 /// exact committed header; dispatcher idle is reserved for equal cursors.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_reports_a_missing_committed_header() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_reports_a_missing_committed_header() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     sqlx::query(
         "ALTER TABLE outbox_sequence_state
@@ -797,11 +795,11 @@ async fn s24_dispatcher_reports_a_missing_committed_header() -> Result<(), Box<d
     Ok(())
 }
 
-/// S24: a header restored ahead of the allocator cursor is durable
+/// a header restored ahead of the allocator cursor is durable
 /// corruption and is never offered to the consumer.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_rejects_a_header_beyond_the_allocator() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_rejects_a_header_beyond_the_allocator() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = insert_outbox_session_fixture(&pool, 0xe1a).await?;
     let mut producer = pool.begin().await?;
@@ -844,11 +842,11 @@ async fn s24_dispatcher_rejects_a_header_beyond_the_allocator() -> Result<(), Bo
     Ok(())
 }
 
-/// S24: a restored header above both the allocator and the exact next
+/// a restored header above both the allocator and the exact next
 /// slot is corruption rather than an idle outbox.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_rejects_a_noncontiguous_header_beyond_the_allocator()
+async fn dispatcher_rejects_a_noncontiguous_header_beyond_the_allocator()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_session = insert_outbox_session_fixture(&pool, 0xe1b).await?;
@@ -914,11 +912,11 @@ async fn s24_dispatcher_rejects_a_noncontiguous_header_beyond_the_allocator()
     Ok(())
 }
 
-/// S24: exhausted delivery still validates the allocator singleton
+/// exhausted delivery still validates the allocator singleton
 /// rather than silently polling forever on missing durable state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_validates_the_allocator_at_exhaustion() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_validates_the_allocator_at_exhaustion() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     sqlx::query(
         "ALTER TABLE outbox_consumer_cursor
@@ -971,11 +969,11 @@ async fn s24_dispatcher_validates_the_allocator_at_exhaustion() -> Result<(), Bo
     Ok(())
 }
 
-/// S24: independently valid same-session terminal identifiers do not
+/// independently valid same-session terminal identifiers do not
 /// form a dispatchable event unless they all describe the event's exact turn.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_rejects_crosswired_terminal_correlations() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_rejects_crosswired_terminal_correlations() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = Uuid::from_u128(0x7e1);
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -1129,12 +1127,12 @@ async fn s24_dispatcher_rejects_crosswired_terminal_correlations() -> Result<(),
     Ok(())
 }
 
-/// S24: the dispatcher observes the allocator and candidate header in
+/// the dispatcher observes the allocator and candidate header in
 /// one statement snapshot, so an uncommitted allocation is idle rather than
 /// false committed-header corruption.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_treats_an_uncommitted_allocation_as_idle() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_treats_an_uncommitted_allocation_as_idle() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = insert_outbox_session_fixture(&pool, 0xe19).await?;
     let mut producer = pool.begin().await?;
@@ -1161,12 +1159,12 @@ async fn s24_dispatcher_treats_an_uncommitted_allocation_as_idle() -> Result<(),
     Ok(())
 }
 
-/// S24: an event-producing transaction cannot mark its own
+/// an event-producing transaction cannot mark its own
 /// uncommitted event delivered and thereby make restart recovery skip it.
 /// Both append-before-delivery and delivery-before-append orderings are covered.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_outbox_delivery_rejects_event_producing_transaction() -> Result<(), Box<dyn Error>> {
+async fn outbox_delivery_rejects_event_producing_transaction() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     insert_outbox_session_fixture(&pool, 0xe15).await?;
     insert_outbox_session_fixture(&pool, 0xe16).await?;
@@ -1319,13 +1317,12 @@ async fn outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// S01: a deferred failure after the production append rolls the
+/// a deferred failure after the production append rolls the
 /// CreateSession state, event, and sequence allocation back together; retry
 /// commits all three together.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_create_session_and_outbox_commit_or_roll_back_together() -> Result<(), Box<dyn Error>>
-{
+async fn create_session_and_outbox_commit_or_roll_back_together() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     sqlx::query(
         "CREATE FUNCTION fail_test_session_created_outbox_commit()
@@ -1426,11 +1423,11 @@ async fn s01_create_session_and_outbox_commit_or_roll_back_together() -> Result<
     Ok(())
 }
 
-/// S01: only first committed handling emits the creation
+/// only first committed handling emits the creation
 /// event; equal replay and conflicting identifier reuse append nothing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_create_session_first_handling_appends_exactly_once() -> Result<(), Box<dyn Error>> {
+async fn create_session_first_handling_appends_exactly_once() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
     let creation = prepared(0xe32, 0xe42, direct(0xe52));
@@ -1478,12 +1475,12 @@ async fn s01_create_session_first_handling_appends_exactly_once() -> Result<(), 
     Ok(())
 }
 
-/// S01: acceptance and activation append their complete
+/// acceptance and activation append their complete
 /// typed process transitions in the same commits, and command replay emits no
 /// duplicate before the dispatcher advances the exact ordered prefix.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn Error>> {
+async fn scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0xe61));
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xe62));
@@ -1638,13 +1635,12 @@ async fn s01_scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box
     Ok(())
 }
 
-/// S01: an activation remains dispatchable after continuation while
+/// an activation remains dispatchable after continuation while
 /// its exact initial attempt and the lifecycle's current or terminal attempt
 /// remain authoritative; cross-wired lifecycle provenance fails closed.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_turn_activation_dispatch_requires_authoritative_attempt() -> Result<(), Box<dyn Error>>
-{
+async fn turn_activation_dispatch_requires_authoritative_attempt() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0xe81));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xe82));
@@ -1785,13 +1781,12 @@ async fn s01_turn_activation_dispatch_requires_authoritative_attempt() -> Result
     Ok(())
 }
 
-/// S01: historical Prepared and InFlight transition records remain
+/// historical Prepared and InFlight transition records remain
 /// dispatchable after advancement, but a terminal record must carry the
 /// authoritative call's exact terminal disposition.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_terminal_model_call_dispatch_requires_exact_disposition() -> Result<(), Box<dyn Error>>
-{
+async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xe90;
     let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
@@ -1917,11 +1912,11 @@ async fn s01_terminal_model_call_dispatch_requires_exact_disposition() -> Result
     Ok(())
 }
 
-/// S01: a stored nonterminal model-call transition cannot be ahead
+/// a stored nonterminal model-call transition cannot be ahead
 /// of the authoritative monotonic call state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_model_call_dispatch_rejects_an_unreached_transition() -> Result<(), Box<dyn Error>> {
+async fn model_call_dispatch_rejects_an_unreached_transition() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0xe98, false).await?;
     let dispatcher = OutboxDispatcher::new(pool.clone());
@@ -1986,11 +1981,11 @@ async fn s01_model_call_dispatch_rejects_an_unreached_transition() -> Result<(),
     Ok(())
 }
 
-/// S01: a completed-turn event is dispatchable only while the
+/// a completed-turn event is dispatchable only while the
 /// lifecycle's terminal attempt retains a completion-compatible disposition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_completed_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
+async fn completed_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xea0;
     let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
@@ -2043,11 +2038,11 @@ async fn s01_completed_dispatch_requires_exact_terminal_attempt() -> Result<(), 
     Ok(())
 }
 
-/// S01: a refused-turn event is dispatchable only while the
+/// a refused-turn event is dispatchable only while the
 /// lifecycle's terminal attempt retains a refusal-compatible disposition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_refused_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
+async fn refused_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xeb0;
     let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
@@ -2091,13 +2086,12 @@ async fn s01_refused_dispatch_requires_exact_terminal_attempt() -> Result<(), Bo
     Ok(())
 }
 
-/// S04 / S07: a reconciliation-required event is
+/// a reconciliation-required event is
 /// dispatchable only while its terminal attempt retains exact ambiguity and
 /// interrupt provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_reconciliation_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>>
-{
+async fn reconciliation_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xec0;
     let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
@@ -2159,11 +2153,11 @@ async fn s04_reconciliation_dispatch_requires_exact_terminal_attempt() -> Result
     Ok(())
 }
 
-/// S01: an accepted-input event is dispatchable only when
+/// an accepted-input event is dispatchable only when
 /// its content still matches the immutable accepting command.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_dispatcher_rejects_crosswired_accepted_content() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_rejects_crosswired_accepted_content() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xe72));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xe73));
@@ -2227,11 +2221,11 @@ async fn s01_dispatcher_rejects_crosswired_accepted_content() -> Result<(), Box<
     Ok(())
 }
 
-/// S24: replay of a settings-aware defaults replacement
+/// replay of a settings-aware defaults replacement
 /// fails closed when its required settings-change evidence is absent.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_replacement_replay_requires_settings_change_evidence() -> Result<(), Box<dyn Error>> {
+async fn replacement_replay_requires_settings_change_evidence() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x3750;
     let replacement = record_settings_replacement_fixture(&pool, seed).await?;
@@ -2277,11 +2271,11 @@ async fn s24_replacement_replay_requires_settings_change_evidence() -> Result<()
     Ok(())
 }
 
-/// S24: replay authenticates settings-change evidence
+/// replay authenticates settings-change evidence
 /// against the immutable command and defaults records.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_replacement_replay_rejects_cross_wired_settings_change_evidence()
+async fn replacement_replay_rejects_cross_wired_settings_change_evidence()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let replacement = record_settings_replacement_fixture(&pool, 0x3760).await?;
@@ -2316,11 +2310,11 @@ async fn s24_replacement_replay_rejects_cross_wired_settings_change_evidence()
     Ok(())
 }
 
-/// S24: one defaults epoch can source exactly one durable
+/// one defaults epoch can source exactly one durable
 /// settings-change outbox event.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_settings_change_outbox_is_unique_per_epoch() -> Result<(), Box<dyn Error>> {
+async fn settings_change_outbox_is_unique_per_epoch() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let replacement = record_settings_replacement_fixture(&pool, 0x3770).await?;
 
@@ -2441,12 +2435,12 @@ async fn legacy_command_versions_reject_explicit_model_settings() -> Result<(), 
     Ok(())
 }
 
-/// S01: native session creation retains the
+/// native session creation retains the
 /// caller's settings independently from its effect row, so a cross-wired
 /// defaults snapshot cannot authenticate command replay or current reads.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_native_creation_authenticates_command_settings() -> Result<(), Box<dyn Error>> {
+async fn native_creation_authenticates_command_settings() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x3761));
     let command = prepared_with_low_reasoning(0x3762, 0x3763, selection);
@@ -2495,11 +2489,11 @@ async fn s01_native_creation_authenticates_command_settings() -> Result<(), Box<
     Ok(())
 }
 
-/// S01: the accepted-input settings copy must equal the
+/// the accepted-input settings copy must equal the
 /// independently retained submit-command payload.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_accepted_settings_match_submit_command() -> Result<(), Box<dyn Error>> {
+async fn accepted_settings_match_submit_command() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x3767));
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -2551,12 +2545,12 @@ async fn s01_accepted_settings_match_submit_command() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// S24: turn-settings dispatch authenticates the retained
+/// turn-settings dispatch authenticates the retained
 /// per-call overlay against the accepted origin rather than trusting only the
 /// settings event row.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_rejects_crosswired_turn_settings_origin() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_rejects_crosswired_turn_settings_origin() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x3771));
     let turn = TurnId::from_uuid(Uuid::from_u128(0x3772));
@@ -2618,11 +2612,11 @@ async fn s24_dispatcher_rejects_crosswired_turn_settings_origin() -> Result<(), 
     Ok(())
 }
 
-/// S24: defaults-settings dispatch compares both event
+/// defaults-settings dispatch compares both event
 /// snapshots with their independently retained immutable defaults epochs.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_rejects_crosswired_defaults_settings_event() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_rejects_crosswired_defaults_settings_event() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = record_settings_replacement(&pool, 0x3780).await?;
     let dispatcher = OutboxDispatcher::new(pool.clone());
@@ -2668,11 +2662,11 @@ async fn s24_dispatcher_rejects_crosswired_defaults_settings_event() -> Result<(
     Ok(())
 }
 
-/// S24: defaults-settings dispatch authenticates
+/// defaults-settings dispatch authenticates
 /// caller provenance against the independently retained replacement command.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_dispatcher_rejects_crosswired_settings_caller() -> Result<(), Box<dyn Error>> {
+async fn dispatcher_rejects_crosswired_settings_caller() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = record_settings_replacement(&pool, 0x3790).await?;
     let dispatcher = OutboxDispatcher::new(pool.clone());
@@ -2719,11 +2713,11 @@ async fn s24_dispatcher_rejects_crosswired_settings_caller() -> Result<(), Box<d
     Ok(())
 }
 
-/// S24: turn settings retain the exact lower
+/// turn settings retain the exact lower
 /// precedence layers from their referenced immutable defaults epoch.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_turn_settings_authenticate_the_defaults_epoch() -> Result<(), Box<dyn Error>> {
+async fn turn_settings_authenticate_the_defaults_epoch() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x37a1));
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x37a2));
@@ -2813,11 +2807,11 @@ async fn s24_turn_settings_authenticate_the_defaults_epoch() -> Result<(), Box<d
     Ok(())
 }
 
-/// S37: the process defaults projection decodes the exact
+/// the process defaults projection decodes the exact
 /// self-contained settings document stored with the selected epoch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s37_process_defaults_read_retains_model_settings_evidence() -> Result<(), Box<dyn Error>> {
+async fn process_defaults_read_retains_model_settings_evidence() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x3751));
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x3752));
@@ -2870,7 +2864,7 @@ async fn s37_process_defaults_read_retains_model_settings_evidence() -> Result<(
     Ok(())
 }
 
-/// S34: a session system prompt lives on the
+/// a session system prompt lives on the
 /// immutable defaults epoch. Creation stores it, the loaded current session
 /// and process defaults read return it, replacement installs a promptless
 /// successor without rewriting the prompted epoch, replay preserves the exact
@@ -2878,7 +2872,7 @@ async fn s37_process_defaults_read_retains_model_settings_evidence() -> Result<(
 /// calling turn's frozen epoch rather than the current pointer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s34_system_prompt_rides_the_frozen_defaults_epoch() -> Result<(), Box<dyn Error>> {
+async fn system_prompt_rides_the_frozen_defaults_epoch() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0xa41));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xa42));
@@ -3253,13 +3247,12 @@ async fn s34_system_prompt_rides_the_frozen_defaults_epoch() -> Result<(), Box<d
     Ok(())
 }
 
-/// S01 / S03 / S08: the operation counted before
+/// the operation counted before
 /// activation is the exact no-steering Prepared call committed with that
 /// activation; steering accepted afterward remains pending for a later call.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s03_s08_counted_activation_checkpoints_exact_call_before_steering()
--> Result<(), Box<dyn Error>> {
+async fn counted_activation_checkpoints_exact_call_before_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0xcd01));
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xcd02));
@@ -3657,14 +3650,14 @@ async fn stale_counted_preview_retains_no_instruction_evidence() -> Result<(), B
     Ok(())
 }
 
-/// S03: deferred compaction evidence accepts successor ranges in
+/// deferred compaction evidence accepts successor ranges in
 /// model-visible order when a predecessor compacts only its logical leading
 /// summary and its retained suffix physically precedes that summary, while
 /// reverse correlation rejects an orphan summary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_context_compaction_constraints_use_projected_successor_order()
--> Result<(), Box<dyn Error>> {
+async fn context_compaction_constraints_use_projected_successor_order() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0xcc01));
     let session_uuid = session.into_uuid();

@@ -475,10 +475,10 @@ mod tests {
         }
     }
 
-    /// S01: sentinel command identities fail before
+    /// sentinel command identities fail before
     /// canonical command construction and claim nothing.
     #[test]
-    fn s01_request_rejects_reserved_command_identifiers() {
+    fn request_rejects_reserved_command_identifiers() {
         assert_eq!(
             CreateSessionRequest::try_new(
                 signalbox_domain::DurableCommandId::from_uuid(Uuid::nil()),
@@ -502,10 +502,10 @@ mod tests {
         );
     }
 
-    /// S01: production session identities are fresh
+    /// production session identities are fresh
     /// RFC-9562 UUIDv7 values, while their timestamp has no domain role.
     #[test]
-    fn s01_production_generator_supplies_fresh_uuid_v7_sessions() {
+    fn production_generator_supplies_fresh_uuid_v7_sessions() {
         let mut generator = UuidV7SessionIdGenerator;
         let first = generator.next_session_id();
         let second = generator.next_session_id();
@@ -523,11 +523,11 @@ mod tests {
         assert!(!session.as_uuid().is_max());
     }
 
-    /// S01: orchestration fixes the admitted
+    /// orchestration fixes the admitted
     /// provenance, establishes defaults version one, and calls the atomic port
     /// exactly once with the sealed candidate.
     #[test]
-    fn s01_orchestrates_one_atomic_creation() {
+    fn orchestrates_one_atomic_creation() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let candidate = session_id(3);
@@ -572,10 +572,10 @@ mod tests {
         );
     }
 
-    /// S01: equal replay returns the recorded receipt unchanged
+    /// equal replay returns the recorded receipt unchanged
     /// rather than the freshly generated candidate or a loaded Session.
     #[test]
-    fn s01_equal_replay_returns_original_receipt() {
+    fn equal_replay_returns_original_receipt() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let winner = session_id(3);
@@ -606,10 +606,10 @@ mod tests {
         assert_eq!(transaction.observed[1].session().id(), replay_candidate);
     }
 
-    /// S01: reusing one command ID for different canonical defaults
+    /// reusing one command ID for different canonical defaults
     /// returns a typed conflict and never substitutes the second candidate.
     #[test]
-    fn s01_conflicting_reuse_is_typed() {
+    fn conflicting_reuse_is_typed() {
         let command = command_id(1);
         let first = CreateSessionRequest::try_new(command, defaults(2))
             .expect("ordinary command identity is admitted");
@@ -656,10 +656,10 @@ mod tests {
         );
     }
 
-    /// S01: application orchestration neither retries transaction
+    /// application orchestration neither retries transaction
     /// failure nor fabricates a terminal command result.
     #[test]
-    fn s01_transaction_failure_is_returned_without_retry() {
+    fn transaction_failure_is_returned_without_retry() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let mut service = CreateSessionService::new(

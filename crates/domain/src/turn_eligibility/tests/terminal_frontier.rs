@@ -6,13 +6,12 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S02 / S04 / S07 / S09 /
 /// a live or startup-recovered completed response validates the
 /// producing call's steering-extended source, stop provenance, and final
 /// marker before the exact terminal frontier becomes the successor's
 /// starting prefix.
 #[test]
-fn s02_s04_s09_completed_frontier_becomes_successor_prefix() {
+fn completed_frontier_becomes_successor_prefix() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -208,10 +207,10 @@ fn s02_s04_s09_completed_frontier_becomes_successor_prefix() {
     );
 }
 
-/// S02 / S04: one physical attempt identity cannot
+/// one physical attempt identity cannot
 /// back terminal outcomes for two different turns.
 #[test]
-fn s02_s04_terminal_turns_reject_shared_attempt_identity() {
+fn terminal_turns_reject_shared_attempt_identity() {
     let session = current_session();
     let completed = accepted_origin(1);
     let refused = accepted_origin(2);
@@ -354,13 +353,12 @@ fn s02_s04_terminal_turns_reject_shared_attempt_identity() {
     );
 }
 
-/// S02 / S04 / S07 / S09 /
 /// a live or startup-recovered refusal validates the producing
 /// call's steering-extended source and stop provenance, releases the slot,
 /// and preserves its equal-content terminal frontier as the successor's
 /// exact prefix.
 #[test]
-fn s02_s04_s09_refused_frontier_becomes_successor_prefix() {
+fn refused_frontier_becomes_successor_prefix() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -513,10 +511,10 @@ fn s02_s04_s09_refused_frontier_becomes_successor_prefix() {
     );
 }
 
-/// S02: assistant text cannot name a refused call because only
+/// assistant text cannot name a refused call because only
 /// completed physical calls can produce semantic assistant content.
 #[test]
-fn s02_refused_call_rejects_assistant_content() {
+fn refused_call_rejects_assistant_content() {
     let session = current_session();
     let origin = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -662,10 +660,10 @@ fn refused_compaction_suffix_reconstitutes_exact_terminal_frontier() {
     .expect("a refusal reload accepts its exact provider-compaction suffix");
 }
 
-/// S02: a terminal refusal must be backed by the
+/// a terminal refusal must be backed by the
 /// stored ended-attempt refusal disposition, not only a matching identity.
 #[test]
-fn s02_refused_turn_rejects_attempt_disposition_mismatch() {
+fn refused_turn_rejects_attempt_disposition_mismatch() {
     let session = current_session();
     let origin = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -730,11 +728,11 @@ fn s02_refused_turn_rejects_attempt_disposition_mismatch() {
     );
 }
 
-/// S07: a terminal-cancelled projection
+/// a terminal-cancelled projection
 /// validates the stored attempt end rather than inferring it from the
 /// separately supplied interrupt result.
 #[test]
-fn s07_cancelled_turn_rejects_attempt_end_mismatch() {
+fn cancelled_turn_rejects_attempt_end_mismatch() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -819,11 +817,11 @@ fn s07_cancelled_turn_rejects_attempt_end_mismatch() {
     );
 }
 
-/// S07: a cancelled call frontier must
+/// a cancelled call frontier must
 /// preserve the starting frontier rather than substituting unrelated
 /// semantic history before the cancellation marker.
 #[test]
-fn s07_cancelled_turn_rejects_unrelated_call_frontier() {
+fn cancelled_turn_rejects_unrelated_call_frontier() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -927,10 +925,10 @@ fn s07_cancelled_turn_rejects_unrelated_call_frontier() {
     );
 }
 
-/// S04: complete ambiguous-call facts reconstruct the
+/// complete ambiguous-call facts reconstruct the
 /// exact recovery wait and preserve the active progressing slot.
 #[test]
-fn s04_ambiguous_call_reconstructs_recovery_wait() {
+fn ambiguous_call_reconstructs_recovery_wait() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -992,11 +990,11 @@ fn s04_ambiguous_call_reconstructs_recovery_wait() {
     ));
 }
 
-/// S06 / S07: an opaque wait from
+/// an opaque wait from
 /// a completely validated ambiguous tool batch reconstructs the exact
 /// typed recovery subject and preserves it through interruption.
 #[test]
-fn s06_s07_ambiguous_tool_recovery_and_interrupt() {
+fn interrupting_tool_recovery_preserves_exact_ambiguity() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -1257,10 +1255,10 @@ fn s06_s07_ambiguous_tool_recovery_and_interrupt() {
     );
 }
 
-/// S07: a later interrupt supplies terminal authority
+/// a later interrupt supplies terminal authority
 /// without being rewritten into an already ambiguous attempt end.
 #[test]
-fn s07_tool_reconciliation_retains_without_stop_attempt_end() {
+fn tool_reconciliation_retains_without_stop_attempt_end() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -1286,10 +1284,10 @@ fn s07_tool_reconciliation_retains_without_stop_attempt_end() {
     ));
 }
 
-/// S09: a predecessor snapshot that omits its required failed
+/// a predecessor snapshot that omits its required failed
 /// marker is not a terminal frontier and cannot authorize a successor.
 #[test]
-fn s09_incomplete_failed_terminal_frontier_fails_closed() {
+fn incomplete_failed_terminal_frontier_fails_closed() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let origin_entry = semantic_entry(30);

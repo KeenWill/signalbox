@@ -10,7 +10,7 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S03 / S09: a scheduler-gap start remains
+/// a scheduler-gap start remains
 /// a valid ordinary origin after an earlier queued turn becomes active.
 #[test]
 fn active_reconstitution_preserves_post_anchor_scheduler_gap_start() {
@@ -34,7 +34,7 @@ fn active_reconstitution_preserves_post_anchor_scheduler_gap_start() {
     .expect("the later origin was accepted during a valid scheduler gap");
 }
 
-/// S03 / S09: an ordinary queued origin
+/// an ordinary queued origin
 /// retains the historical active target named at acceptance.
 #[test]
 fn active_reconstitution_preserves_post_anchor_historical_target() {
@@ -59,7 +59,7 @@ fn active_reconstitution_preserves_post_anchor_historical_target() {
     .expect("the later origin retains its exact previously active target");
 }
 
-/// S03 / S09: after-current delivery must
+/// after-current delivery must
 /// name an earlier nonqueued target in the complete turn inventory.
 #[test]
 fn active_reconstitution_rejects_missing_historical_delivery_target() {
@@ -90,7 +90,7 @@ fn active_reconstitution_rejects_missing_historical_delivery_target() {
     );
 }
 
-/// S03 / S07: an interrupt delivery must
+/// an interrupt delivery must
 /// agree with the origin record's durable interrupt-priority relation.
 #[test]
 fn active_reconstitution_rejects_delivery_priority_mismatch() {
@@ -121,10 +121,10 @@ fn active_reconstitution_rejects_delivery_priority_mismatch() {
     );
 }
 
-/// S01: origin delivery and queue facts
+/// origin delivery and queue facts
 /// are validated even when no active turn requires an acceptance tail.
 #[test]
-fn s01_queued_reconstitution_rejects_delivery_order_mismatch() {
+fn queued_reconstitution_rejects_delivery_order_mismatch() {
     let session = current_session();
     let queued = accepted_origin(1);
     let no_semantic_entries = Vec::new();
@@ -158,10 +158,10 @@ fn s01_queued_reconstitution_rejects_delivery_order_mismatch() {
     );
 }
 
-/// S01: a configured origin's
+/// a configured origin's
 /// accepted defaults version must equal its frozen provenance version.
 #[test]
-fn s01_queued_origin_rejects_defaults_version_mismatch() {
+fn queued_origin_rejects_defaults_version_mismatch() {
     let session = current_session();
     let queued = accepted_origin(1);
     let mismatched_version = SessionConfigurationDefaultsVersion::try_from_u64(2)
@@ -200,10 +200,10 @@ fn s01_queued_origin_rejects_defaults_version_mismatch() {
     );
 }
 
-/// S01: an explicit accepted
+/// an explicit accepted
 /// model request must equal the request retained by frozen provenance.
 #[test]
-fn s01_queued_origin_rejects_explicit_request_mismatch() {
+fn queued_origin_rejects_explicit_request_mismatch() {
     let session = current_session();
     let queued = accepted_origin(1);
     let requested = ModelSelectionRequest::Direct(direct(99));
@@ -241,7 +241,7 @@ fn s01_queued_origin_rejects_explicit_request_mismatch() {
     );
 }
 
-/// S03: the tail repeats the exact
+/// the tail repeats the exact
 /// immutable versioned delivery stored for its origin rather than
 /// supplying an independently plausible configuration choice.
 #[test]
@@ -271,7 +271,7 @@ fn active_reconstitution_rejects_origin_delivery_configuration_mismatch() {
     );
 }
 
-/// S03 / S07: an accepted interrupt
+/// an accepted interrupt
 /// against the current owner prevents evidence-free phase reconstruction.
 #[test]
 fn active_reconstitution_rejects_interrupt_evidence_for_evidence_free_phase() {
@@ -313,10 +313,10 @@ fn active_reconstitution_rejects_interrupt_evidence_for_evidence_free_phase() {
     );
 }
 
-/// S03 / S07: a historical interrupt in the active
+/// a historical interrupt in the active
 /// acceptance tail retains the target terminal's exact stop proof.
 #[test]
-fn s03_s07_historical_interrupt_requires_target_stop_proof() {
+fn historical_interrupt_requires_target_stop_proof() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let active = accepted_origin(2);
@@ -345,7 +345,7 @@ fn s03_s07_historical_interrupt_requires_target_stop_proof() {
     );
 }
 
-/// S03 / S08: one accepted input cannot
+/// one accepted input cannot
 /// be both pending steering and a turn origin in the scheduling inventory.
 #[test]
 fn active_reconstitution_rejects_pending_identity_that_is_also_an_origin() {
@@ -388,11 +388,11 @@ fn active_reconstitution_rejects_pending_identity_that_is_also_an_origin() {
     );
 }
 
-/// S02 / S08: a prepared call consumes the complete
+/// a prepared call consumes the complete
 /// pending prefix; durable history cannot claim that it skipped an earlier
 /// pending input and consumed a later one.
 #[test]
-fn s02_s08_active_tail_rejects_consumed_after_pending() {
+fn active_tail_rejects_consumed_after_pending() {
     let session = current_session();
     let active = accepted_origin(1);
     let pending = accepted_origin(2);
@@ -439,7 +439,7 @@ fn s02_s08_active_tail_rejects_consumed_after_pending() {
     );
 }
 
-/// S03 / S08: a pending tail entry cannot
+/// a pending tail entry cannot
 /// replace a different origin that owns the same acceptance position.
 #[test]
 fn active_reconstitution_rejects_pending_position_owned_by_an_origin() {
@@ -479,7 +479,7 @@ fn active_reconstitution_rejects_pending_position_owned_by_an_origin() {
     );
 }
 
-/// S03: the last represented position must equal
+/// the last represented position must equal
 /// the authoritative session tail observed by the same read.
 #[test]
 fn active_reconstitution_rejects_incomplete_claimed_acceptance_tail() {
@@ -500,10 +500,10 @@ fn active_reconstitution_rejects_incomplete_claimed_acceptance_tail() {
     );
 }
 
-/// S03: the claimed session observation
+/// the claimed session observation
 /// cannot end before a later origin supplied by the same scheduling read.
 #[test]
-fn s03_active_tail_reaches_every_known_origin() {
+fn active_tail_reaches_every_known_origin() {
     let session = current_session();
     let origins = PostAnchorOrigins {
         active: accepted_origin(1),
@@ -538,10 +538,10 @@ fn s03_active_tail_reaches_every_known_origin() {
     );
 }
 
-/// S03: a current attempt owned by another turn cannot
+/// a current attempt owned by another turn cannot
 /// reconstruct an active aggregate.
 #[test]
-fn s03_active_reconstitution_rejects_cross_wired_attempt_owner() {
+fn active_reconstitution_rejects_cross_wired_attempt_owner() {
     let session = current_session();
     let active = accepted_origin(1);
     let other_turn = turn_id(99);

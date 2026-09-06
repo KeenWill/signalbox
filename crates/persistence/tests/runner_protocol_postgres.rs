@@ -3495,7 +3495,7 @@ async fn stored_check_violation(pool: &PgPool) -> RunnerProtocolStoreError {
 /// at 64 sessions and resumes strictly after its durable session identity.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_cursor_pages_sixty_four_sessions() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -3552,7 +3552,7 @@ async fn s32_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(), Box<dy
 /// and pre-enrollment exact-runner placement branches.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_page_has_affected_set_indexes() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_page_has_affected_set_indexes() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
 
     let definition: String = sqlx::query_scalar(
@@ -3588,7 +3588,7 @@ async fn s32_runner_loss_page_has_affected_set_indexes() -> Result<(), Box<dyn E
 /// has not received the loss projection.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_cursor_rejects_skipped_session() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_cursor_rejects_skipped_session() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -3630,7 +3630,7 @@ async fn s32_runner_loss_cursor_rejects_skipped_session() -> Result<(), Box<dyn 
 /// a propagation cursor cannot rewind behind its durable session.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_cursor_rejects_rewind() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_cursor_rejects_rewind() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -3684,7 +3684,7 @@ async fn s32_runner_loss_cursor_rejects_rewind() -> Result<(), Box<dyn Error>> {
 /// still retains an older loss baseline.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_cursor_rejects_premature_completion() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_cursor_rejects_premature_completion() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -3730,8 +3730,7 @@ async fn s32_runner_loss_cursor_rejects_premature_completion() -> Result<(), Box
 /// commits before the matching enrollment can create or complete a loss cursor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_pre_enrollment_placement_serializes_loss_cursor_creation() -> Result<(), Box<dyn Error>>
-{
+async fn pre_enrollment_placement_serializes_loss_cursor_creation() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -3777,7 +3776,7 @@ async fn s32_pre_enrollment_placement_serializes_loss_cursor_creation() -> Resul
 /// enrollment authority, so cursor completion cannot form an opposing edge.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_loss_cursor_completion_serializes_on_runner_identity() -> Result<(), Box<dyn Error>> {
+async fn loss_cursor_completion_serializes_on_runner_identity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -3849,7 +3848,7 @@ async fn s32_loss_cursor_completion_serializes_on_runner_identity() -> Result<()
 /// a fully projected loss cursor may transition once to completed.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_cursor_completes_after_final_session() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_cursor_completes_after_final_session() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -3895,8 +3894,7 @@ async fn s32_runner_loss_cursor_completes_after_final_session() -> Result<(), Bo
 /// identity loss, its follower event, and its cursor advancement atomically.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_transaction_projects_exact_unpinned_session() -> Result<(), Box<dyn Error>>
-{
+async fn runner_loss_transaction_projects_exact_unpinned_session() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -3973,8 +3971,7 @@ async fn s32_runner_loss_transaction_projects_exact_unpinned_session() -> Result
 /// the same runner-identity fallback during projection that selected its page.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_transaction_projects_pre_enrollment_session() -> Result<(), Box<dyn Error>>
-{
+async fn runner_loss_transaction_projects_pre_enrollment_session() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -4029,7 +4026,7 @@ async fn s32_runner_loss_transaction_projects_pre_enrollment_session() -> Result
 /// subject superseded and advances the cursor without a second projection.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_transaction_advances_a_superseded_session() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_transaction_advances_a_superseded_session() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -4076,7 +4073,7 @@ async fn s32_runner_loss_transaction_advances_a_superseded_session() -> Result<(
 /// hide a session that has not crossed the atomic propagation boundary.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_transaction_rejects_premature_completion() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_transaction_rejects_premature_completion() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -4121,7 +4118,7 @@ async fn s32_runner_loss_transaction_rejects_premature_completion() -> Result<()
 /// correlated to the same placement boundary.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_runner_loss_transaction_retires_offered_lease() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_transaction_retires_offered_lease() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, connection_epoch) =
         stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
@@ -4185,7 +4182,7 @@ async fn s31_runner_loss_transaction_retires_offered_lease() -> Result<(), Box<d
 /// lease offered against its pinned predecessor from later loss propagation.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_runner_loss_finds_lease_before_profile_replacement() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_finds_lease_before_profile_replacement() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin, connection_epoch) =
         stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
@@ -4257,7 +4254,7 @@ async fn s31_runner_loss_finds_lease_before_profile_replacement() -> Result<(), 
 /// placement, lease, turn wait, and propagation-cursor mutation back together.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_runner_loss_transaction_rolls_back_as_one_boundary() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_transaction_rolls_back_as_one_boundary() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, connection_epoch) =
         stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
@@ -4326,7 +4323,7 @@ async fn s31_runner_loss_transaction_rolls_back_as_one_boundary() -> Result<(), 
 /// in-flight while the turn yields to the exact runner-recovery wait.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_runner_loss_transaction_retains_claimed_pure_attempt() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_transaction_retains_claimed_pure_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, connection_epoch) =
         stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
@@ -4378,7 +4375,7 @@ async fn s31_runner_loss_transaction_retains_claimed_pure_attempt() -> Result<()
 /// retry authority without erasing the fact that execution may have occurred.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_runner_loss_transaction_retains_idempotent_attempt() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_transaction_retains_idempotent_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, connection_epoch) =
         stored_active_pin_fixture_with_authorization(
@@ -4433,8 +4430,7 @@ async fn s31_runner_loss_transaction_retains_idempotent_attempt() -> Result<(), 
 /// execution ambiguity instead of being rewritten as known failure.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_runner_loss_transaction_preserves_side_effect_ambiguity() -> Result<(), Box<dyn Error>>
-{
+async fn runner_loss_transaction_preserves_side_effect_ambiguity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, connection_epoch) =
         stored_active_pin_fixture_with_authorization(
@@ -4497,7 +4493,7 @@ async fn s31_runner_loss_transaction_preserves_side_effect_ambiguity() -> Result
 /// deleted independently of its exact loss epoch.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_propagation_cursor_rejects_delete() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_propagation_cursor_rejects_delete() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -4534,7 +4530,7 @@ async fn s32_runner_loss_propagation_cursor_rejects_delete() -> Result<(), Box<d
 /// bulk truncation cannot bypass runner-loss cursor durability.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_propagation_cursor_rejects_truncate() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_propagation_cursor_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -4604,7 +4600,7 @@ fn one_conflict_assertion_rejects_a_non_constraint_rejection() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_registration_round_trips_canonical_evidence() -> Result<(), Box<dyn Error>> {
+async fn registration_round_trips_canonical_evidence() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let mut expected_enrollment = enrollment();
@@ -4683,7 +4679,7 @@ async fn s30_registration_round_trips_canonical_evidence() -> Result<(), Box<dyn
 /// the exact loss epoch in the same transaction as terminalization.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_revocation_advances_live_connection_loss_epoch() -> Result<(), Box<dyn Error>> {
+async fn revocation_advances_live_connection_loss_epoch() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let mut expected_enrollment = enrollment();
@@ -4723,7 +4719,7 @@ async fn s32_revocation_advances_live_connection_loss_epoch() -> Result<(), Box<
 /// before applying active-enrollment policy.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_store_pin_rejects_corrupt_enrollment_discriminator() -> Result<(), Box<dyn Error>> {
+async fn store_pin_rejects_corrupt_enrollment_discriminator() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, _) = stored_pin_fixture(&pool).await?;
     let session = SessionId::from_uuid(uuid(SECOND_SESSION));
@@ -4805,8 +4801,7 @@ async fn always_confirm_registration_persists_under_the_closed_constraint()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_store_rejects_oversized_repository_inventory_before_write()
--> Result<(), Box<dyn Error>> {
+async fn store_rejects_oversized_repository_inventory_before_write() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -4843,7 +4838,7 @@ async fn s30_store_rejects_oversized_repository_inventory_before_write()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_failed_registration_write_preserves_prior_authority() -> Result<(), Box<dyn Error>> {
+async fn failed_registration_write_preserves_prior_authority() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -4894,8 +4889,8 @@ async fn s30_failed_registration_write_preserves_prior_authority() -> Result<(),
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_insert_enrollment_requires_pristine_registration_authority()
--> Result<(), Box<dyn Error>> {
+async fn insert_enrollment_requires_pristine_registration_authority() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -4921,7 +4916,7 @@ async fn s30_insert_enrollment_requires_pristine_registration_authority()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_outstanding_preparation_fails_registration_before_durable_writes()
+async fn outstanding_preparation_fails_registration_before_durable_writes()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -4959,7 +4954,7 @@ async fn s30_outstanding_preparation_fails_registration_before_durable_writes()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_historical_registration_load_remains_stale() -> Result<(), Box<dyn Error>> {
+async fn historical_registration_load_remains_stale() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -5008,8 +5003,8 @@ async fn s30_historical_registration_load_remains_stale() -> Result<(), Box<dyn 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_stale_loaded_enrollment_cannot_bind_historical_registration()
--> Result<(), Box<dyn Error>> {
+async fn stale_loaded_enrollment_cannot_bind_historical_registration() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -5040,7 +5035,7 @@ async fn s30_stale_loaded_enrollment_cannot_bind_historical_registration()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_orphan_revocation_audit_cannot_commit() -> Result<(), Box<dyn Error>> {
+async fn orphan_revocation_audit_cannot_commit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -5081,7 +5076,7 @@ async fn s30_orphan_revocation_audit_cannot_commit() -> Result<(), Box<dyn Error
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_historical_enrollment_audit_rechecks_its_own_revision() -> Result<(), Box<dyn Error>> {
+async fn historical_enrollment_audit_rechecks_its_own_revision() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let mut expected_enrollment = enrollment();
@@ -5104,7 +5099,7 @@ async fn s30_historical_enrollment_audit_rechecks_its_own_revision() -> Result<(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_current_registration_gates_new_leases() -> Result<(), Box<dyn Error>> {
+async fn current_registration_gates_new_leases() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _registration, pin) = stored_pin_fixture(&pool).await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -5152,7 +5147,7 @@ async fn s30_current_registration_gates_new_leases() -> Result<(), Box<dyn Error
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_current_registration_preserves_complete_placement() -> Result<(), Box<dyn Error>> {
+async fn current_registration_preserves_complete_placement() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -5215,7 +5210,7 @@ async fn s31_current_registration_preserves_complete_placement() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_current_registration_preserves_profile() -> Result<(), Box<dyn Error>> {
+async fn current_registration_preserves_profile() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -5279,7 +5274,7 @@ async fn s31_current_registration_preserves_profile() -> Result<(), Box<dyn Erro
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_current_registration_preserves_workspace() -> Result<(), Box<dyn Error>> {
+async fn current_registration_preserves_workspace() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -5439,8 +5434,7 @@ async fn s31_current_registration_preserves_workspace() -> Result<(), Box<dyn Er
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s30_registration_replacement_serializes_later_lease_admission()
--> Result<(), Box<dyn Error>> {
+async fn registration_replacement_serializes_later_lease_admission() -> Result<(), Box<dyn Error>> {
     struct SerializationOutcome {
         replacement_result: Result<
             Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError>,
@@ -5553,7 +5547,7 @@ async fn s30_registration_replacement_serializes_later_lease_admission()
 /// before the placement head, matching every later lease append.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s30_initial_pin_locks_scheduler_before_placement() -> Result<(), Box<dyn Error>> {
+async fn initial_pin_locks_scheduler_before_placement() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
         insert_session(&pool).await?;
@@ -5644,7 +5638,7 @@ async fn s30_initial_pin_locks_scheduler_before_placement() -> Result<(), Box<dy
 /// scheduler before the placement head, matching a concurrent lease writer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_placement_projection_locks_scheduler_before_placement() -> Result<(), Box<dyn Error>> {
+async fn placement_projection_locks_scheduler_before_placement() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
         let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
@@ -5732,7 +5726,7 @@ async fn s32_placement_projection_locks_scheduler_before_placement() -> Result<(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_current_registration_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
+async fn current_registration_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, initial, _) = stored_pin_fixture(&pool).await?;
     store
@@ -5756,7 +5750,7 @@ async fn s30_current_registration_head_cannot_rewind() -> Result<(), Box<dyn Err
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_current_registration_head_rejects_truncate() -> Result<(), Box<dyn Error>> {
+async fn current_registration_head_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, _) = stored_pin_fixture(&pool).await?;
     let truncated = sqlx::query("TRUNCATE runner_current_registration")
@@ -5771,7 +5765,21 @@ async fn s30_current_registration_head_rejects_truncate() -> Result<(), Box<dyn 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_enrollment_classes_reject_truncate() -> Result<(), Box<dyn Error>> {
+async fn physical_attempt_lease_binding_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let truncated = sqlx::query("TRUNCATE runner_physical_attempt_lease_binding")
+        .execute(&pool)
+        .await
+        .expect_err("attempt-to-lease lineage cannot be truncated");
+
+    assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn enrollment_classes_reject_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, _) = stored_pin_fixture(&pool).await?;
     let truncated = sqlx::query("TRUNCATE runner_enrollment_allowed_class CASCADE")
@@ -5786,7 +5794,7 @@ async fn s30_enrollment_classes_reject_truncate() -> Result<(), Box<dyn Error>> 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_enrollment_audit_classes_reject_truncate() -> Result<(), Box<dyn Error>> {
+async fn enrollment_audit_classes_reject_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, _) = stored_pin_fixture(&pool).await?;
     let truncated = sqlx::query("TRUNCATE runner_enrollment_audit_allowed_class")
@@ -5801,7 +5809,7 @@ async fn s30_enrollment_audit_classes_reject_truncate() -> Result<(), Box<dyn Er
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_registration_inventories_reject_truncate() -> Result<(), Box<dyn Error>> {
+async fn registration_inventories_reject_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, _) = stored_pin_fixture(&pool).await?;
     let registration = sqlx::query("TRUNCATE runner_registration CASCADE")
@@ -5851,7 +5859,7 @@ async fn s30_registration_inventories_reject_truncate() -> Result<(), Box<dyn Er
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_appended_registration_must_advance_current_head() -> Result<(), Box<dyn Error>> {
+async fn appended_registration_must_advance_current_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -5875,7 +5883,7 @@ async fn s30_appended_registration_must_advance_current_head() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_concurrent_attempt_binding_has_one_lease_lineage() -> Result<(), Box<dyn Error>> {
+async fn concurrent_attempt_binding_has_one_lease_lineage() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -5920,7 +5928,7 @@ async fn s31_concurrent_attempt_binding_has_one_lease_lineage() -> Result<(), Bo
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_request_cannot_start_second_lease_lineage() -> Result<(), Box<dyn Error>> {
+async fn request_cannot_start_second_lease_lineage() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let claimed = duplicate_lease(&pin.lease, registration.registration())
@@ -5944,7 +5952,7 @@ async fn s31_request_cannot_start_second_lease_lineage() -> Result<(), Box<dyn E
 /// exact offer authority required by its subsequent claim.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_connected_later_lease_offer_admits_exact_claim() -> Result<(), Box<dyn Error>> {
+async fn connected_later_lease_offer_admits_exact_claim() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, _, lease) =
         stored_later_lease_fixture(&pool).await?;
@@ -5974,7 +5982,7 @@ async fn s31_connected_later_lease_offer_admits_exact_claim() -> Result<(), Box<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_orphan_request_lease_binding_cannot_commit() -> Result<(), Box<dyn Error>> {
+async fn orphan_request_lease_binding_cannot_commit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
@@ -6001,7 +6009,7 @@ async fn s31_orphan_request_lease_binding_cannot_commit() -> Result<(), Box<dyn 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_request_lease_binding_rejects_truncate() -> Result<(), Box<dyn Error>> {
+async fn request_lease_binding_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     stored_pin_fixture(&pool).await?;
     let truncated = sqlx::query("TRUNCATE runner_tool_request_lease_binding")
@@ -6016,7 +6024,7 @@ async fn s31_request_lease_binding_rejects_truncate() -> Result<(), Box<dyn Erro
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_orphan_physical_attempt_binding_cannot_commit() -> Result<(), Box<dyn Error>> {
+async fn orphan_physical_attempt_binding_cannot_commit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
@@ -6038,7 +6046,7 @@ async fn s31_orphan_physical_attempt_binding_cannot_commit() -> Result<(), Box<d
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_concurrent_enrollment_revocation_blocks_a_later_lease() -> Result<(), Box<dyn Error>> {
+async fn concurrent_enrollment_revocation_blocks_a_later_lease() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     let enrollment = expected_enrollment.enrollment().into_uuid();
@@ -6098,8 +6106,7 @@ async fn s31_concurrent_enrollment_revocation_blocks_a_later_lease() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_direct_lease_admission_serializes_enrollment_revocation() -> Result<(), Box<dyn Error>>
-{
+async fn direct_lease_admission_serializes_enrollment_revocation() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     let enrollment = expected_enrollment.enrollment().into_uuid();
@@ -6150,7 +6157,7 @@ async fn s31_direct_lease_admission_serializes_enrollment_revocation() -> Result
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_concurrent_grant_revocation_blocks_a_later_lease() -> Result<(), Box<dyn Error>> {
+async fn concurrent_grant_revocation_blocks_a_later_lease() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin, lease) = stored_later_lease_fixture(&pool).await?;
     let grant = pin
@@ -6192,7 +6199,7 @@ async fn s31_concurrent_grant_revocation_blocks_a_later_lease() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_grant_revocation_serializes_profile_replacement() -> Result<(), Box<dyn Error>> {
+async fn grant_revocation_serializes_profile_replacement() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let original_grant = pin
@@ -6245,14 +6252,13 @@ async fn s32_grant_revocation_serializes_profile_replacement() -> Result<(), Box
     Ok(())
 }
 
-/// S32: profile replacement stays durable after an
+/// profile replacement stays durable after an
 /// availability-equivalent re-registration. The domain validates the
 /// replacement against the enrollment-owned current revision while the
 /// placement record carries the pinned registration snapshot forward.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_profile_replacement_survives_equivalent_reregistration() -> Result<(), Box<dyn Error>>
-{
+async fn profile_replacement_survives_equivalent_reregistration() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
     let current = store
@@ -6304,7 +6310,7 @@ async fn s32_profile_replacement_survives_equivalent_reregistration() -> Result<
 /// the placement head, matching profile replacement's durable lock order.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_lease_offer_locks_enrollment_before_placement() -> Result<(), Box<dyn Error>> {
+async fn lease_offer_locks_enrollment_before_placement() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin, lease) =
         stored_later_lease_fixture(&pool).await?;
@@ -6393,8 +6399,8 @@ async fn s32_lease_offer_locks_enrollment_before_placement() -> Result<(), Box<d
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_combined_tool_override_survives_omitted_runner_availability()
--> Result<(), Box<dyn Error>> {
+async fn combined_tool_override_survives_omitted_runner_availability() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -6470,12 +6476,12 @@ async fn s30_combined_tool_override_survives_omitted_runner_availability()
     Ok(())
 }
 
-/// S31: a session-policy tool/profile pair admits a lease
+/// a session-policy tool/profile pair admits a lease
 /// only with confirmed approval provenance; policy-auto provenance is
 /// rejected even for a direct lease-row insert.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_session_policy_lease_requires_confirmed_provenance() -> Result<(), Box<dyn Error>> {
+async fn session_policy_lease_requires_confirmed_provenance() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -6565,12 +6571,12 @@ async fn s31_session_policy_lease_requires_confirmed_provenance() -> Result<(), 
     Ok(())
 }
 
-/// S31: a one-shot user override is the user confirming
+/// a one-shot user override is the user confirming
 /// one exact command in advance, so its provenance admits a session-policy
 /// lease exactly as an applied user command does.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_session_policy_lease_admits_user_override_provenance() -> Result<(), Box<dyn Error>> {
+async fn session_policy_lease_admits_user_override_provenance() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -6622,13 +6628,12 @@ async fn s31_session_policy_lease_admits_user_override_provenance() -> Result<()
     Ok(())
 }
 
-/// S31: a profileless lease on a Confirm-permission tool
+/// a profileless lease on a Confirm-permission tool
 /// admits only confirmed approval provenance; policy-auto provenance is
 /// rejected even for a direct lease-row insert.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_profileless_confirm_lease_requires_confirmed_provenance() -> Result<(), Box<dyn Error>>
-{
+async fn profileless_confirm_lease_requires_confirmed_provenance() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -6720,7 +6725,7 @@ async fn s31_profileless_confirm_lease_requires_confirmed_provenance() -> Result
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_replaced_grant_is_not_a_current_revocation_target() -> Result<(), Box<dyn Error>> {
+async fn replaced_grant_is_not_a_current_revocation_target() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let original_grant = pin
@@ -6757,7 +6762,7 @@ async fn s32_replaced_grant_is_not_a_current_revocation_target() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_profile_replacement_requires_current_registration() -> Result<(), Box<dyn Error>> {
+async fn profile_replacement_requires_current_registration() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
     let original_grant = pin
@@ -6797,7 +6802,7 @@ async fn s30_profile_replacement_requires_current_registration() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_generic_store_rejects_runner_replacement_without_command_authority()
+async fn generic_store_rejects_runner_replacement_without_command_authority()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
@@ -6836,7 +6841,7 @@ async fn s32_generic_store_rejects_runner_replacement_without_command_authority(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_checked_runner_replacement_requires_a_live_successor_connection()
+async fn checked_runner_replacement_requires_a_live_successor_connection()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
@@ -6883,7 +6888,7 @@ async fn s32_checked_runner_replacement_requires_a_live_successor_connection()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_checked_runner_replacement_rejects_a_successor_without_a_connection()
+async fn checked_runner_replacement_rejects_a_successor_without_a_connection()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
@@ -6924,8 +6929,7 @@ async fn s32_checked_runner_replacement_rejects_a_successor_without_a_connection
 /// same-runner recovery reserved exclusively for registration-triggered loss.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_registration_loss_admits_same_runner_replacement_shape() -> Result<(), Box<dyn Error>>
-{
+async fn registration_loss_admits_same_runner_replacement_shape() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_credentialless_pin_fixture(&pool).await?;
     append_runner_registration_loss_projection(&pool, pin.placement.session()).await?;
@@ -6955,7 +6959,7 @@ async fn s32_registration_loss_admits_same_runner_replacement_shape() -> Result<
 /// connection loss retains the different-runner replacement rule.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_connection_loss_rejects_same_runner_replacement_shape() -> Result<(), Box<dyn Error>> {
+async fn connection_loss_rejects_same_runner_replacement_shape() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
@@ -6973,7 +6977,7 @@ async fn s32_connection_loss_rejects_same_runner_replacement_shape() -> Result<(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_first_placement_record_is_created_unpinned() -> Result<(), Box<dyn Error>> {
+async fn first_placement_record_is_created_unpinned() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session_for(&pool, uuid(FOREIGN_SESSION)).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -7025,7 +7029,7 @@ async fn s30_first_placement_record_is_created_unpinned() -> Result<(), Box<dyn 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_placement_required_flag_matches_registered_locus() -> Result<(), Box<dyn Error>> {
+async fn placement_required_flag_matches_registered_locus() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     sqlx::query(
@@ -7060,7 +7064,7 @@ async fn s30_placement_required_flag_matches_registered_locus() -> Result<(), Bo
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_initial_pin_requires_loadable_offered_lease() -> Result<(), Box<dyn Error>> {
+async fn initial_pin_requires_loadable_offered_lease() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -7210,7 +7214,7 @@ async fn s30_initial_pin_requires_loadable_offered_lease() -> Result<(), Box<dyn
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_credential_relations_admit_names_and_audit_only() -> Result<(), Box<dyn Error>> {
+async fn credential_relations_admit_names_and_audit_only() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let forbidden_columns: i64 = sqlx::query_scalar(
         "SELECT count(*)
@@ -7249,8 +7253,7 @@ async fn s32_credential_relations_admit_names_and_audit_only() -> Result<(), Box
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_grant_lineage_origin_is_part_of_every_durable_identity() -> Result<(), Box<dyn Error>>
-{
+async fn grant_lineage_origin_is_part_of_every_durable_identity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let grant_primary_key: Vec<String> = sqlx::query_scalar(
         "SELECT array_agg(attribute.attname::text ORDER BY key.ordinality)
@@ -7312,7 +7315,7 @@ async fn s32_grant_lineage_origin_is_part_of_every_durable_identity() -> Result<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pinned_affinity_and_grant_round_trip() -> Result<(), Box<dyn Error>> {
+async fn pinned_affinity_and_grant_round_trip() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -7510,7 +7513,7 @@ async fn s32_pinned_affinity_and_grant_round_trip() -> Result<(), Box<dyn Error>
 /// baseline when that late enrollment is lost before pin.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_lost_before_pin_round_trips_exact_identity() -> Result<(), Box<dyn Error>> {
+async fn runner_lost_before_pin_round_trips_exact_identity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -7559,7 +7562,7 @@ async fn s32_runner_lost_before_pin_round_trips_exact_identity() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_transcript_snapshot_authenticates_current_pre_pin_runner_loss()
+async fn transcript_snapshot_authenticates_current_pre_pin_runner_loss()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
@@ -7600,8 +7603,7 @@ async fn s32_transcript_snapshot_authenticates_current_pre_pin_runner_loss()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_session_summary_authenticates_current_pre_pin_runner_loss()
--> Result<(), Box<dyn Error>> {
+async fn session_summary_authenticates_current_pre_pin_runner_loss() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let session = SessionId::from_uuid(uuid(SESSION));
     let selection = DirectModelSelection::from_uuid(uuid(0xa141));
@@ -7661,8 +7663,8 @@ async fn s32_session_summary_authenticates_current_pre_pin_runner_loss()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_transcript_snapshot_authenticates_current_runner_suspicion()
--> Result<(), Box<dyn Error>> {
+async fn transcript_snapshot_authenticates_current_runner_suspicion() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let connection = store
@@ -7695,7 +7697,7 @@ async fn s32_transcript_snapshot_authenticates_current_runner_suspicion()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_revision_one_loss_authenticates_the_creation_request() -> Result<(), Box<dyn Error>> {
+async fn revision_one_loss_authenticates_the_creation_request() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -7735,7 +7737,7 @@ async fn s32_revision_one_loss_authenticates_the_creation_request() -> Result<()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_pinned_facts_on_loss_before_pin() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_pinned_facts_on_loss_before_pin() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -7779,7 +7781,7 @@ async fn s32_load_rejects_pinned_facts_on_loss_before_pin() -> Result<(), Box<dy
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_loss_with_another_event_kind() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_loss_with_another_event_kind() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -7822,7 +7824,7 @@ async fn s32_load_rejects_loss_with_another_event_kind() -> Result<(), Box<dyn E
 /// revision-one placement creation event after relational guards are bypassed.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_later_created_record() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_later_created_record() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -7869,7 +7871,7 @@ async fn s32_load_rejects_later_created_record() -> Result<(), Box<dyn Error>> {
 /// creation after relational guards are bypassed.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_revision_one_pre_pin_replacement() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_revision_one_pre_pin_replacement() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -7919,7 +7921,7 @@ async fn s32_load_rejects_revision_one_pre_pin_replacement() -> Result<(), Box<d
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pre_pin_replacement_round_trips_append_only_history() -> Result<(), Box<dyn Error>> {
+async fn pre_pin_replacement_round_trips_append_only_history() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -7990,8 +7992,7 @@ async fn s32_pre_pin_replacement_round_trips_append_only_history() -> Result<(),
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_malformed_pre_pin_replacement_predecessor() -> Result<(), Box<dyn Error>>
-{
+async fn load_rejects_malformed_pre_pin_replacement_predecessor() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -8061,7 +8062,7 @@ async fn s32_load_rejects_malformed_pre_pin_replacement_predecessor() -> Result<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_malformed_pre_pin_replacement_origin() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_malformed_pre_pin_replacement_origin() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -8131,7 +8132,7 @@ async fn s32_load_rejects_malformed_pre_pin_replacement_origin() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pre_pin_replacement_rejects_retained_lost_selector() -> Result<(), Box<dyn Error>> {
+async fn pre_pin_replacement_rejects_retained_lost_selector() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -8188,7 +8189,7 @@ async fn s32_pre_pin_replacement_rejects_retained_lost_selector() -> Result<(), 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_requires_a_closed_source() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_requires_a_closed_source() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let mut malformed = pool.begin().await?;
@@ -8210,7 +8211,7 @@ async fn s32_runner_loss_requires_a_closed_source() -> Result<(), Box<dyn Error>
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_requires_the_exact_pinned_runner() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_requires_the_exact_pinned_runner() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let mut malformed = pool.begin().await?;
@@ -8232,7 +8233,7 @@ async fn s32_runner_loss_requires_the_exact_pinned_runner() -> Result<(), Box<dy
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_abandonment_retains_the_complete_lost_request() -> Result<(), Box<dyn Error>> {
+async fn abandonment_retains_the_complete_lost_request() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -8255,7 +8256,7 @@ async fn s32_abandonment_retains_the_complete_lost_request() -> Result<(), Box<d
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_missing_pre_pin_replacement_history() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_missing_pre_pin_replacement_history() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -8326,8 +8327,7 @@ async fn s32_load_rejects_missing_pre_pin_replacement_history() -> Result<(), Bo
 /// placement head's physical event prefix.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_pre_pin_replacement_proof_after_current_head()
--> Result<(), Box<dyn Error>> {
+async fn load_rejects_pre_pin_replacement_proof_after_current_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -8388,7 +8388,7 @@ async fn s32_load_rejects_pre_pin_replacement_proof_after_current_head()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_loss_metadata_on_a_pinned_placement() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_loss_metadata_on_a_pinned_placement() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     sqlx::query(
@@ -8424,7 +8424,7 @@ async fn s32_load_rejects_loss_metadata_on_a_pinned_placement() -> Result<(), Bo
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_loss_for_a_runner_other_than_the_pin() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_loss_for_a_runner_other_than_the_pin() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
@@ -8462,7 +8462,7 @@ async fn s32_load_rejects_loss_for_a_runner_other_than_the_pin() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_generic_store_rejects_pre_pin_loss_without_transactional_authority()
+async fn generic_store_rejects_pre_pin_loss_without_transactional_authority()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
@@ -8488,7 +8488,7 @@ async fn s32_generic_store_rejects_pre_pin_loss_without_transactional_authority(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_generic_store_rejects_pinned_loss_without_transactional_authority()
+async fn generic_store_rejects_pinned_loss_without_transactional_authority()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
@@ -8510,7 +8510,7 @@ async fn s32_generic_store_rejects_pinned_loss_without_transactional_authority()
 /// active running turn at the exact pre-pin runner-loss boundary.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_running_turn_enters_runner_recovery_with_all_triggers() -> Result<(), Box<dyn Error>> {
+async fn running_turn_enters_runner_recovery_with_all_triggers() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -8562,7 +8562,7 @@ async fn s32_running_turn_enters_runner_recovery_with_all_triggers() -> Result<(
 /// turn attempt has yielded to its durable loss boundary.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rejects_non_yielded_turn_boundary() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rejects_non_yielded_turn_boundary() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -8609,7 +8609,7 @@ async fn s32_runner_recovery_rejects_non_yielded_turn_boundary() -> Result<(), B
 /// produced by the unique yielded chain-tip turn attempt.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rejects_stale_tool_round_boundary() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rejects_stale_tool_round_boundary() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -8709,8 +8709,7 @@ async fn s32_runner_recovery_rejects_stale_tool_round_boundary() -> Result<(), B
 /// continuing tool round, never a round already closed by turn end.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_nullable_runner_wait_rejects_closed_tool_round_boundary() -> Result<(), Box<dyn Error>>
-{
+async fn nullable_runner_wait_rejects_closed_tool_round_boundary() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -8786,8 +8785,8 @@ async fn s32_nullable_runner_wait_rejects_closed_tool_round_boundary() -> Result
 /// attempt also requires that attempt's tool round to remain continuing.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_interrupted_runner_wait_rejects_closed_tool_round_boundary()
--> Result<(), Box<dyn Error>> {
+async fn interrupted_runner_wait_rejects_closed_tool_round_boundary() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
@@ -8821,7 +8820,7 @@ async fn s32_interrupted_runner_wait_rejects_closed_tool_round_boundary()
 /// continuing tool-round boundary produced by its yielded chain-tip attempt.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_nullable_runner_wait_rejects_hidden_tool_round() -> Result<(), Box<dyn Error>> {
+async fn nullable_runner_wait_rejects_hidden_tool_round() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -8881,7 +8880,7 @@ async fn s32_nullable_runner_wait_rejects_hidden_tool_round() -> Result<(), Box<
 /// rechecks and rejects the now-hidden yielded boundary.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_late_tool_round_rechecks_nullable_runner_wait() -> Result<(), Box<dyn Error>> {
+async fn late_tool_round_rechecks_nullable_runner_wait() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -8963,7 +8962,7 @@ async fn s32_late_tool_round_rechecks_nullable_runner_wait() -> Result<(), Box<d
 /// before inserting a round that would invalidate a nullable runner wait.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_serializes_tool_round_inserts() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_serializes_tool_round_inserts() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -9064,8 +9063,7 @@ async fn s32_runner_recovery_serializes_tool_round_inserts() -> Result<(), Box<d
 /// physical attempt in its retained tool round.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_nullable_runner_wait_rejects_unrecorded_physical_attempt() -> Result<(), Box<dyn Error>>
-{
+async fn nullable_runner_wait_rejects_unrecorded_physical_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -9130,8 +9128,7 @@ async fn s32_nullable_runner_wait_rejects_unrecorded_physical_attempt() -> Resul
 /// prepared physical attempt that stop handling would classify as current.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_nullable_runner_wait_rejects_prepared_physical_attempt() -> Result<(), Box<dyn Error>>
-{
+async fn nullable_runner_wait_rejects_prepared_physical_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -9210,8 +9207,8 @@ async fn s32_nullable_runner_wait_rejects_prepared_physical_attempt() -> Result<
 /// inventory and does not make a resolved current round ambiguous.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_nullable_runner_wait_ignores_retired_claimed_retry_attempt()
--> Result<(), Box<dyn Error>> {
+async fn nullable_runner_wait_ignores_retired_claimed_retry_attempt() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let producing_call = ModelCallId::from_uuid(uuid(
@@ -9348,7 +9345,7 @@ async fn s32_nullable_runner_wait_ignores_retired_claimed_retry_attempt()
 /// wait and leaves the placement's runner-effect evidence untouched.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_stop_terminalizes_runner_recovery_wait() -> Result<(), Box<dyn Error>> {
+async fn stop_terminalizes_runner_recovery_wait() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -9484,7 +9481,7 @@ async fn s32_stop_terminalizes_runner_recovery_wait() -> Result<(), Box<dyn Erro
 /// the round's yielded frontier instead of the ordinary active-batch decoder.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_stop_uses_tool_round_boundary() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_stop_uses_tool_round_boundary() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -9646,7 +9643,7 @@ async fn s32_runner_recovery_stop_uses_tool_round_boundary() -> Result<(), Box<d
 /// external-effect attempt as reconciliation-required at the round boundary.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_stop_preserves_tool_ambiguity() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_stop_preserves_tool_ambiguity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -10020,7 +10017,7 @@ async fn prepare_unclaimed_retryable_runner_recovery(
 /// its dispatch authority before cancelling and releasing the active slot.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_stop_retires_retryable_runner_attempt() -> Result<(), Box<dyn Error>> {
+async fn stop_retires_retryable_runner_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, interrupted_attempt, boundary, request, lease) =
         prepare_unclaimed_retryable_runner_recovery(&pool).await?;
@@ -10138,7 +10135,7 @@ async fn s32_stop_retires_retryable_runner_attempt() -> Result<(), Box<dyn Error
 /// its named terminal attempt and emits the correlated crash-lost result.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_stop_reloads_pure_attempt_from_terminal_history() -> Result<(), Box<dyn Error>> {
+async fn stop_reloads_pure_attempt_from_terminal_history() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let facts = prepare_execution_possible_retryable_runner_recovery(
         &pool,
@@ -10242,8 +10239,7 @@ async fn s32_stop_reloads_pure_attempt_from_terminal_history() -> Result<(), Box
 /// reloads its named ambiguity and retains reconciliation authority.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_stop_reloads_idempotent_ambiguity_from_terminal_history() -> Result<(), Box<dyn Error>>
-{
+async fn stop_reloads_idempotent_ambiguity_from_terminal_history() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let facts = prepare_execution_possible_retryable_runner_recovery(
         &pool,
@@ -10324,7 +10320,7 @@ async fn s32_stop_reloads_idempotent_ambiguity_from_terminal_history() -> Result
 /// reconciliation-required ambiguity merely by terminalizing its attempt.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_stop_rejects_unclaimed_side_effecting_ambiguity() -> Result<(), Box<dyn Error>> {
+async fn stop_rejects_unclaimed_side_effecting_ambiguity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, interrupted_attempt, _, _, _) =
         prepare_unclaimed_retryable_runner_recovery(&pool).await?;
@@ -10378,7 +10374,7 @@ async fn s32_stop_rejects_unclaimed_side_effecting_ambiguity() -> Result<(), Box
 /// through its delegation projection and retains the exact loss evidence.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_stop_terminalizes_delegated_runner_recovery_wait() -> Result<(), Box<dyn Error>> {
+async fn stop_terminalizes_delegated_runner_recovery_wait() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -10554,7 +10550,7 @@ async fn s32_stop_terminalizes_delegated_runner_recovery_wait() -> Result<(), Bo
 /// on the scheduler row, so the stale placement transaction cannot commit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_serializes_with_placement_advance() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_serializes_with_placement_advance() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -10637,7 +10633,7 @@ async fn s32_runner_recovery_serializes_with_placement_advance() -> Result<(), B
 /// a queued turn cannot fabricate a runner-recovery slot.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_queued_turn_cannot_enter_runner_recovery() -> Result<(), Box<dyn Error>> {
+async fn queued_turn_cannot_enter_runner_recovery() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let session = SessionId::from_uuid(uuid(SESSION));
@@ -10697,8 +10693,7 @@ async fn s32_queued_turn_cannot_enter_runner_recovery() -> Result<(), Box<dyn Er
 /// without mutating the retained physical lifecycle.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_delegated_runner_recovery_releases_runtime_slot_and_wait() -> Result<(), Box<dyn Error>>
-{
+async fn delegated_runner_recovery_releases_runtime_slot_and_wait() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let session = SessionId::from_uuid(uuid(SESSION));
@@ -10768,7 +10763,7 @@ async fn s32_delegated_runner_recovery_releases_runtime_slot_and_wait() -> Resul
 /// exact runner and placement revision named by the loss wait.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rejects_cross_wired_lease_runner() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rejects_cross_wired_lease_runner() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -10817,8 +10812,7 @@ async fn s32_runner_recovery_rejects_cross_wired_lease_runner() -> Result<(), Bo
 /// same-session attempt that has no lease on the lost runner and revision.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_record_rejects_unleased_same_session_attempt() -> Result<(), Box<dyn Error>>
-{
+async fn runner_loss_record_rejects_unleased_same_session_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     insert_physical_attempt(&pool, PROFILELESS_PHYSICAL_ATTEMPT).await?;
@@ -10850,7 +10844,7 @@ async fn s32_runner_loss_record_rejects_unleased_same_session_attempt() -> Resul
 /// attempt; a known terminal result cannot be reclassified as runner loss.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rejects_non_ambiguous_tool_attempt() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rejects_non_ambiguous_tool_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -10898,7 +10892,7 @@ async fn s32_runner_recovery_rejects_non_ambiguous_tool_attempt() -> Result<(), 
 /// physical attempt retained by an active runner-recovery wait.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rechecks_changed_tool_attempt() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rechecks_changed_tool_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -10941,7 +10935,7 @@ async fn s32_runner_recovery_rechecks_changed_tool_attempt() -> Result<(), Box<d
 /// predecessor masquerading as the yielded chain-tip recovery boundary.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rechecks_turn_attempt_continuations() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rechecks_turn_attempt_continuations() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -11000,7 +10994,7 @@ async fn s32_runner_recovery_rechecks_turn_attempt_continuations() -> Result<(),
 /// before inserting a successor to the yielded runner-recovery attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_serializes_turn_attempt_continuations() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_serializes_turn_attempt_continuations() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -11080,7 +11074,7 @@ async fn s32_runner_recovery_serializes_turn_attempt_continuations() -> Result<(
 /// advancing the lease head retained by an active runner-recovery wait.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_serializes_lease_head_advances() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_serializes_lease_head_advances() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin) =
         stored_side_effecting_pin_fixture(&pool).await?;
@@ -11144,7 +11138,7 @@ async fn s32_runner_recovery_serializes_lease_head_advances() -> Result<(), Box<
 /// the exact loss event that authorized runner recovery.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rechecks_changed_lease_head() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rechecks_changed_lease_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -11200,7 +11194,7 @@ async fn s32_runner_recovery_rechecks_changed_lease_head() -> Result<(), Box<dyn
 /// also recheck the execution-loss classification retained by the wait.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rechecks_changed_lease_event() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rechecks_changed_lease_event() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -11256,7 +11250,7 @@ async fn s32_runner_recovery_rechecks_changed_lease_event() -> Result<(), Box<dy
 /// physical execution interrupted by a later runner loss.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rejects_completed_lease_attempt() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rejects_completed_lease_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin) =
         stored_side_effecting_pin_fixture(&pool).await?;
@@ -11296,7 +11290,7 @@ async fn s32_runner_recovery_rejects_completed_lease_attempt() -> Result<(), Box
 /// interrupted execution.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rejects_offered_lease_attempt() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rejects_offered_lease_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
@@ -11327,7 +11321,7 @@ async fn s32_runner_recovery_rejects_offered_lease_attempt() -> Result<(), Box<d
 /// evidence that runner loss interrupted execution.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rejects_claimed_lease_attempt() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rejects_claimed_lease_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin) =
         stored_side_effecting_pin_fixture(&pool).await?;
@@ -11363,7 +11357,7 @@ async fn s32_runner_recovery_rejects_claimed_lease_attempt() -> Result<(), Box<d
 /// execution-possible interrupted attempt.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rejects_no_execution_lease_loss() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rejects_no_execution_lease_loss() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
@@ -11395,7 +11389,7 @@ async fn s32_runner_recovery_rejects_no_execution_lease_loss() -> Result<(), Box
 /// revision cannot impersonate the operation interrupted at a later loss.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_attempt_matches_exact_active_round() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_attempt_matches_exact_active_round() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, later_lease) =
         stored_side_effecting_later_lease_fixture(&pool).await?;
@@ -11429,7 +11423,7 @@ async fn s32_runner_loss_attempt_matches_exact_active_round() -> Result<(), Box<
 /// attempt interrupted by loss after its replacement becomes current.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_loss_rejects_retired_claimed_retry_attempt() -> Result<(), Box<dyn Error>> {
+async fn runner_loss_rejects_retired_claimed_retry_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -11515,7 +11509,7 @@ async fn s32_runner_loss_rejects_retired_claimed_retry_attempt() -> Result<(), B
 /// live or ambiguous physical attempt in its retained tool round.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_rejects_additional_round_ambiguity() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_rejects_additional_round_ambiguity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -11591,7 +11585,7 @@ async fn s32_runner_recovery_rejects_additional_round_ambiguity() -> Result<(), 
 /// current lost placement and retains the interrupted physical attempt.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pinned_runner_recovery_wait_round_trips_exact_loss() -> Result<(), Box<dyn Error>> {
+async fn pinned_runner_recovery_wait_round_trips_exact_loss() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -11644,7 +11638,7 @@ async fn s32_pinned_runner_recovery_wait_round_trips_exact_loss() -> Result<(), 
 /// statement-level truncation as well as row-level mutation.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_interrupt_effect_rejects_truncate() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_interrupt_effect_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let rejected = sqlx::query("TRUNCATE turn_runner_recovery_interrupt_effect")
         .execute(&pool)
@@ -11660,7 +11654,7 @@ async fn s32_runner_recovery_interrupt_effect_rejects_truncate() -> Result<(), B
 /// turn with its exact in-flight source attempt for successor reissuance.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_retryable_pure_loss_wait_retains_in_flight_attempt() -> Result<(), Box<dyn Error>> {
+async fn retryable_pure_loss_wait_retains_in_flight_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -11702,7 +11696,7 @@ async fn s32_retryable_pure_loss_wait_retains_in_flight_attempt() -> Result<(), 
 /// work retryable and parks the turn with its exact in-flight source attempt.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_unclaimed_loss_wait_retains_in_flight_attempt() -> Result<(), Box<dyn Error>> {
+async fn unclaimed_loss_wait_retains_in_flight_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -11744,8 +11738,7 @@ async fn s32_unclaimed_loss_wait_retains_in_flight_attempt() -> Result<(), Box<d
 /// physical attempt, and that nullable arm reads back distinctly.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pre_pin_runner_recovery_wait_round_trips_without_attempt() -> Result<(), Box<dyn Error>>
-{
+async fn pre_pin_runner_recovery_wait_round_trips_without_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -11782,7 +11775,7 @@ async fn s32_pre_pin_runner_recovery_wait_round_trips_without_attempt() -> Resul
 /// recovery wait against another runner's loss.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_wait_rejects_cross_wired_runner() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_wait_rejects_cross_wired_runner() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -11812,7 +11805,7 @@ async fn s32_runner_recovery_wait_rejects_cross_wired_runner() -> Result<(), Box
 /// than the exact current loss revision.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_wait_rejects_cross_wired_revision() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_wait_rejects_cross_wired_revision() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -11844,7 +11837,7 @@ async fn s32_runner_recovery_wait_rejects_cross_wired_revision() -> Result<(), B
 /// by the exact placement-loss record.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_wait_requires_loss_recorded_attempt() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_wait_requires_loss_recorded_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -11877,7 +11870,7 @@ async fn s32_runner_recovery_wait_requires_loss_recorded_attempt() -> Result<(),
 /// wait without the future checked replacement transaction.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_recovery_wait_rejects_generic_active_reopen() -> Result<(), Box<dyn Error>> {
+async fn runner_recovery_wait_rejects_generic_active_reopen() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -11915,7 +11908,7 @@ async fn s32_runner_recovery_wait_rejects_generic_active_reopen() -> Result<(), 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_generic_store_rejects_pre_pin_replacement_without_command_authority()
+async fn generic_store_rejects_pre_pin_replacement_without_command_authority()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
@@ -11953,8 +11946,7 @@ async fn s32_generic_store_rejects_pre_pin_replacement_without_command_authority
 /// generic placement writer cannot bypass its connection and lease authority.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_generic_store_rejects_initial_pin_without_lease_authority()
--> Result<(), Box<dyn Error>> {
+async fn generic_store_rejects_initial_pin_without_lease_authority() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -11992,8 +11984,7 @@ async fn s31_generic_store_rejects_initial_pin_without_lease_authority()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_abandoned_pre_pin_placement_round_trips_terminal_state() -> Result<(), Box<dyn Error>>
-{
+async fn abandoned_pre_pin_placement_round_trips_terminal_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -12027,8 +12018,7 @@ async fn s32_abandoned_pre_pin_placement_round_trips_terminal_state() -> Result<
 /// immediately preceding loss record.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_pre_pin_abandonment_without_loss_predecessor()
--> Result<(), Box<dyn Error>> {
+async fn load_rejects_pre_pin_abandonment_without_loss_predecessor() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -12076,7 +12066,7 @@ async fn s32_load_rejects_pre_pin_abandonment_without_loss_predecessor()
 /// lineage beneath its immediately preceding loss record.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pre_pin_abandonment_requires_complete_loss_history() -> Result<(), Box<dyn Error>> {
+async fn pre_pin_abandonment_requires_complete_loss_history() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -12122,8 +12112,7 @@ async fn s32_pre_pin_abandonment_requires_complete_loss_history() -> Result<(), 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_abandoned_pinned_placement_round_trips_retained_authority()
--> Result<(), Box<dyn Error>> {
+async fn abandoned_pinned_placement_round_trips_retained_authority() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let lost = pin
@@ -12151,7 +12140,7 @@ async fn s32_abandoned_pinned_placement_round_trips_retained_authority()
 /// terminal abandonment to its authenticated replaceable loss predecessor.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_rewound_current_placement_head() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_rewound_current_placement_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     let lost = pin
@@ -12194,8 +12183,7 @@ async fn s32_load_rejects_rewound_current_placement_head() -> Result<(), Box<dyn
 /// immediately preceding loss record.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_pinned_abandonment_without_loss_predecessor() -> Result<(), Box<dyn Error>>
-{
+async fn load_rejects_pinned_abandonment_without_loss_predecessor() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
@@ -12229,7 +12217,7 @@ async fn s32_load_rejects_pinned_abandonment_without_loss_predecessor() -> Resul
 /// retained registration against the exact loss predecessor.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_pinned_abandonment_with_cross_wired_registration()
+async fn load_rejects_pinned_abandonment_with_cross_wired_registration()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
@@ -12264,7 +12252,7 @@ async fn s32_load_rejects_pinned_abandonment_with_cross_wired_registration()
 /// lineage beneath its immediately preceding loss record.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pinned_abandonment_requires_complete_loss_history() -> Result<(), Box<dyn Error>> {
+async fn pinned_abandonment_requires_complete_loss_history() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
@@ -12305,7 +12293,7 @@ async fn s32_pinned_abandonment_requires_complete_loss_history() -> Result<(), B
 /// immediately preceding unpinned record.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_pre_pin_loss_relabelled_from_abandonment() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_pre_pin_loss_relabelled_from_abandonment() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -12346,7 +12334,7 @@ async fn s32_load_rejects_pre_pin_loss_relabelled_from_abandonment() -> Result<(
 /// immediately preceding pinned record.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_pinned_loss_relabelled_from_abandonment() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_pinned_loss_relabelled_from_abandonment() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
@@ -12379,7 +12367,7 @@ async fn s32_load_rejects_pinned_loss_relabelled_from_abandonment() -> Result<()
 /// predecessor for its admitted pinned event kind.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_pinned_state_relabelled_from_abandonment() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_pinned_state_relabelled_from_abandonment() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
@@ -12413,8 +12401,7 @@ async fn s32_load_rejects_pinned_state_relabelled_from_abandonment() -> Result<(
 /// immediately preceding unpinned origin.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_abandonment_relabelled_as_historical_loss() -> Result<(), Box<dyn Error>>
-{
+async fn load_rejects_abandonment_relabelled_as_historical_loss() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -12461,7 +12448,7 @@ async fn s32_load_rejects_abandonment_relabelled_as_historical_loss() -> Result<
 /// the complete append-only replacement history.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pinned_pre_pin_successor_requires_complete_history() -> Result<(), Box<dyn Error>> {
+async fn pinned_pre_pin_successor_requires_complete_history() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -12541,7 +12528,7 @@ async fn s32_pinned_pre_pin_successor_requires_complete_history() -> Result<(), 
 /// a freshly provisioned workspace at that successor placement revision.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pre_pin_successor_rejects_stale_workspace_generation() -> Result<(), Box<dyn Error>> {
+async fn pre_pin_successor_rejects_stale_workspace_generation() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -12640,7 +12627,7 @@ async fn s32_pre_pin_successor_rejects_stale_workspace_generation() -> Result<()
 /// of the pin consumed at the loss boundary.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_lost_pre_pin_successor_requires_complete_history() -> Result<(), Box<dyn Error>> {
+async fn lost_pre_pin_successor_requires_complete_history() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -12725,8 +12712,8 @@ async fn s32_lost_pre_pin_successor_requires_complete_history() -> Result<(), Bo
 /// canonical validated registration rather than only the current successor's.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_replacement_authenticates_historical_pin_registration()
--> Result<(), Box<dyn Error>> {
+async fn runner_replacement_authenticates_historical_pin_registration() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -12815,7 +12802,7 @@ async fn s32_runner_replacement_authenticates_historical_pin_registration()
 /// closed pinned shape even when a later successor becomes current.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_historical_runner_replacement_rejects_loss_metadata() -> Result<(), Box<dyn Error>> {
+async fn historical_runner_replacement_rejects_loss_metadata() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     let original_grant = pin
@@ -12923,7 +12910,7 @@ async fn s32_historical_runner_replacement_rejects_loss_metadata() -> Result<(),
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_generic_store_rejects_abandonment_without_scheduler_authority()
+async fn generic_store_rejects_abandonment_without_scheduler_authority()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
@@ -12947,7 +12934,7 @@ async fn s32_generic_store_rejects_abandonment_without_scheduler_authority()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_pin_grant_requires_complete_registration_inventory() -> Result<(), Box<dyn Error>> {
+async fn pin_grant_requires_complete_registration_inventory() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -13051,7 +13038,7 @@ async fn s32_pin_grant_requires_complete_registration_inventory() -> Result<(), 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_loaded_placement_retains_reconciliation_registration() -> Result<(), Box<dyn Error>> {
+async fn loaded_placement_retains_reconciliation_registration() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, historical, pin) = stored_pin_fixture(&pool).await?;
     let current = store
@@ -13085,7 +13072,7 @@ async fn s32_loaded_placement_retains_reconciliation_registration() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_direct_lease_admission_serializes_runner_loss() -> Result<(), Box<dyn Error>> {
+async fn direct_lease_admission_serializes_runner_loss() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin, lease) = stored_later_lease_fixture(&pool).await?;
     let mut runner_loss = pool.begin().await?;
@@ -13121,7 +13108,7 @@ async fn s32_direct_lease_admission_serializes_runner_loss() -> Result<(), Box<d
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_current_placement_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
+async fn current_placement_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let lost = pin
@@ -13146,7 +13133,7 @@ async fn s32_current_placement_head_cannot_rewind() -> Result<(), Box<dyn Error>
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_current_placement_head_rejects_truncate() -> Result<(), Box<dyn Error>> {
+async fn current_placement_head_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, _) = stored_pin_fixture(&pool).await?;
     let truncated = sqlx::query("TRUNCATE runner_current_session_placement")
@@ -13161,7 +13148,7 @@ async fn s32_current_placement_head_rejects_truncate() -> Result<(), Box<dyn Err
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_appended_placement_must_advance_current_head() -> Result<(), Box<dyn Error>> {
+async fn appended_placement_must_advance_current_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let mut malformed = pool.begin().await?;
@@ -13186,7 +13173,7 @@ async fn s32_appended_placement_must_advance_current_head() -> Result<(), Box<dy
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_initial_lease_rejects_cross_wired_dispatch_fence() -> Result<(), Box<dyn Error>> {
+async fn initial_lease_rejects_cross_wired_dispatch_fence() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, _, lease) = stored_later_lease_fixture(&pool).await?;
     let cross_wired = lease_with_cross_wired_dispatch(&lease, registration.registration());
@@ -13202,7 +13189,7 @@ async fn s31_initial_lease_rejects_cross_wired_dispatch_fence() -> Result<(), Bo
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_later_lease_event_rejects_cross_wired_dispatch_fence() -> Result<(), Box<dyn Error>> {
+async fn later_lease_event_rejects_cross_wired_dispatch_fence() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, _, lease) = stored_later_lease_fixture(&pool).await?;
     store.store_lease(&lease).await?;
@@ -13222,7 +13209,7 @@ async fn s31_later_lease_event_rejects_cross_wired_dispatch_fence() -> Result<()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_current_lease_event_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
+async fn current_lease_event_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let claimed = duplicate_lease(&pin.lease, registration.registration())
@@ -13247,7 +13234,7 @@ async fn s31_current_lease_event_head_cannot_rewind() -> Result<(), Box<dyn Erro
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_current_lease_event_head_rejects_truncate() -> Result<(), Box<dyn Error>> {
+async fn current_lease_event_head_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     stored_pin_fixture(&pool).await?;
     let truncated = sqlx::query("TRUNCATE runner_current_lease_event")
@@ -13262,7 +13249,7 @@ async fn s31_current_lease_event_head_rejects_truncate() -> Result<(), Box<dyn E
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_lease_event_history_rejects_truncate() -> Result<(), Box<dyn Error>> {
+async fn lease_event_history_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     stored_pin_fixture(&pool).await?;
     sqlx::query(
@@ -13292,7 +13279,7 @@ async fn s31_lease_event_history_rejects_truncate() -> Result<(), Box<dyn Error>
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_appended_lease_event_must_advance_current_head() -> Result<(), Box<dyn Error>> {
+async fn appended_lease_event_must_advance_current_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let mut malformed = pool.begin().await?;
@@ -13318,7 +13305,7 @@ async fn s31_appended_lease_event_must_advance_current_head() -> Result<(), Box<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_every_generation_requires_offered_event_head() -> Result<(), Box<dyn Error>> {
+async fn every_generation_requires_offered_event_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     insert_physical_attempt(&pool, PROFILELESS_PHYSICAL_ATTEMPT).await?;
@@ -13359,8 +13346,7 @@ async fn s31_every_generation_requires_offered_event_head() -> Result<(), Box<dy
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_explicit_automatic_grant_approval_cannot_be_downgraded() -> Result<(), Box<dyn Error>>
-{
+async fn explicit_automatic_grant_approval_cannot_be_downgraded() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     let lost = pin
@@ -13445,7 +13431,7 @@ async fn s30_explicit_automatic_grant_approval_cannot_be_downgraded() -> Result<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_grant_audit_rejects_truncate() -> Result<(), Box<dyn Error>> {
+async fn grant_audit_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     stored_pin_fixture(&pool).await?;
     let truncated = sqlx::query(
@@ -13463,8 +13449,7 @@ async fn s32_grant_audit_rejects_truncate() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_profile_replacement_preserves_workspace_origin_revision() -> Result<(), Box<dyn Error>>
-{
+async fn profile_replacement_preserves_workspace_origin_revision() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -13569,8 +13554,8 @@ async fn s32_profile_replacement_preserves_workspace_origin_revision() -> Result
 /// projected by its immediately preceding placement record.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_profile_replacement_authenticates_durable_grant_predecessor()
--> Result<(), Box<dyn Error>> {
+async fn profile_replacement_authenticates_durable_grant_predecessor() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let original_grant = pin
@@ -13622,8 +13607,7 @@ async fn s32_profile_replacement_authenticates_durable_grant_predecessor()
 /// placement event that installs it.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_profile_replacement_authenticates_grant_placement_event() -> Result<(), Box<dyn Error>>
-{
+async fn profile_replacement_authenticates_grant_placement_event() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let original_grant = pin
@@ -13678,7 +13662,7 @@ async fn s32_profile_replacement_authenticates_grant_placement_event() -> Result
 /// profiled placement that installs a different grant revision.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_base_grant_authenticates_policy_placement_identity() -> Result<(), Box<dyn Error>> {
+async fn base_grant_authenticates_policy_placement_identity() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let original_grant = pin
@@ -13739,7 +13723,7 @@ async fn s32_base_grant_authenticates_policy_placement_identity() -> Result<(), 
 /// authority from a predecessor grant that durable audit already revoked.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_profile_replacement_rejects_revoked_predecessor_grant() -> Result<(), Box<dyn Error>> {
+async fn profile_replacement_rejects_revoked_predecessor_grant() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let original_grant = pin
@@ -13799,7 +13783,7 @@ async fn s32_profile_replacement_rejects_revoked_predecessor_grant() -> Result<(
 /// authority from a predecessor grant whose canonical issuance is absent.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_profile_replacement_requires_predecessor_issuance() -> Result<(), Box<dyn Error>> {
+async fn profile_replacement_requires_predecessor_issuance() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let original_grant = pin
@@ -13851,7 +13835,7 @@ async fn s32_profile_replacement_requires_predecessor_issuance() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
+async fn new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
@@ -13887,7 +13871,7 @@ async fn s32_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dy
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_grant_audit_kind_is_revision_bound() -> Result<(), Box<dyn Error>> {
+async fn grant_audit_kind_is_revision_bound() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let initial = pin
@@ -13948,7 +13932,7 @@ async fn s32_grant_audit_kind_is_revision_bound() -> Result<(), Box<dyn Error>> 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_relational_placement_binds_selected_grant() -> Result<(), Box<dyn Error>> {
+async fn relational_placement_binds_selected_grant() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, _) = stored_pin_fixture(&pool).await?;
     let mut transaction = pool.begin().await?;
@@ -14023,7 +14007,7 @@ async fn s32_relational_placement_binds_selected_grant() -> Result<(), Box<dyn E
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_cross_runner_grant_predecessor_round_trips() -> Result<(), Box<dyn Error>> {
+async fn cross_runner_grant_predecessor_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -14100,7 +14084,7 @@ async fn s32_cross_runner_grant_predecessor_round_trips() -> Result<(), Box<dyn 
 /// older workspace generation.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_replacement_rejects_stale_workspace_generation() -> Result<(), Box<dyn Error>> {
+async fn runner_replacement_rejects_stale_workspace_generation() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -14228,7 +14212,7 @@ async fn s32_runner_replacement_rejects_stale_workspace_generation() -> Result<(
 /// successor of the immediately preceding cross-runner grant.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_load_rejects_stale_returning_runner_grant() -> Result<(), Box<dyn Error>> {
+async fn load_rejects_stale_returning_runner_grant() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -14350,12 +14334,11 @@ async fn s32_load_rejects_stale_returning_runner_grant() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// S32: a profile-free tombstone retains the predecessor placement's
+/// a profile-free tombstone retains the predecessor placement's
 /// approval policy even when the successor placement selects a different one.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_profile_free_tombstone_uses_predecessor_approval_policy() -> Result<(), Box<dyn Error>>
-{
+async fn profile_free_tombstone_uses_predecessor_approval_policy() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -14533,7 +14516,7 @@ async fn s32_profile_free_tombstone_uses_predecessor_approval_policy() -> Result
 /// predecessor chain and ignores a later sibling sharing its lineage origin.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_grant_policy_resolution_excludes_sibling_lineage() -> Result<(), Box<dyn Error>> {
+async fn grant_policy_resolution_excludes_sibling_lineage() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     let lost = pin
@@ -14636,7 +14619,7 @@ async fn s32_grant_policy_resolution_excludes_sibling_lineage() -> Result<(), Bo
 /// revision-one grant names itself as its predecessor.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_grant_policy_rejects_cyclic_base_predecessor() -> Result<(), Box<dyn Error>> {
+async fn grant_policy_rejects_cyclic_base_predecessor() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     sqlx::query("ALTER TABLE runner_credential_grant DISABLE TRIGGER ALL")
@@ -14674,7 +14657,7 @@ async fn s32_grant_policy_rejects_cyclic_base_predecessor() -> Result<(), Box<dy
 /// successor grant names a revision-one predecessor that does not exist.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_grant_policy_rejects_missing_base_predecessor() -> Result<(), Box<dyn Error>> {
+async fn grant_policy_rejects_missing_base_predecessor() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     sqlx::query("ALTER TABLE runner_credential_grant DISABLE TRIGGER ALL")
@@ -14750,7 +14733,7 @@ async fn s32_grant_policy_rejects_missing_base_predecessor() -> Result<(), Box<d
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_profile_free_replacement_preserves_grant_lineage() -> Result<(), Box<dyn Error>> {
+async fn profile_free_replacement_preserves_grant_lineage() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -14956,7 +14939,7 @@ async fn s32_profile_free_replacement_preserves_grant_lineage() -> Result<(), Bo
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_worktree_pin_requires_provisioned_facts() -> Result<(), Box<dyn Error>> {
+async fn worktree_pin_requires_provisioned_facts() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -15020,7 +15003,7 @@ async fn s32_worktree_pin_requires_provisioned_facts() -> Result<(), Box<dyn Err
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_claimed_retry_reservation_rejects_terminal_source() -> Result<(), Box<dyn Error>> {
+async fn claimed_retry_reservation_rejects_terminal_source() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let claimed = duplicate_lease(&pin.lease, registration.registration())
@@ -15062,7 +15045,7 @@ async fn s31_claimed_retry_reservation_rejects_terminal_source() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_replacement_attempt_commits_only_with_successor_lease() -> Result<(), Box<dyn Error>> {
+async fn replacement_attempt_commits_only_with_successor_lease() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
     let claimed = duplicate_lease(&pin.lease, registration.registration())
@@ -15188,7 +15171,7 @@ async fn s31_replacement_attempt_commits_only_with_successor_lease() -> Result<(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_idempotent_claimed_loss_retires_physical_attempt() -> Result<(), Box<dyn Error>> {
+async fn idempotent_claimed_loss_retires_physical_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -15275,7 +15258,7 @@ async fn s31_idempotent_claimed_loss_retires_physical_attempt() -> Result<(), Bo
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_claimed_retry_state_survives_reconstitution() -> Result<(), Box<dyn Error>> {
+async fn claimed_retry_state_survives_reconstitution() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -15406,8 +15389,7 @@ async fn s31_claimed_retry_state_survives_reconstitution() -> Result<(), Box<dyn
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_adapter_rejects_caller_reconstituted_no_execution_proof() -> Result<(), Box<dyn Error>>
-{
+async fn adapter_rejects_caller_reconstituted_no_execution_proof() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let correlation = pin.lease.correlation();
@@ -15447,7 +15429,7 @@ async fn s31_adapter_rejects_caller_reconstituted_no_execution_proof() -> Result
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_unclaimed_retry_authority_survives_reconstitution() -> Result<(), Box<dyn Error>> {
+async fn unclaimed_retry_authority_survives_reconstitution() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
     let correlation = pin.lease.correlation();
@@ -15522,7 +15504,7 @@ async fn s31_unclaimed_retry_authority_survives_reconstitution() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_unclaimed_loss_requires_live_source_attempt() -> Result<(), Box<dyn Error>> {
+async fn unclaimed_loss_requires_live_source_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_store, _, _, pin) = stored_pin_fixture(&pool).await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -15546,7 +15528,7 @@ async fn s31_unclaimed_loss_requires_live_source_attempt() -> Result<(), Box<dyn
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_retryable_loss_serializes_with_attempt_termination() -> Result<(), Box<dyn Error>> {
+async fn retryable_loss_serializes_with_attempt_termination() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let claimed = duplicate_lease(&pin.lease, registration.registration())
@@ -15578,7 +15560,7 @@ async fn s31_retryable_loss_serializes_with_attempt_termination() -> Result<(), 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_first_generation_requires_null_predecessor() -> Result<(), Box<dyn Error>> {
+async fn first_generation_requires_null_predecessor() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     sqlx::query("ALTER TABLE runner_lease_generation DISABLE TRIGGER ALL")
@@ -15625,7 +15607,7 @@ async fn s31_first_generation_requires_null_predecessor() -> Result<(), Box<dyn 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_relational_retry_rejects_claimed_attempt_reuse() -> Result<(), Box<dyn Error>> {
+async fn relational_retry_rejects_claimed_attempt_reuse() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -15924,7 +15906,7 @@ async fn s31_relational_retry_rejects_claimed_attempt_reuse() -> Result<(), Box<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_reconstitution_rejects_cross_wired_registration() -> Result<(), Box<dyn Error>> {
+async fn reconstitution_rejects_cross_wired_registration() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -15961,7 +15943,7 @@ async fn s30_reconstitution_rejects_cross_wired_registration() -> Result<(), Box
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_reconstitution_requires_trusted_catalog_declarations() -> Result<(), Box<dyn Error>> {
+async fn reconstitution_requires_trusted_catalog_declarations() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -16000,7 +15982,7 @@ async fn s30_reconstitution_requires_trusted_catalog_declarations() -> Result<()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_reconstitution_rejects_noncanonical_tool_schema() -> Result<(), Box<dyn Error>> {
+async fn reconstitution_rejects_noncanonical_tool_schema() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -16034,8 +16016,7 @@ async fn s30_reconstitution_rejects_noncanonical_tool_schema() -> Result<(), Box
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_idempotent_registration_tool_requires_runner_only_locus() -> Result<(), Box<dyn Error>>
-{
+async fn idempotent_registration_tool_requires_runner_only_locus() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -16077,7 +16058,7 @@ async fn s30_idempotent_registration_tool_requires_runner_only_locus() -> Result
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_registration_tool_requires_selector_discriminator() -> Result<(), Box<dyn Error>> {
+async fn registration_tool_requires_selector_discriminator() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -16118,8 +16099,7 @@ async fn s30_registration_tool_requires_selector_discriminator() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_registration_profile_approval_requires_tool_name_shape() -> Result<(), Box<dyn Error>>
-{
+async fn registration_profile_approval_requires_tool_name_shape() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -16162,7 +16142,7 @@ async fn s30_registration_profile_approval_requires_tool_name_shape() -> Result<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_reconstitution_rejects_cross_wired_enrollment() -> Result<(), Box<dyn Error>> {
+async fn reconstitution_rejects_cross_wired_enrollment() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -16197,7 +16177,7 @@ async fn s30_reconstitution_rejects_cross_wired_enrollment() -> Result<(), Box<d
 /// append-only loss epoch with its exact connection source.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_terminal_connections_advance_exact_loss_epochs() -> Result<(), Box<dyn Error>> {
+async fn terminal_connections_advance_exact_loss_epochs() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -16259,7 +16239,7 @@ async fn s32_terminal_connections_advance_exact_loss_epochs() -> Result<(), Box<
 /// connection event back at the same commit boundary.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_loss_epoch_failure_rolls_back_terminal_connection() -> Result<(), Box<dyn Error>> {
+async fn loss_epoch_failure_rolls_back_terminal_connection() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -16320,7 +16300,7 @@ async fn s32_loss_epoch_failure_rolls_back_terminal_connection() -> Result<(), B
 /// a loss epoch may name only its exact terminal connection source.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_loss_epoch_rejects_connected_source() -> Result<(), Box<dyn Error>> {
+async fn loss_epoch_rejects_connected_source() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -16350,7 +16330,7 @@ async fn s32_loss_epoch_rejects_connected_source() -> Result<(), Box<dyn Error>>
 /// offers even after the enrollment opens a successor physical connection.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_loss_fences_placement_across_successor_connection() -> Result<(), Box<dyn Error>> {
+async fn loss_fences_placement_across_successor_connection() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     let connection = store
@@ -16389,7 +16369,7 @@ async fn s31_loss_fences_placement_across_successor_connection() -> Result<(), B
 /// be pinned after reconnect without an explicit placement replacement.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_exact_selection_loss_rejects_post_reconnect_pin() -> Result<(), Box<dyn Error>> {
+async fn exact_selection_loss_rejects_post_reconnect_pin() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -16450,7 +16430,7 @@ async fn s31_exact_selection_loss_rejects_post_reconnect_pin() -> Result<(), Box
 /// derives its first loss baseline at pin when no intervening loss exists.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_pre_enrollment_exact_selection_pins_without_loss() -> Result<(), Box<dyn Error>> {
+async fn pre_enrollment_exact_selection_pins_without_loss() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -16505,8 +16485,7 @@ async fn s31_pre_enrollment_exact_selection_pins_without_loss() -> Result<(), Bo
 /// prior loss epoch and may pin on the live successor connection.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_post_reconnect_selection_pins_with_fresh_loss_baseline() -> Result<(), Box<dyn Error>>
-{
+async fn post_reconnect_selection_pins_with_fresh_loss_baseline() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -16577,7 +16556,7 @@ async fn s31_post_reconnect_selection_pins_with_fresh_loss_baseline() -> Result<
 /// baseline, even when the supplied enrollment and epoch exist durably.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_placement_loss_baseline_rejects_caller_input() -> Result<(), Box<dyn Error>> {
+async fn placement_loss_baseline_rejects_caller_input() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -16625,7 +16604,7 @@ async fn s31_placement_loss_baseline_rejects_caller_input() -> Result<(), Box<dy
 /// rejects the stale exact selection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_connection_loss_serializes_exact_selection_pin() -> Result<(), Box<dyn Error>> {
+async fn connection_loss_serializes_exact_selection_pin() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -16704,7 +16683,7 @@ async fn s31_connection_loss_serializes_exact_selection_pin() -> Result<(), Box<
 /// epoch and cannot strand a newly offered lease behind unusable authority.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_shutdown_connection_rejects_later_lease_offer() -> Result<(), Box<dyn Error>> {
+async fn shutdown_connection_rejects_later_lease_offer() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     let connection = store
@@ -16731,7 +16710,7 @@ async fn s31_shutdown_connection_rejects_later_lease_offer() -> Result<(), Box<d
 /// a concurrent lease offer observes the committed loss fence and is refused.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_connection_loss_wins_concurrent_lease_offer() -> Result<(), Box<dyn Error>> {
+async fn connection_loss_wins_concurrent_lease_offer() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     let enrollment = expected_enrollment.enrollment();
@@ -16773,7 +16752,7 @@ async fn s31_connection_loss_wins_concurrent_lease_offer() -> Result<(), Box<dyn
 /// commits before a racing terminal transition installs the loss fence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_lease_offer_wins_concurrent_connection_loss() -> Result<(), Box<dyn Error>> {
+async fn lease_offer_wins_concurrent_connection_loss() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     let enrollment = expected_enrollment.enrollment();
@@ -16823,7 +16802,7 @@ async fn s31_lease_offer_wins_concurrent_connection_loss() -> Result<(), Box<dyn
 /// can revive the stale execution capability.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_loss_fences_offered_lease_claim_across_reconnect() -> Result<(), Box<dyn Error>> {
+async fn loss_fences_offered_lease_claim_across_reconnect() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, _, lease) =
         stored_later_lease_fixture(&pool).await?;
@@ -16860,7 +16839,7 @@ async fn s31_loss_fences_offered_lease_claim_across_reconnect() -> Result<(), Bo
 /// fences a concurrently queued claim before execution capability is issued.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_connection_loss_wins_concurrent_lease_claim() -> Result<(), Box<dyn Error>> {
+async fn connection_loss_wins_concurrent_lease_claim() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, _, lease) =
         stored_later_lease_fixture(&pool).await?;
@@ -16925,7 +16904,7 @@ async fn s31_connection_loss_wins_concurrent_lease_claim() -> Result<(), Box<dyn
 /// before a racing loss and remains the durable execution-capability boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s31_lease_claim_wins_concurrent_connection_loss() -> Result<(), Box<dyn Error>> {
+async fn lease_claim_wins_concurrent_connection_loss() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, _, lease) =
         stored_later_lease_fixture(&pool).await?;
@@ -16996,7 +16975,7 @@ async fn s31_lease_claim_wins_concurrent_connection_loss() -> Result<(), Box<dyn
 /// record with the complete follower-visible runner facts.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_pinned_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+async fn runner_pinned_outbox_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17037,7 +17016,7 @@ async fn s32_runner_pinned_outbox_round_trips() -> Result<(), Box<dyn Error>> {
 /// exact connection event and retained pinned placement.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_suspect_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+async fn runner_suspect_outbox_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17090,7 +17069,7 @@ async fn s32_runner_suspect_outbox_round_trips() -> Result<(), Box<dyn Error>> {
 /// for every session pinned to the affected enrollment.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_suspect_outbox_covers_every_pinned_session() -> Result<(), Box<dyn Error>> {
+async fn runner_suspect_outbox_covers_every_pinned_session() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, first_pin) =
         stored_credentialless_pin_fixture(&pool).await?;
@@ -17134,7 +17113,7 @@ async fn s32_runner_suspect_outbox_covers_every_pinned_session() -> Result<(), B
 /// and cannot commit after a concurrent first-heartbeat suspicion.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_initial_pin_rejects_suspect_connection() -> Result<(), Box<dyn Error>> {
+async fn initial_pin_rejects_suspect_connection() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -17197,7 +17176,7 @@ async fn s32_initial_pin_rejects_suspect_connection() -> Result<(), Box<dyn Erro
 /// authority, so neither can observe a split connection/placement state.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_initial_pin_serializes_with_heartbeat_suspicion() -> Result<(), Box<dyn Error>> {
+async fn initial_pin_serializes_with_heartbeat_suspicion() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -17304,7 +17283,7 @@ async fn s32_initial_pin_serializes_with_heartbeat_suspicion() -> Result<(), Box
 /// transition back rather than leaving durable health without its update.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_suspect_outbox_failure_rolls_back_connection() -> Result<(), Box<dyn Error>> {
+async fn runner_suspect_outbox_failure_rolls_back_connection() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
@@ -17365,8 +17344,8 @@ async fn s32_runner_suspect_outbox_failure_rolls_back_connection() -> Result<(),
 /// connection provenance after post-admission corruption.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_outbox_dispatch_rejects_pinned_connection_provenance()
--> Result<(), Box<dyn Error>> {
+async fn runner_outbox_dispatch_rejects_pinned_connection_provenance() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
@@ -17415,7 +17394,7 @@ async fn s32_runner_outbox_dispatch_rejects_pinned_connection_provenance()
 /// connection event rather than the mutable current connection head.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_connected_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+async fn runner_connected_outbox_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17461,7 +17440,7 @@ async fn s32_runner_connected_outbox_round_trips() -> Result<(), Box<dyn Error>>
 /// publishes recovery from the new epoch for every affected pinned session.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_reconnect_after_suspicion_publishes_connected() -> Result<(), Box<dyn Error>> {
+async fn runner_reconnect_after_suspicion_publishes_connected() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17504,7 +17483,7 @@ async fn s32_runner_reconnect_after_suspicion_publishes_connected() -> Result<()
 /// immediate durable predecessor is the suspicion that it supersedes.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_initial_connection_cannot_publish_recovery() -> Result<(), Box<dyn Error>> {
+async fn initial_connection_cannot_publish_recovery() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17544,7 +17523,7 @@ async fn s32_initial_connection_cannot_publish_recovery() -> Result<(), Box<dyn 
 /// a cause-valid established event in the suspect epoch is not a reconnect.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_same_epoch_established_event_cannot_publish_recovery() -> Result<(), Box<dyn Error>> {
+async fn same_epoch_established_event_cannot_publish_recovery() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17609,7 +17588,7 @@ async fn s32_same_epoch_established_event_cannot_publish_recovery() -> Result<()
 /// post-admission corruption cannot turn an established epoch into recovery.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_reconnect_dispatch_rejects_corrupted_predecessor() -> Result<(), Box<dyn Error>> {
+async fn reconnect_dispatch_rejects_corrupted_predecessor() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let first_connection = store
@@ -17661,7 +17640,7 @@ async fn s32_reconnect_dispatch_rejects_corrupted_predecessor() -> Result<(), Bo
 /// latest durable connection event at insertion time.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_outbox_rejects_superseded_connection_source() -> Result<(), Box<dyn Error>> {
+async fn runner_outbox_rejects_superseded_connection_source() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17715,7 +17694,7 @@ async fn s32_runner_outbox_rejects_superseded_connection_source() -> Result<(), 
 /// current placement rather than a historical placement for the same runner.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_outbox_rejects_historical_connection_placement() -> Result<(), Box<dyn Error>> {
+async fn runner_outbox_rejects_historical_connection_placement() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17766,7 +17745,7 @@ async fn s32_runner_outbox_rejects_historical_connection_placement() -> Result<(
 /// requested sandbox and user-selected directory.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_lost_before_pin_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+async fn runner_lost_before_pin_outbox_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -17816,7 +17795,7 @@ async fn s32_runner_lost_before_pin_outbox_round_trips() -> Result<(), Box<dyn E
 /// record even after the placement head can later advance.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_lost_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+async fn runner_lost_outbox_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17859,7 +17838,7 @@ async fn s32_runner_lost_outbox_round_trips() -> Result<(), Box<dyn Error>> {
 /// identity and successor placement revision without fabricating pinned facts.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_pre_pin_replaced_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+async fn runner_pre_pin_replaced_outbox_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
@@ -17911,7 +17890,7 @@ async fn s32_runner_pre_pin_replaced_outbox_round_trips() -> Result<(), Box<dyn 
 /// successor placement record without requiring a directory relocation.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_pinned_replaced_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+async fn runner_pinned_replaced_outbox_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -17956,7 +17935,7 @@ async fn s32_runner_pinned_replaced_outbox_round_trips() -> Result<(), Box<dyn E
 /// directory dispatches the relocation state and exact requested directory.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_working_directory_changed_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+async fn runner_working_directory_changed_outbox_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -18007,7 +17986,7 @@ async fn s32_runner_working_directory_changed_outbox_round_trips() -> Result<(),
 /// follower state and cannot also masquerade as an ordinary replacement.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_directory_relocation_rejects_replaced_state() -> Result<(), Box<dyn Error>> {
+async fn runner_directory_relocation_rejects_replaced_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -18047,8 +18026,7 @@ async fn s32_runner_directory_relocation_rejects_replaced_state() -> Result<(), 
 /// post-admission state corruption cannot publish an ordinary replacement.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_outbox_dispatch_rejects_corrupted_relocation_state()
--> Result<(), Box<dyn Error>> {
+async fn runner_outbox_dispatch_rejects_corrupted_relocation_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -18107,7 +18085,7 @@ async fn s32_runner_outbox_dispatch_rejects_corrupted_relocation_state()
 /// placement record while retaining the lost runner identity.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_abandoned_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+async fn runner_abandoned_outbox_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -18150,7 +18128,7 @@ async fn s32_runner_abandoned_outbox_round_trips() -> Result<(), Box<dyn Error>>
 /// rejects a runner event whose stored runner was corrupted after admission.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_outbox_dispatch_rejects_cross_wired_source() -> Result<(), Box<dyn Error>> {
+async fn runner_outbox_dispatch_rejects_cross_wired_source() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
@@ -18200,7 +18178,7 @@ async fn s32_runner_outbox_dispatch_rejects_cross_wired_source() -> Result<(), B
 /// runner identity disagrees with its immutable placement source.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_runner_outbox_insert_rejects_cross_wired_source() -> Result<(), Box<dyn Error>> {
+async fn runner_outbox_insert_rejects_cross_wired_source() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();

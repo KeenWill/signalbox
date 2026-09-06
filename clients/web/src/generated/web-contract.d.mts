@@ -282,6 +282,8 @@ export type WebSessionCatalogSummary = {
   readonly title_truncated: boolean;
 };
 
+export type WebSessionGoalDisposition = "session_closed" | "commissioned" | "blocked" | "resumed" | "achieved" | "user_stopped" | "superseded";
+
 export type WebSessionId = string;
 
 export type WebSessionLiveActiveState = {
@@ -307,6 +309,18 @@ export type WebSessionLiveActiveState = {
 };
 
 export type WebSessionLiveRunnerConnectionHealth = "connected" | "suspect" | "shutdown" | "lost";
+
+export type WebSessionRate = {
+  readonly completed_turn_count: WebU64;
+  readonly failed_turn_count: WebU64;
+  readonly goal_disposition?: WebSessionGoalDisposition | null;
+  readonly last_failure_sequence?: WebU64 | null;
+  readonly last_provider_cause?: WebProviderModelCallFailureCause | null;
+  readonly lifecycle_state: WebAttentionLifecycleState;
+  readonly retired_turn_count: WebU64;
+  readonly session_id: WebSessionId;
+  readonly turn_count: WebU64;
+};
 
 export type WebSessionTimelineDetail = {
   readonly address: WebTimelineAddress;
@@ -571,6 +585,10 @@ export type WebAttentionStreamEvent = {
   readonly kind: "resync_required";
 };
 
+export type WebSessionRates = {
+  readonly sessions: ReadonlyArray<WebSessionRate>;
+};
+
 export type WebSessionCatalogSnapshot = {
   readonly continuation: {
   readonly kind: "last_activity";
@@ -731,6 +749,7 @@ export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimeli
 export function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTimelineDetailPage;
 export function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;
 export function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;
+export function decodeWebSessionRates(value: unknown): WebSessionRates;
 export function decodeWebSessionCatalogSnapshot(value: unknown): WebSessionCatalogSnapshot;
 export function decodeWebSessionLiveSnapshot(value: unknown): WebSessionLiveSnapshot;
 export function decodeWebSessionLiveStreamEvent(value: unknown): WebSessionLiveStreamEvent;

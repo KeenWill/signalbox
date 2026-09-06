@@ -1256,7 +1256,7 @@ async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_prepar
     Ok(())
 }
 
-/// S01 / S20 / S21: the production
+/// the production
 /// persistence chain checkpoints Prepared with its credential and input-token
 /// semantics pins, reloads them instead of changed deployment values,
 /// separately authorizes send, and atomically commits exact assistant content,
@@ -1264,7 +1264,7 @@ async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_prepar
 /// attempt, and typed outbox records.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s20_s21_model_call_transactions_complete_first_reply() -> Result<(), Box<dyn Error>> {
+async fn model_call_transactions_complete_first_reply() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e1));
     let direct_selection =
@@ -1946,7 +1946,7 @@ async fn prepared_model_call_remains_scheduler_eligible() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// S02 / S08: the scripted
+/// the scripted
 /// application path consumes multiple steering inputs at preparation, renders
 /// them immediately in the process projection and to the provider in acceptance
 /// order, rejects noncontiguous stored snapshot ordinals before resume,
@@ -1954,7 +1954,7 @@ async fn prepared_model_call_remains_scheduler_eligible() -> Result<(), Box<dyn 
 /// pending-steering receipt after consumption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_application_service_completes_scripted_reply() -> Result<(), Box<dyn Error>> {
+async fn application_service_completes_scripted_reply() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x18e1));
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0x1ce1));
@@ -2430,7 +2430,7 @@ async fn s02_application_service_completes_scripted_reply() -> Result<(), Box<dy
     Ok(())
 }
 
-/// S03 / S04 / S07: a restart-parked
+/// a restart-parked
 /// ambiguous model call wedges the session — the scan classifies nothing, the
 /// wait stays visible across a second restart, and ordinary input is refused —
 /// and the user reconciliation decision then terminalizes the exact ambiguity
@@ -2445,8 +2445,8 @@ async fn s02_application_service_completes_scripted_reply() -> Result<(), Box<dy
 /// guarantee broke rather than only that the timeline broke.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_user_reconciliation_releases_a_restart_parked_ambiguous_turn()
--> Result<(), Box<dyn Error>> {
+async fn user_reconciliation_releases_a_restart_parked_ambiguous_turn() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, database_url) = migrated_postgres().await?;
     let parked = checkpoint_restart_model_call(&pool, 0xB100, true).await?;
 
@@ -2756,13 +2756,12 @@ async fn spend_automatic_reconciliation_budget(
     Ok(())
 }
 
-/// S04 / S10: the daemon claims a typed durable attempt and uses the existing
+/// the daemon claims a typed durable attempt and uses the existing
 /// reconciliation-required transition to release an automatically recovered
 /// ambiguous model-call wait without rewriting the call's unknown outcome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_automatic_reconciliation_records_the_operator_transition() -> Result<(), Box<dyn Error>>
-{
+async fn automatic_reconciliation_records_the_operator_transition() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xC100).await?;
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
@@ -2881,12 +2880,12 @@ async fn s04_automatic_reconciliation_records_the_operator_transition() -> Resul
     Ok(())
 }
 
-/// S04: PostgreSQL, rather than a dropped client future, ends a recovery
+/// PostgreSQL, rather than a dropped client future, ends a recovery
 /// transaction that cannot reach the commit-ordered outbox allocator. The
 /// failed attempt therefore leaves no backend queued behind that allocator.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_automatic_reconciliation_server_bound_releases_its_database_work()
+async fn automatic_reconciliation_server_bound_releases_its_database_work()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xC500).await?;
@@ -2962,12 +2961,12 @@ async fn s04_automatic_reconciliation_server_bound_releases_its_database_work()
     Ok(())
 }
 
-/// S04 / S10: the existing operator reconciliation may win after an automatic
+/// the existing operator reconciliation may win after an automatic
 /// attempt is claimed; that attempt records supersession and never applies a
 /// second terminal transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
+async fn operator_reconciliation_supersedes_a_claimed_automatic_attempt()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xE100;
@@ -3034,7 +3033,7 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
     Ok(())
 }
 
-/// S04 / S10: an attempt that meets a held session scheduler row gives the row
+/// an attempt that meets a held session scheduler row gives the row
 /// up inside the database, so a busy row costs one classified infrastructure
 /// failure with nothing written rather than a pooled connection checked out for
 /// the whole real wait.
@@ -3061,7 +3060,7 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
 /// was still using, which is the strand these tests exist to keep closed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database()
+async fn a_contended_automatic_attempt_gives_the_row_up_inside_the_database()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xF100).await?;
@@ -3164,7 +3163,7 @@ fn reconciliation_database_failure(
     }
 }
 
-/// S04 / S10: the durable failure record is bounded inside the database too, so
+/// the durable failure record is bounded inside the database too, so
 /// a run of contended attempts cannot strand a pooled connection apiece.
 ///
 /// This transaction updates the attempt row and its recovery row, and both are
@@ -3177,7 +3176,7 @@ fn reconciliation_database_failure(
 /// reaches a record this transaction could not write.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
+async fn a_contended_failure_record_gives_the_row_up_inside_the_database()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xF200).await?;
@@ -3251,7 +3250,7 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
     Ok(())
 }
 
-/// S04 / S10: the acquisition budget bounds reaching a pooled connection and
+/// the acquisition budget bounds reaching a pooled connection and
 /// nothing past it, so a pool with nothing left to hand out costs one
 /// classified infrastructure failure that wrote nothing, rather than a watchdog
 /// wake spent waiting out the driver's own thirty-second acquisition timeout.
@@ -3275,7 +3274,7 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
 /// budget while the acquisition behaved exactly as asserted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_begins()
+async fn an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_begins()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xF300).await?;
@@ -3346,14 +3345,14 @@ async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_b
     Ok(())
 }
 
-/// S04 / S10: infrastructure failures spend the exact automatic budget; only
+/// infrastructure failures spend the exact automatic budget; only
 /// then does the still-active ambiguity become a visible operator park.
-/// S04 / S10: infrastructure failures spend the exact automatic budget; the
+/// infrastructure failures spend the exact automatic budget; the
 /// visible operator park can still be interrupted without leaving its durable
 /// automatic record inconsistent with the terminal turn and queued successor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
+async fn exhausted_automatic_reconciliation_is_visible_to_the_operator()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xD100;
@@ -3451,7 +3450,7 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     Ok(())
 }
 
-/// S04: first-time recovery discovery contends with an accepting operator
+/// first-time recovery discovery contends with an accepting operator
 /// interrupt on the turn row instead of racing past its uncommitted
 /// terminalization.
 ///
@@ -3462,7 +3461,7 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
 /// corruption until a later supersession lap reaches it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<(), Box<dyn Error>> {
+async fn recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xD1A0;
     let parked = park_restart_ambiguity(&pool, seed).await?;
@@ -3525,11 +3524,11 @@ async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<()
     Ok(())
 }
 
-/// S03: a prepared model call remains discoverable for ordinary
+/// a prepared model call remains discoverable for ordinary
 /// active-turn resumption even when no tool round is active.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_prepared_model_call_is_resumable_without_tool_round() -> Result<(), Box<dyn Error>> {
+async fn prepared_model_call_is_resumable_without_tool_round() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0xc700, false).await?;
     let active_tool_round = sqlx::query_scalar::<_, Option<Uuid>>(
@@ -3555,7 +3554,7 @@ async fn s03_prepared_model_call_is_resumable_without_tool_round() -> Result<(),
     Ok(())
 }
 
-/// S03 / S04 / S08: the production
+/// the production
 /// startup repository applies call-aware recovery under its session lock:
 /// Prepared remains retryable with its steering unchanged, an issued call becomes an exact
 /// ambiguity wait, a stopped call terminalizes as reconciliation while
@@ -3563,7 +3562,7 @@ async fn s03_prepared_model_call_is_resumable_without_tool_round() -> Result<(),
 /// and replay changes neither.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s04_startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error>> {
+async fn startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let prepared = checkpoint_restart_model_call(&pool, 0x2000, false).await?;
     let issued = checkpoint_restart_model_call(&pool, 0x3000, true).await?;
@@ -3982,12 +3981,12 @@ async fn s03_s04_startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<d
     Ok(())
 }
 
-/// S04: restart recovery reconstructs a committed call
+/// restart recovery reconstructs a committed call
 /// from its durable provider target even after deployment configuration remaps
 /// the selected model.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_restart_recovery_preserves_durable_target_after_catalog_remap()
+async fn restart_recovery_preserves_durable_target_after_catalog_remap()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7000;
@@ -4034,15 +4033,14 @@ async fn s04_restart_recovery_preserves_durable_target_after_catalog_remap()
     Ok(())
 }
 
-/// S04 / S08 / S09: steering accepted after send
+/// steering accepted after send
 /// authorization is atomically reclassified when the source completes. Its
 /// immutable command still replays PendingSteering, while the inherited
 /// successor enters the ordinary scheduler with the source's exact settings
 /// evidence and activates after the terminal source.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_s08_s09_terminal_call_reclassifies_and_schedules_pending_steering()
--> Result<(), Box<dyn Error>> {
+async fn terminal_call_reclassifies_and_schedules_pending_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e4));
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce4));
@@ -4358,13 +4356,13 @@ async fn s04_s08_s09_terminal_call_reclassifies_and_schedules_pending_steering()
     Ok(())
 }
 
-/// S08 / S21: immutable target
+/// immutable target
 /// resolution failure creates no targetless call, reclassifies the complete
 /// pending steering prefix, and atomically closes the prepared attempt and turn
 /// with its semantic failure boundary and typed outbox event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s08_s21_target_unavailable_reclassifies_steering() -> Result<(), Box<dyn Error>> {
+async fn target_unavailable_reclassifies_steering() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8f1));
     let direct_selection =

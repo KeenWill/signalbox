@@ -281,21 +281,21 @@ fn execution_failure_turn(goal: &Goal) -> TurnId {
     provenance.turn()
 }
 
-/// S01 / S02: the complete offline
+/// the complete offline
 /// chain creates a session, submits input, lets the scheduler activate it,
 /// invokes the application provider port, and atomically persists the exact
 /// selection, resolved target, consumed frontier, Prepared-to-InFlight
 /// checkpoint sequence, assistant reply, and terminal lifecycle facts.
 /// the bridge receives a one-action runtime script, so any repeated
 /// physical interaction exhausts the script and fails the test.
-/// S20: the fixture configures an undated provider-model spelling while the
+/// the fixture configures an undated provider-model spelling while the
 /// scripted response echoes that family's canonical dated form, so the chain
 /// also proves the provider-target normalization law of
 /// docs/spec/model-call-execution.md end to end: the call completes and the
 /// supervisor never raises a fatal signal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s02_runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dyn Error>> {
+async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
     let mut create = CreateSessionService::new(

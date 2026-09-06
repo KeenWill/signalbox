@@ -6,11 +6,11 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S02 / S07 / S11: scheduling
+/// scheduling
 /// reconstitution accepts the exact terminal shape written when an
 /// interrupt closes a yielded tool round.
 #[test]
-fn s02_s07_s11_cancelled_tool_round_reconstitutes() {
+fn cancelled_tool_round_reconstitutes() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -149,12 +149,12 @@ fn s02_s07_s11_cancelled_tool_round_reconstitutes() {
     );
 }
 
-/// S02 / S07 / S11: scheduling
+/// scheduling
 /// reconstitution accepts the exact terminal shape written when a stop
 /// request races a tool-using response, which names the batch's completed
 /// producing call.
 #[test]
-fn s02_s07_s11_stopped_tool_round_reconstitutes_from_named_call() {
+fn stopped_tool_round_reconstitutes_from_named_call() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -293,11 +293,11 @@ fn s02_s07_s11_stopped_tool_round_reconstitutes_from_named_call() {
     );
 }
 
-/// S02 / S07 / S11: a cancelled terminal
+/// a cancelled terminal
 /// turn naming a completed call that is not the tool round's producing
 /// call fails closed.
 #[test]
-fn s02_s07_s11_cancelled_tool_round_rejects_unrelated_named_call() {
+fn cancelled_tool_round_rejects_unrelated_named_call() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -439,11 +439,11 @@ fn s02_s07_s11_cancelled_tool_round_rejects_unrelated_named_call() {
     );
 }
 
-/// S02 / S07 / S11: a cancelled terminal
+/// a cancelled terminal
 /// tool round whose `ToolDenied` result entry names no user denial
 /// resolution fails closed.
 #[test]
-fn s02_s07_s11_cancelled_tool_round_rejects_missing_denial_resolution() {
+fn cancelled_tool_round_rejects_missing_denial_resolution() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -574,11 +574,11 @@ fn s02_s07_s11_cancelled_tool_round_rejects_missing_denial_resolution() {
     );
 }
 
-/// S02 / S07 / S11: an approving user
+/// an approving user
 /// resolution cannot back a cancelled terminal tool round's `ToolDenied`
 /// result entry; the round fails closed.
 #[test]
-fn s02_s07_s11_cancelled_tool_round_rejects_approving_resolution() {
+fn cancelled_tool_round_rejects_approving_resolution() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -713,11 +713,11 @@ fn s02_s07_s11_cancelled_tool_round_rejects_approving_resolution() {
     );
 }
 
-/// S02 / S03 / S11: scheduling
+/// scheduling
 /// reconstitution accepts the exact terminal shape written when a
 /// crash-lost tool round closes the turn as failed.
 #[test]
-fn s02_s03_s11_failed_tool_round_reconstitutes() {
+fn failed_tool_round_reconstitutes() {
     let session = current_session();
     let failed = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -898,11 +898,11 @@ fn s02_s03_s11_failed_tool_round_reconstitutes() {
     );
 }
 
-/// S02 / S11: complete scheduling reconstitution admits every
+/// complete scheduling reconstitution admits every
 /// reference-only tool entry while retaining completed-call provenance
 /// for assistant tool use from an earlier intra-turn round.
 #[test]
-fn s02_s11_scheduling_reconstitutes_tool_round_history() {
+fn scheduling_reconstitutes_tool_round_history() {
     let session = current_session();
     let active = accepted_origin(1);
     let producing_call = model_call_id(90);

@@ -1056,11 +1056,11 @@ mod tests {
     };
     use uuid::Uuid;
 
-    /// S34: the domain retains exact prompt text independently of
+    /// the domain retains exact prompt text independently of
     /// deployment policy; empty and U+0000-bearing text is rejected with the
     /// value retained unchanged.
     #[test]
-    fn s34_system_prompt_retains_large_exact_utf8_text() {
+    fn system_prompt_retains_large_exact_utf8_text() {
         let exact = "y".repeat(2 * 1024 * 1024) + "\u{221a}";
         let admitted =
             SessionSystemPrompt::try_new(exact.clone()).expect("large exact text is admitted");
@@ -1080,11 +1080,11 @@ mod tests {
         assert_eq!(with_null.into_parts().0, "a\u{0}b");
     }
 
-    /// S34: the complete defaults value carries the optional prompt
+    /// the complete defaults value carries the optional prompt
     /// in structural equality, so an epoch differing only in its prompt is a
     /// different replacement payload.
     #[test]
-    fn s34_defaults_equality_covers_the_system_prompt() {
+    fn defaults_equality_covers_the_system_prompt() {
         let model = ModelSelectionRequest::Direct(direct(1));
         let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
             .expect("test prompt is admissible");
@@ -1205,10 +1205,10 @@ mod tests {
         assert_ne!(definition, other_definition);
     }
 
-    /// S37: alias retargeting resolves the caller overlay
+    /// alias retargeting resolves the caller overlay
     /// against the new direct capability and retains its automatic adjustment.
     #[test]
-    fn s37_alias_retarget_freezes_adjusted_origin_settings() {
+    fn alias_retarget_freezes_adjusted_origin_settings() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let prior_capabilities = ModelCapabilities::new(
@@ -1832,10 +1832,10 @@ mod tests {
         );
     }
 
-    /// S37: the catalog-free origin path cannot preserve
+    /// the catalog-free origin path cannot preserve
     /// settings admitted for an alias's prior direct target after retargeting.
     #[test]
-    fn s37_legacy_freeze_rejects_alias_retarget_settings() {
+    fn legacy_freeze_rejects_alias_retarget_settings() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let requested_alias = alias(1);
@@ -1886,10 +1886,10 @@ mod tests {
         );
     }
 
-    /// S37: legacy reconstitution rejects an alias whose
+    /// legacy reconstitution rejects an alias whose
     /// frozen target differs from the stored settings validation identity.
     #[test]
-    fn s37_legacy_reconstitution_rejects_alias_retarget_settings() {
+    fn legacy_reconstitution_rejects_alias_retarget_settings() {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let requested_alias = alias(1);

@@ -6,11 +6,11 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S01: ancestry-free first eligibility fixes the
+/// ancestry-free first eligibility fixes the
 /// origin-only frontier and enters Running with one Prepared attempt in
 /// the same sealed candidate.
 #[test]
-fn s01_first_eligibility_prepares_one_atomic_activation_candidate() {
+fn first_eligibility_prepares_one_atomic_activation_candidate() {
     let session = current_session();
     let queued = accepted_origin(1);
     let activation = activation(1);
@@ -61,11 +61,11 @@ fn s01_first_eligibility_prepares_one_atomic_activation_candidate() {
     ));
 }
 
-/// S28: an imported session's first native activation
+/// an imported session's first native activation
 /// appends its origin to the exact checked seed prefix without changing
 /// first-in-session lineage.
 #[test]
-fn s28_first_native_frontier_appends_to_imported_seed() {
+fn first_native_frontier_appends_to_imported_seed() {
     let imported = imported_session();
     let session = imported.session().clone();
     let seed_entries = imported
@@ -97,10 +97,10 @@ fn s28_first_native_frontier_appends_to_imported_seed() {
     );
 }
 
-/// S03: restart returns a queued scheduling projection with no
+/// restart returns a queued scheduling projection with no
 /// manufactured start, and a cross-wired OriginOf fact fails closed.
 #[test]
-fn s03_checked_reconstitution_preserves_queued_state_and_exact_origin() {
+fn checked_reconstitution_preserves_queued_state_and_exact_origin() {
     let session = current_session();
     let origin = accepted_origin(1);
     let queued = origin.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
@@ -161,11 +161,11 @@ fn s03_checked_reconstitution_preserves_queued_state_and_exact_origin() {
     );
 }
 
-/// S03: an admitted active restart record owns its exact
+/// an admitted active restart record owns its exact
 /// Prepared attempt, reconstructs Running, and makes that identity
 /// unavailable to a second activation candidate.
 #[test]
-fn s03_active_reconstitution_requires_and_exposes_exact_prepared_attempt() {
+fn active_reconstitution_requires_and_exposes_exact_prepared_attempt() {
     let session = current_session();
     let active_origin = accepted_origin(1);
     let stored_attempt = matching_active_attempt();
@@ -207,7 +207,7 @@ fn s03_active_reconstitution_requires_and_exposes_exact_prepared_attempt() {
     );
 }
 
-/// S03: inert prepared facts become a canonical attempt only
+/// inert prepared facts become a canonical attempt only
 /// inside the validated owner projection.
 #[test]
 fn active_reconstitution_derives_prepared_attempt_after_validation() {
@@ -231,7 +231,7 @@ fn active_reconstitution_derives_prepared_attempt_after_validation() {
     ));
 }
 
-/// S03: inert running facts traverse the sealed
+/// inert running facts traverse the sealed
 /// prepared-to-running transition only inside the validated owner
 /// projection.
 #[test]
@@ -260,10 +260,10 @@ fn active_reconstitution_derives_running_attempt_after_validation() {
     ));
 }
 
-/// S07: a running continuation retains the exact
+/// a running continuation retains the exact
 /// independently checked tool batch correlation needed by interruption.
 #[test]
-fn s07_running_tool_batch_correlation_is_reconstituted() {
+fn running_tool_batch_correlation_is_reconstituted() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
@@ -373,11 +373,11 @@ fn s07_running_tool_batch_correlation_is_reconstituted() {
     assert_eq!(current_attempt.state(), &CurrentTurnAttemptState::Prepared);
 }
 
-/// S03: startup recovery consumes the complete active
+/// startup recovery consumes the complete active
 /// projection, ends its exact evidence-free attempt as Lost, and appends
 /// one `TurnFailed` marker to the starting frontier.
 #[test]
-fn s03_prepares_atomic_lost_failed_terminal_candidate() {
+fn prepares_atomic_lost_failed_terminal_candidate() {
     let session = current_session();
     let active = accepted_origin(1);
     let failure_entry = semantic_entry(500);

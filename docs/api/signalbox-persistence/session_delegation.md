@@ -62,7 +62,7 @@ where
 {
 }
 impl session_delegation::RecordedDelegationWait {
-    pub const fn wait(self) -> session_delegation::DelegationWait;
+    pub const fn wait(self) -> wait::DelegationWait;
 }
 ```
 
@@ -128,8 +128,8 @@ where
 impl session_delegation::RecordedDelegationMessage {
     pub const fn tool_request(&self) -> signalbox_domain::ToolRequestId;
     pub const fn message(&self) -> signalbox_domain::DelegationMessageId;
-    pub const fn direction(&self) -> session_delegation::DelegationMessageDirection;
-    pub const fn ordinal(&self) -> session_delegation::DelegationEventOrdinal;
+    pub const fn direction(&self) -> message::DelegationMessageDirection;
+    pub const fn ordinal(&self) -> event::DelegationEventOrdinal;
     pub const fn delivery_sequence(&self) -> nonzero::NonZeroU64;
 }
 impl session_delegation::DelegationMessageDeliveryProjection
@@ -137,8 +137,8 @@ impl session_delegation::DelegationMessageDeliveryProjection
 {
     fn tool_request(&self) -> signalbox_domain::ToolRequestId;
     fn message(&self) -> signalbox_domain::DelegationMessageId;
-    fn direction(&self) -> session_delegation::DelegationMessageDirection;
-    fn ordinal(&self) -> session_delegation::DelegationEventOrdinal;
+    fn direction(&self) -> message::DelegationMessageDirection;
+    fn ordinal(&self) -> event::DelegationEventOrdinal;
     fn delivery_sequence(&self) -> nonzero::NonZeroU64;
 }
 ```
@@ -203,7 +203,7 @@ where
 {
 }
 impl session_delegation::RecordedDelegationDelivery {
-    pub const fn outcome(&self) -> &session_delegation::DelegationOutcome;
+    pub const fn outcome(&self) -> &outcome::DelegationOutcome;
 }
 ```
 
@@ -219,7 +219,7 @@ pub enum DelegationOperationRejection {
     DeliverySequenceExhausted,
     Transition {
         spawning_request: signalbox_domain::ToolRequestId,
-        failure: session_delegation::DelegationTransitionFailure,
+        failure: relation::DelegationTransitionFailure,
     },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -625,7 +625,7 @@ pub enum SessionDelegationCorruption {
         field: &'static str,
         value: string::String,
     },
-    Reconstitution(session_delegation::SessionDelegationReconstitutionFailure),
+    Reconstitution(reconstitution::SessionDelegationReconstitutionFailure),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl<T> from_ref::FromRef<T> for session_delegation::SessionDelegationCorruption
@@ -821,7 +821,7 @@ impl session_delegation::SessionDelegationRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn record_wait(
         &self,
-        request: session_delegation::DelegationAwaitRequest,
+        request: request::DelegationAwaitRequest,
         dispatch: &tool_attempt::ToolDispatchAuthority,
     ) -> result::Result<
         session_delegation::RecordDelegationWaitOutcome,
@@ -829,7 +829,7 @@ impl session_delegation::SessionDelegationRepository {
     >;
     pub async fn record_message(
         &self,
-        request: session_delegation::DelegationMessageRequest,
+        request: request::DelegationMessageRequest,
         message: signalbox_domain::DelegationMessageId,
         dispatch: &tool_attempt::ToolDispatchAuthority,
     ) -> result::Result<
@@ -842,10 +842,10 @@ impl session_delegation::SessionDelegationRepository {
         turn: signalbox_domain::TurnId,
         request: signalbox_domain::ToolRequestId,
         child: signalbox_domain::SessionId,
-        mode: session_delegation::DelegationWaitMode,
+        mode: vocabulary::DelegationWaitMode,
     ) -> result::Result<
         session_delegation::ProcessDelegationOutcome<(
-            session_delegation::DelegationAwaitRequest,
+            request::DelegationAwaitRequest,
             session_delegation::RecordedDelegationWait,
         )>,
         session_delegation::SessionDelegationRepositoryError,
@@ -860,14 +860,14 @@ impl session_delegation::SessionDelegationRepository {
         message: signalbox_domain::DelegationMessageId,
     ) -> result::Result<
         session_delegation::ProcessDelegationOutcome<(
-            session_delegation::DelegationMessageRequest,
+            request::DelegationMessageRequest,
             boxed::Box<session_delegation::RecordedDelegationMessage>,
         )>,
         session_delegation::SessionDelegationRepositoryError,
     >;
     pub async fn load_foreground_delivery(
         &self,
-        wait: session_delegation::DelegationWait,
+        wait: wait::DelegationWait,
     ) -> result::Result<
         option::Option<session_delegation::RecordedDelegationDelivery>,
         session_delegation::SessionDelegationRepositoryError,

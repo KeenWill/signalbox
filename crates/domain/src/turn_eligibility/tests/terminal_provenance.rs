@@ -84,11 +84,11 @@ fn assert_failed_terminal_call_provenance_is_complete(
     );
 }
 
-/// S02 / S03: failed-terminal reconstitution
+/// failed-terminal reconstitution
 /// preserves all three accepted execution shapes and any steering already
 /// committed in an ended call's source frontier.
 #[test]
-fn s02_s03_failed_terminal_execution_provenance_is_complete() {
+fn failed_terminal_execution_provenance_is_complete() {
     let session = current_session();
     let failed = accepted_origin(1);
     let attempt = turn_attempt_id(60);
@@ -130,11 +130,11 @@ fn s02_s03_failed_terminal_execution_provenance_is_complete() {
     );
 }
 
-/// S02 / S07: a proof-bearing known-failure attempt
+/// a proof-bearing known-failure attempt
 /// can only correlate a physically known-failed call. Confirmed physical
 /// cancellation remains the cancelled terminal outcome.
 #[test]
-fn s02_s07_stopped_failure_rejects_cancelled_call() {
+fn stopped_failure_rejects_cancelled_call() {
     let session = current_session();
     let failed = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -207,10 +207,10 @@ fn s02_s07_stopped_failure_rejects_cancelled_call() {
     );
 }
 
-/// S02 / S03: failed-terminal attempt provenance fails closed
+/// failed-terminal attempt provenance fails closed
 /// when either ownership or the allowed terminal end is contradicted.
 #[test]
-fn s02_s03_failed_terminal_attempt_provenance_fails_closed() {
+fn failed_terminal_attempt_provenance_fails_closed() {
     let session = current_session();
     let failed = accepted_origin(1);
     let attempt = turn_attempt_id(60);
@@ -292,11 +292,11 @@ fn s02_s03_failed_terminal_attempt_provenance_fails_closed() {
     );
 }
 
-/// S02: a failed terminal call must match the ended
+/// a failed terminal call must match the ended
 /// attempt and the turn's selection, target, starting frontier, and
 /// KnownFailed-or-Cancelled physical disposition.
 #[test]
-fn s02_failed_terminal_call_provenance_fails_closed() {
+fn failed_terminal_call_provenance_fails_closed() {
     let session = current_session();
     let failed = accepted_origin(1);
     let attempt = turn_attempt_id(60);

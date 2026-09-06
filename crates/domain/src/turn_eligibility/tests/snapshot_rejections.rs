@@ -8,10 +8,10 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S03: a supplied acceptance tail requires an active turn; a
+/// a supplied acceptance tail requires an active turn; a
 /// tail alongside a queued-only projection fails closed.
 #[test]
-fn s03_reconstitution_rejects_tail_without_active_turn() {
+fn reconstitution_rejects_tail_without_active_turn() {
     let session = current_session();
     let queued = accepted_origin(1);
     let mut input = queued_input(&session, queued);
@@ -25,7 +25,7 @@ fn s03_reconstitution_rejects_tail_without_active_turn() {
     );
 }
 
-/// S03 / S08: every tail entry belongs to the
+/// every tail entry belongs to the
 /// scheduling session and appears exactly once; a cross-session entry or
 /// a repeated accepted-input identity fails closed.
 #[test]
@@ -99,11 +99,11 @@ fn active_reconstitution_rejects_cross_session_or_repeated_tail_entries() {
         ]));
 }
 
-/// S03: every stored snapshot is owned by the
+/// every stored snapshot is owned by the
 /// scheduling session, unique, duplicate-free, and backed by supplied
 /// entries; each malformed snapshot collection fails closed.
 #[test]
-fn s03_reconstitution_rejects_malformed_snapshot_collection() {
+fn reconstitution_rejects_malformed_snapshot_collection() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
@@ -189,7 +189,7 @@ fn s03_reconstitution_rejects_malformed_snapshot_collection() {
         ]));
 }
 
-/// S03 / S09: a stored start or failed terminal must
+/// a stored start or failed terminal must
 /// name a snapshot present in the complete supplied set; an absent
 /// snapshot fails closed. Together with the frontier-exactness
 /// rejections, this validated precondition backs eligibility's
@@ -241,12 +241,12 @@ fn reconstitution_rejects_absent_starting_or_terminal_snapshot() {
         ]));
 }
 
-/// S03: a supplied snapshot that no stored lifecycle
+/// a supplied snapshot that no stored lifecycle
 /// fact references cannot ride along; the complete collection fails
 /// closed. This is the read-side rejection recorded for orphan committed
 /// snapshot headers.
 #[test]
-fn s03_reconstitution_rejects_unreferenced_snapshot() {
+fn reconstitution_rejects_unreferenced_snapshot() {
     let session = current_session();
     let active = accepted_origin(1);
     let stray_frontier = frontier(90);
@@ -266,12 +266,12 @@ fn s03_reconstitution_rejects_unreferenced_snapshot() {
     );
 }
 
-/// S03: durable total order admits only a failed-terminal
+/// durable total order admits only a failed-terminal
 /// prefix, at most one active slot, and a queued suffix; every
 /// out-of-order stored lifecycle fails closed on the first offending
 /// turn.
 #[test]
-fn s03_reconstitution_rejects_out_of_order_lifecycle_states() {
+fn reconstitution_rejects_out_of_order_lifecycle_states() {
     let session = current_session();
     let earlier = accepted_origin(1);
     let later = accepted_origin(2);
@@ -370,11 +370,11 @@ fn s03_reconstitution_rejects_out_of_order_lifecycle_states() {
         ]));
 }
 
-/// S03: the stored starting lineage must equal the
+/// the stored starting lineage must equal the
 /// lineage derived from durable total order; a first-in-session active
 /// turn cannot claim a predecessor.
 #[test]
-fn s03_reconstitution_rejects_stored_lineage_disagreeing_with_order() {
+fn reconstitution_rejects_stored_lineage_disagreeing_with_order() {
     let session = current_session();
     let active = accepted_origin(1);
     let claimed_lineage = AcceptedInputStartingLineage::After {
@@ -451,11 +451,11 @@ fn rendered_frontier_origins_exclude_compacted_input() {
     );
 }
 
-/// S03: the stored starting snapshot must be exactly
+/// the stored starting snapshot must be exactly
 /// the predecessor prefix plus the turn's origin entry; a snapshot
 /// omitting the origin fails closed.
 #[test]
-fn s03_reconstitution_rejects_starting_snapshot_omitting_origin() {
+fn reconstitution_rejects_starting_snapshot_omitting_origin() {
     let session = current_session();
     let active = accepted_origin(1);
     let mut facts = ActiveReconstitutionFacts::matching(&session, active);
@@ -472,11 +472,11 @@ fn s03_reconstitution_rejects_starting_snapshot_omitting_origin() {
     );
 }
 
-/// S03: after a completed compaction, the exact compacted
+/// after a completed compaction, the exact compacted
 /// result followed by the next turn's origin is a valid starting
 /// frontier even though the predecessor frontier remains complete.
 #[test]
-fn s03_reconstitution_accepts_exact_compaction_result_then_origin() {
+fn reconstitution_accepts_exact_compaction_result_then_origin() {
     let session = current_session();
     let predecessor_turn = turn_id(1);
     let active_turn = turn_id(2);
@@ -735,13 +735,13 @@ fn s03_reconstitution_accepts_exact_compaction_result_then_origin() {
     );
 }
 
-/// S03 / S09: each start owns a distinct snapshot; a
+/// each start owns a distinct snapshot; a
 /// successor start naming its predecessor's already-referenced starting
 /// snapshot fails closed. With the content-exactness rejection, this
 /// backs eligibility's expectation that fresh snapshot identities
 /// preserve the validated prefix.
 #[test]
-fn s09_reconstitution_rejects_starting_frontier_reused_from_predecessor() {
+fn reconstitution_rejects_starting_frontier_reused_from_predecessor() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let active = accepted_origin(2);

@@ -7,10 +7,10 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S03: eligibility derives the target from complete durable
+/// eligibility derives the target from complete durable
 /// order and cannot be directed to skip earlier queued work.
 #[test]
-fn s03_eligibility_consumes_the_earliest_queued_origin() {
+fn eligibility_consumes_the_earliest_queued_origin() {
     let session = current_session();
     let later = accepted_origin(2);
     let earlier = accepted_origin(1);
@@ -39,12 +39,12 @@ fn s03_eligibility_consumes_the_earliest_queued_origin() {
     );
 }
 
-/// S09: the earliest queued successor starts only
+/// the earliest queued successor starts only
 /// after the exact immediately preceding failed turn and retains its
 /// complete origin-then-failure terminal prefix before appending its own
 /// origin.
 #[test]
-fn s09_successor_uses_exact_failed_predecessor_terminal_frontier() {
+fn successor_uses_exact_failed_predecessor_terminal_frontier() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -108,11 +108,11 @@ fn s09_successor_uses_exact_failed_predecessor_terminal_frontier() {
     );
 }
 
-/// S33: an actual frozen direct-model transition
+/// an actual frozen direct-model transition
 /// inserts exactly one typed identity boundary between the predecessor
 /// terminal frontier and the successor origin.
 #[test]
-fn s33_model_transition_extends_frontier_before_origin() {
+fn model_transition_extends_frontier_before_origin() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -282,11 +282,11 @@ fn legacy_start_grandfathers_its_historical_frontier() {
         .expect("the durable legacy bit retains the historical marker-free frontier");
 }
 
-/// S08 / S09: terminally reclassified
+/// terminally reclassified
 /// steering becomes ordinary queued work at its original position and
 /// inherits the source turn's canonical configuration.
 #[test]
-fn s08_s09_reclassified_steering_becomes_eligible_work() {
+fn reclassified_steering_becomes_eligible_work() {
     let session = current_session();
     let predecessor = accepted_origin(1);
     let successor = accepted_origin(2);

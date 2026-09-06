@@ -7,12 +7,12 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S02 / S08 / S09: scheduling
+/// scheduling
 /// reconstitution admits consumed steering only when its semantic subject,
 /// accepted lifecycle, source turn, call frontier, and acceptance order
 /// agree exactly.
 #[test]
-fn s02_s08_s09_reconstitution_validates_steering_subjects() {
+fn reconstitution_validates_steering_subjects() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -150,13 +150,13 @@ fn s02_s08_s09_reconstitution_validates_steering_subjects() {
     );
 }
 
-/// S02 / S08 / S10: scheduling reconstitution admits
+/// scheduling reconstitution admits
 /// the durable shape the continuation transaction commits — a running
 /// continuation attempt owning a prepared steering-consuming call whose
 /// frontier is the round's exact result projection plus the consumed
 /// suffix.
 #[test]
-fn s02_s08_s10_steering_consumed_at_continuation_reconstitutes() {
+fn steering_consumed_at_continuation_reconstitutes() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -166,11 +166,11 @@ fn s02_s08_s10_steering_consumed_at_continuation_reconstitutes() {
         .expect("continuation-consumed steering reconstructs");
 }
 
-/// S02 / S08: a running attempt owning a prepared
+/// a running attempt owning a prepared
 /// steering-consuming call is legal only with the round's result
 /// evidence.
 #[test]
-fn s02_s08_continuation_pair_requires_round_evidence() {
+fn continuation_pair_requires_round_evidence() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -185,10 +185,10 @@ fn s02_s08_continuation_pair_requires_round_evidence() {
     );
 }
 
-/// S02 / S08: continuation-round evidence must name a
+/// continuation-round evidence must name a
 /// steering-consuming call.
 #[test]
-fn s02_s08_round_evidence_requires_a_consuming_call() {
+fn round_evidence_requires_a_consuming_call() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -213,10 +213,10 @@ fn s02_s08_round_evidence_requires_a_consuming_call() {
     );
 }
 
-/// S02 / S08: continuation-round evidence names each
+/// continuation-round evidence names each
 /// consuming call at most once.
 #[test]
-fn s02_s08_round_evidence_names_each_consumer_once() {
+fn round_evidence_names_each_consumer_once() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -234,10 +234,10 @@ fn s02_s08_round_evidence_names_each_consumer_once() {
     );
 }
 
-/// S02 / S08: the consumed steering entries must be
+/// the consumed steering entries must be
 /// the exact trailing suffix after the round's result window.
 #[test]
-fn s02_s08_consumed_steering_is_the_continuation_trailing_suffix() {
+fn consumed_steering_is_the_continuation_trailing_suffix() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -260,10 +260,10 @@ fn s02_s08_consumed_steering_is_the_continuation_trailing_suffix() {
     );
 }
 
-/// S02 / S08 / S10: each result entry in the
+/// each result entry in the
 /// continuation window must correlate to its proposal-ordered request.
 #[test]
-fn s02_s08_s10_continuation_results_correlate_to_proposal_order() {
+fn continuation_results_correlate_to_proposal_order() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -289,11 +289,11 @@ fn s02_s08_s10_continuation_results_correlate_to_proposal_order() {
     );
 }
 
-/// S02 / S08 / S10: the round's tools were issued by
+/// the round's tools were issued by
 /// the same continuation attempt that owns the consuming call; evidence
 /// issued by a foreign attempt fails closed.
 #[test]
-fn s02_s08_s10_continuation_results_bind_to_the_consuming_attempt() {
+fn continuation_results_bind_to_the_consuming_attempt() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -319,10 +319,10 @@ fn s02_s08_s10_continuation_results_bind_to_the_consuming_attempt() {
     );
 }
 
-/// S02 / S08 / S10: a continuation window forbids
+/// a continuation window forbids
 /// turn-end closures, which exist only in terminal materialization.
 #[test]
-fn s02_s08_s10_continuation_window_forbids_turn_end_closures() {
+fn continuation_window_forbids_turn_end_closures() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -349,10 +349,10 @@ fn s02_s08_s10_continuation_window_forbids_turn_end_closures() {
     );
 }
 
-/// S02 / S08 / S10: an ambiguous attempt end is a
+/// an ambiguous attempt end is a
 /// turn-level failure and never reaches a continuation window.
 #[test]
-fn s02_s08_s10_continuation_window_rejects_an_ambiguous_attempt_end() {
+fn continuation_window_rejects_an_ambiguous_attempt_end() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -379,10 +379,10 @@ fn s02_s08_s10_continuation_window_rejects_an_ambiguous_attempt_end() {
     );
 }
 
-/// S02 / S08 / S10: a crash-lost attempt end is a
+/// a crash-lost attempt end is a
 /// turn-level failure and never reaches a continuation window.
 #[test]
-fn s02_s08_s10_continuation_window_rejects_a_crash_lost_attempt_end() {
+fn continuation_window_rejects_a_crash_lost_attempt_end() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -411,11 +411,11 @@ fn s02_s08_s10_continuation_window_rejects_a_crash_lost_attempt_end() {
     );
 }
 
-/// S02 / S08: only a tool proposal keeps a completed
+/// only a tool proposal keeps a completed
 /// consumer's turn going, so a text-only completed consumer inside an
 /// active turn cannot claim the historical-consumer correlation.
 #[test]
-fn s02_s08_text_only_completed_consumer_fails_closed() {
+fn text_only_completed_consumer_fails_closed() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);
@@ -449,13 +449,13 @@ fn s02_s08_text_only_completed_consumer_fails_closed() {
     );
 }
 
-/// S02 / S08 / S10: a steering-consuming call that
+/// a steering-consuming call that
 /// completed by proposing a tool round stays reconstitutable while the
 /// round is parked awaiting approval — the consumer is correlated through
 /// its assistant history and exact frontier window, not the current
 /// phase's attempt.
 #[test]
-fn s02_s08_s10_parked_tool_round_retains_consumed_steering() {
+fn parked_tool_round_retains_consumed_steering() {
     let session = current_session();
     let active = accepted_origin(1);
     let consumed = accepted_origin(2);

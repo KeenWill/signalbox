@@ -7,10 +7,10 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S09: an all-terminal projection holds no queued work;
+/// an all-terminal projection holds no queued work;
 /// eligibility rejects instead of manufacturing a candidate.
 #[test]
-fn s09_eligibility_rejects_projection_without_queued_work() {
+fn eligibility_rejects_projection_without_queued_work() {
     let session = current_session();
     let failed = accepted_origin(1);
     let activation = activation(1);
@@ -24,7 +24,7 @@ fn s09_eligibility_rejects_projection_without_queued_work() {
     assert_eq!(failure, AcceptedInputEligibilityFailure::NoQueuedTurn);
 }
 
-/// S01 / S09: a proposed origin-entry identity colliding with
+/// a proposed origin-entry identity colliding with
 /// a committed semantic entry fails closed before any candidate is
 /// prepared.
 #[test]
@@ -54,7 +54,7 @@ fn eligibility_rejects_committed_origin_entry_identity() {
     );
 }
 
-/// S01 / S09: a proposed starting-snapshot identity
+/// a proposed starting-snapshot identity
 /// colliding with a committed session-scoped snapshot fails closed
 /// before any candidate is prepared.
 #[test]
@@ -84,10 +84,10 @@ fn eligibility_rejects_committed_starting_frontier_identity() {
     );
 }
 
-/// S03: a prepared standalone compaction call survives complete
+/// a prepared standalone compaction call survives complete
 /// reconstitution and prevents queued-turn activation until recovery.
 #[test]
-fn s03_prepared_compaction_call_blocks_activation_after_reconstitution() {
+fn prepared_compaction_call_blocks_activation_after_reconstitution() {
     let session = current_session();
     let source = ResolvedContextFrontierReconstitutionInput::new(
         session.id(),
@@ -127,10 +127,10 @@ fn s03_prepared_compaction_call_blocks_activation_after_reconstitution() {
     );
 }
 
-/// S03: an authorized standalone compaction call remains
+/// an authorized standalone compaction call remains
 /// recoverable and owns the execution slot after restart reconstitution.
 #[test]
-fn s03_in_flight_compaction_call_blocks_activation_after_reconstitution() {
+fn in_flight_compaction_call_blocks_activation_after_reconstitution() {
     let session = current_session();
     let source = ResolvedContextFrontierReconstitutionInput::new(
         session.id(),
@@ -170,10 +170,10 @@ fn s03_in_flight_compaction_call_blocks_activation_after_reconstitution() {
     );
 }
 
-/// S03: a terminal non-completed dedicated call is retained as
+/// a terminal non-completed dedicated call is retained as
 /// historical recovery evidence without requiring a compaction result.
 #[test]
-fn s03_known_failed_compaction_call_is_legal_standalone_evidence() {
+fn known_failed_compaction_call_is_legal_standalone_evidence() {
     let session = current_session();
     let source = ResolvedContextFrontierReconstitutionInput::new(
         session.id(),

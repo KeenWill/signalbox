@@ -119,11 +119,11 @@ fn failed_continuation_call_input(
     )
 }
 
-/// S02 / S10 / S11: a failed terminal turn naming its round-two
+/// a failed terminal turn naming its round-two
 /// continuation call reconstitutes when that call's whole frontier is the
 /// completed round's result projection the terminal marker extends.
 #[test]
-fn s02_s10_s11_failed_continuation_call_reconstitutes() {
+fn failed_continuation_call_reconstitutes() {
     let session = current_session();
     let failed = accepted_origin(1);
     failed_continuation_call_input(&session, failed)
@@ -131,10 +131,10 @@ fn s02_s10_s11_failed_continuation_call_reconstitutes() {
         .expect("the failed continuation-call terminal shape reconstructs");
 }
 
-/// S02 / S10 / S11: a failed terminal turn naming a
+/// a failed terminal turn naming a
 /// continuation call is accepted only with its round's result evidence.
 #[test]
-fn s02_s10_s11_failed_continuation_call_requires_round_evidence() {
+fn failed_continuation_call_requires_round_evidence() {
     let session = current_session();
     let failed = accepted_origin(1);
     let mut missing_evidence = failed_continuation_call_input(&session, failed);
@@ -154,10 +154,10 @@ fn s02_s10_s11_failed_continuation_call_requires_round_evidence() {
     );
 }
 
-/// S02 / S10 / S11: a named continuation call's round
+/// a named continuation call's round
 /// completed, so its window forbids turn-end closures.
 #[test]
-fn s02_s10_s11_failed_continuation_call_window_forbids_turn_end_closures() {
+fn failed_continuation_call_window_forbids_turn_end_closures() {
     let session = current_session();
     let failed = accepted_origin(1);
     let mut closed_request = failed_continuation_call_input(&session, failed);
@@ -349,13 +349,13 @@ fn cancelled_continuation_call_input(
     )
 }
 
-/// S02 / S07 / S10: a cancelled terminal turn naming
+/// a cancelled terminal turn naming
 /// its unsent round-two continuation call reconstitutes when provider
 /// compaction precedes the tool proposal and that call's whole frontier is
 /// the completed round's result projection the cancellation marker
 /// extends.
 #[test]
-fn s02_s07_s10_cancelled_continuation_call_reconstitutes() {
+fn cancelled_continuation_call_reconstitutes() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -364,10 +364,10 @@ fn s02_s07_s10_cancelled_continuation_call_reconstitutes() {
         .expect("the cancelled continuation-call terminal shape reconstructs");
 }
 
-/// S02 / S07 / S10: a cancelled terminal turn naming
+/// a cancelled terminal turn naming
 /// a continuation call is accepted only with its round's result evidence.
 #[test]
-fn s02_s07_s10_cancelled_continuation_call_requires_round_evidence() {
+fn cancelled_continuation_call_requires_round_evidence() {
     let session = current_session();
     let cancelled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -490,12 +490,12 @@ fn refused_continuation_call_input(
     )])
 }
 
-/// S02 / S10: a refused terminal turn naming its round-two
+/// a refused terminal turn naming its round-two
 /// continuation call reconstitutes when that call's whole frontier is the
 /// completed round's result projection the equal-content terminal
 /// frontier repeats.
 #[test]
-fn s02_s10_refused_continuation_call_reconstitutes() {
+fn refused_continuation_call_reconstitutes() {
     let session = current_session();
     let refused = accepted_origin(1);
     refused_continuation_call_input(&session, refused)
@@ -503,10 +503,10 @@ fn s02_s10_refused_continuation_call_reconstitutes() {
         .expect("the refused continuation-call terminal shape reconstructs");
 }
 
-/// S02 / S10: a refused terminal turn naming a continuation
+/// a refused terminal turn naming a continuation
 /// call is accepted only with its round's result evidence.
 #[test]
-fn s02_s10_refused_continuation_call_requires_round_evidence() {
+fn refused_continuation_call_requires_round_evidence() {
     let session = current_session();
     let refused = accepted_origin(1);
     let mut missing_evidence = refused_continuation_call_input(&session, refused);
@@ -519,10 +519,10 @@ fn s02_s10_refused_continuation_call_requires_round_evidence() {
     );
 }
 
-/// S02 / S10: a named refused continuation call's round
+/// a named refused continuation call's round
 /// completed, so its window forbids turn-end closures.
 #[test]
-fn s02_s10_refused_continuation_call_window_forbids_turn_end_closures() {
+fn refused_continuation_call_window_forbids_turn_end_closures() {
     let session = current_session();
     let refused = accepted_origin(1);
     let mut closed_request = refused_continuation_call_input(&session, refused);
@@ -546,10 +546,10 @@ fn s02_s10_refused_continuation_call_window_forbids_turn_end_closures() {
     );
 }
 
-/// S02 / S10: gate-named continuation-round evidence names each
+/// gate-named continuation-round evidence names each
 /// call at most once.
 #[test]
-fn s02_s10_continuation_round_evidence_names_each_call_once() {
+fn continuation_round_evidence_names_each_call_once() {
     let session = current_session();
     let refused = accepted_origin(1);
     let mut duplicate_evidence = refused_continuation_call_input(&session, refused);
@@ -563,10 +563,10 @@ fn s02_s10_continuation_round_evidence_names_each_call_once() {
     );
 }
 
-/// S02 / S10: gate-named continuation-round evidence must name
+/// gate-named continuation-round evidence must name
 /// a call a terminal or recovery gate proves against it.
 #[test]
-fn s02_s10_continuation_round_evidence_requires_a_naming_gate() {
+fn continuation_round_evidence_requires_a_naming_gate() {
     let session = current_session();
     let refused = accepted_origin(1);
     let mut dangling_evidence = refused_continuation_call_input(&session, refused);
@@ -719,12 +719,12 @@ fn reconciliation_required_continuation_call_input(
     )])
 }
 
-/// S04 / S07: a reconciliation-required terminal turn
+/// a reconciliation-required terminal turn
 /// naming its interrupted round-two continuation call reconstitutes when
 /// that call's whole frontier is the completed round's result projection
 /// the equal-content terminal frontier repeats.
 #[test]
-fn s04_s07_reconciliation_required_continuation_call_reconstitutes() {
+fn reconciliation_required_continuation_call_reconstitutes() {
     let session = current_session();
     let reconciled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -733,11 +733,11 @@ fn s04_s07_reconciliation_required_continuation_call_reconstitutes() {
         .expect("the reconciliation-required continuation-call terminal shape reconstructs");
 }
 
-/// S04 / S07: a reconciliation-required terminal turn
+/// a reconciliation-required terminal turn
 /// naming a continuation call is accepted only with its round's result
 /// evidence.
 #[test]
-fn s04_s07_reconciliation_required_continuation_call_requires_round_evidence() {
+fn reconciliation_required_continuation_call_requires_round_evidence() {
     let session = current_session();
     let reconciled = accepted_origin(1);
     let successor = accepted_origin(2);
@@ -853,12 +853,12 @@ fn recovery_wait_continuation_call_input(
     )])
 }
 
-/// S04: an active turn parked on the ambiguous
+/// an active turn parked on the ambiguous
 /// round-two continuation call of a completed tool round reconstitutes
 /// the exact recovery wait when that call's whole frontier is the
 /// completed round's result projection.
 #[test]
-fn s04_recovery_wait_continuation_call_reconstitutes() {
+fn recovery_wait_continuation_call_reconstitutes() {
     let session = current_session();
     let active = accepted_origin(1);
     let projection = recovery_wait_continuation_call_input(&session, active)
@@ -878,10 +878,10 @@ fn s04_recovery_wait_continuation_call_reconstitutes() {
     ));
 }
 
-/// S04: a recovery wait naming a continuation call is
+/// a recovery wait naming a continuation call is
 /// accepted only with its round's result evidence.
 #[test]
-fn s04_recovery_wait_continuation_call_requires_round_evidence() {
+fn recovery_wait_continuation_call_requires_round_evidence() {
     let session = current_session();
     let active = accepted_origin(1);
     let mut missing_evidence = recovery_wait_continuation_call_input(&session, active);

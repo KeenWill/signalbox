@@ -7,10 +7,10 @@ use super::fixtures::{
 };
 use super::*;
 
-/// S28: imported ancestry is admitted only together
+/// imported ancestry is admitted only together
 /// with its exact complete independently checked seed projection.
 #[test]
-fn s28_imported_scheduling_requires_exact_seed_projection() {
+fn imported_scheduling_requires_exact_seed_projection() {
     let imported = imported_session();
     let session = imported.session().clone();
     let queued = accepted_origin(1);
@@ -38,11 +38,11 @@ fn s28_imported_scheduling_requires_exact_seed_projection() {
     );
 }
 
-/// S03: this closed slice still cannot resolve a first frontier
+/// this closed slice still cannot resolve a first frontier
 /// from native session ancestry, so an otherwise-valid queued projection
 /// for a native ancestral session fails closed.
 #[test]
-fn s03_reconstitution_rejects_ancestral_session() {
+fn reconstitution_rejects_ancestral_session() {
     let ancestral = session_id(1);
     let version = SessionConfigurationDefaultsVersion::first();
     let defaults = SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct(1)));
@@ -82,11 +82,11 @@ fn s03_reconstitution_rejects_ancestral_session() {
     );
 }
 
-/// S03: every stored session and turn correlation on one
+/// every stored session and turn correlation on one
 /// scheduling record must repeat the owning identities exactly; each
 /// cross-wired stored identity fails closed with its own failure.
 #[test]
-fn s03_reconstitution_rejects_cross_wired_record_identities() {
+fn reconstitution_rejects_cross_wired_record_identities() {
     let session = current_session();
     let queued = accepted_origin(1);
     let other_session = session_id(2);
@@ -162,10 +162,10 @@ fn s03_reconstitution_rejects_cross_wired_record_identities() {
         ]));
 }
 
-/// S03: two turn records cannot both claim one
+/// two turn records cannot both claim one
 /// accepted input as their typed durable origin.
 #[test]
-fn s03_reconstitution_rejects_shared_accepted_input_identity() {
+fn reconstitution_rejects_shared_accepted_input_identity() {
     let session = current_session();
     let first = accepted_origin(1);
     let second = accepted_origin(2);
@@ -188,10 +188,10 @@ fn s03_reconstitution_rejects_shared_accepted_input_identity() {
     );
 }
 
-/// S03: a delegation-origin turn fact cannot also be represented
+/// a delegation-origin turn fact cannot also be represented
 /// by an accepted-input lifecycle record.
 #[test]
-fn s03_reconstitution_rejects_delegated_accepted_turn_fact() {
+fn reconstitution_rejects_delegated_accepted_turn_fact() {
     let session = current_session();
     let queued = accepted_origin(1);
     let input = queued_input(&session, queued).with_delegated_turn_facts(vec![
@@ -213,10 +213,10 @@ fn s03_reconstitution_rejects_delegated_accepted_turn_fact() {
     );
 }
 
-/// S03: complete delegation-origin turn facts cannot duplicate
+/// complete delegation-origin turn facts cannot duplicate
 /// the same stored turn identity.
 #[test]
-fn s03_reconstitution_rejects_duplicate_delegated_turn_fact() {
+fn reconstitution_rejects_duplicate_delegated_turn_fact() {
     let session = current_session();
     let queued = accepted_origin(1);
     let delegated = turn_id(99);
@@ -236,10 +236,10 @@ fn s03_reconstitution_rejects_duplicate_delegated_turn_fact() {
     );
 }
 
-/// S18: a delegated model-identity entry must match
+/// a delegated model-identity entry must match
 /// the exact configuration frozen by its stored turn origin.
 #[test]
-fn s18_delegated_model_identity_requires_stored_configuration() {
+fn delegated_model_identity_requires_stored_configuration() {
     let session = current_session();
     let queued = accepted_origin(1);
     let delegated = turn_id(99);
@@ -274,10 +274,10 @@ fn s18_delegated_model_identity_requires_stored_configuration() {
     );
 }
 
-/// S18: a delegated terminal semantic entry must match the
+/// a delegated terminal semantic entry must match the
 /// independently stored delegated lifecycle state.
 #[test]
-fn s18_delegated_terminal_entry_requires_stored_lifecycle() {
+fn delegated_terminal_entry_requires_stored_lifecycle() {
     let session = current_session();
     let queued = accepted_origin(1);
     let delegated = turn_id(99);
@@ -308,10 +308,10 @@ fn s18_delegated_terminal_entry_requires_stored_lifecycle() {
     );
 }
 
-/// S03: immutable queue facts that cannot form one
+/// immutable queue facts that cannot form one
 /// durable total order fail closed with the exact derivation error.
 #[test]
-fn s03_reconstitution_rejects_underivable_queue_order() {
+fn reconstitution_rejects_underivable_queue_order() {
     let session = current_session();
     let first = accepted_origin(1);
     let second = accepted_origin(2);
@@ -337,10 +337,10 @@ fn s03_reconstitution_rejects_underivable_queue_order() {
     );
 }
 
-/// S03: a stored semantic entry must name the scheduling
+/// a stored semantic entry must name the scheduling
 /// session as its source session.
 #[test]
-fn s03_reconstitution_rejects_cross_session_semantic_entry() {
+fn reconstitution_rejects_cross_session_semantic_entry() {
     let session = current_session();
     let active = accepted_origin(1);
     let other_session = session_id(2);
@@ -364,10 +364,10 @@ fn s03_reconstitution_rejects_cross_session_semantic_entry() {
     );
 }
 
-/// S03: the same source-qualified semantic entry cannot appear
+/// the same source-qualified semantic entry cannot appear
 /// twice in the complete entry collection.
 #[test]
-fn s03_reconstitution_rejects_duplicate_semantic_entry() {
+fn reconstitution_rejects_duplicate_semantic_entry() {
     let session = current_session();
     let active = accepted_origin(1);
     let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
@@ -386,10 +386,10 @@ fn s03_reconstitution_rejects_duplicate_semantic_entry() {
     );
 }
 
-/// S03: a failed marker naming a turn absent from the complete
+/// a failed marker naming a turn absent from the complete
 /// scheduling inventory fails closed.
 #[test]
-fn s03_reconstitution_rejects_semantic_entry_without_subject() {
+fn reconstitution_rejects_semantic_entry_without_subject() {
     let session = current_session();
     let queued = accepted_origin(1);
     let unknown_turn = turn_id(99);
@@ -413,10 +413,10 @@ fn s03_reconstitution_rejects_semantic_entry_without_subject() {
     );
 }
 
-/// S03: an origin entry for a turn whose stored lifecycle is
+/// an origin entry for a turn whose stored lifecycle is
 /// still queued contradicts that turn's state and fails closed.
 #[test]
-fn s03_reconstitution_rejects_origin_entry_for_queued_turn() {
+fn reconstitution_rejects_origin_entry_for_queued_turn() {
     let session = current_session();
     let queued = accepted_origin(1);
     let origin_entry = semantic_entry(30);
@@ -435,10 +435,10 @@ fn s03_reconstitution_rejects_origin_entry_for_queued_turn() {
     );
 }
 
-/// S03: one started turn owns exactly one origin entry; a
+/// one started turn owns exactly one origin entry; a
 /// second origin entry naming the same accepted input fails closed.
 #[test]
-fn s03_reconstitution_rejects_second_origin_entry_for_one_turn() {
+fn reconstitution_rejects_second_origin_entry_for_one_turn() {
     let session = current_session();
     let active = accepted_origin(1);
     let second_origin_entry = semantic_entry(31);
@@ -457,10 +457,10 @@ fn s03_reconstitution_rejects_second_origin_entry_for_one_turn() {
     );
 }
 
-/// S03: a started turn requires its exact origin entry; an
+/// a started turn requires its exact origin entry; an
 /// absent origin fails closed instead of deriving a start without one.
 #[test]
-fn s03_reconstitution_rejects_started_turn_without_origin_entry() {
+fn reconstitution_rejects_started_turn_without_origin_entry() {
     let session = current_session();
     let active = accepted_origin(1);
     let mut facts = ActiveReconstitutionFacts::matching(&session, active);
@@ -480,11 +480,11 @@ fn s03_reconstitution_rejects_started_turn_without_origin_entry() {
     );
 }
 
-/// S09: a failed turn requires its exact failed
+/// a failed turn requires its exact failed
 /// marker; an absent marker fails closed instead of accepting the
 /// stored terminal frontier on faith.
 #[test]
-fn s09_reconstitution_rejects_failed_turn_without_failure_marker() {
+fn reconstitution_rejects_failed_turn_without_failure_marker() {
     let session = current_session();
     let failed = accepted_origin(1);
     let origin_entry = FailedTerminalReconstitutionFacts::matching_origin_entry();
