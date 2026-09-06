@@ -309,10 +309,11 @@ may immediately create a new recorded attempt on the same credential while the
 credential remains admitted and below the required finite-positive
 `numeric_bounds.max_same_credential_attempts_per_turn` configuration value. The
 contract fixes no numeric value; the initial call and every same-credential
-successor call count toward the configured bound. The successor carries the
-durable retry deadline, and its call preparation and dispatch wait until that
-deadline. [Credential availability](credential-availability.md) owns the delay
-rule for rate-limit, overload, and provider-internal successors.
+successor call count toward the configured bound. The failure commit records the
+successor attempt immediately.
+[Credential availability](credential-availability.md) owns the credential-scoped
+durable transient exclusion, its reset deadline, and preparation admission for
+every session.
 
 The same-credential retry is evaluated before the pinned pool action, and that
 action is not applied while the retry is admitted. Once the configured bound is
