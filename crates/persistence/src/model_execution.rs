@@ -1795,11 +1795,16 @@ impl PostgresModelCallRepository {
                 ProviderModelIdentity::from_uuid(stored_effective_identity),
             );
             if stored_effective_target != current_effective_target
-                && !same_credential_family(
+                && (!same_credential_family(
                     self.credential_families.as_ref(),
                     stored_effective_target,
                     current_effective_target,
-                )
+                ) || !remap_preserves_preflight_limits(
+                    &self.continuation_usage_limits,
+                    current.target(),
+                    fast_mode,
+                    stored_effective_target,
+                ))
             {
                 return Ok((false, AuthorizeModelCallOutcome::NoSend));
             }
@@ -6796,10 +6801,40 @@ fn same_credential_family(
     let Some(families) = families else {
         return false;
     };
-    matches!(
-        (families.family(left), families.family(right)),
-        (Some(left), Some(right)) if left == right
-    )
+    match (families.family(left), families.family(right)) {
+        (Some(left), Some(right)) => left == right,
+        // A removed previous fast target has no current route to authenticate.
+        // The prepared call's frozen credential remains valid when the newly
+        // resolved serving target names a configured family.
+        (None, Some(_)) => true,
+        (Some(_) | None, None) => false,
+    }
+}
+
+fn remap_preserves_preflight_limits(
+    limits: &ToolContinuationUsageLimitCatalog,
+    selected_target: ResolvedProviderTarget,
+    fast_mode: FastMode,
+    stored_effective_target: ResolvedProviderTarget,
+) -> bool {
+    let previous = limits.get(&(stored_effective_target, FastMode::Disabled));
+    let current = limits.get(&(selected_target, fast_mode));
+    match (previous, current) {
+        (Some(previous), Some(current)) => {
+            let previous_input_allowance = previous
+                .context_window_tokens()
+                .saturating_sub(previous.max_output_tokens());
+            let current_input_allowance = current
+                .context_window_tokens()
+                .saturating_sub(current.max_output_tokens());
+            current_input_allowance >= previous_input_allowance
+                && current.replays_provider_compaction() == previous.replays_provider_compaction()
+        }
+        // A removed serving target has no current limit entry. The replacement
+        // target's configured limit is the only available deployment evidence.
+        (None, Some(_)) | (None, None) => true,
+        (Some(_), None) => false,
+    }
 }
 
 struct SelectedRuntimePoolCredential {

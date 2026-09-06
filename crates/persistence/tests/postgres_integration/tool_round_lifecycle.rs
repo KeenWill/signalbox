@@ -936,8 +936,8 @@ async fn provider_compaction_releases_tool_continuation_input_headroom()
 }
 
 /// A restarted continuation cannot reuse any usage from a producing call
-/// served by the previous fast target. It prepares without a reported-usage
-/// baseline so the next request takes the prospective counting path.
+/// served by the previous fast target. It prepares without that target's
+/// reported-usage baseline, so the old usage cannot decide B's headroom.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn changed_fast_target_discards_tool_continuation_usage_baseline()

@@ -665,9 +665,9 @@ async fn effective_target_baseline_rejects_changed_alternate_mapping() -> Result
     Ok(())
 }
 
-/// A prepared call refreshes its serving-target attribution at authorization
-/// only when the new target uses the frozen credential's family. A restart
-/// cannot send a call through an unrelated credential family and pool policy.
+/// A prepared call refreshes its serving-target attribution when current
+/// configuration does not contradict the frozen credential family or the
+/// headroom limits that admitted it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn effective_target_authorization_records_changed_mapping_after_restart()
@@ -811,16 +811,43 @@ async fn effective_target_authorization_records_changed_mapping_after_restart()
         )
     );
 
-    let new_families = ModelCredentialFamilyCatalog::try_new([
+    let narrower_families = ModelCredentialFamilyCatalog::try_new([
         (selected_target, Arc::<str>::from("test-model-family"), None),
         (old_fast_target, Arc::<str>::from("test-model-family"), None),
+        (new_fast_target, Arc::<str>::from("test-model-family"), None),
+    ])
+    .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
+    .expect("both alternate targets share the fixture credential family");
+    let narrower = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    )
+    .with_session_credentials(narrower_families)
+    .with_continuation_usage_limits([
+        ToolContinuationUsageLimit::new(old_fast_target, FastMode::Disabled, 10, 100),
+        ToolContinuationUsageLimit::new(selected_target, FastMode::Enabled, 10, 50),
+    ]);
+    assert!(matches!(
+        narrower.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    ));
+
+    let new_families = ModelCredentialFamilyCatalog::try_new([
+        (selected_target, Arc::<str>::from("test-model-family"), None),
         (new_fast_target, Arc::<str>::from("test-model-family"), None),
     ])
     .and_then(|catalog| catalog.with_fast_targets([(selected_target, new_fast_target)]))
     .expect("the replacement alternate target has a credential family");
     let restarted =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
-            .with_session_credentials(new_families);
+            .with_session_credentials(new_families)
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                selected_target,
+                FastMode::Enabled,
+                10,
+                100,
+            )]);
     assert!(matches!(
         restarted.authorize_send(session, call).await?,
         AuthorizeModelCallOutcome::Authorized(_)
