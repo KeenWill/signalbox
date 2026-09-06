@@ -628,7 +628,6 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .fetch_one(&module_pool)
     .await?;
     assert_eq!(activation_tail, Decimal::from(2_u64));
-
     let late_rule = RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(String::from("late-branch-ci"))?,
         RepoWatchRuleVersion::V1,
@@ -684,7 +683,40 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?,
         DispatchAdmission::InactiveRule
     ));
-
+    let first_unseen_repository = RepositorySlug::try_new(String::from("unseen/first-repository"))?;
+    let second_unseen_repository =
+        RepositorySlug::try_new(String::from("unseen/second-repository"))?;
+    let first_unseen_configuration = [RepositoryRuleSet::new(
+        &first_unseen_repository,
+        std::slice::from_ref(&rule),
+    )];
+    let second_unseen_configuration = [RepositoryRuleSet::new(
+        &second_unseen_repository,
+        std::slice::from_ref(&rule),
+    )];
+    let (first_unseen, second_unseen) = tokio::join!(
+        store.reconcile_rules(&first_unseen_configuration, observed_at),
+        store.reconcile_rules(&second_unseen_configuration, observed_at)
+    );
+    assert!(matches!(
+        (first_unseen?, second_unseen?),
+        (
+            RuleReconciliationAdmission::Applied { .. },
+            RuleReconciliationAdmission::Applied { .. }
+        )
+    ));
+    let active_unseen_repositories: Vec<String> = sqlx::query_scalar(
+        "SELECT repository FROM rule
+          WHERE active_revision IS NOT NULL AND repository LIKE 'unseen/%'
+          ORDER BY repository",
+    )
+    .fetch_all(&module_pool)
+    .await?;
+    assert_eq!(active_unseen_repositories.len(), 1);
+    assert!(
+        active_unseen_repositories[0] == first_unseen_repository.as_str()
+            || active_unseen_repositories[0] == second_unseen_repository.as_str()
+    );
     let complete_baseline_retained: bool = sqlx::query_scalar(
         "SELECT comparison_baseline @> $2::jsonb
            FROM repository_state WHERE repository = $1",
