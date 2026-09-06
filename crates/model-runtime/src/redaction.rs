@@ -769,15 +769,22 @@ fn provider_compaction_prefix_completed_by_durable_parts(
 }
 
 fn following_durable_parts_contain(parts: &[AssistantPart], expected: &str) -> bool {
-    let mut pending = String::new();
+    let mut matched_prefix_lengths = vec![0];
     parts.iter().any(|part| {
         let mut inspect = |fragment: &str| {
-            pending.push_str(fragment);
-            if pending.contains(expected) {
-                return true;
+            let prior_matches = matched_prefix_lengths.clone();
+            for prior_length in prior_matches {
+                if fragment.contains(expected)
+                    || (prior_length > 0 && fragment.starts_with(&expected[prior_length..]))
+                {
+                    return true;
+                }
+                let next_length =
+                    longest_prefix_suffix(&expected[..prior_length], fragment, expected);
+                if !matched_prefix_lengths.contains(&next_length) {
+                    matched_prefix_lengths.push(next_length);
+                }
             }
-            (_, pending) =
-                redact_complete_credentials_and_hold_prefix(std::mem::take(&mut pending), expected);
             false
         };
 
@@ -793,8 +800,10 @@ fn following_durable_parts_contain(parts: &[AssistantPart], expected: &str) -> b
             AssistantPart::ToolCall(proposal) => {
                 inspect(proposal.id.as_str())
                     || inspect(proposal.name.as_str())
-                    || inspect(&proposal.arguments_json)
-                    || json_escapes_decode_to_credential(&proposal.arguments_json, expected)
+                    || match serde_json::from_str::<serde_json::Value>(&proposal.arguments_json) {
+                        Ok(arguments) => inspect_json_strings(&arguments, &mut inspect),
+                        Err(_) => inspect(&decode_json_escapes(&proposal.arguments_json)),
+                    }
             }
             AssistantPart::SuppressedToolCall(name) => inspect(name.as_str()),
         }
@@ -999,6 +1008,10 @@ fn redact_json_value(raw: &str, credential: &str) -> Result<String, serde_json::
 }
 
 fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
+    decode_json_escapes(raw).contains(credential)
+}
+
+fn decode_json_escapes(raw: &str) -> String {
     let mut decoded = String::with_capacity(raw.len());
     let mut chars = raw.chars();
     while let Some(character) = chars.next() {
@@ -1053,7 +1066,7 @@ fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
             other => decoded.push(other),
         }
     }
-    decoded.contains(credential)
+    decoded
 }
 
 fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> AssistantPart {
@@ -1898,6 +1911,43 @@ mod tests {
             panic!("multi-part credential evidence is rejected");
         };
         assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(
+            error.native.error_token.as_deref(),
+            Some("credential_in_provider_compaction")
+        );
+    }
+
+    #[test]
+    fn credential_spanning_compaction_text_and_escaped_tool_arguments_is_rejected() {
+        let key = credential("key_loop");
+        let evidence = TerminalEvidence::CompletedWithProviderCompaction {
+            completion: CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::ToolUse,
+                content: vec![
+                    AssistantPart::ProviderCompaction {
+                        block_json:
+                            r#"{"type":"compaction","content":"key_","encrypted_content":"opaque"}"#
+                                .to_string(),
+                    },
+                    AssistantPart::Text("l".to_string()),
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call-1"),
+                        name: ToolName::new("lookup"),
+                        arguments_json: r#"{"value":"\u006fop"}"#.to_string(),
+                    }),
+                ],
+                usage: TokenUsage::unreported(),
+            },
+            retained_input_tokens: 12,
+            retained_output_tokens: 4,
+        };
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &key) else {
+            panic!("credential crossing decoded tool arguments is rejected");
+        };
         assert_eq!(
             error.native.error_token.as_deref(),
             Some("credential_in_provider_compaction")
