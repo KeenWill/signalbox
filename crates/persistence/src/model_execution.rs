@@ -6217,10 +6217,10 @@ async fn load_origin_contents(
         let command: Option<Uuid> = row.try_get("accepting_command_id")?;
         let goal_turn: Option<Uuid> = row.try_get("goal_turn_id")?;
         // An accepting command decides provenance whether or not a generation
-        // owns the turn. A goal turn bound to a turn a command already accepted
-        // — the shape repository-watch dispatch commits — has both, and its
-        // text was authored by that command; the `goal_turn` row records which
-        // generation the turn runs under, not where its input came from.
+        // owns the turn. A commissioned dispatch binds its goal to a turn its
+        // input command already accepted, so both rows exist and the text was
+        // authored by that command; the `goal_turn` row records which generation
+        // the turn runs under, not where its input came from.
         let provenance = match (command, goal_turn) {
             (Some(command), _) => {
                 let command = durable_command_id_from_uuid(command)

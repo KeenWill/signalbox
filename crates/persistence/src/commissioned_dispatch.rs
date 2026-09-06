@@ -1,11 +1,10 @@
 //! Durable operator-commissioned dispatch admission and audit.
 //!
-//! One transaction commits the same composite a repository-watch dispatch
-//! action commits — created session, recorded authority fence, initial input
-//! with its reserved turn, and commissioned goal — so a commissioned session is
-//! never durably visible without the fence and goal stating what it acts
-//! under. The approval judge consumes the fence through the same authority
-//! loading as the repository-watch source (`crate::approval_judge`).
+//! One transaction commits the created session, recorded authority fence,
+//! initial input with its reserved turn, and commissioned goal, so a
+//! commissioned session is never durably visible without the fence and goal
+//! stating what it acts under. The approval judge consumes that fence through
+//! its commissioned-dispatch authority loader (`crate::approval_judge`).
 
 use std::{error::Error, fmt, time::Duration};
 
@@ -204,8 +203,8 @@ impl PostgresCommissionedDispatchStore {
     /// no fence row — is a conflicting reuse rather than corruption, because
     /// the caller's identity names intent this store never recorded; a claim
     /// lost to a concurrent commit re-reads the winner and answers the same
-    /// way. The alias resolver serves the initial input's frozen model
-    /// configuration exactly as it does for a repository-watch dispatch.
+    /// way. The alias resolver supplies the initial input's frozen model
+    /// configuration.
     pub async fn commission<SelectDefinition>(
         &self,
         prepared: PreparedCommissionedDispatch,
@@ -364,8 +363,8 @@ impl PostgresCommissionedDispatchStore {
         .map_err(CommissionedDispatchRepositoryError::InitialInput)?;
         // The commission adopts the turn just accepted above rather than
         // scheduling one of its own, so the session runs its template once,
-        // against the operator's context, under the generation that turn is
-        // recorded in — exactly as a repository-watch dispatch action does.
+        // against the operator's context, under the generation that records
+        // that turn.
         crate::goal::insert_fresh_commissioned_goal(
             &mut transaction,
             goal,
