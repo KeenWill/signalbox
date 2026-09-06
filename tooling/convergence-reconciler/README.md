@@ -29,6 +29,7 @@ export PATH="$PWD/target/debug:$PATH"
 ```console
 signalbox-converge reconcile \
   --repo OWNER/REPOSITORY \
+  --policy /path/to/repository.toml \
   --active-command 'session-control is-active' \
   --dry-run \
   --once
@@ -39,18 +40,18 @@ the end of the previous tick. `SIGINT` stops the loop. A once-only tick returns
 nonzero when its GitHub snapshot fails; a continuing loop logs a `tick-error`
 and tries again at the next interval.
 
-The default state location follows `XDG_STATE_HOME`, falling back to the current
-user's standard local state directory. Set `state_file` explicitly when a
-service manager provides a persistent runtime directory. Writes use a temporary
-file, atomic replacement, and synchronization of both the file and its parent
-directory before a dispatch child can start.
+The default state location uses `XDG_STATE_HOME`, then `$HOME/.local/state`;
+when neither variable is set, configure `--state-file` explicitly. Set
+`state_file` explicitly when a service manager provides a persistent runtime
+directory. Writes use a temporary file, atomic replacement, and synchronization
+of both the file and its parent directory before a dispatch child can start.
 
 ## Convergence evaluation
 
 The [shared policy](../../crates/convergence/examples/repository.toml)
-configures reviewers, evidence grammars, check exemptions, and limits.
-`--policy` selects a TOML or JSON policy file; `--repo` selects the repository
-for live reads.
+configures reviewers, evidence grammars, check exemptions, and limits. An
+explicit TOML or JSON policy is required via `--policy`, its environment
+variable, or JSON configuration; `--repo` selects the repository for live reads.
 
 Each evaluation receives its pull request's prior evidence state in process. The
 returned state is persisted with driver timing and dispatch records. The crate
@@ -107,13 +108,14 @@ terminal states likewise record the final duration before clearing both clocks.
 ## Configuration
 
 Values are selected in this order: command-line flag, environment variable, JSON
-configuration file, then default. `repository` and `active_command` are
-required. `dispatch_command` is required unless dry-run is enabled.
+configuration file, then default. `repository`, `convergence_policy`, and
+`active_command` are required. `dispatch_command` is required unless dry-run is
+enabled.
 
 | JSON key                  | Environment variable                             | Flag                        | Default                       |
 | ------------------------- | ------------------------------------------------ | --------------------------- | ----------------------------- |
 | `repository`              | `CONVERGENCE_RECONCILER_REPOSITORY`              | `--repo`                    | required                      |
-| `convergence_policy`      | `CONVERGENCE_RECONCILER_CONVERGENCE_POLICY`      | `--policy`                  | repository policy example     |
+| `convergence_policy`      | `CONVERGENCE_RECONCILER_CONVERGENCE_POLICY`      | `--policy`                  | required                      |
 | `head_pattern`            | `CONVERGENCE_RECONCILER_HEAD_PATTERN`            | `--head-pattern`            | `agent/*`                     |
 | `interval_seconds`        | `CONVERGENCE_RECONCILER_INTERVAL_SECONDS`        | `--interval-seconds`        | `300`                         |
 | `cool_off_seconds`        | `CONVERGENCE_RECONCILER_COOL_OFF_SECONDS`        | `--cool-off-seconds`        | `1800`                        |
@@ -151,6 +153,7 @@ The equivalent environment-oriented shape is useful under a service manager:
 
 ```console
 export CONVERGENCE_RECONCILER_REPOSITORY=OWNER/REPOSITORY
+export CONVERGENCE_RECONCILER_CONVERGENCE_POLICY=/path/to/repository.toml
 export CONVERGENCE_RECONCILER_ACTIVE_COMMAND='session-control is-active'
 export CONVERGENCE_RECONCILER_DISPATCH_COMMAND='session-control dispatch'
 export CONVERGENCE_RECONCILER_STATE_FILE=runtime/convergence-state.json

@@ -34,6 +34,10 @@ drivers. The
 the candidate loop, dispatch fence, and cool-off bookkeeping with in-process
 fetch and evaluation.
 
+All three subcommands use clap-derived flags and `--help`. Reconciliation
+requires an explicit policy path through `--policy`, environment, or JSON
+configuration.
+
 State records the complete policy value as its identity. A policy change
 discards retained review authentication and wave counts and qualifies current
 evidence again; check inventories and resolution observation times remain facts.

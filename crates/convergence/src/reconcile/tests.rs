@@ -1,5 +1,6 @@
 //! Recorded evidence, dispatch fence, configuration, and child-process scenarios.
 use super::*;
+use clap::Parser;
 use std::{
     collections::VecDeque, os::unix::process::ExitStatusExt, path::PathBuf, sync::atomic::AtomicU64,
 };
@@ -191,6 +192,10 @@ fn environment() -> BTreeMap<String, String> {
     BTreeMap::from([
         ("HOME".into(), "/unused".into()),
         (
+            "CONVERGENCE_RECONCILER_CONVERGENCE_POLICY".into(),
+            "explicit-policy.toml".into(),
+        ),
+        (
             "CONVERGENCE_RECONCILER_REPOSITORY".into(),
             "KeenWill/signalbox".into(),
         ),
@@ -201,18 +206,30 @@ fn environment() -> BTreeMap<String, String> {
         ("CONVERGENCE_RECONCILER_DRY_RUN".into(), "true".into()),
     ])
 }
+fn load_config(args: Vec<String>, env: &BTreeMap<String, String>) -> Result<Config, Error> {
+    let cli = crate::Cli::try_parse_from(
+        ["signalbox-converge".into(), "reconcile".into()]
+            .into_iter()
+            .chain(args),
+    )
+    .map_err(|error| failure(error.to_string()))?;
+    let crate::Command::Reconcile(args) = cli.command else {
+        panic!("reconcile subcommand expected")
+    };
+    Config::load(&args, env)
+}
 #[test]
 fn non_path_configuration_is_rejected() {
     let dir = Directory::new();
     let path = dir.0.join("config.json");
+    let mut env = environment();
+    env.remove("CONVERGENCE_RECONCILER_CONVERGENCE_POLICY");
     for field in ["state_file", "log_file", "convergence_policy"] {
-        fs::write(&path, serde_json::to_vec(&json!({field:42})).unwrap()).unwrap();
+        let mut config = json!({"convergence_policy":"explicit-policy.toml"});
+        config[field] = json!(42);
+        fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
         assert!(
-            Config::load(
-                vec!["--config".into(), path.to_string_lossy().into()],
-                &environment()
-            )
-            .is_err(),
+            load_config(vec!["--config".into(), path.to_string_lossy().into()], &env).is_err(),
             "{field}"
         );
     }
@@ -664,7 +681,7 @@ fn configuration_precedence_and_quoted_argv_preserve_arguments() {
     let mut env = environment();
     env.insert("CONVERGENCE_RECONCILER_HEAD_PATTERN".into(), "env/*".into());
     env.insert("XDG_STATE_HOME".into(), dir.0.to_string_lossy().into());
-    let cfg = Config::load(
+    let cfg = load_config(
         vec![
             "--config".into(),
             path.to_string_lossy().into(),
@@ -707,12 +724,98 @@ fn explicit_state_path_does_not_require_a_home_environment() {
     let mut env = environment();
     env.remove("HOME");
     let path = dir.0.join("state.json");
-    let cfg = Config::load(
+    let cfg = load_config(
         vec!["--state-file".into(), path.to_string_lossy().into()],
         &env,
     )
     .unwrap();
     assert_eq!(cfg.state_file, path);
+}
+
+#[test]
+fn missing_home_environment_requires_an_explicit_state_path() {
+    let mut env = environment();
+    env.remove("HOME");
+    let error = load_config(Vec::new(), &env).unwrap_err();
+    assert!(error.to_string().contains("--state-file is required"));
+}
+
+#[test]
+fn reconciliation_requires_an_explicit_policy_from_cli_environment_or_json() {
+    let dir = Directory::new();
+    let path = dir.0.join("config.json");
+    fs::write(&path, r#"{"convergence_policy":"json-policy.toml"}"#).unwrap();
+    let mut env = environment();
+    env.remove("CONVERGENCE_RECONCILER_CONVERGENCE_POLICY");
+    assert!(
+        load_config(Vec::new(), &env)
+            .unwrap_err()
+            .to_string()
+            .contains("--policy")
+    );
+    let args = vec!["--config".into(), path.to_string_lossy().into()];
+    assert_eq!(
+        load_config(args.clone(), &env).unwrap().policy,
+        PathBuf::from("json-policy.toml")
+    );
+    env.insert(
+        "CONVERGENCE_RECONCILER_CONVERGENCE_POLICY".into(),
+        "env-policy.toml".into(),
+    );
+    assert_eq!(
+        load_config(args.clone(), &env).unwrap().policy,
+        PathBuf::from("env-policy.toml")
+    );
+    let args = args
+        .into_iter()
+        .chain(["--policy".into(), "cli-policy.toml".into()])
+        .collect();
+    assert_eq!(
+        load_config(args, &env).unwrap().policy,
+        PathBuf::from("cli-policy.toml")
+    );
+}
+
+#[test]
+fn clap_preserves_reconcile_defaults_and_configuration_boolean_precedence() {
+    let dir = Directory::new();
+    let path = dir.0.join("config.json");
+    fs::write(&path, r#"{"dry_run":true,"once":true}"#).unwrap();
+    let mut env = environment();
+    env.remove("CONVERGENCE_RECONCILER_DRY_RUN");
+    env.insert(
+        "CONVERGENCE_RECONCILER_DISPATCH_COMMAND".into(),
+        "dispatch".into(),
+    );
+    let defaults = load_config(Vec::new(), &env).unwrap();
+    assert_eq!(defaults.interval, Duration::from_secs(300));
+    assert_eq!(defaults.cool_off, 1800.0);
+    assert_eq!(defaults.timeout, Duration::from_secs(60));
+    assert_eq!(defaults.head_pattern, "agent/*");
+    assert_eq!(defaults.summary, "text");
+    assert_eq!(defaults.log_file, None);
+    assert_eq!(
+        defaults.state_file,
+        PathBuf::from("/unused/.local/state/signalbox/convergence-reconciler.json")
+    );
+    assert!(!defaults.dry_run);
+    assert!(!defaults.once);
+    let args = vec!["--config".into(), path.to_string_lossy().into()];
+    let from_file = load_config(args.clone(), &env).unwrap();
+    assert!(from_file.dry_run);
+    assert!(from_file.once);
+    env.insert("CONVERGENCE_RECONCILER_DRY_RUN".into(), "false".into());
+    env.insert("CONVERGENCE_RECONCILER_ONCE".into(), "false".into());
+    let from_env = load_config(args.clone(), &env).unwrap();
+    assert!(!from_env.dry_run);
+    assert!(!from_env.once);
+    let args = args
+        .into_iter()
+        .chain(["--dry-run".into(), "--once".into()])
+        .collect();
+    let from_cli = load_config(args, &env).unwrap();
+    assert!(from_cli.dry_run);
+    assert!(from_cli.once);
 }
 #[test]
 fn summaries_support_text_json_and_none() {

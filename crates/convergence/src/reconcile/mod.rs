@@ -5,6 +5,7 @@ mod process;
 mod tests;
 
 use config::Config;
+pub(super) use config::ReconcileArgs;
 use process::CommandError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -753,14 +754,7 @@ fn summary(values: &[Value], mode: &str, out: &mut dyn Write) -> Result<(), Erro
     Ok(())
 }
 
-pub(super) fn run(args: Vec<String>) -> Result<u8, Error> {
-    if args
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
-    {
-        println!("{}", config::HELP);
-        return Ok(0);
-    }
+pub(super) fn run(args: &ReconcileArgs) -> Result<u8, Error> {
     let config = Config::load(args, &std::env::vars().collect())?;
     let policy = ConvergencePolicy::read(&config.policy)?;
     let mut logger: Box<dyn Write> = match &config.log_file {

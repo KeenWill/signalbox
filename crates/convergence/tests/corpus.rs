@@ -124,7 +124,7 @@ fn inventory_stability_requires_an_explicit_boolean() -> Result<(), Box<dyn Erro
 #[test]
 fn unknown_cli_options_fail_before_policy_or_evidence_io() -> Result<(), Box<dyn Error>> {
     let repository = policy()?.repository;
-    for command in ["record", "evaluate"] {
+    for command in ["record", "evaluate", "reconcile"] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-converge"))
             .args([
                 command,
@@ -138,7 +138,7 @@ fn unknown_cli_options_fail_before_policy_or_evidence_io() -> Result<(), Box<dyn
             .output()?;
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
-        assert!(String::from_utf8(output.stderr)?.contains("unknown option --polciy"));
+        assert!(String::from_utf8(output.stderr)?.contains("--polciy"));
     }
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-converge"))
         .args([
@@ -151,7 +151,7 @@ fn unknown_cli_options_fail_before_policy_or_evidence_io() -> Result<(), Box<dyn
         .output()?;
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8(output.stderr)?.contains("expected record or evaluate"));
+    assert!(String::from_utf8(output.stderr)?.contains("evalute"));
     Ok(())
 }
 

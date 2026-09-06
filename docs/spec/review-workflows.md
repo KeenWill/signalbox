@@ -263,7 +263,9 @@ in-process fetch and evaluation, the dispatch fence, and repository-bound
 cool-off state. It syncs the state file and parent directory before starting a
 dispatch child; every ambiguous outcome retains the fence. Operator commands run
 as argv in their own process groups; timeout kills the group and reaps the
-child. `SIGINT` stops the loop.
+child. `SIGINT` stops the loop. Reconciliation requires a configured policy path
+and an explicit state path when neither `XDG_STATE_HOME` nor `HOME` supplies a
+default.
 
 ## Planned
 

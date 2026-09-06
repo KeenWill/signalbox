@@ -1,26 +1,58 @@
 //! Operator configuration and argv parsing for the reconciliation loop.
 use super::failure;
+use clap::Args;
 use serde_json::{Map, Value, json};
 use signalbox_convergence::Error;
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
-pub(super) const HELP: &str = "signalbox-converge reconcile [options]
-  --config FILE                  JSON configuration; omitted: CONVERGENCE_RECONCILER_CONFIG
-  --repo OWNER/NAME              Required repository
-  --policy FILE                  TOML/JSON policy; omitted: crates/convergence/examples/repository.toml
-  --head-pattern GLOB            Case-sensitive branch pattern; omitted: agent/*
-  --active-command ARGV          Required quoted command or JSON argv array
-  --dispatch-command ARGV        Required outside dry-run; quoted command or JSON argv array
-  --interval-seconds SECONDS     Finite positive interval; omitted: 300 seconds
-  --cool-off-seconds SECONDS     Finite nonnegative cool-off; omitted: 1800 seconds
-  --command-timeout-seconds SECONDS  Finite positive command timeout; omitted: 60 seconds
-  --state-file FILE              State path; omitted: XDG_STATE_HOME/signalbox/convergence-reconciler.json
-  --log-file FILE                Append JSON decisions; omitted: stderr
-  --summary text|json|none        Stdout summary; omitted: text
-  --dry-run                     Suppress dispatch; omitted: false
-  --once                        Run one tick; omitted: repeat until SIGINT
-Values use CLI, CONVERGENCE_RECONCILER_<JSON_KEY>, JSON file, then defaults.
-Commands receive the PR number and compact JSON state as two appended arguments.";
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Values use CLI, CONVERGENCE_RECONCILER_<JSON_KEY>, JSON file, then defaults.\nCommands receive the PR number and compact JSON state as two appended arguments."
+)]
+pub(crate) struct ReconcileArgs {
+    /// JSON configuration file; omitted: use CONVERGENCE_RECONCILER_CONFIG.
+    #[arg(long, value_name = "FILE")]
+    config: Option<String>,
+    /// Required repository; omitted: use environment or JSON configuration.
+    #[arg(long = "repo", value_name = "OWNER/NAME")]
+    repository: Option<String>,
+    /// Required TOML/JSON policy; omitted: use environment or JSON configuration.
+    #[arg(long = "policy", value_name = "FILE")]
+    convergence_policy: Option<String>,
+    /// Case-sensitive branch pattern; default: agent/*.
+    #[arg(long, value_name = "GLOB")]
+    head_pattern: Option<String>,
+    /// Required quoted command or JSON argv array; omitted: use environment or JSON configuration.
+    #[arg(long, value_name = "ARGV")]
+    active_command: Option<String>,
+    /// Quoted command or JSON argv array; required outside dry-run.
+    #[arg(long, value_name = "ARGV")]
+    dispatch_command: Option<String>,
+    /// Finite positive interval in seconds; default: 300.
+    #[arg(long, value_name = "SECONDS", allow_negative_numbers = true)]
+    interval_seconds: Option<String>,
+    /// Finite nonnegative cool-off in seconds; default: 1800.
+    #[arg(long, value_name = "SECONDS", allow_negative_numbers = true)]
+    cool_off_seconds: Option<String>,
+    /// Finite positive command timeout in seconds; default: 60.
+    #[arg(long, value_name = "SECONDS", allow_negative_numbers = true)]
+    command_timeout_seconds: Option<String>,
+    /// State path; default: XDG_STATE_HOME or HOME/.local/state, plus signalbox/convergence-reconciler.json; required when both variables are unset.
+    #[arg(long, value_name = "FILE")]
+    state_file: Option<String>,
+    /// Append JSON decisions to a file; default: stderr.
+    #[arg(long, value_name = "FILE")]
+    log_file: Option<String>,
+    /// Stdout summary format; default: text.
+    #[arg(long, value_name = "FORMAT", value_parser = ["text", "json", "none"])]
+    summary: Option<String>,
+    /// Suppress dispatch; default: false.
+    #[arg(long)]
+    dry_run: bool,
+    /// Run one tick; default: repeat until SIGINT.
+    #[arg(long)]
+    once: bool,
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct Config {
@@ -40,40 +72,10 @@ pub(super) struct Config {
 }
 
 impl Config {
-    pub fn load(args: Vec<String>, env: &BTreeMap<String, String>) -> Result<Self, Error> {
-        let mut cli = Map::new();
-        let mut args = args.into_iter();
-        while let Some(arg) = args.next() {
-            let name = match arg.as_str() {
-                "--repo" => "repository",
-                "--policy" => "convergence_policy",
-                "--config" => "config",
-                "--head-pattern" => "head_pattern",
-                "--interval-seconds" => "interval_seconds",
-                "--cool-off-seconds" => "cool_off_seconds",
-                "--command-timeout-seconds" => "command_timeout_seconds",
-                "--state-file" => "state_file",
-                "--log-file" => "log_file",
-                "--active-command" => "active_command",
-                "--dispatch-command" => "dispatch_command",
-                "--summary" => "summary",
-                "--dry-run" => "dry_run",
-                "--once" => "once",
-                _ => return Err(failure(format!("unknown option {arg}"))),
-            };
-            let value = if matches!(name, "dry_run" | "once") {
-                json!(true)
-            } else {
-                json!(
-                    args.next()
-                        .ok_or_else(|| failure(format!("missing value for {arg}")))?
-                )
-            };
-            cli.insert(name.into(), value);
-        }
-        let config_path = cli
-            .get("config")
-            .and_then(Value::as_str)
+    pub fn load(args: &ReconcileArgs, env: &BTreeMap<String, String>) -> Result<Self, Error> {
+        let config_path = args
+            .config
+            .as_deref()
             .or_else(|| env.get("CONVERGENCE_RECONCILER_CONFIG").map(String::as_str));
         let file = match config_path {
             Some(path) => serde_json::from_slice::<Value>(&std::fs::read(path)?)?
@@ -82,17 +84,16 @@ impl Config {
                 .ok_or_else(|| failure("configuration file must contain a JSON object"))?,
             None => Map::new(),
         };
-        Self::from_values(&cli, env, &file)
+        Self::from_values(args, env, &file)
     }
 
     fn from_values(
-        cli: &Map<String, Value>,
+        args: &ReconcileArgs,
         env: &BTreeMap<String, String>,
         file: &Map<String, Value>,
     ) -> Result<Self, Error> {
-        let selected = |name: &str, default: Value| {
-            cli.get(name)
-                .cloned()
+        let selected = |cli: Option<&str>, name: &str, default: Value| {
+            cli.map(|value| json!(value))
                 .or_else(|| {
                     env.get(&format!("CONVERGENCE_RECONCILER_{}", name.to_uppercase()))
                         .map(|v| json!(v))
@@ -100,17 +101,34 @@ impl Config {
                 .or_else(|| file.get(name).cloned())
                 .unwrap_or(default)
         };
-        let string = |name: &str, default: Value| -> Result<String, Error> {
-            selected(name, default)
+        let string = |cli: Option<&str>, name: &str, default: Value| -> Result<String, Error> {
+            selected(cli, name, default)
                 .as_str()
                 .map(str::to_owned)
                 .ok_or_else(|| failure(format!("{name} must be a string")))
         };
-        let repository = string("repository", Value::Null)?;
+        let repository = string(args.repository.as_deref(), "repository", Value::Null)?;
         split_repository(&repository)?;
-        let dry_run = boolean(&selected("dry_run", json!(false)), "dry_run")?;
-        let active = command(&selected("active_command", Value::Null))?;
-        let dispatch = command(&selected("dispatch_command", Value::Null))?;
+        let policy = selected(
+            args.convergence_policy.as_deref(),
+            "convergence_policy",
+            Value::Null,
+        );
+        let policy = policy.as_str().ok_or_else(|| failure("convergence_policy requires a path via --policy, environment, or JSON configuration"))?;
+        let dry_run = boolean(
+            &selected(args.dry_run.then_some("true"), "dry_run", json!(false)),
+            "dry_run",
+        )?;
+        let active = command(&selected(
+            args.active_command.as_deref(),
+            "active_command",
+            Value::Null,
+        ))?;
+        let dispatch = command(&selected(
+            args.dispatch_command.as_deref(),
+            "dispatch_command",
+            Value::Null,
+        ))?;
         if active.is_empty() {
             return Err(failure("active_command is required"));
         }
@@ -120,15 +138,27 @@ impl Config {
             ));
         }
         let interval = duration(
-            &selected("interval_seconds", json!(300)),
+            &selected(
+                args.interval_seconds.as_deref(),
+                "interval_seconds",
+                json!(300),
+            ),
             "interval_seconds",
         )?;
         let timeout = duration(
-            &selected("command_timeout_seconds", json!(60)),
+            &selected(
+                args.command_timeout_seconds.as_deref(),
+                "command_timeout_seconds",
+                json!(60),
+            ),
             "command_timeout_seconds",
         )?;
         let cool_off = number(
-            &selected("cool_off_seconds", json!(1800)),
+            &selected(
+                args.cool_off_seconds.as_deref(),
+                "cool_off_seconds",
+                json!(1800),
+            ),
             "cool_off_seconds",
             true,
         )?;
@@ -142,23 +172,29 @@ impl Config {
             });
         let default_state =
             state_root.map(|root| root.join("signalbox/convergence-reconciler.json"));
-        let log_file = selected("log_file", Value::Null);
-        let summary = string("summary", json!("text"))?;
+        let state_file = selected(
+            args.state_file.as_deref(),
+            "state_file",
+            json!(default_state),
+        );
+        let state_file = state_file.as_str().ok_or_else(|| failure("state_file must be a path; --state-file is required when XDG_STATE_HOME and HOME are unset"))?;
+        let log_file = selected(args.log_file.as_deref(), "log_file", Value::Null);
+        let summary = string(args.summary.as_deref(), "summary", json!("text"))?;
         if !matches!(summary.as_str(), "text" | "json" | "none") {
             return Err(failure("summary must be text, json, or none"));
         }
         Ok(Self {
             repository,
-            policy: string(
-                "convergence_policy",
-                json!("crates/convergence/examples/repository.toml"),
-            )?
-            .into(),
-            head_pattern: string("head_pattern", json!("agent/*"))?,
+            policy: policy.into(),
+            head_pattern: string(
+                args.head_pattern.as_deref(),
+                "head_pattern",
+                json!("agent/*"),
+            )?,
             interval,
             cool_off,
             timeout,
-            state_file: string("state_file", json!(default_state))?.into(),
+            state_file: state_file.into(),
             log_file: if log_file.is_null() {
                 None
             } else {
@@ -173,7 +209,10 @@ impl Config {
             dispatch,
             summary,
             dry_run,
-            once: boolean(&selected("once", json!(false)), "once")?,
+            once: boolean(
+                &selected(args.once.then_some("true"), "once", json!(false)),
+                "once",
+            )?,
         })
     }
 }

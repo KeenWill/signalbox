@@ -4292,6 +4292,7 @@ name = "signalbox-convergence"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "clap",
  "flate2",
  "futures-executor",
  "nix",
