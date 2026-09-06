@@ -42,8 +42,8 @@ pull-request projections, expected generation, complete identity candidate, and
 ordered event occurrences in one transaction. The projection retains the
 complete normalized differ observation, including signal-reviewer provenance,
 pull requests, workflows, and branch heads. A generation mismatch is stale
-unless that complete input exactly replays the immediately succeeding commit.
-An empty event batch with an unchanged cursor is unchanged only when both stored
+unless that complete input exactly replays the immediately succeeding commit. An
+empty event batch with an unchanged cursor is unchanged only when both stored
 projections also match; a projection-only change advances the generation and
 records the complete commit digest. Projection timestamps use PostgreSQL
 microsecond precision in both the stored comparison and commit identity.
