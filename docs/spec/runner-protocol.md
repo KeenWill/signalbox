@@ -78,9 +78,9 @@ not a second terminal-state model.
 
 Digests detect replay disagreement and confer no authority.
 
-Runner failure detail exposed through inspection follows the
-[diagnostic-evidence rule](process-protocol.md#boundary-contracts): bounded,
-with no host or credential paths. The daemon never parses or branches on it.
+The daemon retains a runner-authored failure detail verbatim as operator
+evidence, exposes it through runner inspection, and never parses or branches on
+it. Why: a runner can add detail codes without a daemon change.
 
 The daemon-local `ToolDefinition` is a compatibility representation, not a
 second source of policy.
